@@ -1,0 +1,212 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "OPD1 TRCKER — how the app works",
+    "output": "architecture.html",
+    "quality_profile": "showcase"
+  },
+  "components": [
+    {
+      "id": "valorant",
+      "type": "external",
+      "label": "VALORANT",
+      "sublabel": "the game on your PC",
+      "pos": [
+        40,
+        200
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "valapi",
+      "type": "cloud",
+      "label": "valorant-api.com",
+      "sublabel": "agent, rank, map images",
+      "pos": [
+        40,
+        420
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "riotsrv",
+      "type": "cloud",
+      "label": "Riot servers",
+      "sublabel": "ranks and matches",
+      "pos": [
+        320,
+        80
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
+      "id": "core",
+      "type": "backend",
+      "label": "Core (Rust)",
+      "sublabel": "fetches, computes, decides",
+      "pos": [
+        320,
+        300
+      ],
+      "size": [
+        160,
+        72
+      ],
+      "tag": "very light"
+    },
+    {
+      "id": "db",
+      "type": "database",
+      "label": "App memory",
+      "sublabel": "SQLite on your PC",
+      "pos": [
+        320,
+        520
+      ],
+      "size": [
+        160,
+        64
+      ],
+      "tag": "kept on update"
+    },
+    {
+      "id": "ui",
+      "type": "frontend",
+      "label": "Screen (Svelte)",
+      "sublabel": "fixed 1000×800 window",
+      "pos": [
+        600,
+        300
+      ],
+      "size": [
+        160,
+        72
+      ]
+    },
+    {
+      "id": "live",
+      "type": "frontend",
+      "label": "Live",
+      "sublabel": "Lobby · Agent Select · In Game",
+      "pos": [
+        880,
+        200
+      ],
+      "size": [
+        190,
+        64
+      ]
+    },
+    {
+      "id": "mystats",
+      "type": "frontend",
+      "label": "My Stats",
+      "sublabel": "your deep stats",
+      "pos": [
+        880,
+        420
+      ],
+      "size": [
+        190,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Inside OPD1 TRCKER, on your PC",
+      "wraps": [
+        "core",
+        "db",
+        "ui"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "game-to-core",
+      "from": "valorant",
+      "to": "core",
+      "label": "login key",
+      "variant": "emphasis"
+    },
+    {
+      "id": "assets-to-core",
+      "from": "valapi",
+      "to": "core",
+      "label": "images, once",
+      "variant": "dashed"
+    },
+    {
+      "id": "core-to-riot",
+      "from": "core",
+      "to": "riotsrv",
+      "label": "only what is new",
+      "labelDy": -36
+    },
+    {
+      "id": "core-to-db",
+      "from": "core",
+      "to": "db",
+      "label": "save + remember",
+      "labelDy": 24
+    },
+    {
+      "id": "core-to-ui",
+      "from": "core",
+      "to": "ui",
+      "label": "pushes updates",
+      "variant": "emphasis"
+    },
+    {
+      "id": "ui-to-live",
+      "from": "ui",
+      "to": "live"
+    },
+    {
+      "id": "ui-to-mystats",
+      "from": "ui",
+      "to": "mystats"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "Why it is light",
+      "items": [
+        "One small app: no Python, no browser",
+        "Game closed = almost zero work",
+        "Asks Riot only when the stage changes"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "Smart memory",
+      "items": [
+        "Each match is fetched once, kept forever",
+        "Knows a player by ID, even after a rename",
+        "Powers party detection, encounters, stats"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Your part",
+      "items": [
+        "GitHub builds Setup.exe automatically",
+        "You install it and test with the game",
+        "Problem? Ctrl+Shift+L, send me the log"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "isValid": true,
+  "matchPresenceData": {
+    "sessionLoopState": "PREGAME",
+    "queueId": "competitive",
+    "partyOwnerMatchScoreAllyTeam": 0,
+    "partyOwnerMatchScoreEnemyTeam": 0
+  },
+  "partyPresenceData": {
+    "partyId": "7c11e6a2-88f1-4a77-9e2a-000000000002",
+    "partySize": 5,
+    "isPartyOwner": true,
+    "partyState": "MATCHMAKING",
+    "partyClientVersion": "release-09.08-shipping-11-3200000"
+  },
+  "playerPresenceData": {
+    "accountLevel": 187
+  }
+}

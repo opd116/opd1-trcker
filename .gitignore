@@ -1,0 +1,18 @@
+# Rust / Cargo workspace
+/target/
+
+# Tauri
+/src-tauri/gen/schemas/
+
+# Node
+node_modules/
+ui/dist/
+npm-debug.log*
+
+# Editors / OS
+.DS_Store
+Thumbs.db
+*.swp
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

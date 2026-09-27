@@ -1,0 +1,22 @@
+/* Base reset only. Real design tokens (colors, spacing, type scale) land in
+   Task 7 -- this just prevents a white flash before then. */
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+}
+
+body {
+  background: #121212;
+  color: #e6e6e6;
+  font-family:
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    sans-serif;
+}
+
+#app {
+  height: 100%;
+}

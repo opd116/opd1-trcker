@@ -4,14 +4,17 @@
 //!            lockfile missing (check every 5s — the ONLY idle work)
 //!   ┌──────── Disconnected ◄───────────────────────────────┐
 //!   │  lockfile present → RiotSession::connect             │ ClientGone /
-//!   │  (fail → retry in 5s)                                │ 5 presence errors /
-//!   ▼                                                      │ game started after
-//! Connected: presence (local) every 2s (5s while closed) ──┘ a game-less connect
+//!   │  (fail → back off 5s,10s,20s,40s,60s; a rewritten    │ 5 presence errors /
+//!   │   lockfile retries at once — R47)                    │ VALORANT (re)started
+//!   ▼                                                      │ under a game-less
+//! Connected: own Riot ID from /chat/v1/session (R43)       │ session (R46)
+//!   presence (local) every 2s (5s while closed) ───────────┘
 //!   │  own VALORANT presence absent twice → stage Closed (own card from DB)
-//!   │  sessionLoopState change → plan_transition():
+//!   │  view_stage(sessionLoopState, queueId) change → plan_transition():
 //!   │     MENUS   → party roster   (+ re-fetch on partyId/partySize change)
 //!   │     PREGAME → ally team      (+ re-poll every 3s for agent picks, R39)
 //!   │     INGAME  → both teams + loadouts
+//!   │     PREGAME/INGAME in a free-for-all queue → stays MENUS (R41)
 //!   │     INGAME→MENUS = match end: back to Lobby + post-match follow-up
 //!   └─ roster → cached-first cards (DB) → emit → worker syncs
 //!      self → party → allies → enemies, re-emitting after each player
@@ -24,7 +27,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use tauri::async_runtime::JoinHandle;
 use tokio::time::{sleep, sleep_until, Instant};
@@ -34,11 +37,14 @@ use opd1_riot::{RiotError, RiotSession};
 
 use crate::logbuf::short;
 use crate::roster::{
-    extract_loadouts, from_coregame, from_party, from_pregame, order_players, party_key,
-    plan_transition, PartyKey, RosterFetch, RosterPlayer,
+    connect_retry_delay, extract_loadouts, from_coregame, from_party, from_pregame, is_ffa_roster,
+    order_players, party_key, plan_transition, view_stage, GameVerdict, GameWatch, PartyKey,
+    RosterFetch, RosterPlayer,
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
-use crate::store::{load_player_db, save_player, PlayerDb, PlayerUpdate, SELF_PUUID_KEY};
+use crate::store::{
+    load_player_db, match_landed, save_player, PlayerDb, PlayerUpdate, SELF_PUUID_KEY,
+};
 
 /// Closed: how often the lockfile's existence is checked.
 const CLOSED_CHECK: Duration = Duration::from_secs(5);
@@ -47,17 +53,15 @@ const PRESENCE_EVERY: Duration = Duration::from_secs(2);
 const PRESENCE_EVERY_IDLE: Duration = Duration::from_secs(5);
 /// R39: Agent Select re-poll, only to pick up agent selections.
 const PREGAME_REPOLL: Duration = Duration::from_secs(3);
-/// Consecutive absent presences before declaring VALORANT closed (avoids
-/// flashing the Closed stage on one odd presence payload).
-const ABSENT_TICKS_TO_CLOSE: u32 = 2;
 /// Consecutive presence failures (other than ClientGone) before the
 /// session is dropped and rebuilt.
 const PRESENCE_ERRORS_TO_RECONNECT: u32 = 5;
 /// Roster retry backoff: 3s, 6s, 12s, … capped.
 const ROSTER_RETRY_BASE: Duration = Duration::from_secs(3);
 const ROSTER_RETRY_MAX: Duration = Duration::from_secs(30);
-/// After a match ends, Riot needs a moment to publish its details: re-sync
-/// the party at these delays until the ended match is in the DB.
+/// After a match ends, Riot needs a moment to publish it: re-sync the party
+/// at these delays until the ended match has landed (R48: for competitive,
+/// its `comp_updates` row — RR/rank — not just its details).
 const POST_MATCH_DELAYS: [Duration; 2] = [Duration::from_secs(30), Duration::from_secs(90)];
 
 /// Why the connected tick stopped.
@@ -68,6 +72,8 @@ enum Stop {
 
 struct PostMatch {
     match_id: String,
+    /// Wait for the RR row (`comp_updates`), not just the match (R48).
+    competitive: bool,
     due: Instant,
     attempt: usize,
 }
@@ -82,12 +88,15 @@ struct Poller {
     st: Arc<AppState>,
     local_app_data: Option<PathBuf>,
     session: Option<Arc<RiotSession>>,
+    /// The stage being shown (`roster::view_stage` of the presence).
     stage: Stage,
-    /// `Some(true)` when this session was connected while VALORANT itself
-    /// wasn't running (its shards/version may be stale → reconnect once
-    /// the game shows up).
-    connected_without_game: Option<bool>,
-    absent_ticks: u32,
+    /// The raw presence stage last seen (differs from `stage` in FFA).
+    presence_stage: Stage,
+    /// VALORANT's own presence under this session (R46).
+    game: GameWatch,
+    /// The presence `queueId` while in a match — decides the post-match
+    /// check for the match that just ended (R48).
+    match_queue: Option<String>,
     presence_errors: u32,
     party_key: Option<PartyKey>,
     self_party: HashSet<String>,
@@ -96,8 +105,15 @@ struct Poller {
     next_pregame: Option<Instant>,
     roster_retry: Option<(Instant, u32)>,
     post_match: Option<PostMatch>,
-    worker: Option<JoinHandle<()>>,
+    /// The sync worker's task and the id its claim in `LiveModel` has.
+    worker: Option<(JoinHandle<()>, u64)>,
     last_connect_error: Option<String>,
+    /// R47: consecutive connect failures and when the next attempt is due.
+    connect_failures: u32,
+    next_connect: Instant,
+    /// The lockfile's mtime at the last check — a rewritten lockfile (the
+    /// Riot Client restarted) retries at once, whatever the backoff.
+    lockfile_mtime: Option<SystemTime>,
 }
 
 impl Poller {
@@ -111,8 +127,9 @@ impl Poller {
             local_app_data,
             session: None,
             stage: Stage::Closed,
-            connected_without_game: None,
-            absent_ticks: 0,
+            presence_stage: Stage::Closed,
+            game: GameWatch::default(),
+            match_queue: None,
             presence_errors: 0,
             party_key: None,
             self_party: HashSet::new(),
@@ -123,6 +140,9 @@ impl Poller {
             post_match: None,
             worker: None,
             last_connect_error: None,
+            connect_failures: 0,
+            next_connect: Instant::now(),
+            lockfile_mtime: None,
         }
     }
 
@@ -150,17 +170,41 @@ impl Poller {
             sleep(CLOSED_CHECK).await;
             return;
         };
-        if !lockfile_path(&lad).exists() {
+        let lockfile = lockfile_path(&lad);
+        let Ok(meta) = std::fs::metadata(&lockfile) else {
+            // Riot Client closed: back to the plain 5s existence check.
             self.last_connect_error = None;
+            self.connect_failures = 0;
+            self.lockfile_mtime = None;
+            sleep(CLOSED_CHECK).await;
+            return;
+        };
+        let mtime = meta.modified().ok();
+        if mtime != self.lockfile_mtime {
+            // New or rewritten lockfile (a client (re)start): try now.
+            self.lockfile_mtime = mtime;
+            self.connect_failures = 0;
+            self.next_connect = Instant::now();
+        }
+        if Instant::now() < self.next_connect {
             sleep(CLOSED_CHECK).await;
             return;
         }
         match RiotSession::connect(&lad).await {
-            Ok(session) => self.on_connected(Arc::new(session)).await,
+            Ok(session) => {
+                self.connect_failures = 0;
+                self.on_connected(Arc::new(session)).await;
+            }
             Err(e) => {
+                self.connect_failures = self.connect_failures.saturating_add(1);
+                let delay = connect_retry_delay(self.connect_failures);
+                self.next_connect = Instant::now() + delay;
                 let msg = e.to_string();
                 if self.last_connect_error.as_deref() != Some(msg.as_str()) {
-                    log::info!("Riot client not ready: {msg}");
+                    log::info!(
+                        "Riot client not ready: {msg} (retrying in {}s)",
+                        delay.as_secs()
+                    );
                     self.last_connect_error = Some(msg);
                 }
                 sleep(CLOSED_CHECK).await;
@@ -180,19 +224,22 @@ impl Poller {
                 live.synced.clear();
                 live.names_attempted.clear();
                 live.self_roster = None;
+                live.self_name = None;
             }
             live.self_puuid = Some(me.clone());
+            live.self_name_attempted = false;
         }
         let key_value = me.clone();
         self.st
             .db(move |repo| repo.set_state(SELF_PUUID_KEY, &key_value))
             .await;
         self.st.set_session(Some(session.clone()));
-        self.session = Some(session);
-        self.connected_without_game = None;
-        self.absent_ticks = 0;
+        self.session = Some(session.clone());
+        self.game = GameWatch::default();
         self.presence_errors = 0;
         self.next_presence = Instant::now();
+        // R43: the user's own Riot ID, from the local chat session.
+        let _ = crate::sync::fetch_self_name(&self.st, &session).await;
 
         // One cheap /v1/version check per client start (new patch → new
         // tables); the tables themselves only download when it changed.
@@ -217,6 +264,12 @@ impl Poller {
         self.roster_retry = None;
         self.post_match = None;
         self.party_key = None;
+        self.match_queue = None;
+        self.presence_stage = Stage::Closed;
+        // A deliberate reconnect (e.g. VALORANT started) goes straight to
+        // `connect`, not through the failure backoff.
+        self.connect_failures = 0;
+        self.next_connect = Instant::now();
         self.enter_closed().await;
     }
 
@@ -298,29 +351,38 @@ impl Poller {
             .and_then(|p| p.private.clone());
         let decoded = private.as_deref().and_then(decode_presence);
 
+        match self.game.on_presence(decoded.is_some()) {
+            GameVerdict::Present => {}
+            // The session was built (or has lived) while VALORANT wasn't
+            // running: stale shards / fallback client version. Rebuild it
+            // now that the game is up — first launch or relaunch (R46).
+            GameVerdict::Reconnect => return Err(Stop::Reconnect("VALORANT started")),
+            GameVerdict::Absent => return Ok(()),
+            GameVerdict::Closed => {
+                if self.stage != Stage::Closed {
+                    log::info!("VALORANT is not running");
+                    self.change_stage(session, Stage::Closed, None).await?;
+                }
+                return Ok(());
+            }
+        }
         let Some(presence) = decoded else {
-            if self.connected_without_game.is_none() {
-                self.connected_without_game = Some(true);
-            }
-            self.absent_ticks += 1;
-            if self.absent_ticks >= ABSENT_TICKS_TO_CLOSE && self.stage != Stage::Closed {
-                log::info!("VALORANT is not running");
-                self.change_stage(session, Stage::Closed, None).await?;
-            }
             return Ok(());
         };
 
-        self.absent_ticks = 0;
-        if self.connected_without_game == Some(true) {
-            // The session was built from a stale ShooterGame.log / fallback
-            // client version; rebuild it now that VALORANT is up.
-            return Err(Stop::Reconnect("VALORANT started"));
+        if presence.stage == Stage::Ingame {
+            self.match_queue = presence.queue_id.clone();
         }
-        self.connected_without_game = Some(false);
-
+        let view = view_stage(presence.stage, presence.queue_id.as_deref());
+        if presence.stage != self.presence_stage {
+            if view != presence.stage {
+                log::info!("free-for-all {:?}: keeping the lobby view", presence.stage);
+            }
+            self.presence_stage = presence.stage;
+        }
         let key = private.as_deref().and_then(party_key);
-        if presence.stage != self.stage {
-            self.change_stage(session, presence.stage, key).await?;
+        if view != self.stage {
+            self.change_stage(session, view, key).await?;
         } else if key != self.party_key {
             self.party_key = key;
             if self.stage == Stage::Menus {
@@ -336,26 +398,31 @@ impl Poller {
     }
 
     fn stop_worker(&mut self) {
-        if let Some(handle) = self.worker.take() {
+        if let Some((handle, _)) = self.worker.take() {
             handle.abort();
         }
+        lock(&self.st.live).revoke_worker();
     }
 
-    /// Starts the sync worker unless one is already running (it picks up
-    /// roster changes on its own).
+    /// Starts the sync worker when there is work and no worker holds the
+    /// claim (R45: claim + work check happen under one lock in
+    /// `LiveModel::try_start_worker`; a running worker picks up roster
+    /// changes itself).
     fn ensure_worker(&mut self, session: &Arc<RiotSession>) {
-        if self
-            .worker
-            .as_ref()
-            .is_some_and(|h| !h.inner().is_finished())
-        {
-            return;
+        // A worker task that ended without releasing its claim (it can
+        // only panic in a debug build) must not block all future work.
+        if let Some((handle, id)) = &self.worker {
+            if handle.inner().is_finished() {
+                lock(&self.st.live).release_worker(*id);
+                self.worker = None;
+            }
         }
-        if !lock(&self.st.live).has_pending_work() {
+        let Some(id) = lock(&self.st.live).try_start_worker() else {
             return;
-        }
+        };
         let (st, s) = (self.st.clone(), session.clone());
-        self.worker = Some(tauri::async_runtime::spawn(crate::sync::run_worker(st, s)));
+        let handle = tauri::async_runtime::spawn(crate::sync::run_worker(st, s, id));
+        self.worker = Some((handle, id));
     }
 
     async fn change_stage(
@@ -369,6 +436,16 @@ impl Poller {
         };
         log::info!("stage {:?} -> {:?}", self.stage, next);
         self.stop_worker();
+        // R43: retry the own Riot ID until the chat session has it (the
+        // guard is dropped before the await).
+        let need_self_name = lock(&self.st.live).self_name.is_none();
+        if need_self_name
+            && crate::sync::fetch_self_name(&self.st, session)
+                .await
+                .is_err()
+        {
+            return Err(Stop::Reconnect("Riot client closed"));
+        }
 
         let ended_match = {
             let mut live = lock(&self.st.live);
@@ -383,6 +460,12 @@ impl Poller {
         self.post_match = match (t.match_ended, ended_match) {
             (true, Some(match_id)) => Some(PostMatch {
                 match_id,
+                // An unknown queue gets the stricter (competitive) check: at
+                // worst two extra cheap re-syncs.
+                competitive: self
+                    .match_queue
+                    .as_deref()
+                    .is_none_or(|q| q == "competitive"),
                 due: Instant::now() + POST_MATCH_DELAYS[0],
                 attempt: 0,
             }),
@@ -526,6 +609,12 @@ impl Poller {
         }
         let match_id = session.coregame_player(me).await?.match_id;
         let m = session.coregame_match(&match_id).await?;
+        if is_ffa_roster(&m) {
+            // Presence had no usable queueId, but everyone is on their own
+            // team: free-for-all keeps the lobby view (R41).
+            log::info!("free-for-all roster: keeping the lobby view");
+            return self.fetch_party(session, me).await;
+        }
         let roster = from_coregame(&m, me, &self.self_party);
         let loadouts = match session.coregame_loadouts(&match_id).await {
             Ok(resp) => Some(extract_loadouts(&resp)),
@@ -700,14 +789,16 @@ impl Poller {
         if self.stage != Stage::Menus {
             return;
         }
-        let id = pm.match_id.clone();
-        let missing = self
+        let Some(me) = lock(&self.st.live).self_puuid.clone() else {
+            return;
+        };
+        let (id, competitive) = (pm.match_id.clone(), pm.competitive);
+        let landed = self
             .st
-            .db(move |repo| repo.new_match_ids(&[id]))
+            .db(move |repo| match_landed(repo.conn(), &me, &id, competitive))
             .await
-            .map(|m| !m.is_empty())
-            .unwrap_or(false);
-        if !missing {
+            .unwrap_or(true);
+        if landed {
             return;
         }
         log::info!(
@@ -731,6 +822,7 @@ impl Poller {
         if let Some(delay) = POST_MATCH_DELAYS.get(next) {
             self.post_match = Some(PostMatch {
                 match_id: pm.match_id,
+                competitive: pm.competitive,
                 due: Instant::now() + *delay,
                 attempt: next,
             });

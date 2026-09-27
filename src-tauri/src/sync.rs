@@ -21,6 +21,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use serde::Deserialize;
+
 use tokio::task::JoinSet;
 
 use opd1_core::db::repo::{CompUpdateRow, HistoryEntry, MmrSnapshot};
@@ -30,7 +32,7 @@ use opd1_riot::{RiotError, RiotSession, VisiblePuuid};
 
 use crate::logbuf::short;
 use crate::roster::extract_loadouts;
-use crate::state::{lock, now_ms, AppState};
+use crate::state::{lock, now_ms, AppState, Job};
 use crate::store::{save_player, trim_mmr, PlayerUpdate};
 
 /// Match-details requests in flight at once. They're large responses
@@ -288,49 +290,62 @@ pub async fn sync_details(
     Ok(())
 }
 
-/// The live roster's background worker: names first (one `names()` call
-/// for every visible player still unnamed), then each unsynced player in
-/// display order, re-publishing after each step. Reads its to-do list
-/// from the live model every iteration, so roster changes mid-run are
-/// picked up without a restart.
-pub async fn run_worker(st: Arc<AppState>, session: Arc<RiotSession>) {
+/// The live roster's background worker (worker `id`, claimed via
+/// `LiveModel::try_start_worker`). Each job — one `names()` call for the
+/// visible players still unnamed, or one player's sync in display order —
+/// is chosen by `LiveModel::next_job` under the model's lock, which also
+/// releases the claim when nothing is left (R45: no roster change can
+/// slip between "nothing to do" and the task ending). Roster changes
+/// mid-run are simply picked up by the next job.
+pub async fn run_worker(st: Arc<AppState>, session: Arc<RiotSession>, id: u64) {
     loop {
-        if names_step(&st, &session).await.is_err() {
-            return;
-        }
-        let Some(puuid) = lock(&st.live).next_unsynced() else {
-            return;
+        let job = lock(&st.live).next_job(id);
+        let outcome = match job {
+            None => return,
+            Some(Job::Names(needed)) => names_step(&st, &session, needed).await,
+            Some(Job::Sync(puuid)) => sync_step(&st, &session, puuid).await,
         };
-        if sync_player(&st, &session, &puuid).await.is_err() {
+        if outcome.is_err() {
+            lock(&st.live).release_worker(id);
             return;
         }
-        let p = puuid.clone();
-        // A failed read keeps the bundle already on screen.
-        let db = st
-            .db(move |repo| crate::store::load_player_db(repo, &p))
-            .await;
-        {
-            let mut live = lock(&st.live);
-            live.synced.insert(puuid.clone());
-            if let (Some(db), Some(slot)) =
-                (db, live.slots.iter_mut().find(|s| s.roster.puuid == puuid))
-            {
-                slot.db = db;
-            }
-        }
-        log::debug!("synced {}", short(&puuid));
-        st.publish();
     }
 }
 
-/// One `names()` call for the visible players still unnamed. Hidden
-/// players are filtered twice: `names_needed()` skips them, and
-/// `VisiblePuuid::new` refuses an incognito flag at the type level.
-async fn names_step(st: &Arc<AppState>, session: &RiotSession) -> Result<(), Gone> {
-    let needed = lock(&st.live).names_needed();
-    if needed.is_empty() {
-        return Ok(());
+async fn sync_step(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    puuid: String,
+) -> Result<(), Gone> {
+    sync_player(st, session, &puuid).await?;
+    let p = puuid.clone();
+    // A failed read keeps the bundle already on screen.
+    let db = st
+        .db(move |repo| crate::store::load_player_db(repo, &p))
+        .await;
+    {
+        let mut live = lock(&st.live);
+        live.synced.insert(puuid.clone());
+        if let (Some(db), Some(slot)) =
+            (db, live.slots.iter_mut().find(|s| s.roster.puuid == puuid))
+        {
+            slot.db = db;
+        }
     }
+    log::debug!("synced {}", short(&puuid));
+    st.publish();
+    Ok(())
+}
+
+/// One `names()` call. Hidden players are filtered twice: `names_needed()`
+/// skips anyone whose `Incognito` is true (and the user, whose name comes
+/// from the chat session — R43), and `VisiblePuuid::new` refuses an
+/// incognito flag at the type level.
+async fn names_step(
+    st: &Arc<AppState>,
+    session: &RiotSession,
+    needed: Vec<(String, bool)>,
+) -> Result<(), Gone> {
     let visible: Vec<VisiblePuuid> = needed
         .iter()
         .filter_map(|(p, incognito)| VisiblePuuid::new(p.clone(), *incognito))
@@ -366,24 +381,75 @@ async fn names_step(st: &Arc<AppState>, session: &RiotSession) -> Result<(), Gon
         }
     }
     log::debug!("names: {} of {} resolved", learned.len(), asked.len());
-    if !learned.is_empty() {
-        let now = now_ms();
-        st.db(move |repo| {
-            for (p, n, t) in &learned {
-                save_player(
-                    repo.conn(),
-                    &PlayerUpdate {
-                        puuid: p.clone(),
-                        name: Some((n.clone(), t.clone())),
-                        account_level: 0,
-                        card_id: String::new(),
-                    },
-                    now,
-                )?;
-            }
-            Ok(())
-        })
-        .await;
+    save_names(st, learned).await;
+    st.publish();
+    Ok(())
+}
+
+async fn save_names(st: &Arc<AppState>, learned: Vec<(String, String, String)>) {
+    if learned.is_empty() {
+        return;
+    }
+    let now = now_ms();
+    st.db(move |repo| {
+        for (p, n, t) in &learned {
+            save_player(
+                repo.conn(),
+                &PlayerUpdate {
+                    puuid: p.clone(),
+                    name: Some((n.clone(), t.clone())),
+                    account_level: 0,
+                    card_id: String::new(),
+                },
+                now,
+            )?;
+        }
+        Ok(())
+    })
+    .await;
+}
+
+/// `GET /chat/v1/session` on the local client (techchrism
+/// `ChatSession.ts`: `{game_name, game_tag, puuid, loaded, ...}`).
+#[derive(Debug, Deserialize)]
+struct ChatSession {
+    #[serde(default)]
+    game_name: String,
+    #[serde(default)]
+    game_tag: String,
+    #[serde(default)]
+    puuid: String,
+}
+
+/// R43: the user's own Riot ID, from the local chat session — never from
+/// name-service. Retried by the poll loop (on stage changes) until it
+/// yields a name; `self_name_attempted` makes an unknown own name `—`
+/// instead of a skeleton in the meantime.
+pub async fn fetch_self_name(st: &Arc<AppState>, session: &RiotSession) -> Result<(), Gone> {
+    let me = session.self_puuid().to_string();
+    let name = match session.local::<ChatSession>("/chat/v1/session").await {
+        Ok(s) if s.puuid == me && !s.game_name.is_empty() && !s.game_tag.is_empty() => {
+            Some((s.game_name, s.game_tag))
+        }
+        Ok(_) => {
+            log::info!("chat session has no Riot ID yet");
+            None
+        }
+        Err(RiotError::ClientGone) => return Err(Gone),
+        Err(e) => {
+            log::warn!("chat session failed: {e}");
+            None
+        }
+    };
+    {
+        let mut live = lock(&st.live);
+        live.self_name_attempted = true;
+        if name.is_some() {
+            live.self_name = name.clone();
+        }
+    }
+    if let Some((n, t)) = name {
+        save_names(st, vec![(me, n, t)]).await;
     }
     st.publish();
     Ok(())

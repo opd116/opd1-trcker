@@ -65,6 +65,17 @@ pub struct Slot {
     pub db: PlayerDb,
 }
 
+/// One unit of work for the roster worker (see [`LiveModel::next_job`]).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Job {
+    /// One `names()` call: `(puuid, incognito)` pairs — `incognito` is
+    /// always `false` (filtered), carried so the worker builds each
+    /// `VisiblePuuid` from the real flag.
+    Names(Vec<(String, bool)>),
+    /// The per-player sync of one puuid.
+    Sync(String),
+}
+
 /// The live stage/roster plus the session-scoped bookkeeping the sync
 /// worker and the card builder share.
 pub struct LiveModel {
@@ -80,10 +91,18 @@ pub struct LiveModel {
     pub loadouts: HashMap<String, Loadout>,
     pub coregame_match_id: Option<String>,
     pub self_puuid: Option<String>,
+    /// The user's own Riot ID from the local chat session
+    /// (`/chat/v1/session`, R43) — the only source of the user's name; the
+    /// user is never sent to name-service.
+    pub self_name: Option<(String, String)>,
+    /// The chat-session lookup ran for this Riot Client session (so an
+    /// unknown own name is Missing, not Loading). Not cleared by stage
+    /// resets — only a new connection re-asks.
+    pub self_name_attempted: bool,
     /// The user's own last-seen roster entry (placeholder while a roster
     /// fetch is retried).
     pub self_roster: Option<RosterPlayer>,
-    /// Names from `names()` this run (visible players only).
+    /// Names from `names()` this run (visible, non-self players only).
     pub known_names: HashMap<String, (String, String)>,
     /// Players a `names()` call was attempted for (since the last reset):
     /// a visible name still unknown after that is Missing, not Loading.
@@ -91,6 +110,12 @@ pub struct LiveModel {
     /// Players whose per-player sync ran (since the last reset): a field
     /// still unknown after that is Missing, not Loading.
     pub synced: HashSet<String>,
+    /// The worker currently entitled to run (R45). Set and cleared only
+    /// under this model's lock, together with the "is there work?" check,
+    /// so no roster change can fall between a worker deciding to exit and
+    /// a new one being refused.
+    worker_id: Option<u64>,
+    next_worker_id: u64,
     /// The last built/emitted state (`live_state()` returns it).
     pub current: LiveState,
     last_bytes: Vec<u8>,
@@ -106,10 +131,14 @@ impl LiveModel {
             loadouts: HashMap::new(),
             coregame_match_id: None,
             self_puuid,
+            self_name: None,
+            self_name_attempted: false,
             self_roster: None,
             known_names: HashMap::new(),
             names_attempted: HashSet::new(),
             synced: HashSet::new(),
+            worker_id: None,
+            next_worker_id: 0,
             current: LiveState {
                 stage: Stage::Closed,
                 map_id: None,
@@ -147,26 +176,34 @@ impl LiveModel {
         now_ms: i64,
     ) -> PlayerCard {
         let r = &slot.roster;
-        let self_id = self.self_id();
-        let incognito = r.effectively_incognito(self_id);
+        let is_self = r.puuid == self.self_id();
         // While VALORANT is closed nothing can be fetched: whatever the DB
         // doesn't have is Missing, not a skeleton that never resolves.
         let closed = self.stage == Stage::Closed;
         let data_done = closed || self.synced.contains(&r.puuid);
-        let names_done = closed || data_done || self.names_attempted.contains(&r.puuid);
 
-        // Hidden names: an incognito player's name is never fed into the
-        // card from any source (build_card also ignores it, belt and
-        // braces). Visible: this run's name-service answer first, then the
-        // name stored the last time they were visible (cached-first).
-        let (game_name, tag_line) = if incognito {
-            (String::new(), String::new())
+        // Names (CLAUDE.md "Hidden names", R43):
+        // - the user: their own Riot ID from the local chat session (or its
+        //   stored copy) — shown to the user, never looked up remotely;
+        // - an incognito player: no name is fed into the card from any
+        //   source (build_card also ignores it, belt and braces);
+        // - a visible player: this run's name-service answer first, then
+        //   the name stored the last time they were visible (cached-first).
+        let stored = || slot.db.row.as_ref().and_then(StoredPlayer::name);
+        let (incognito, (game_name, tag_line), names_done) = if is_self {
+            let name = self.self_name.clone().or_else(stored).unwrap_or_default();
+            (false, name, closed || data_done || self.self_name_attempted)
+        } else if r.incognito {
+            (true, Default::default(), true)
         } else {
-            self.known_names
+            let name = self
+                .known_names
                 .get(&r.puuid)
                 .cloned()
-                .or_else(|| slot.db.row.as_ref().and_then(StoredPlayer::name))
-                .unwrap_or_default()
+                .or_else(stored)
+                .unwrap_or_default();
+            let done = closed || data_done || self.names_attempted.contains(&r.puuid);
+            (false, name, done)
         };
 
         let mmr = match &slot.db.mmr {
@@ -211,32 +248,29 @@ impl LiveModel {
     }
 
     /// Players shown hidden right now (R18: their names must not leak
-    /// through Player Details' Top Teammates either).
+    /// through Player Details' Top Teammates either). The user's own name
+    /// is known locally (chat session) and is not hidden from the user.
     pub fn hidden_puuids(&self) -> HashSet<String> {
         let self_id = self.self_id();
         self.slots
             .iter()
-            .filter(|s| s.roster.effectively_incognito(self_id))
+            .filter(|s| s.roster.incognito && s.roster.puuid != self_id)
             .map(|s| s.roster.puuid.clone())
             .collect()
     }
 
-    /// Visible players whose name isn't known yet and hasn't been asked
-    /// for: `(puuid, effectively_incognito)` — always `false` here, but
-    /// carried so the caller builds `VisiblePuuid`s from the real flag.
+    /// Players to send to name-service: never the user (R43 — their name
+    /// comes from the chat session), never anyone whose `Incognito` is
+    /// true, only names not known and not yet asked for.
     pub fn names_needed(&self) -> Vec<(String, bool)> {
         let self_id = self.self_id();
         self.slots
             .iter()
-            .filter(|s| !s.roster.effectively_incognito(self_id))
+            .filter(|s| s.roster.puuid != self_id)
+            .filter(|s| !s.roster.incognito)
             .filter(|s| !self.known_names.contains_key(&s.roster.puuid))
             .filter(|s| !self.names_attempted.contains(&s.roster.puuid))
-            .map(|s| {
-                (
-                    s.roster.puuid.clone(),
-                    s.roster.effectively_incognito(self_id),
-                )
-            })
+            .map(|s| (s.roster.puuid.clone(), s.roster.incognito))
             .collect()
     }
 
@@ -252,6 +286,54 @@ impl LiveModel {
 
     pub fn has_pending_work(&self) -> bool {
         self.next_unsynced().is_some() || !self.names_needed().is_empty()
+    }
+
+    /// R45: claims the worker slot if there is work and no worker owns it
+    /// — returns the new worker's id (the caller spawns it), else `None`.
+    pub fn try_start_worker(&mut self) -> Option<u64> {
+        if self.worker_id.is_some() || !self.has_pending_work() {
+            return None;
+        }
+        self.next_worker_id += 1;
+        self.worker_id = Some(self.next_worker_id);
+        self.worker_id
+    }
+
+    /// R45: the worker's next job, decided under the lock. When there is
+    /// nothing left, the worker's claim is released *in the same critical
+    /// section*, so a player added a moment later finds no worker and
+    /// `try_start_worker` starts a fresh one. A superseded worker (`id`
+    /// no longer the owner) just gets `None`.
+    pub fn next_job(&mut self, id: u64) -> Option<Job> {
+        if self.worker_id != Some(id) {
+            return None;
+        }
+        let names = self.names_needed();
+        if !names.is_empty() {
+            return Some(Job::Names(names));
+        }
+        if let Some(puuid) = self.next_unsynced() {
+            return Some(Job::Sync(puuid));
+        }
+        self.worker_id = None;
+        None
+    }
+
+    /// Releases worker `id`'s claim (early exit, e.g. the client went away).
+    pub fn release_worker(&mut self, id: u64) {
+        if self.worker_id == Some(id) {
+            self.worker_id = None;
+        }
+    }
+
+    /// Revokes any worker's claim (the poll loop aborted it).
+    pub fn revoke_worker(&mut self) {
+        self.worker_id = None;
+    }
+
+    #[cfg(test)]
+    pub fn worker_running(&self) -> bool {
+        self.worker_id.is_some()
     }
 }
 
@@ -476,33 +558,35 @@ impl AppState {
 
     /// Rebuilds `LiveState` and emits `"live"` — only when its serialized
     /// bytes differ from the last emission.
+    ///
+    /// Build, compare, record and emit all happen under the `live` lock, so
+    /// concurrent publishers (poll loop, worker, details sync, tables task)
+    /// are serialized: events leave in the order the states were built and
+    /// the last one emitted is always `current` — an older snapshot can
+    /// never land after a newer one and then be "deduped" into sticking.
+    /// Holding the lock across the emit is fine: Tauri's `emit` only
+    /// serializes and queues the event for the webview.
     pub fn publish(&self) {
         let acts = self.acts();
-        let payload = {
-            let mut live = lock(&self.live);
-            if live.map_id.is_none() {
-                if let Some(path) = live.map_path.clone() {
-                    live.map_id = self.map_uuid(&path);
-                }
+        let mut live = lock(&self.live);
+        if live.map_id.is_none() {
+            if let Some(path) = live.map_path.clone() {
+                live.map_id = self.map_uuid(&path);
             }
-            let state = live.build(&acts, card_clock(now_ms()));
-            let bytes = serde_json::to_vec(&state).unwrap_or_default();
-            if bytes == live.last_bytes {
-                None
-            } else {
-                live.last_bytes = bytes;
-                live.current = state.clone();
-                Some(state)
-            }
-        };
-        if let Some(state) = payload {
-            log::debug!(
-                "emit live: {:?}, {} players",
-                state.stage,
-                state.players.len()
-            );
-            self.sink.live(&state);
         }
+        let state = live.build(&acts, card_clock(now_ms()));
+        let bytes = serde_json::to_vec(&state).unwrap_or_default();
+        if bytes == live.last_bytes {
+            return;
+        }
+        live.last_bytes = bytes;
+        log::debug!(
+            "emit live: {:?}, {} players",
+            state.stage,
+            state.players.len()
+        );
+        self.sink.live(&state);
+        live.current = state;
     }
 
     pub fn emit_details(&self, details: &PlayerDetails) {
@@ -683,10 +767,37 @@ mod tests {
     }
 
     #[test]
-    fn the_user_is_visible_to_themselves_even_with_incognito_on() {
-        let m = model(vec![slot("me", true)]);
-        assert_eq!(m.names_needed(), vec![("me".to_string(), false)]);
+    fn the_user_is_never_sent_to_name_service() {
+        // Visible or incognito, the user's own puuid never needs names()
+        // (R43: their Riot ID comes from the local chat session).
+        for incognito in [false, true] {
+            let m = model(vec![slot("me", incognito), slot("p1", false)]);
+            assert_eq!(m.names_needed(), vec![("p1".to_string(), false)]);
+        }
+    }
+
+    #[test]
+    fn the_users_own_name_comes_from_the_chat_session() {
+        let mut m = model(vec![slot("me", true)]);
+        // Unknown until the chat session was asked…
+        assert!(m.build(&[], 0).players[0].name.is_loading());
+        m.self_name_attempted = true;
+        assert_eq!(m.build(&[], 0).players[0].name, Field::Missing);
+        // …then the local chat session's Riot ID, shown to the user even
+        // with their own streamer-mode flag on.
+        m.self_name = Some(("Shanky".into(), "OPD1".into()));
+        assert_eq!(
+            m.build(&[], 0).players[0].name,
+            Field::Value(DisplayName::Visible {
+                name: "Shanky".into(),
+                tag: "OPD1".into()
+            })
+        );
         assert!(m.hidden_puuids().is_empty());
+        // A stage reset (which clears names_attempted) keeps it settled.
+        m.names_attempted.clear();
+        m.self_name = None;
+        assert_eq!(m.build(&[], 0).players[0].name, Field::Missing);
     }
 
     #[test]
@@ -725,9 +836,57 @@ mod tests {
         m.synced.insert("me".into());
         assert_eq!(m.next_unsynced().as_deref(), Some("a"));
         m.synced.extend(["a".to_string(), "e".to_string()]);
-        m.names_attempted
-            .extend(["me".to_string(), "a".to_string(), "e".to_string()]);
+        m.names_attempted.extend(["a".to_string(), "e".to_string()]);
         assert!(!m.has_pending_work());
+    }
+
+    #[test]
+    fn worker_exit_and_a_new_player_cannot_race() {
+        let mut m = model(vec![slot("me", false)]);
+        m.names_attempted.insert("me".into());
+        let id = m
+            .try_start_worker()
+            .expect("work pending -> worker claimed");
+        assert!(m.try_start_worker().is_none(), "one worker at a time");
+        assert_eq!(m.next_job(id), Some(Job::Sync("me".into())));
+        m.synced.insert("me".into());
+
+        // Nothing left: the claim is released in the same step…
+        assert_eq!(m.next_job(id), None);
+        assert!(!m.worker_running());
+        // …so a player added right after the worker decided to exit gets a
+        // fresh worker instead of staying Loading forever (R45).
+        m.slots.push(slot("late", false));
+        let id2 = m
+            .try_start_worker()
+            .expect("new work after exit -> new worker");
+        assert_eq!(
+            m.next_job(id2),
+            Some(Job::Names(vec![("late".into(), false)]))
+        );
+
+        // A player added while a worker still runs is picked up by it.
+        m.names_attempted.insert("late".into());
+        m.slots.push(slot("later", false));
+        m.names_attempted.insert("later".into());
+        assert_eq!(m.next_job(id2), Some(Job::Sync("late".into())));
+        m.synced.insert("late".into());
+        assert_eq!(m.next_job(id2), Some(Job::Sync("later".into())));
+    }
+
+    #[test]
+    fn a_revoked_worker_gets_no_more_jobs_and_cannot_release_its_successor() {
+        let mut m = model(vec![slot("me", false), slot("p", false)]);
+        let old = m.try_start_worker().unwrap();
+        m.revoke_worker(); // the poll loop aborted it (stage change)
+        let new = m.try_start_worker().unwrap();
+        assert_eq!(m.next_job(old), None, "superseded");
+        m.release_worker(old);
+        assert!(
+            m.worker_running(),
+            "the old worker can't free the new one's claim"
+        );
+        assert!(m.next_job(new).is_some());
     }
 
     #[test]
@@ -768,5 +927,91 @@ mod tests {
         let s = closed_self_slot("me", db).unwrap();
         assert!(s.roster.is_self_party);
         assert!(s.roster.hide_account_level, "unknown level shows as —");
+    }
+
+    // -- publish() ------------------------------------------------------
+
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<LiveState>>);
+
+    struct Sink(Arc<Recorder>);
+
+    impl EventSink for Sink {
+        fn live(&self, state: &LiveState) {
+            lock(&self.0 .0).push(state.clone());
+        }
+        fn details(&self, _details: &PlayerDetails) {}
+    }
+
+    fn test_state() -> (Arc<AppState>, Arc<Recorder>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let rec = Arc::new(Recorder::default());
+        let repo = Repo::new(opd1_core::db::open_db(std::path::Path::new(":memory:")).unwrap());
+        let assets = AssetCache::with_base(dir.path().join("a"), "http://127.0.0.1:1".into());
+        let st = AppState::new(
+            Box::new(Sink(rec.clone())),
+            repo,
+            assets,
+            dir.path().join("debug"),
+            Some("me".into()),
+        );
+        (Arc::new(st), rec, dir)
+    }
+
+    #[test]
+    fn publish_emits_only_when_the_state_changes() {
+        let (st, rec, _dir) = test_state();
+        st.publish();
+        st.publish();
+        assert_eq!(lock(&rec.0).len(), 1, "same bytes -> no second emit");
+        lock(&st.live).slots.push(slot("p1", false));
+        st.publish();
+        st.publish();
+        let emitted = lock(&rec.0).clone();
+        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted.last(), Some(&st.live_state()));
+    }
+
+    #[test]
+    fn concurrent_publishers_always_end_on_the_current_state() {
+        for _ in 0..10 {
+            let (st, rec, _dir) = test_state();
+            let threads: Vec<_> = (0..6)
+                .map(|t| {
+                    let st = st.clone();
+                    std::thread::spawn(move || {
+                        for i in 0..20 {
+                            {
+                                let mut live = lock(&st.live);
+                                let p = format!("p{t}-{i}");
+                                live.slots.push(slot(&p, false));
+                                if i % 3 == 0 {
+                                    live.synced.insert(p);
+                                }
+                            }
+                            st.publish();
+                        }
+                    })
+                })
+                .collect();
+            for t in threads {
+                t.join().unwrap();
+            }
+            let emitted = lock(&rec.0).clone();
+            let current = st.live_state();
+            // The last event the UI received is the model's current state…
+            assert_eq!(emitted.last(), Some(&current));
+            // …and it matches a fresh build (nothing newer was suppressed).
+            let fresh = lock(&st.live).build(&[], card_clock(now_ms()));
+            assert_eq!(current, fresh);
+            // Events never go backwards: each has at least as many players
+            // as the one before (slots only grow in this test).
+            for w in emitted.windows(2) {
+                assert!(
+                    w[1].players.len() >= w[0].players.len(),
+                    "out-of-order emit"
+                );
+            }
+        }
     }
 }

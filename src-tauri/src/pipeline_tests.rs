@@ -23,10 +23,11 @@ use opd1_riot::session::{ConnectOverrides, RiotSession};
 use crate::roster::RosterPlayer;
 use crate::state::{lock, now_ms, AppState, EventSink, Slot};
 use crate::store::PlayerDb;
-use crate::sync::{run_worker, sync_player};
+use crate::sync::{fetch_self_name, run_worker, sync_player};
 
 const ME: &str = "aaaaaaaa-0000-0000-0000-000000000001";
 const HIDDEN: &str = "bbbbbbbb-0000-0000-0000-000000000002";
+const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
 const ACT: &str = "act-current";
 
 #[derive(Default)]
@@ -161,19 +162,31 @@ async fn mock_riot(server: &MockServer) {
     .await;
     get(server, &format!("/mmr/v1/players/{ME}"), mmr()).await;
 
+    // The user's own Riot ID comes from the local chat session (R43)…
+    get(
+        server,
+        "/chat/v1/session",
+        json!({"federated": true, "game_name": "Me", "game_tag": "TAG", "loaded": true,
+               "name": "", "pid": "", "puuid": ME, "region": "eu", "resource": "", "state": "connected"}),
+    )
+    .await;
+    // …name-service only ever answers for other visible players.
     Mock::given(method("PUT"))
         .and(path("/name-service/v2/players"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!([
-            {"DisplayName": "", "Subject": ME, "GameName": "Me", "TagLine": "TAG"}
+            {"DisplayName": "", "Subject": OTHER, "GameName": "Other", "TagLine": "OTH"}
         ])))
         .mount(server)
         .await;
 
-    // Every HIDDEN call fails: their card must settle to `—`, not spin.
+    // Every HIDDEN / OTHER call fails: their cards must settle to `—`.
     for p in [
         format!("/mmr/v1/players/{HIDDEN}/competitiveupdates"),
         format!("/match-history/v1/history/{HIDDEN}"),
         format!("/mmr/v1/players/{HIDDEN}"),
+        format!("/mmr/v1/players/{OTHER}/competitiveupdates"),
+        format!("/match-history/v1/history/{OTHER}"),
+        format!("/mmr/v1/players/{OTHER}"),
     ] {
         Mock::given(method("GET"))
             .and(path(p.as_str()))
@@ -369,11 +382,19 @@ async fn worker_names_only_visible_players_and_settles_failures() {
                 roster: roster(HIDDEN, true),
                 db: PlayerDb::default(),
             },
+            Slot {
+                roster: roster(OTHER, false),
+                db: PlayerDb::default(),
+            },
         ];
     }
-    run_worker(h.st.clone(), h.session.clone()).await;
+    fetch_self_name(&h.st, &h.session).await.unwrap();
+    let id = lock(&h.st.live).try_start_worker().expect("work pending");
+    run_worker(h.st.clone(), h.session.clone(), id).await;
+    assert!(!lock(&h.st.live).worker_running(), "claim released on exit");
 
-    // Exactly one name-service call, and the hidden player isn't in it.
+    // Exactly one name-service call: the other visible player only —
+    // never the hidden player, never the user (R43).
     let puts: Vec<Request> = h
         .server
         .received_requests()
@@ -384,11 +405,12 @@ async fn worker_names_only_visible_players_and_settles_failures() {
         .collect();
     assert_eq!(puts.len(), 1);
     let body = String::from_utf8(puts[0].body.clone()).unwrap();
-    assert!(body.contains(ME));
+    assert!(body.contains(OTHER));
     assert!(
         !body.contains(HIDDEN),
         "a hidden player's name must never be requested"
     );
+    assert!(!body.contains(ME), "the user is never sent to name-service");
 
     let emitted = h.rec.live.lock().unwrap().clone();
     assert!(emitted.len() >= 2, "re-emits as each player completes");
@@ -404,6 +426,15 @@ async fn worker_names_only_visible_players_and_settles_failures() {
     assert!(matches!(me.rank, Field::Value(r) if r.tier == 15 && r.rr == 42));
     assert!(matches!(me.last5, Field::Value(ref v) if v.len() == 1));
     assert_eq!(me.kd, Field::Value(2.0));
+
+    let other = &last.players[2];
+    assert_eq!(
+        other.name,
+        Field::Value(DisplayName::Visible {
+            name: "Other".into(),
+            tag: "OTH".into()
+        })
+    );
 
     let hidden = &last.players[1];
     assert_eq!(

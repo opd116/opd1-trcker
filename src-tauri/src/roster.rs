@@ -13,8 +13,13 @@
 //!   loadouts ([`extract_loadouts`])
 //! - Riot map path -> valorant-api map uuid ([`map_uuid`])
 //! - the current act ([`current_act`])
+//! - free-for-all queues keep the Lobby view (R41, [`view_stage`],
+//!   [`is_ffa_roster`])
+//! - VALORANT (re)launch under a live Riot Client session ([`GameWatch`], R46)
+//! - connect-failure backoff ([`connect_retry_delay`], R47)
 
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -70,15 +75,6 @@ impl RosterPlayer {
             selection_state: selection_state.to_string(),
         }
     }
-
-    /// Hidden-name rule as it applies to *this app's user*: the user's own
-    /// card always shows their own Riot ID, even with Riot's streamer-mode
-    /// "hide my name" on (that setting hides the user from *others*; it
-    /// never hides the user from themselves). Everyone else follows their
-    /// `Incognito` flag.
-    pub fn effectively_incognito(&self, self_puuid: &str) -> bool {
-        self.incognito && self.puuid != self_puuid
-    }
 }
 
 // ---------------------------------------------------------------------
@@ -130,6 +126,115 @@ pub fn plan_transition(prev: Stage, next: Stage) -> Option<Transition> {
         reset_synced: matches!(next, Stage::Menus | Stage::Closed),
         match_ended: prev == Stage::Ingame && next == Stage::Menus,
     })
+}
+
+// ---------------------------------------------------------------------
+// free-for-all (R41)
+// ---------------------------------------------------------------------
+
+/// Presence `queueId`s of free-for-all modes. Checked against every mode
+/// Valorant-Scout knows (`vconstants.py` GAMEMODES: competitive, unrated,
+/// swiftplay, spikerush, deathmatch, ggteam, hurm, fortcollins,
+/// skirmish2v2, custom): Deathmatch is the only one without teams — Team
+/// Deathmatch (`hurm`), Escalation (`ggteam`), Retake and Skirmish 2v2 are
+/// all team modes and keep the normal In Game view.
+pub const FFA_QUEUES: &[&str] = &["deathmatch"];
+
+pub fn is_ffa_queue(queue_id: Option<&str>) -> bool {
+    queue_id.is_some_and(|q| FFA_QUEUES.contains(&q))
+}
+
+/// The stage the app *shows* for a presence stage (R41): a free-for-all
+/// match has no teammates and a dozen strangers, so Agent Select / In Game
+/// in an FFA queue keep the Lobby (party) view — `Menus` — and nobody but
+/// the party is fetched or synced.
+pub fn view_stage(stage: Stage, queue_id: Option<&str>) -> Stage {
+    match stage {
+        Stage::Pregame | Stage::Ingame if is_ffa_queue(queue_id) => Stage::Menus,
+        other => other,
+    }
+}
+
+/// Fallback when presence carries no usable `queueId`: a core-game roster
+/// where no two players share a `TeamID` (Deathmatch gives every player a
+/// team of their own) is free-for-all. Two players is still a duel-shaped
+/// team game (e.g. a 1v1 custom), not FFA.
+pub fn is_ffa_roster(resp: &CoreGameMatchResponse) -> bool {
+    if resp.players.len() < 3 {
+        return false;
+    }
+    let teams: HashSet<&str> = resp.players.iter().map(|p| p.team_id.as_str()).collect();
+    teams.len() == resp.players.len()
+}
+
+// ---------------------------------------------------------------------
+// game presence watch (R46) / connect backoff (R47)
+// ---------------------------------------------------------------------
+
+/// What one presence tick means for the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GameVerdict {
+    /// VALORANT is running and the session is fine.
+    Present,
+    /// VALORANT is running, but this session was built while it wasn't
+    /// (stale `ShooterGame.log` shards, fallback client version):
+    /// rebuild the session.
+    Reconnect,
+    /// No VALORANT presence this tick (maybe transient).
+    Absent,
+    /// Absent long enough: VALORANT is closed.
+    Closed,
+}
+
+/// Tracks VALORANT's own presence under one Riot Client session. A session
+/// is "stale" when it was created, or has lived, while the game wasn't
+/// running — both a first launch and a relaunch (e.g. after a patch) under
+/// a Riot Client that stayed open must rebuild it (R46).
+#[derive(Debug, Clone, Default)]
+pub struct GameWatch {
+    absent_ticks: u32,
+    /// `None` until the first tick of this session.
+    stale: Option<bool>,
+}
+
+impl GameWatch {
+    /// Consecutive absent presences before VALORANT counts as closed (one
+    /// odd payload mustn't flash the Closed stage).
+    pub const ABSENT_TICKS_TO_CLOSE: u32 = 2;
+
+    pub fn on_presence(&mut self, game_present: bool) -> GameVerdict {
+        if game_present {
+            self.absent_ticks = 0;
+            if self.stale == Some(true) {
+                return GameVerdict::Reconnect;
+            }
+            self.stale = Some(false);
+            return GameVerdict::Present;
+        }
+        self.absent_ticks += 1;
+        if self.stale.is_none() {
+            // Connected while the game wasn't up.
+            self.stale = Some(true);
+        }
+        if self.absent_ticks >= Self::ABSENT_TICKS_TO_CLOSE {
+            // The game is gone: whenever it comes back, rebuild.
+            self.stale = Some(true);
+            GameVerdict::Closed
+        } else {
+            GameVerdict::Absent
+        }
+    }
+}
+
+/// Wait before the next `RiotSession::connect` after `failures`
+/// consecutive failures: 5s, 10s, 20s, 40s, then 60s. A stale lockfile or
+/// a logged-out Riot Client then costs one attempt a minute, not one every
+/// 5s (each attempt re-reads `ShooterGame.log` and calls the local API).
+pub fn connect_retry_delay(failures: u32) -> Duration {
+    const BASE: u64 = 5;
+    const CAP: u64 = 60;
+    let exp = failures.saturating_sub(1).min(8);
+    Duration::from_secs((BASE << exp).min(CAP))
 }
 
 // ---------------------------------------------------------------------
@@ -494,12 +599,88 @@ mod tests {
     }
 
     #[test]
-    fn self_is_never_treated_as_incognito() {
+    fn incognito_flag_is_carried_verbatim_even_for_self() {
         let players = from_coregame(&coregame(), "a2", &HashSet::new());
         let a2 = players.iter().find(|p| p.puuid == "a2").unwrap();
-        assert!(a2.incognito);
-        assert!(!a2.effectively_incognito("a2"));
-        assert!(a2.effectively_incognito("me"));
+        assert!(a2.incognito, "no self-exemption at the roster level (R43)");
+    }
+
+    #[test]
+    fn ffa_queue_keeps_the_lobby_view_in_agent_select_and_in_game() {
+        assert_eq!(view_stage(Stage::Ingame, Some("deathmatch")), Stage::Menus);
+        assert_eq!(view_stage(Stage::Pregame, Some("deathmatch")), Stage::Menus);
+        // Team modes keep their real stage.
+        for q in [
+            "competitive",
+            "unrated",
+            "swiftplay",
+            "spikerush",
+            "hurm",
+            "ggteam",
+            "skirmish2v2",
+            "",
+        ] {
+            assert_eq!(view_stage(Stage::Ingame, Some(q)), Stage::Ingame, "{q}");
+        }
+        assert_eq!(view_stage(Stage::Ingame, None), Stage::Ingame);
+        assert_eq!(view_stage(Stage::Menus, Some("deathmatch")), Stage::Menus);
+        assert_eq!(view_stage(Stage::Closed, Some("deathmatch")), Stage::Closed);
+    }
+
+    #[test]
+    fn ffa_match_is_not_a_transition_from_the_lobby() {
+        // Lobby -> Deathmatch -> Lobby: the view never changes, so no roster
+        // fetch, no opponent sync, no post-match follow-up.
+        let into = plan_transition(Stage::Menus, view_stage(Stage::Ingame, Some("deathmatch")));
+        assert_eq!(into, None);
+        // App started mid-Deathmatch: the transition fetches the party.
+        let t =
+            plan_transition(Stage::Closed, view_stage(Stage::Ingame, Some("deathmatch"))).unwrap();
+        assert_eq!(t.fetch, RosterFetch::Party);
+        assert!(!t.match_ended);
+    }
+
+    #[test]
+    fn ffa_roster_is_every_player_on_their_own_team() {
+        let mut dm = coregame();
+        for p in dm.players.iter_mut() {
+            p.team_id = p.subject.clone();
+        }
+        assert!(is_ffa_roster(&dm));
+        assert!(
+            !is_ffa_roster(&coregame()),
+            "5 players on two teams is a team game"
+        );
+        dm.players.truncate(2);
+        assert!(!is_ffa_roster(&dm), "two players is a duel, not FFA");
+    }
+
+    #[test]
+    fn game_watch_reconnects_on_first_launch_and_on_relaunch() {
+        // Connected while VALORANT was running: fine.
+        let mut w = GameWatch::default();
+        assert_eq!(w.on_presence(true), GameVerdict::Present);
+        // One odd tick doesn't close anything, nor mark the session stale.
+        assert_eq!(w.on_presence(false), GameVerdict::Absent);
+        assert_eq!(w.on_presence(true), GameVerdict::Present);
+        // The game really closes (e.g. to patch) under the same Riot Client…
+        assert_eq!(w.on_presence(false), GameVerdict::Absent);
+        assert_eq!(w.on_presence(false), GameVerdict::Closed);
+        // …and relaunches: the session must be rebuilt (R46).
+        assert_eq!(w.on_presence(true), GameVerdict::Reconnect);
+
+        // Connected before the game was up at all.
+        let mut w = GameWatch::default();
+        assert_eq!(w.on_presence(false), GameVerdict::Absent);
+        assert_eq!(w.on_presence(true), GameVerdict::Reconnect);
+    }
+
+    #[test]
+    fn connect_backoff_doubles_to_a_minute() {
+        let secs: Vec<u64> = (1..=7).map(|f| connect_retry_delay(f).as_secs()).collect();
+        assert_eq!(secs, [5, 10, 20, 40, 60, 60, 60]);
+        assert_eq!(connect_retry_delay(0).as_secs(), 5);
+        assert_eq!(connect_retry_delay(u32::MAX).as_secs(), 60);
     }
 
     #[test]

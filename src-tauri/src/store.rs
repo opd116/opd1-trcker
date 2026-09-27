@@ -197,6 +197,32 @@ pub fn recent_comp_updates(
 }
 
 // ---------------------------------------------------------------------
+// post-match (R48)
+// ---------------------------------------------------------------------
+
+/// Has the just-ended match reached the data the Lobby card shows? For a
+/// competitive match that means the user's `comp_updates` row (RR/rank —
+/// Riot can publish match-history/details before competitiveupdates, and
+/// the MMR refresh keys off the latest comp update); for any other queue,
+/// the stored match itself.
+pub fn match_landed(
+    conn: &Connection,
+    self_puuid: &str,
+    match_id: &str,
+    competitive: bool,
+) -> Result<bool> {
+    let sql = if competitive {
+        "SELECT 1 FROM comp_updates WHERE puuid = ?1 AND match_id = ?2"
+    } else {
+        "SELECT 1 FROM matches WHERE ?1 IS NOT NULL AND match_id = ?2"
+    };
+    Ok(conn
+        .query_row(sql, params![self_puuid, match_id], |_| Ok(()))
+        .optional()?
+        .is_some())
+}
+
+// ---------------------------------------------------------------------
 // Player Details reads
 // ---------------------------------------------------------------------
 
@@ -423,5 +449,41 @@ mod tests {
         // Unknown map: empty id, never the Riot path.
         let none = |_: &str| None;
         assert_eq!(recent_matches(&r, "p1", 8, &none).unwrap()[0].map_id, "");
+    }
+
+    #[test]
+    fn competitive_match_lands_only_with_its_comp_update() {
+        let r = repo();
+        let m = Match {
+            match_id: "m1".into(),
+            map_id: "/Game/Maps/Ascent/Ascent".into(),
+            queue_id: "competitive".into(),
+            start_ms: 1,
+            winning_team: None,
+            is_ranked: true,
+            rounds_played: None,
+        };
+        r.upsert_match(&m, &[], &[]).unwrap();
+        // Details arrived first: an unrated match would count as landed…
+        assert!(match_landed(r.conn(), "me", "m1", false).unwrap());
+        // …but a competitive one isn't until its RR row exists (R48).
+        assert!(!match_landed(r.conn(), "me", "m1", true).unwrap());
+        r.upsert_comp_updates(
+            "me",
+            &[CompUpdateRow {
+                match_id: "m1".into(),
+                season_id: "act".into(),
+                tier_after: 10,
+                tier_before: Some(10),
+                rr_after: 1,
+                rr_earned: 1,
+                map_id: None,
+                start_ms: 1,
+            }],
+        )
+        .unwrap();
+        assert!(match_landed(r.conn(), "me", "m1", true).unwrap());
+        assert!(!match_landed(r.conn(), "someone-else", "m1", true).unwrap());
+        assert!(!match_landed(r.conn(), "me", "m2", false).unwrap());
     }
 }

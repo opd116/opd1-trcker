@@ -1,0 +1,13 @@
+{
+  "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+  "Version": 1,
+  "CurrentPartyID": "cccccccc-0000-0000-0000-000000000001",
+  "Invites": null,
+  "Requests": [],
+  "PlatformInfo": {
+    "platformType": "PC",
+    "platformOS": "Windows",
+    "platformOSVersion": "10.0.19045.1.256.64bit",
+    "platformChipset": "Unknown"
+  }
+}

@@ -2,3 +2,15 @@
 name = "opd1-riot"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+opd1-core = { path = "../core" }
+reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
+tokio = { version = "1", features = ["rt", "macros", "time"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+wiremock = "0.6"

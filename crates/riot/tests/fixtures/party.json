@@ -1,0 +1,42 @@
+{
+  "ID": "cccccccc-0000-0000-0000-000000000001",
+  "MUCName": "",
+  "VoiceRoomID": "",
+  "Version": 1,
+  "ClientVersion": "release-09.08-shipping-11-3200000",
+  "Members": [
+    {
+      "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+      "CompetitiveTier": 15,
+      "PlayerIdentity": {
+        "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+        "PlayerCardID": "1711d20d-4b1c-c64a-14be-d4ae58a457c6",
+        "PlayerTitleID": "b3a2f52f-0000-0000-0000-000000000000",
+        "AccountLevel": 187,
+        "PreferredLevelBorderID": "",
+        "Incognito": false,
+        "HideAccountLevel": false
+      },
+      "SeasonalBadgeInfo": null,
+      "IsOwner": true,
+      "QueueEligibleRemainingAccountLevels": 0,
+      "Pings": [],
+      "IsReady": true,
+      "IsModerator": true,
+      "UseBroadcastHUD": false,
+      "PlatformType": "PC"
+    }
+  ],
+  "State": "DEFAULT",
+  "PreviousState": "",
+  "StateTransitionReason": "",
+  "Accessibility": "OPEN",
+  "MatchmakingData": { "QueueID": "competitive", "PreferredGamePods": [], "SkillDisparityRRPenalty": 0 },
+  "Invites": null,
+  "Requests": [],
+  "QueueEntryTime": "0001-01-01T00:00:00Z",
+  "RestrictedSeconds": 0,
+  "EligibleQueues": ["competitive", "unrated", "deathmatch"],
+  "QueueIneligibilities": [],
+  "XPBonuses": []
+}

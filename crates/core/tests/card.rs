@@ -86,6 +86,9 @@ fn base_input(identity: Identity) -> BuildCardInput<'static> {
         now_ms: 2_500,
         team: Team::Ally,
         is_self_party: false,
+        remembered: None,
+        party: None,
+        encounters: None,
     }
 }
 
@@ -533,4 +536,121 @@ fn last5_is_capped_at_five_even_with_more_rows_passed_in() {
         }
         other => panic!("expected last5 to be present, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// Task 6: remembered names, party marks, encounters
+// ---------------------------------------------------------------------
+
+fn remembered(name: &str, tag: &str) -> Option<(String, String)> {
+    Some((name.to_string(), tag.to_string()))
+}
+
+#[test]
+fn incognito_card_shows_a_remembered_name_before_and_after_pick() {
+    use opd1_core::model::DisplayName;
+
+    for state in ["", "locked"] {
+        let mut hidden = identity();
+        hidden.incognito = true;
+        hidden.character_selection_state = state.to_string();
+        // A stale name on identity must still never be used.
+        hidden.game_name = "ShouldNeverAppear".to_string();
+        let mut input = base_input(hidden);
+        input.remembered = remembered("Rival", "ENEMY");
+
+        let card = build_card(input);
+        assert_eq!(
+            card.name,
+            Field::Value(DisplayName::Remembered {
+                name: "Rival".into(),
+                tag: "ENEMY".into()
+            }),
+            "selection state {state:?}"
+        );
+        assert!(!serde_json::to_string(&card)
+            .unwrap()
+            .contains("ShouldNeverAppear"));
+    }
+}
+
+#[test]
+fn visible_card_ignores_a_remembered_name() {
+    use opd1_core::model::DisplayName;
+
+    let mut input = base_input(identity());
+    input.remembered = remembered("Old", "NAME");
+    assert_eq!(
+        build_card(input).name,
+        Field::Value(DisplayName::Visible {
+            name: "Shanky".into(),
+            tag: "OPD1".into()
+        })
+    );
+
+    // Still loading stays loading: a remembered name never stands in for a
+    // visible player's pending Riot ID.
+    let mut pending = identity();
+    pending.game_name = String::new();
+    let mut input = base_input(pending);
+    input.remembered = remembered("Old", "NAME");
+    assert_eq!(build_card(input).name, Field::Loading);
+}
+
+#[test]
+fn card_carries_party_mark_and_encounters_for_other_players() {
+    use opd1_core::model::{EncounterCount, PartyMark};
+
+    let mut input = base_input(identity());
+    input.party = Some(PartyMark {
+        group: 1,
+        confirmed: true,
+    });
+    input.encounters = Some(EncounterCount {
+        with: 2,
+        against: 3,
+    });
+    let card = build_card(input);
+    assert_eq!(
+        card.party,
+        Some(PartyMark {
+            group: 1,
+            confirmed: true
+        })
+    );
+    assert_eq!(
+        card.encounters,
+        Some(EncounterCount {
+            with: 2,
+            against: 3
+        })
+    );
+    let json = serde_json::to_value(&card).unwrap();
+    assert_eq!(
+        json["party"],
+        serde_json::json!({"group": 1, "confirmed": true})
+    );
+    assert_eq!(
+        json["encounters"],
+        serde_json::json!({"with": 2, "against": 3})
+    );
+}
+
+#[test]
+fn self_party_card_never_gets_party_mark_or_encounters() {
+    use opd1_core::model::{EncounterCount, PartyMark};
+
+    let mut input = base_input(identity());
+    input.is_self_party = true;
+    input.party = Some(PartyMark {
+        group: 0,
+        confirmed: false,
+    });
+    input.encounters = Some(EncounterCount {
+        with: 9,
+        against: 0,
+    });
+    let card = build_card(input);
+    assert_eq!(card.party, None);
+    assert_eq!(card.encounters, None);
 }

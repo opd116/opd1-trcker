@@ -1,7 +1,8 @@
 //! The real sync pipeline (`sync.rs` + `state.rs` + `store.rs`) against a
 //! mock Riot client (wiremock) and an in-memory DB: request counts for a
 //! cold vs a warm DB ("sync, don't refetch"), hidden players never sent
-//! to name-service, and failed calls settling to `null` instead of a
+//! to name-service, hidden names shown only when remembered from the
+//! user's own matches, and failed calls settling to `null` instead of a
 //! skeleton. The poll loop's timing itself isn't tested here (by plan);
 //! its decisions are, in `roster.rs`.
 
@@ -13,8 +14,8 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use opd1_core::db::open_db;
-use opd1_core::db::repo::Repo;
-use opd1_core::model::{DisplayName, Field, LiveState, PlayerDetails, Team};
+use opd1_core::db::repo::{Match, MatchPlayer, Repo};
+use opd1_core::model::{DisplayName, EncounterCount, Field, LiveState, PlayerDetails, Team};
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
 use opd1_riot::assets::AssetCache;
@@ -28,6 +29,9 @@ use crate::sync::{fetch_self_name, run_worker, sync_player};
 const ME: &str = "aaaaaaaa-0000-0000-0000-000000000001";
 const HIDDEN: &str = "bbbbbbbb-0000-0000-0000-000000000002";
 const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
+/// Incognito, and never in a match with ME: their name is only in the DB
+/// from someone else's match.
+const STRANGER: &str = "dddddddd-0000-0000-0000-000000000004";
 const ACT: &str = "act-current";
 
 #[derive(Default)]
@@ -67,8 +71,9 @@ fn details(match_id: &str, queue: &str, start: i64) -> Value {
             {"subject": ME, "gameName": "Me", "tagLine": "TAG", "teamId": "Blue",
              "partyId": "p", "characterId": "agent-me",
              "stats": {"score": 1, "roundsPlayed": 20, "kills": 20, "deaths": 10, "assists": 3}},
-            // Post-match details carry a hidden player's real name — it gets
-            // stored, but must never reach their live card.
+            // Post-match details carry a hidden player's real name — ME
+            // played this match, so it's the "remembered" name (CLAUDE.md's
+            // hidden-name exception), shown in its own style.
             {"subject": HIDDEN, "gameName": "SecretName", "tagLine": "HID", "teamId": "Red",
              "partyId": "q", "characterId": "agent-h",
              "stats": {"score": 1, "roundsPlayed": 20, "kills": 5, "deaths": 15, "assists": 1}}
@@ -367,9 +372,45 @@ fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
     }
 }
 
+/// A competitive match of the current act that ME did not play: HIDDEN and
+/// STRANGER as teammates, with real names (as someone else's match history
+/// would carry them) — so each is in the other's Top Teammates.
+async fn store_foreign_match(st: &AppState) {
+    let player = |puuid: &str, name: &str| MatchPlayer {
+        puuid: puuid.into(),
+        team_id: "Blue".into(),
+        party_id: None,
+        agent_id: None,
+        kills: 0,
+        deaths: 0,
+        assists: 0,
+        score: 0,
+        rounds: None,
+        hs: 0,
+        bs: 0,
+        ls: 0,
+        game_name: Some(name.into()),
+        tag_line: Some("LEAK".into()),
+    };
+    let m = Match {
+        match_id: "m-foreign".into(),
+        map_id: "/Game/Maps/Ascent/Ascent".into(),
+        queue_id: "competitive".into(),
+        start_ms: now_ms() - 60_000,
+        winning_team: None,
+        is_ranked: false,
+        rounds_played: None,
+    };
+    let players = vec![player(HIDDEN, "SecretName"), player(STRANGER, "LeakedName")];
+    st.db(move |repo| repo.upsert_match(&m, &[], &players))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn worker_names_only_visible_players_and_settles_failures() {
     let h = harness().await;
+    store_foreign_match(&h.st).await;
     {
         let mut live = lock(&h.st.live);
         live.stage = Stage::Ingame;
@@ -384,6 +425,10 @@ async fn worker_names_only_visible_players_and_settles_failures() {
             },
             Slot {
                 roster: roster(OTHER, false),
+                db: PlayerDb::default(),
+            },
+            Slot {
+                roster: roster(STRANGER, true),
                 db: PlayerDb::default(),
             },
         ];
@@ -407,7 +452,7 @@ async fn worker_names_only_visible_players_and_settles_failures() {
     let body = String::from_utf8(puts[0].body.clone()).unwrap();
     assert!(body.contains(OTHER));
     assert!(
-        !body.contains(HIDDEN),
+        !body.contains(HIDDEN) && !body.contains(STRANGER),
         "a hidden player's name must never be requested"
     );
     assert!(!body.contains(ME), "the user is never sent to name-service");
@@ -424,6 +469,7 @@ async fn worker_names_only_visible_players_and_settles_failures() {
         })
     );
     assert!(matches!(me.rank, Field::Value(r) if r.tier == 15 && r.rr == 42));
+    assert_eq!((me.party, me.encounters), (None, None));
     assert!(matches!(me.last5, Field::Value(ref v) if v.len() == 1));
     assert_eq!(me.kd, Field::Value(2.0));
 
@@ -436,13 +482,36 @@ async fn worker_names_only_visible_players_and_settles_failures() {
         })
     );
 
+    assert_eq!(other.encounters, None, "never met: no badge");
+
+    // HIDDEN played m1 + m2 against ME: their name as shown after those
+    // matches is remembered, and the badge counts both.
     let hidden = &last.players[1];
     assert_eq!(
         hidden.name,
+        Field::Value(DisplayName::Remembered {
+            name: "SecretName".into(),
+            tag: "HID".into()
+        })
+    );
+    assert_eq!(
+        hidden.encounters,
+        Some(EncounterCount {
+            with: 0,
+            against: 2
+        })
+    );
+    assert_eq!(hidden.party, None, "no synced history: no party link");
+
+    // STRANGER's name is only in a match ME didn't play: never shown.
+    let stranger = &last.players[3];
+    assert_eq!(
+        stranger.name,
         Field::Value(DisplayName::HiddenAgent {
             agent_id: "agent".into()
         })
     );
+    assert_eq!(stranger.encounters, None);
     // All of HIDDEN's own calls failed: the MMR fields are `—`, never a
     // stuck skeleton…
     let json = serde_json::to_value(hidden).unwrap();
@@ -453,13 +522,15 @@ async fn worker_names_only_visible_players_and_settles_failures() {
             "{key} must settle to null"
         );
     }
-    // …while the competitive match they shared with ME (already in the DB)
-    // still fills their last-5 — every non-name field stays visible.
-    assert!(matches!(hidden.last5, Field::Value(ref v) if v.len() == 1));
+    // …while the competitive matches already in the DB (m1 with ME, and
+    // the foreign one) still fill their last-5 — every non-name field
+    // stays visible.
+    assert!(matches!(hidden.last5, Field::Value(ref v) if v.len() == 2));
     assert_eq!(hidden.kd, Field::Value(5.0 / 15.0));
-    // The real name sits in the DB (from ME's match details) but never
-    // reaches the live payload.
-    assert!(!serde_json::to_string(last).unwrap().contains("SecretName"));
+    // A name seen only in someone else's match never reaches the live
+    // payload (nor does HIDDEN's name from that foreign match).
+    let payload = serde_json::to_string(last).unwrap();
+    assert!(!payload.contains("LeakedName") && !payload.contains("LEAK"));
 
     // Player Details for ME: recent from the DB; no encounters with self.
     let d = crate::details::build(&h.st, ME).await.unwrap();
@@ -470,10 +541,38 @@ async fn worker_names_only_visible_players_and_settles_failures() {
         "unknown map → empty id, never the Riot path"
     );
     assert!(d.encounters.is_empty());
-    // Details for the hidden enemy: encounters exist (m1, m2), and their
-    // details card stays hidden.
+    // Details for the hidden enemy: encounters exist (m1, m2), their card
+    // keeps the remembered name, and STRANGER (their teammate in the
+    // foreign match, hidden on screen) is never named in Top Teammates.
     let d = crate::details::build(&h.st, HIDDEN).await.unwrap();
     assert_eq!(d.encounters.len(), 2);
     assert!(d.encounters.iter().all(|e| !e.with));
-    assert!(!serde_json::to_string(&d).unwrap().contains("SecretName"));
+    assert!(matches!(
+        d.card.name,
+        Field::Value(DisplayName::Remembered { .. })
+    ));
+    assert_eq!(d.top_teammates.len(), 1);
+    assert_eq!(d.top_teammates[0].puuid, STRANGER);
+    assert_eq!(
+        d.top_teammates[0].name,
+        DisplayName::HiddenAgent {
+            agent_id: "agent".into()
+        }
+    );
+    let json = serde_json::to_string(&d).unwrap();
+    assert!(!json.contains("LeakedName") && !json.contains("LEAK"));
+
+    // STRANGER's details: HIDDEN (hidden on screen) as a teammate shows the
+    // name remembered from ME's own match — never the foreign one.
+    let d = crate::details::build(&h.st, STRANGER).await.unwrap();
+    assert_eq!(d.top_teammates.len(), 1);
+    assert_eq!(
+        d.top_teammates[0].name,
+        DisplayName::Remembered {
+            name: "SecretName".into(),
+            tag: "HID".into()
+        }
+    );
+    let json = serde_json::to_string(&d).unwrap();
+    assert!(!json.contains("LeakedName") && !json.contains("LEAK"));
 }

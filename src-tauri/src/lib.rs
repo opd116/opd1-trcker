@@ -58,7 +58,7 @@ fn init_state(app: &tauri::App) -> Result<Arc<AppState>, Box<dyn std::error::Err
     // The Closed-stage snapshot (the user's own card from the DB) is ready
     // before the UI can ask `live_state()`.
     if let Some(me) = self_puuid {
-        let db = st.db_blocking(|repo| load_player_db(repo, &me));
+        let db = st.db_blocking(|repo| load_player_db(repo, Some(&me), &me));
         if let Some(slot) = db.and_then(|db| state::closed_self_slot(&me, db)) {
             lock(&st.live).slots = vec![slot];
         }

@@ -14,9 +14,10 @@ use tauri::{AppHandle, Emitter};
 
 use opd1_core::db::repo::Repo;
 use opd1_core::model::{
-    build_card, BuildCardInput, Field, Identity, LiveState, Loadout, MmrInput, PlayerCard,
-    PlayerDetails, Team,
+    build_card, shown_agent, BuildCardInput, Field, Identity, LiveState, Loadout, MmrInput,
+    PartyMark, PlayerCard, PlayerDetails, Team,
 };
+use opd1_core::party::detect_parties;
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
 use opd1_riot::assets::AssetCache;
@@ -157,23 +158,67 @@ impl LiveModel {
         let current_act_id = current_act(acts, now_ms)
             .map(|a| a.id.as_str())
             .unwrap_or("");
+        let marks = self.party_marks();
         LiveState {
             stage: self.stage,
             map_id: self.map_id.clone(),
             players: self
                 .slots
                 .iter()
-                .map(|s| self.card_for(s, acts, current_act_id, now_ms))
+                .map(|s| {
+                    let party = marks.get(&s.roster.puuid).copied();
+                    self.card_for(s, acts, current_act_id, now_ms, party)
+                })
                 .collect(),
         }
     }
 
+    /// Party stripes for the players on screen (CLAUDE.md "Party
+    /// detection": both teams, Agent Select + In Game — the Lobby shows
+    /// only the user's own party, which is never marked). Recomputed on
+    /// every build: it's a few comparisons over at most 10 players, all
+    /// from the slots' DB bundles (no request, no query).
+    ///
+    /// Only players whose sync ran this cycle take part (R53): a cached
+    /// history from an earlier session could link players who no longer
+    /// play together. Their mark appears on the publish after their sync.
+    pub fn party_marks(&self) -> HashMap<String, PartyMark> {
+        if !matches!(self.stage, Stage::Pregame | Stage::Ingame) {
+            return HashMap::new();
+        }
+        let self_id = self.self_id();
+        let synced: Vec<&Slot> = self
+            .slots
+            .iter()
+            .filter(|s| self.synced.contains(&s.roster.puuid))
+            .collect();
+        let players: Vec<(String, Team)> = synced
+            .iter()
+            .map(|s| (s.roster.puuid.clone(), s.roster.team))
+            .collect();
+        let recent = synced
+            .iter()
+            .map(|s| (s.roster.puuid.clone(), s.db.recent.clone()))
+            .collect();
+        let self_party: HashSet<String> = self
+            .slots
+            .iter()
+            .filter(|s| s.roster.is_self_party || s.roster.puuid == self_id)
+            .map(|s| s.roster.puuid.clone())
+            .collect();
+        detect_parties(&players, &recent, &self_party)
+    }
+
+    /// One card. `party` is this player's mark from [`Self::party_marks`]
+    /// (`None` off screen, e.g. Player Details for someone not in the
+    /// roster).
     pub fn card_for(
         &self,
         slot: &Slot,
         acts: &[Act],
         current_act_id: &str,
         now_ms: i64,
+        party: Option<PartyMark>,
     ) -> PlayerCard {
         let r = &slot.roster;
         let is_self = r.puuid == self.self_id();
@@ -185,8 +230,10 @@ impl LiveModel {
         // Names (CLAUDE.md "Hidden names", R43):
         // - the user: their own Riot ID from the local chat session (or its
         //   stored copy) — shown to the user, never looked up remotely;
-        // - an incognito player: no name is fed into the card from any
-        //   source (build_card also ignores it, belt and braces);
+        // - an incognito player: no visible name is fed into the card from
+        //   any source (build_card also ignores it, belt and braces) — only
+        //   the name remembered from a finished match the user played in
+        //   (`PlayerDb::remembered`, `Repo::known_name`);
         // - a visible player: this run's name-service answer first, then
         //   the name stored the last time they were visible (cached-first).
         let stored = || slot.db.row.as_ref().and_then(StoredPlayer::name);
@@ -241,21 +288,35 @@ impl LiveModel {
             current_act_id,
             now_ms,
             team: r.team,
-            is_self_party: r.is_self_party,
+            // CLAUDE.md: the user and their party get no stripe and no
+            // encounter badge (build_card drops both for them).
+            is_self_party: r.is_self_party || is_self,
+            remembered: if is_self {
+                None
+            } else {
+                slot.db.remembered.clone()
+            },
+            party,
+            encounters: slot.db.encounters,
         });
         settle_card(&mut card, names_done, data_done);
         card
     }
 
-    /// Players shown hidden right now (R18: their names must not leak
-    /// through Player Details' Top Teammates either). The user's own name
-    /// is known locally (chat session) and is not hidden from the user.
-    pub fn hidden_puuids(&self) -> HashSet<String> {
+    /// Players shown hidden right now, with the agent their card shows (if
+    /// selected) — R18: their names must not leak through Player Details'
+    /// Top Teammates either; there they're shown by the same rules as on
+    /// their card. The user's own name is known locally (chat session) and
+    /// is not hidden from the user.
+    pub fn hidden_players(&self) -> HashMap<String, Option<String>> {
         let self_id = self.self_id();
         self.slots
             .iter()
             .filter(|s| s.roster.incognito && s.roster.puuid != self_id)
-            .map(|s| s.roster.puuid.clone())
+            .map(|s| {
+                let agent = shown_agent(&s.roster.character_id, &s.roster.selection_state);
+                (s.roster.puuid.clone(), agent.map(str::to_string))
+            })
             .collect()
     }
 
@@ -601,8 +662,9 @@ impl AppState {
     /// with a fresh read, then republishes.
     pub async fn reload_slot(&self, puuid: &str) {
         let p = puuid.to_string();
+        let me = lock(&self.live).self_puuid.clone();
         let Some(db) = self
-            .db(move |repo| crate::store::load_player_db(repo, &p))
+            .db(move |repo| crate::store::load_player_db(repo, me.as_deref(), &p))
             .await
         else {
             return;
@@ -635,7 +697,8 @@ impl AppState {
 mod tests {
     use super::*;
     use opd1_core::db::repo::MatchPlayerRow;
-    use opd1_core::model::DisplayName;
+    use opd1_core::model::{DisplayName, EncounterCount, PartyMark};
+    use opd1_core::party::SharedRef;
 
     fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
         RosterPlayer {
@@ -763,7 +826,142 @@ mod tests {
             m.names_needed().is_empty(),
             "never ask name-service for a hidden player"
         );
-        assert_eq!(m.hidden_puuids(), HashSet::from(["h1".to_string()]));
+        assert_eq!(
+            m.hidden_players(),
+            HashMap::from([("h1".to_string(), Some("agent".to_string()))])
+        );
+    }
+
+    /// The src-tauri half of CLAUDE.md "Hidden names": an incognito
+    /// player's real name may be sitting in the `players` row (seen while
+    /// visible) or in this run's name-service answers, yet their card only
+    /// ever shows HiddenPlayer / HiddenAgent — or, when the user learned
+    /// it in a finished match the user played, the remembered name.
+    #[test]
+    fn incognito_card_never_carries_a_visible_name_unless_remembered() {
+        let mut s = slot("h1", true);
+        s.roster.selection_state = String::new();
+        s.db.row = Some(StoredPlayer {
+            game_name: "Real".into(),
+            tag_line: "Name".into(),
+            account_level: 1,
+            card_id: "c".into(),
+        });
+        let mut m = model(vec![s]);
+        m.known_names
+            .insert("h1".into(), ("Real".into(), "Name".into()));
+        m.synced.insert("h1".into());
+        let card = |m: &LiveModel| m.build(&[], 0).players[0].clone();
+        let leaks = |m: &LiveModel| serde_json::to_string(&card(m)).unwrap().contains("Real");
+
+        // Before agent select: Hidden Player.
+        assert_eq!(card(&m).name, Field::Value(DisplayName::HiddenPlayer));
+        assert!(!leaks(&m));
+        // After: the agent, no tag.
+        m.slots[0].roster.selection_state = "locked".into();
+        assert_eq!(
+            card(&m).name,
+            Field::Value(DisplayName::HiddenAgent {
+                agent_id: "agent".into()
+            })
+        );
+        assert!(!leaks(&m));
+        // Remembered from a match the user played: that name, in its own
+        // style — still never the players-row / name-service one.
+        m.slots[0].db.remembered = Some(("Seen".into(), "AFTER".into()));
+        assert_eq!(
+            card(&m).name,
+            Field::Value(DisplayName::Remembered {
+                name: "Seen".into(),
+                tag: "AFTER".into()
+            })
+        );
+        assert!(!leaks(&m));
+        assert!(m.names_needed().is_empty(), "never sent to name-service");
+
+        // A visible player never shows the remembered style.
+        m.slots[0].roster.incognito = false;
+        assert_eq!(
+            card(&m).name,
+            Field::Value(DisplayName::Visible {
+                name: "Real".into(),
+                tag: "Name".into()
+            })
+        );
+    }
+
+    #[test]
+    fn encounters_show_for_others_but_never_for_the_user_or_their_party() {
+        let enc = Some(EncounterCount {
+            with: 1,
+            against: 2,
+        });
+        let mut me = slot("me", false);
+        me.roster.is_self_party = true;
+        me.db.encounters = enc;
+        let mut duo = slot("duo", false);
+        duo.roster.is_self_party = true;
+        duo.db.encounters = enc;
+        let mut known = slot("known", false);
+        known.db.encounters = enc;
+        let stranger = slot("stranger", false);
+        let cards = model(vec![me, duo, known, stranger]).build(&[], 0).players;
+        let got: Vec<Option<EncounterCount>> = cards.iter().map(|c| c.encounters).collect();
+        assert_eq!(got, vec![None, None, enc, None]);
+    }
+
+    fn last_match(match_id: &str, team: &str) -> [Option<SharedRef>; 2] {
+        [
+            Some(SharedRef {
+                match_id: match_id.into(),
+                team_id: Some(team.into()),
+                party_id: None,
+            }),
+            None,
+        ]
+    }
+
+    #[test]
+    fn party_marks_come_from_synced_players_only_in_agent_select_and_in_game() {
+        let mut slots = Vec::new();
+        for (p, self_party, team) in [
+            ("me", true, Team::Ally),
+            ("duo", true, Team::Ally),
+            ("e1", false, Team::Enemy),
+            ("e2", false, Team::Enemy),
+            ("e3", false, Team::Enemy),
+        ] {
+            let mut s = slot(p, false);
+            s.roster.is_self_party = self_party;
+            s.roster.team = team;
+            // Everyone's last match was the same one, on the same team.
+            s.db.recent = last_match("m1", "Red");
+            slots.push(s);
+        }
+        let mut m = model(slots);
+        let marks = |m: &LiveModel| -> Vec<Option<PartyMark>> {
+            m.build(&[], 0).players.iter().map(|c| c.party).collect()
+        };
+        let likely = Some(PartyMark {
+            group: 0,
+            confirmed: false,
+        });
+
+        // Cached history isn't trusted before this cycle's sync (R53).
+        assert_eq!(marks(&m), vec![None; 5]);
+        m.synced.extend(["me", "duo", "e1", "e2"].map(String::from));
+        // e3 not synced yet: no link yet. The user's party: never.
+        assert_eq!(marks(&m), vec![None, None, likely, likely, None]);
+        m.synced.insert("e3".into());
+        assert_eq!(marks(&m), vec![None, None, likely, likely, likely]);
+
+        m.stage = Stage::Pregame;
+        assert_eq!(marks(&m), vec![None, None, likely, likely, likely]);
+        // Lobby / Closed show only the user's party: no stripes at all.
+        for stage in [Stage::Menus, Stage::Closed] {
+            m.stage = stage;
+            assert_eq!(marks(&m), vec![None; 5], "{stage:?}");
+        }
     }
 
     #[test]
@@ -793,7 +991,7 @@ mod tests {
                 tag: "OPD1".into()
             })
         );
-        assert!(m.hidden_puuids().is_empty());
+        assert!(m.hidden_players().is_empty());
         // A stage reset (which clears names_attempted) keeps it settled.
         m.names_attempted.clear();
         m.self_name = None;

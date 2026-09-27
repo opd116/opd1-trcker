@@ -663,6 +663,7 @@ impl Poller {
         let mut loaded: HashMap<String, PlayerDb> = HashMap::new();
         if !new_players.is_empty() {
             let now = now_ms();
+            let me = me.clone();
             loaded = self
                 .st
                 .db(move |repo| {
@@ -682,7 +683,7 @@ impl Poller {
                             },
                             now,
                         )?;
-                        out.insert(p.puuid.clone(), load_player_db(repo, &p.puuid)?);
+                        out.insert(p.puuid.clone(), load_player_db(repo, Some(&me), &p.puuid)?);
                     }
                     Ok(out)
                 })
@@ -732,7 +733,7 @@ impl Poller {
         let p = me.clone();
         let db = self
             .st
-            .db(move |repo| load_player_db(repo, &p))
+            .db(move |repo| load_player_db(repo, Some(&p), &p))
             .await
             .unwrap_or_default();
         let slot = match own {
@@ -760,7 +761,7 @@ impl Poller {
                 let p = me.clone();
                 let db = self
                     .st
-                    .db(move |repo| load_player_db(repo, &p))
+                    .db(move |repo| load_player_db(repo, Some(&p), &p))
                     .await
                     .unwrap_or_default();
                 closed_self_slot(&me, db)

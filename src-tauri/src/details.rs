@@ -3,13 +3,14 @@
 //! caller then syncs in the background and emits `"details"` when that
 //! produced more data.
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use opd1_core::db::repo::TeammateRow;
 use opd1_core::model::{
     DisplayName, EncounterDetailRow, PlayerCard, PlayerDetails, TeammateSummary,
 };
+use opd1_core::names::display_name;
 
 use crate::roster::RosterPlayer;
 use crate::state::{card_clock, closed_self_slot, lock, now_ms, AppState, Slot};
@@ -19,21 +20,32 @@ use crate::sync::RECENT_COUNT;
 /// CLAUDE.md: "Top 3 Teammates".
 const TOP_TEAMMATES: usize = 3;
 
-/// R18: a teammate who is incognito in the current live roster is never
-/// shown by name — even though the name is right there in someone else's
-/// match history. Otherwise the name from their most recent shared row;
-/// a row without a full name (never resolved) is hidden too. (Task 6
-/// refines this with names remembered from the user's own matches.)
-pub fn teammate_name(row: &TeammateRow, hidden_now: &HashSet<String>) -> DisplayName {
-    if hidden_now.contains(&row.puuid) {
-        return DisplayName::HiddenPlayer;
-    }
-    match (&row.game_name, &row.tag_line) {
-        (Some(name), Some(tag)) if !name.is_empty() && !tag.is_empty() => DisplayName::Visible {
-            name: name.clone(),
-            tag: tag.clone(),
-        },
-        _ => DisplayName::HiddenPlayer,
+/// R18: a teammate who is incognito in the current live roster
+/// (`hidden_now`: puuid -> the agent their card shows) is shown by the
+/// same rules as their card — the name remembered from a finished match
+/// the user played in (`remembered`, from `Repo::known_name`), else their
+/// agent, else Hidden Player — never with the name in the details
+/// player's own match history. Anyone else: the name from their most
+/// recent shared row; a row without a full name (never resolved) is
+/// hidden too.
+pub fn teammate_name(
+    row: &TeammateRow,
+    hidden_now: &HashMap<String, Option<String>>,
+    remembered: &HashMap<String, (String, String)>,
+) -> DisplayName {
+    match hidden_now.get(&row.puuid) {
+        Some(agent) => display_name(
+            true,
+            None,
+            agent.as_deref(),
+            remembered.get(&row.puuid).cloned(),
+        ),
+        None => display_name(
+            false,
+            row.game_name.clone().zip(row.tag_line.clone()),
+            None,
+            None,
+        ),
     }
 }
 
@@ -52,7 +64,7 @@ fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Opt
     let act_id = crate::roster::current_act(&acts, now)
         .map(|a| a.id.clone())
         .unwrap_or_default();
-    let mut card = live.card_for(&slot, &acts, &act_id, now);
+    let mut card = live.card_for(&slot, &acts, &act_id, now, None);
     // Nothing is being fetched for it right now: unknown means `—`.
     crate::state::settle_card(&mut card, true, true);
     Some(card)
@@ -68,7 +80,7 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
                 .iter()
                 .find(|c| c.puuid == puuid)
                 .cloned(),
-            live.hidden_puuids(),
+            live.hidden_players(),
             live.loadouts.get(puuid).cloned().unwrap_or_default(),
             live.self_puuid.clone(),
         )
@@ -78,7 +90,8 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
     let p = puuid.to_string();
     let assets = st.assets.clone();
     let need_card = on_screen.is_none();
-    let (recent, teammates, encounters, db) = st
+    let hidden_ids: Vec<String> = hidden_now.keys().cloned().collect();
+    let (recent, teammates, remembered, encounters, db) = st
         .db(move |repo| {
             let lookup = |path: &str| {
                 crate::roster::map_uuid(path, |x| assets.map_uuid_for_path(x).ok().flatten())
@@ -88,6 +101,16 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
                 Some(start) => repo.top_teammates(&p, start, TOP_TEAMMATES)?,
                 None => Vec::new(),
             };
+            // R18: names the user learned in their own matches, only for
+            // the teammates hidden on screen right now.
+            let mut remembered = HashMap::new();
+            if let Some(me) = self_puuid.as_deref() {
+                for t in teammates.iter().filter(|t| hidden_ids.contains(&t.puuid)) {
+                    if let Some(name) = repo.known_name(me, &t.puuid)? {
+                        remembered.insert(t.puuid.clone(), name);
+                    }
+                }
+            }
             // The user's own details have no encounter list (CLAUDE.md:
             // the user gets no encounter badge; "with yourself" is noise).
             let encounters = match self_puuid.as_deref() {
@@ -106,11 +129,11 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
                 _ => Vec::new(),
             };
             let db = if need_card {
-                Some(load_player_db(repo, &p)?)
+                Some(load_player_db(repo, self_puuid.as_deref(), &p)?)
             } else {
                 None
             };
-            Ok((recent, teammates, encounters, db))
+            Ok((recent, teammates, remembered, encounters, db))
         })
         .await
         .ok_or_else(|| "database unavailable".to_string())?;
@@ -129,7 +152,7 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
             .iter()
             .map(|t| TeammateSummary {
                 puuid: t.puuid.clone(),
-                name: teammate_name(t, &hidden_now),
+                name: teammate_name(t, &hidden_now, &remembered),
                 count: t.count,
             })
             .collect(),
@@ -151,19 +174,56 @@ mod tests {
         }
     }
 
+    fn none() -> HashMap<String, (String, String)> {
+        HashMap::new()
+    }
+
     #[test]
     fn teammate_hidden_in_the_live_roster_is_never_named() {
-        let hidden: HashSet<String> = ["duo".to_string()].into();
+        // The name in someone else's match history is never used for a
+        // player who is incognito on screen right now (R18).
+        let before_pick: HashMap<String, Option<String>> = [("duo".to_string(), None)].into();
         assert_eq!(
-            teammate_name(&row("duo", Some("RealName")), &hidden),
+            teammate_name(&row("duo", Some("RealName")), &before_pick, &none()),
             DisplayName::HiddenPlayer
+        );
+        let after_pick: HashMap<String, Option<String>> =
+            [("duo".to_string(), Some("agent-jett".to_string()))].into();
+        assert_eq!(
+            teammate_name(&row("duo", Some("RealName")), &after_pick, &none()),
+            DisplayName::HiddenAgent {
+                agent_id: "agent-jett".into()
+            }
+        );
+    }
+
+    #[test]
+    fn hidden_teammate_shows_the_name_remembered_from_the_users_own_match() {
+        let hidden: HashMap<String, Option<String>> =
+            [("duo".to_string(), Some("agent-jett".to_string()))].into();
+        let remembered: HashMap<String, (String, String)> =
+            [("duo".to_string(), ("Seen".to_string(), "AFTER".to_string()))].into();
+        assert_eq!(
+            teammate_name(&row("duo", Some("RealName")), &hidden, &remembered),
+            DisplayName::Remembered {
+                name: "Seen".into(),
+                tag: "AFTER".into()
+            }
+        );
+        // A remembered name only matters for a hidden teammate.
+        assert_eq!(
+            teammate_name(&row("duo", Some("Name")), &HashMap::new(), &remembered),
+            DisplayName::Visible {
+                name: "Name".into(),
+                tag: "TAG".into()
+            }
         );
     }
 
     #[test]
     fn visible_teammate_keeps_the_stored_name() {
         assert_eq!(
-            teammate_name(&row("x", Some("Name")), &HashSet::new()),
+            teammate_name(&row("x", Some("Name")), &HashMap::new(), &none()),
             DisplayName::Visible {
                 name: "Name".into(),
                 tag: "TAG".into()
@@ -174,13 +234,13 @@ mod tests {
     #[test]
     fn teammate_without_a_stored_name_is_hidden() {
         assert_eq!(
-            teammate_name(&row("x", None), &HashSet::new()),
+            teammate_name(&row("x", None), &HashMap::new(), &none()),
             DisplayName::HiddenPlayer
         );
         let mut empty = row("x", Some(""));
         empty.tag_line = Some(String::new());
         assert_eq!(
-            teammate_name(&empty, &HashSet::new()),
+            teammate_name(&empty, &HashMap::new(), &none()),
             DisplayName::HiddenPlayer
         );
     }

@@ -29,6 +29,7 @@ use std::collections::HashMap;
 use serde::{Serialize, Serializer};
 
 use crate::db::repo::{CompUpdateRow, MatchPlayerRow};
+use crate::names::display_name;
 use crate::presence::Stage;
 use crate::stats::{self, Act, SeasonalMap};
 
@@ -93,10 +94,8 @@ impl<T: Serialize> Serialize for Field<T> {
 // DisplayName (R9/R10) / PartyMark / EncounterCount / Team
 // ---------------------------------------------------------------------
 
-/// CLAUDE.md's "Hidden names" contract, as a wire type. `Remembered` is
-/// defined here for Task 6 (`names::display_name()`) — [`build_card`]
-/// never constructs it in 5a (scope note: "fill `name` with a simple
-/// rule").
+/// CLAUDE.md's "Hidden names" contract, as a wire type. Which variant a
+/// player gets is decided by [`crate::names::display_name`].
 ///
 /// Fix-round item 1: `rename_all = "camelCase"` alone only renames
 /// *variants* (`HiddenAgent` -> `"hiddenAgent"`); it does nothing to each
@@ -118,9 +117,9 @@ pub enum DisplayName {
     HiddenAgent { agent_id: String },
 }
 
-/// A per-group party stripe (CLAUDE.md's "Party detection"). Populated by
-/// Task 6 (`party::detect_parties()`) — [`build_card`] always emits `None`
-/// in 5a.
+/// A per-group party stripe (CLAUDE.md's "Party detection"), from
+/// [`crate::party::detect_parties`]. `group` is the stripe color index
+/// (`0..n`); `confirmed` = solid, otherwise dashed.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PartyMark {
@@ -128,8 +127,8 @@ pub struct PartyMark {
     pub confirmed: bool,
 }
 
-/// The ⟲ badge's count (CLAUDE.md's "Encounters"). Populated by Task 6 —
-/// [`build_card`] always emits `None` in 5a.
+/// The ⟲ badge's count (CLAUDE.md's "Encounters"): past matches shared
+/// with the user, with and against.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EncounterCount {
@@ -237,9 +236,11 @@ pub struct PlayerCard {
     pub act_winrate: Field<f32>,
     #[serde(skip_serializing_if = "Field::is_loading")]
     pub last5: Field<Vec<LastFiveEntry>>,
-    /// Task 6 fills this in; always `None` in 5a.
+    /// `None` when not in a detected party — and always for the user and
+    /// their own party.
     pub party: Option<PartyMark>,
-    /// Task 6 fills this in; always `None` in 5a.
+    /// `None` for strangers (nothing shared) — and always for the user and
+    /// their own party.
     pub encounters: Option<EncounterCount>,
     pub team: Team,
     pub is_self_party: bool,
@@ -408,7 +409,28 @@ pub struct BuildCardInput<'a> {
     pub current_act_id: &'a str,
     pub now_ms: i64,
     pub team: Team,
+    /// The user or a member of the user's own party (CLAUDE.md: they get
+    /// no party stripe and no encounter badge — [`build_card`] drops
+    /// `party`/`encounters` for them).
     pub is_self_party: bool,
+    /// The player's name as the user saw it after a finished match the
+    /// user personally played in (`Repo::known_name`) — shown only when
+    /// the player is incognito now (CLAUDE.md "Hidden names" exception).
+    pub remembered: Option<(String, String)>,
+    pub party: Option<PartyMark>,
+    pub encounters: Option<EncounterCount>,
+}
+
+/// The agent a card shows: `character_id`, but only once it's selected —
+/// an empty `CharacterSelectionState` means no agent yet, whether or not
+/// `CharacterID` is already populated (CLAUDE.md: never a placeholder
+/// agent).
+pub fn shown_agent<'a>(character_id: &'a str, selection_state: &str) -> Option<&'a str> {
+    if selection_state.is_empty() || character_id.is_empty() {
+        None
+    } else {
+        Some(character_id)
+    }
 }
 
 fn non_empty(s: &str) -> Option<String> {
@@ -434,42 +456,43 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
         now_ms,
         team,
         is_self_party,
+        remembered,
+        party,
+        encounters,
     } = input;
 
-    // CLAUDE.md: agent head icon "only after the agent is selected" — an
-    // empty `CharacterSelectionState` means no agent yet, regardless of
-    // whether `CharacterID` happens to already be populated.
-    let agent_id = if identity.character_selection_state.is_empty() {
-        None
-    } else {
-        non_empty(&identity.character_id)
-    };
+    // CLAUDE.md: agent head icon "only after the agent is selected".
+    let agent_id = shown_agent(&identity.character_id, &identity.character_selection_state)
+        .map(str::to_string);
 
-    // CLAUDE.md "Hidden names": visible if not incognito; otherwise
-    // `HiddenPlayer` before agent select, `HiddenAgent` after (Task 6 adds
-    // the `Remembered` exception on top of this). Ruling R34: the hidden
-    // states are known instantly (no separate fetch — everything they need
-    // is already on `identity`), so they're `Field::Value` immediately;
-    // a *visible* player's name comes from a separate name-service call
-    // the roster fetch doesn't include, so it's `Field::Loading` until
-    // `identity.game_name`/`tag_line` are both non-empty — never
-    // `Value(Visible { name: "", tag: "" })`.
+    // CLAUDE.md "Hidden names", decided by `names::display_name`. An
+    // incognito player's name never comes from `identity` (not even
+    // passed in). Ruling R34: the hidden states are known instantly (no
+    // separate fetch — everything they need is already here), so they're
+    // `Field::Value` immediately; a *visible* player's name comes from a
+    // separate name-service call the roster fetch doesn't include, so it's
+    // `Field::Loading` until `identity.game_name`/`tag_line` are both
+    // non-empty — never `Value(Visible { name: "", tag: "" })`.
     let name = if identity.incognito {
-        Field::Value(if let Some(agent) = &agent_id {
-            DisplayName::HiddenAgent {
-                agent_id: agent.clone(),
-            }
-        } else {
-            DisplayName::HiddenPlayer
-        })
+        Field::Value(display_name(true, None, agent_id.as_deref(), remembered))
     } else {
         match (
             non_empty(&identity.game_name),
             non_empty(&identity.tag_line),
         ) {
-            (Some(name), Some(tag)) => Field::Value(DisplayName::Visible { name, tag }),
+            (Some(name), Some(tag)) => {
+                Field::Value(display_name(false, Some((name, tag)), None, None))
+            }
             _ => Field::Loading,
         }
+    };
+
+    // CLAUDE.md: "The user and their own party members get no party
+    // stripe and no encounter badge."
+    let (party, encounters) = if is_self_party {
+        (None, None)
+    } else {
+        (party, encounters)
     };
 
     let level = if identity.hide_account_level {
@@ -509,8 +532,8 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
         hs_pct,
         act_winrate,
         last5: last5_out,
-        party: None,
-        encounters: None,
+        party,
+        encounters,
         team,
         is_self_party,
     }

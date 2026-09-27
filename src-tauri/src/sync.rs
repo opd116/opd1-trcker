@@ -318,10 +318,10 @@ async fn sync_step(
     puuid: String,
 ) -> Result<(), Gone> {
     sync_player(st, session, &puuid).await?;
-    let p = puuid.clone();
+    let (p, me) = (puuid.clone(), session.self_puuid().to_string());
     // A failed read keeps the bundle already on screen.
     let db = st
-        .db(move |repo| crate::store::load_player_db(repo, &p))
+        .db(move |repo| crate::store::load_player_db(repo, Some(&me), &p))
         .await;
     {
         let mut live = lock(&st.live);

@@ -1,8 +1,10 @@
 //! DB helpers the Tauri shell needs on top of `opd1_core::db::repo::Repo`:
-//! the per-player bundle a card is built from ([`load_player_db`]), a
-//! name/level-preserving `players` upsert ([`save_player`]), the trimmed
-//! MMR snapshot format ([`trim_mmr`]/[`parse_mmr_snapshot`]), and the
-//! Player Details reads ([`recent_matches`]). Everything here is plain
+//! the per-player bundle a card is built from ([`load_player_db`], incl.
+//! the remembered name, encounter count and the last two matches party
+//! detection reads), a name/level-preserving `players` upsert
+//! ([`save_player`]), the trimmed MMR snapshot format
+//! ([`trim_mmr`]/[`parse_mmr_snapshot`]), and the Player Details reads
+//! ([`recent_matches`]). Everything here is plain
 //! synchronous rusqlite — callers run it through `AppState::db`
 //! (`spawn_blocking`), never on an async task directly.
 //!
@@ -14,8 +16,11 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde_json::{json, Map, Value};
 
 use opd1_core::db::repo::{CompUpdateRow, MatchPlayerRow, Repo};
-use opd1_core::model::{match_result, MatchSummary};
+use opd1_core::model::{match_result, EncounterCount, MatchSummary};
+use opd1_core::party::SharedRef;
 use opd1_riot::endpoints::PlayerMmrResponse;
+
+use crate::roster::is_ffa_queue;
 
 /// `app_state` key holding the user's own puuid (R31) — lets the Closed
 /// stage show the user's card before the Riot client is ever reached.
@@ -157,18 +162,76 @@ pub struct PlayerDb {
     /// Recent competitive-update rows (the `rrEarned` join for `last5`).
     pub comp: Vec<CompUpdateRow>,
     pub row: Option<StoredPlayer>,
+    /// Their name as shown in a finished match the user played in
+    /// (`Repo::known_name`) — displayed only while they're incognito.
+    pub remembered: Option<(String, String)>,
+    /// Matches shared with the user; `None` when there are none (no ⟲
+    /// badge for strangers, R52) and always for the user themself.
+    pub encounters: Option<EncounterCount>,
+    /// Their last two matches (any mode), newest first — party detection.
+    pub recent: [Option<SharedRef>; 2],
 }
 
-pub fn load_player_db(repo: &Repo, puuid: &str) -> Result<PlayerDb> {
+/// `self_puuid` is the user (`None` before the app ever learned it): the
+/// remembered name and encounter count are relative to the user, so the
+/// user's own bundle (and any bundle while the user is unknown) has
+/// neither.
+pub fn load_player_db(repo: &Repo, self_puuid: Option<&str>, puuid: &str) -> Result<PlayerDb> {
     let mmr = repo
         .load_mmr_snapshot(puuid)?
         .and_then(|snap| parse_mmr_snapshot(&snap.json));
+    let (remembered, encounters) = match self_puuid {
+        Some(me) if me != puuid => {
+            let e = repo.encounters(me, puuid)?;
+            let count = (e.with + e.against > 0).then_some(EncounterCount {
+                with: e.with,
+                against: e.against,
+            });
+            (repo.known_name(me, puuid)?, count)
+        }
+        _ => (None, None),
+    };
     Ok(PlayerDb {
         mmr,
         last5: repo.last_n_comp(puuid, 5)?,
         comp: recent_comp_updates(repo.conn(), puuid, 10)?,
         row: load_player(repo.conn(), puuid)?,
+        remembered,
+        encounters,
+        recent: recent_refs(repo.conn(), puuid)?,
     })
+}
+
+/// A player's last two matches from their own history listing
+/// (`history_index`: the sync indexes their last 2 matches in any queue
+/// plus their last 5 competitive ones), newest first. A match whose
+/// details aren't stored is `None` (unknown team/party — links nothing).
+/// Free-for-all matches have no team (`team_id: None`).
+pub fn recent_refs(conn: &Connection, puuid: &str) -> Result<[Option<SharedRef>; 2]> {
+    let mut stmt = conn.prepare(
+        "SELECT h.match_id, h.queue_id, mp.team_id, mp.party_id
+         FROM history_index h
+         LEFT JOIN match_players mp ON mp.match_id = h.match_id AND mp.puuid = h.puuid
+         WHERE h.puuid = ?1
+         ORDER BY h.start_ms DESC
+         LIMIT 2",
+    )?;
+    let rows = stmt.query_map(params![puuid], |row| {
+        let match_id: String = row.get(0)?;
+        let queue_id: String = row.get(1)?;
+        let team_id: Option<String> = row.get(2)?;
+        let party_id: Option<String> = row.get(3)?;
+        Ok(team_id.map(|team| SharedRef {
+            match_id,
+            team_id: (!is_ffa_queue(Some(&queue_id))).then_some(team),
+            party_id,
+        }))
+    })?;
+    let mut out = [None, None];
+    for (slot, r) in out.iter_mut().zip(rows) {
+        *slot = r?;
+    }
+    Ok(out)
 }
 
 /// A player's newest `limit` `comp_updates` rows, any season.
@@ -293,8 +356,8 @@ mod tests {
     use std::path::Path;
 
     use opd1_core::db::open_db;
-    use opd1_core::db::repo::{Match, MatchPlayer, MatchTeam, MmrSnapshot};
-    use opd1_core::model::MatchResultKind;
+    use opd1_core::db::repo::{HistoryEntry, Match, MatchPlayer, MatchTeam, MmrSnapshot};
+    use opd1_core::model::{EncounterCount, MatchResultKind};
 
     fn repo() -> Repo {
         Repo::new(open_db(Path::new(":memory:")).unwrap())
@@ -373,11 +436,143 @@ mod tests {
         })
         .unwrap();
         save_player(r.conn(), &upd(Some(("A", "B")), 3, "c"), 1).unwrap();
-        let db = load_player_db(&r, "p1").unwrap();
+        let db = load_player_db(&r, Some("p1"), "p1").unwrap();
         assert!(db.mmr.is_some());
         assert!(db.last5.is_empty());
         assert_eq!(db.row.unwrap().account_level, 3);
-        assert!(load_player_db(&r, "nobody").unwrap().mmr.is_none());
+        assert!(load_player_db(&r, Some("p1"), "nobody")
+            .unwrap()
+            .mmr
+            .is_none());
+    }
+
+    fn mp(puuid: &str, team: &str, party: &str, name: Option<(&str, &str)>) -> MatchPlayer {
+        MatchPlayer {
+            puuid: puuid.into(),
+            team_id: team.into(),
+            party_id: Some(party.into()),
+            agent_id: None,
+            kills: 0,
+            deaths: 0,
+            assists: 0,
+            score: 0,
+            rounds: None,
+            hs: 0,
+            bs: 0,
+            ls: 0,
+            game_name: name.map(|(n, _)| n.to_string()),
+            tag_line: name.map(|(_, t)| t.to_string()),
+        }
+    }
+
+    fn stored_match(r: &Repo, id: &str, queue: &str, start_ms: i64, players: &[MatchPlayer]) {
+        let m = Match {
+            match_id: id.into(),
+            map_id: "/Game/Maps/Ascent/Ascent".into(),
+            queue_id: queue.into(),
+            start_ms,
+            winning_team: None,
+            is_ranked: false,
+            rounds_played: None,
+        };
+        r.upsert_match(&m, &[], players).unwrap();
+    }
+
+    fn indexed(r: &Repo, puuid: &str, entries: &[(&str, &str, i64)]) {
+        let entries: Vec<HistoryEntry> = entries
+            .iter()
+            .map(|(id, q, start)| HistoryEntry {
+                match_id: id.to_string(),
+                queue_id: q.to_string(),
+                start_ms: *start,
+            })
+            .collect();
+        r.index_history(puuid, &entries).unwrap();
+    }
+
+    #[test]
+    fn load_player_db_reads_remembered_name_encounters_and_recent_matches() {
+        let r = repo();
+        // m1: the user and h1 together; h1's name as shown after the match.
+        stored_match(
+            &r,
+            "m1",
+            "competitive",
+            100,
+            &[
+                mp("me", "Blue", "pa", Some(("Me", "1"))),
+                mp("h1", "Blue", "pa", Some(("Seen", "AFTER"))),
+            ],
+        );
+        // m2 (newer): a deathmatch h1 played *without* the user, under
+        // another name — never a remembered name (someone else's match).
+        stored_match(
+            &r,
+            "m2",
+            "deathmatch",
+            200,
+            &[mp("h1", "h1", "pb", Some(("Other", "NAME")))],
+        );
+        // m3: the user against h1.
+        stored_match(
+            &r,
+            "m3",
+            "unrated",
+            50,
+            &[mp("me", "Blue", "x", None), mp("h1", "Red", "y", None)],
+        );
+        indexed(
+            &r,
+            "h1",
+            &[
+                ("m0", "competitive", 10),
+                ("m1", "competitive", 100),
+                ("m2", "deathmatch", 200),
+            ],
+        );
+
+        let db = load_player_db(&r, Some("me"), "h1").unwrap();
+        assert_eq!(db.remembered, Some(("Seen".into(), "AFTER".into())));
+        assert_eq!(
+            db.encounters,
+            Some(EncounterCount {
+                with: 1,
+                against: 1
+            })
+        );
+        // Newest first; Deathmatch has no team.
+        assert_eq!(
+            db.recent,
+            [
+                Some(SharedRef {
+                    match_id: "m2".into(),
+                    team_id: None,
+                    party_id: Some("pb".into()),
+                }),
+                Some(SharedRef {
+                    match_id: "m1".into(),
+                    team_id: Some("Blue".into()),
+                    party_id: Some("pa".into()),
+                }),
+            ]
+        );
+
+        // A newest history entry without stored details is unknown.
+        indexed(&r, "h1", &[("m9", "competitive", 300)]);
+        let db = load_player_db(&r, Some("me"), "h1").unwrap();
+        assert_eq!(db.recent[0], None);
+        assert_eq!(db.recent[1].as_ref().unwrap().match_id, "m2");
+
+        // The user's own bundle: nothing relative to the user.
+        let own = load_player_db(&r, Some("me"), "me").unwrap();
+        assert_eq!((own.remembered, own.encounters), (None, None));
+        // User unknown (first run): nothing relative to them either.
+        let db = load_player_db(&r, None, "h1").unwrap();
+        assert_eq!((db.remembered, db.encounters), (None, None));
+        // A stranger: no encounters (no badge), no name, no history.
+        let db = load_player_db(&r, Some("me"), "nobody").unwrap();
+        assert_eq!((db.remembered, db.encounters), (None, None));
+        assert_eq!(db.recent, [None, None]);
     }
 
     #[test]

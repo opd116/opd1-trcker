@@ -2,9 +2,10 @@
 //! -> remote (pd/glz) headers, with auto re-auth on 401/403 and a
 //! `ClientGone` signal the moment the lockfile disappears or changes.
 //!
-//! All HTTP goes through three private choke points — [`RiotSession::call_local`]
-//! and [`RiotSession::call_remote`] — so a later task can add raw-response
-//! capture in one place.
+//! All HTTP goes through two private choke points — [`RiotSession::call_local`]
+//! and [`RiotSession::call_remote`] — which is also where Task 5's
+//! raw-response capture (`crate::raw_capture`) hooks in, via
+//! [`RiotSession::raw_captures`].
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use reqwest::header::{AUTHORIZATION, RETRY_AFTER};
+use reqwest::header::{HeaderMap, AUTHORIZATION, RETRY_AFTER};
 use reqwest::{Client, Method, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -22,6 +23,7 @@ use serde_json::Value;
 use opd1_core::lockfile::parse_lockfile;
 use opd1_core::shards::parse_shards;
 
+use crate::raw_capture::RawCaptures;
 use crate::throttle::Throttle;
 
 /// The global remote-call bucket (every pd/glz call): burst 10, 10 rps.
@@ -164,6 +166,10 @@ pub struct RiotSession {
     auth: Mutex<AuthState>,
     global_throttle: Throttle,
     mmr_throttle: Throttle,
+    /// The last response body seen at each of `call_local`/`call_remote`,
+    /// for Task 5b's `dump_raw()` (via [`RiotSession::raw_captures`]). See
+    /// `raw_capture.rs`'s module docs for what is/isn't captured.
+    raw_captures: RawCaptures,
 }
 
 impl fmt::Debug for RiotSession {
@@ -331,6 +337,7 @@ impl RiotSession {
             }),
             global_throttle: Throttle::new(GLOBAL_BURST, GLOBAL_RPS),
             mmr_throttle: Throttle::new(MMR_BURST, MMR_RPS),
+            raw_captures: RawCaptures::new(),
         })
     }
 
@@ -340,12 +347,20 @@ impl RiotSession {
         &self.puuid
     }
 
+    /// The last, redacted response body for every endpoint captured so
+    /// far (via `call_local`/`call_remote`), sorted by endpoint name — for
+    /// Task 5b's `dump_raw()`. See `raw_capture.rs`'s module docs for what
+    /// this deliberately does not include.
+    pub fn raw_captures(&self) -> Vec<(String, String)> {
+        self.raw_captures.snapshot()
+    }
+
     /// `GET`s a path on the local client (`127.0.0.1:{port}`), with Basic
     /// auth. Not throttled — only remote (pd/glz) calls are rate-limited.
     pub async fn local<T: DeserializeOwned>(&self, path: &str) -> Result<T, RiotError> {
         self.check_alive()?;
         let resp = self.call_local(Method::GET, path, None).await?;
-        parse_json(resp).await
+        parse_json(&resp)
     }
 
     /// `GET`s a path on `pd.{shard}.a.pvp.net`, throttled (and, for
@@ -392,14 +407,15 @@ impl RiotSession {
         Ok(())
     }
 
-    /// The single choke point for local-client HTTP. `raw-response
-    /// capture` (a later task) hooks in here.
+    /// The single choke point for local-client HTTP. Buffers the whole
+    /// body eagerly (via [`buffer_response`]) and records it for
+    /// [`raw_captures`](Self::raw_captures) before returning.
     async fn call_local(
         &self,
         method: Method,
         path: &str,
         body: Option<&Value>,
-    ) -> Result<Response, RiotError> {
+    ) -> Result<CapturedResponse, RiotError> {
         let url = format!("{}{}", self.local_base, path);
         let mut req = self
             .local_client
@@ -408,19 +424,26 @@ impl RiotSession {
         if let Some(b) = body {
             req = req.json(b);
         }
-        req.send().await.map_err(|e| RiotError::Http(e.to_string()))
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| RiotError::Http(e.to_string()))?;
+        let captured = buffer_response(resp).await?;
+        self.raw_captures.record(path, &captured.body);
+        Ok(captured)
     }
 
     /// The single choke point for pd/glz HTTP (before throttling/retry
-    /// logic is applied in [`remote`](Self::remote)). A later task's
-    /// raw-response capture hooks in here.
+    /// logic is applied in [`remote`](Self::remote)). Buffers the whole
+    /// body eagerly (via [`buffer_response`]) and records it for
+    /// [`raw_captures`](Self::raw_captures) before returning.
     async fn call_remote(
         &self,
         kind: &RemoteKind,
         method: Method,
         path: &str,
         body: Option<&Value>,
-    ) -> Result<Response, RiotError> {
+    ) -> Result<CapturedResponse, RiotError> {
         let base = match kind {
             RemoteKind::Pd => &self.pd_base,
             RemoteKind::Glz => &self.glz_base,
@@ -444,7 +467,13 @@ impl RiotSession {
         if let Some(b) = body {
             req = req.json(b);
         }
-        req.send().await.map_err(|e| RiotError::Http(e.to_string()))
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| RiotError::Http(e.to_string()))?;
+        let captured = buffer_response(resp).await?;
+        self.raw_captures.record(path, &captured.body);
+        Ok(captured)
     }
 
     /// Throttled pd/glz call with 401/403 re-auth (once) and 429 retry
@@ -475,13 +504,13 @@ impl RiotSession {
             self.global_throttle.take().await;
 
             let resp = self.call_remote(&kind, method.clone(), path, body).await?;
-            match resp.status() {
+            match resp.status {
                 StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN if !reauthed => {
                     reauthed = true;
                     self.refresh_entitlements().await?;
                 }
                 StatusCode::TOO_MANY_REQUESTS => {
-                    let retry_after = retry_after_seconds(&resp).unwrap_or(backoff);
+                    let retry_after = retry_after_seconds(&resp.headers).unwrap_or(backoff);
                     if is_mmr {
                         self.mmr_throttle.hold_for(retry_after);
                     } else {
@@ -493,7 +522,7 @@ impl RiotSession {
                         return Err(RiotError::RateLimited);
                     }
                 }
-                _ => return parse_json(resp).await,
+                _ => return parse_json(&resp),
             }
         }
     }
@@ -511,6 +540,36 @@ impl RiotSession {
     }
 }
 
+/// A fully-buffered HTTP response: status, headers, and the whole body —
+/// read eagerly at both `call_local`/`call_remote` so the raw body can be
+/// captured (see `raw_capture.rs`) without anything downstream needing to
+/// touch a live `reqwest::Response` (whose `.bytes()` consumes it).
+struct CapturedResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Vec<u8>,
+}
+
+/// Buffers a live `reqwest::Response` into a [`CapturedResponse`]. Used by
+/// `call_local`/`call_remote` (which then also record the body into
+/// `raw_captures`) and by [`fetch_entitlements`] (which deliberately does
+/// *not* record — see `raw_capture.rs`'s module docs on why the
+/// entitlements endpoint is excluded).
+async fn buffer_response(resp: Response) -> Result<CapturedResponse, RiotError> {
+    let status = resp.status();
+    let headers = resp.headers().clone();
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| RiotError::Http(e.to_string()))?
+        .to_vec();
+    Ok(CapturedResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
 async fn fetch_entitlements(
     local_client: &Client,
     local_base: &str,
@@ -522,21 +581,15 @@ async fn fetch_entitlements(
         .send()
         .await
         .map_err(|e| RiotError::Http(e.to_string()))?;
-    parse_json(resp)
-        .await
-        .map_err(|e| RiotError::AuthFailed(e.to_string()))
+    let captured = buffer_response(resp).await?;
+    parse_json(&captured).map_err(|e| RiotError::AuthFailed(e.to_string()))
 }
 
-async fn parse_json<T: DeserializeOwned>(resp: Response) -> Result<T, RiotError> {
-    let status = resp.status();
-    let bytes = resp
-        .bytes()
-        .await
-        .map_err(|e| RiotError::Http(e.to_string()))?;
-    if !status.is_success() {
-        return Err(RiotError::Status(status.as_u16()));
+fn parse_json<T: DeserializeOwned>(resp: &CapturedResponse) -> Result<T, RiotError> {
+    if !resp.status.is_success() {
+        return Err(RiotError::Status(resp.status.as_u16()));
     }
-    serde_json::from_slice(&bytes).map_err(|e| RiotError::Decode(e.to_string()))
+    serde_json::from_slice(&resp.body).map_err(|e| RiotError::Decode(e.to_string()))
 }
 
 /// Parses `Retry-After` as a plain number of seconds (Riot doesn't use the
@@ -547,9 +600,8 @@ async fn parse_json<T: DeserializeOwned>(resp: Response) -> Result<T, RiotError>
 /// would otherwise be the last line of defense against a value that can't
 /// become a valid `Duration`. A huge-but-finite value is clamped to
 /// [`MAX_RETRY_AFTER_SECS`] rather than trusted outright.
-fn retry_after_seconds(resp: &Response) -> Option<f64> {
-    let raw: f64 = resp
-        .headers()
+fn retry_after_seconds(headers: &HeaderMap) -> Option<f64> {
+    let raw: f64 = headers
         .get(RETRY_AFTER)?
         .to_str()
         .ok()?

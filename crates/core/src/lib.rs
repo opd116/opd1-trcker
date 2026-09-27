@@ -6,6 +6,7 @@
 
 pub mod db;
 pub mod lockfile;
+pub mod model;
 pub mod presence;
 pub mod shards;
 pub mod stats;

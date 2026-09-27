@@ -11,9 +11,12 @@
 //!   the type-level guarantee that a hidden player's name is never
 //!   requested.
 
+pub mod assets;
 pub mod endpoints;
+pub mod raw_capture;
 pub mod session;
 pub mod throttle;
+pub mod to_core;
 
 pub use endpoints::VisiblePuuid;
 pub use session::{RiotError, RiotSession};

@@ -20,7 +20,24 @@ tokio = { version = "1", features = ["time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"
+# RFC3339 parsing only (`to_core::acts_from_seasons`'s `startTime`/`endTime`
+# -> epoch ms) — `default-features = false` + `std` skips `clock`/`now()`
+# and any timezone-database features we don't need. Already resolved
+# elsewhere in this workspace's `Cargo.lock` (pulled in transitively via
+# `serde_with`), so this adds an edge to the dependency graph, not a new
+# crate to compile.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+# `image`: decode-once, cache-forever downscaling for the handful of
+# valorant-api image kinds that are far larger than the UI ever displays
+# them (`assets.rs` — agent head icons, rank tier icons, map splash art).
+# `default-features = false` + only `png`/`jpeg` (every valorant-api image
+# asset is one of those two) keeps this to ~20 small, pure-Rust codec
+# crates — no cmake/NASM/system-library build step, consistent with this
+# crate's existing `rustls-no-provider` choice. See task-5a-report.md for
+# the measured dependency count.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 wiremock = "0.6"
+tempfile = "3"

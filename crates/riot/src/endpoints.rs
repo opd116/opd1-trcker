@@ -333,6 +333,12 @@ pub struct MatchPlayer {
 pub struct MatchTeam {
     pub team_id: String,
     pub won: bool,
+    /// Not in Task 3's original field list (which covered only
+    /// `teamId`/`won`) — Task 5's `to_core::match_from_details` needs it to
+    /// fill `opd1_core::db::repo::MatchTeam.rounds_won`. `#[serde(default)]`
+    /// guards against a payload variant that omits it.
+    #[serde(default)]
+    pub rounds_won: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

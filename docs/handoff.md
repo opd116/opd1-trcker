@@ -124,3 +124,10 @@ Closed: fix round 1 re-review clean (`ca0b5fe..2a16055`). Its deferred minors ar
   - `svelte-code-writer` when implementing in Svelte
 - **Explaining to the user:** `archify` (diagrams in English, explanation in Arabic).
 - **`handoff`** is user-invoked only: ask the user to run `/handoff` at phase ends.
+
+## CI result after the final push
+- **Green.** GitHub Actions run 36346114001 succeeded on `7855f45`, which contains everything through Task 5b (`2a16055`) plus these docs.
+- Every step passed on windows-latest: Rust tests, UI tests and the NSIS build.
+- The `OPD1-TRCKER-setup` artifact is 4.2 MB zipped. It grew from 1.9 MB with the real Rust core (rustls/ring, rusqlite, image).
+- Task 10 applies the release profile (size optimization). Only then check the ≤10 MB installer target.
+- `.superpowers/design/` appeared during handoff and wasn't created by this session. It is probably the user's parallel design work. Leave it alone and don't commit it.

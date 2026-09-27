@@ -3,22 +3,28 @@
 //! the remembered name, encounter count and the last two matches party
 //! detection reads), a name/level-preserving `players` upsert
 //! ([`save_player`]), the trimmed MMR snapshot format
-//! ([`trim_mmr`]/[`parse_mmr_snapshot`]), and the Player Details reads
-//! ([`recent_matches`]). Everything here is plain
-//! synchronous rusqlite — callers run it through `AppState::db`
+//! ([`trim_mmr`]/[`parse_mmr_snapshot`]), the Player Details reads
+//! ([`recent_matches`]) and My Stats ([`load_my_stats`]). Everything here
+//! is plain synchronous rusqlite — callers run it through `AppState::db`
 //! (`spawn_blocking`), never on an async task directly.
 //!
 //! Extra SQL goes through `Repo::conn()` (the repo's documented escape
 //! hatch) rather than new `Repo` methods, keeping `opd1-core`'s repo API
-//! as Task 4 shipped it (+ `app_state`).
+//! as Task 4 shipped it (+ `app_state`, + `comp_matches`, which My Stats'
+//! core tests exercise directly).
+
+use std::collections::HashMap;
 
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde_json::{json, Map, Value};
 
-use opd1_core::db::repo::{CompUpdateRow, MatchPlayerRow, Repo};
-use opd1_core::model::{match_result, EncounterCount, MatchSummary};
+use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow, Repo};
+use opd1_core::model::{match_summary, EncounterCount, MatchSummary, MyStats};
+use opd1_core::mystats::{self, MyStatsInput};
 use opd1_core::party::SharedRef;
+use opd1_core::stats::Act;
 use opd1_riot::endpoints::PlayerMmrResponse;
+use opd1_riot::to_core::current_rank_from_mmr;
 
 use crate::roster::is_ffa_queue;
 
@@ -289,25 +295,21 @@ pub fn match_landed(
 // Player Details reads
 // ---------------------------------------------------------------------
 
-fn team_rounds(conn: &Connection, match_id: &str) -> Result<Vec<(String, Option<i64>)>> {
-    let mut stmt =
-        conn.prepare("SELECT team_id, rounds_won FROM match_teams WHERE match_id = ?1")?;
-    let rows = stmt.query_map(params![match_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-    rows.collect()
-}
-
-fn rr_earned(conn: &Connection, puuid: &str, match_id: &str) -> Result<Option<i64>> {
-    conn.query_row(
-        "SELECT rr_earned FROM comp_updates WHERE puuid = ?1 AND match_id = ?2",
-        params![puuid, match_id],
-        |row| row.get(0),
-    )
-    .optional()
-}
-
-/// Up to `n` newest competitive matches as `MatchSummary`. `map_uuid`
-/// turns the stored Riot map path into a valorant-api uuid; an unknown
+/// Riot map path -> valorant-api uuid on every row, in place; an unknown
 /// map becomes `""` (the UI shows `—`), never the raw `/Game/...` path.
+/// One lookup per distinct map (a lookup clones the asset tables).
+fn to_map_uuids(rows: &mut [CompMatchRow], map_uuid: &dyn Fn(&str) -> Option<String>) {
+    let mut seen: HashMap<String, String> = HashMap::new();
+    for r in rows {
+        let uuid = seen
+            .entry(std::mem::take(&mut r.map_id))
+            .or_insert_with_key(|path| map_uuid(path).unwrap_or_default());
+        r.map_id = uuid.clone();
+    }
+}
+
+/// Up to `n` newest competitive matches as `MatchSummary` (any act).
+/// `map_uuid` turns the stored Riot map path into a valorant-api uuid.
 /// `roundsLost` is the other team's rounds when there are exactly two
 /// teams, else `None`.
 pub fn recent_matches(
@@ -316,38 +318,45 @@ pub fn recent_matches(
     n: u32,
     map_uuid: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Vec<MatchSummary>> {
-    let rows = repo.last_n_comp(puuid, n)?;
-    let mut out = Vec::with_capacity(rows.len());
-    for r in rows {
-        let teams = team_rounds(repo.conn(), &r.match_id)?;
-        let rounds_won = teams
-            .iter()
-            .find(|(t, _)| *t == r.team_id)
-            .and_then(|(_, w)| *w);
-        let others: Vec<Option<i64>> = teams
-            .iter()
-            .filter(|(t, _)| *t != r.team_id)
-            .map(|(_, w)| *w)
-            .collect();
-        let rounds_lost = match others.as_slice() {
-            [single] => *single,
-            _ => None,
-        };
-        out.push(MatchSummary {
-            map_id: map_uuid(&r.map_id).unwrap_or_default(),
-            start_ms: r.start_ms,
-            result: match_result(&r.team_id, r.winning_team.as_deref()),
-            rounds_won,
-            rounds_lost,
-            agent_id: r.agent_id.clone(),
-            kills: r.kills,
-            deaths: r.deaths,
-            assists: r.assists,
-            rr_earned: rr_earned(repo.conn(), puuid, &r.match_id)?.map(|v| v as i32),
-            match_id: r.match_id,
-        });
-    }
-    Ok(out)
+    let mut rows = repo.comp_matches(puuid, i64::MIN..i64::MAX, n)?;
+    to_map_uuids(&mut rows, map_uuid);
+    Ok(rows.iter().map(match_summary).collect())
+}
+
+// ---------------------------------------------------------------------
+// My Stats
+// ---------------------------------------------------------------------
+
+/// My Stats for the user (`me`) over `act`, from the DB only: the act's
+/// competitive matches and RR rows plus the stored MMR snapshot's rank.
+/// `map_names` is valorant-api map uuid -> name (insight text);
+/// `utc_offset_ms` gives the local offset at an instant (weekday and
+/// time-of-day buckets).
+pub fn load_my_stats(
+    repo: &Repo,
+    me: &str,
+    act: &Act,
+    now_ms: i64,
+    map_uuid: &dyn Fn(&str) -> Option<String>,
+    map_names: &HashMap<String, String>,
+    utc_offset_ms: &dyn Fn(i64) -> i64,
+) -> Result<MyStats> {
+    let mut matches = repo.comp_matches(me, act.start_ms..act.end_ms, u32::MAX)?;
+    to_map_uuids(&mut matches, map_uuid);
+    let comp_updates = repo.comp_updates_for_season(me, &act.id)?;
+    let current_rank = repo
+        .load_mmr_snapshot(me)?
+        .and_then(|snap| parse_mmr_snapshot(&snap.json))
+        .and_then(|resp| current_rank_from_mmr(&resp, &act.id));
+    Ok(mystats::build(MyStatsInput {
+        act,
+        matches: &matches,
+        comp_updates: &comp_updates,
+        current_rank,
+        map_names,
+        now_ms,
+        utc_offset_ms,
+    }))
 }
 
 #[cfg(test)]
@@ -640,10 +649,200 @@ mod tests {
         assert_eq!((s.rounds_won, s.rounds_lost), (Some(13), Some(10)));
         assert_eq!(s.rr_earned, Some(21));
         assert_eq!((s.kills, s.deaths, s.assists), (20, 10, 4));
+        assert_eq!(s.kd, 2.0);
+        assert_eq!(s.acs, Some(5000.0 / 23.0));
+        assert_eq!(s.hs_pct, Some(1.0 / 6.0));
 
         // Unknown map: empty id, never the Riot path.
         let none = |_: &str| None;
         assert_eq!(recent_matches(&r, "p1", 8, &none).unwrap()[0].map_id, "");
+    }
+
+    const ASCENT: &str = "/Game/Maps/Ascent/Ascent";
+
+    /// A match "me" played on Blue (13-7 win or 7-13 loss) with a
+    /// 20/10/5 stat line.
+    fn played(r: &Repo, id: &str, queue: &str, start_ms: i64, won: bool) {
+        let m = Match {
+            match_id: id.into(),
+            map_id: ASCENT.into(),
+            queue_id: queue.into(),
+            start_ms,
+            winning_team: Some(if won { "Blue" } else { "Red" }.into()),
+            is_ranked: queue == "competitive",
+            rounds_played: Some(20),
+        };
+        let (blue, red) = if won { (13, 7) } else { (7, 13) };
+        let teams = [
+            MatchTeam {
+                team_id: "Blue".into(),
+                won,
+                rounds_won: Some(blue),
+            },
+            MatchTeam {
+                team_id: "Red".into(),
+                won: !won,
+                rounds_won: Some(red),
+            },
+        ];
+        let me = MatchPlayer {
+            agent_id: Some("agent-jett".into()),
+            kills: 20,
+            deaths: 10,
+            assists: 5,
+            score: 4000,
+            rounds: Some(20),
+            hs: 5,
+            bs: 15,
+            ls: 5,
+            ..mp("me", "Blue", "p", Some(("Me", "1")))
+        };
+        r.upsert_match(&m, &teams, &[me]).unwrap();
+    }
+
+    fn rr_row(id: &str, season: &str, start_ms: i64, earned: i64) -> CompUpdateRow {
+        CompUpdateRow {
+            match_id: id.into(),
+            season_id: season.into(),
+            tier_after: 15,
+            tier_before: Some(15),
+            rr_after: 42,
+            rr_earned: earned,
+            map_id: Some(ASCENT.into()),
+            start_ms,
+        }
+    }
+
+    /// Recursively: no object key with an underscore (camelCase only).
+    fn assert_camel_case(v: &Value, path: &str) {
+        match v {
+            Value::Object(map) => {
+                for (k, child) in map {
+                    assert!(!k.contains('_'), "snake_case key {path}.{k}");
+                    assert_camel_case(child, &format!("{path}.{k}"));
+                }
+            }
+            Value::Array(items) => items.iter().for_each(|i| assert_camel_case(i, path)),
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn my_stats_json_is_camel_case_and_current_act_only() {
+        let r = repo();
+        let day = 86_400_000;
+        let act = Act {
+            id: "act-cur".into(),
+            name: "ACT V".into(),
+            episode_name: "V26".into(),
+            start_ms: 100 * day,
+            end_ms: 160 * day,
+        };
+        played(&r, "prev", "competitive", 99 * day, true);
+        played(&r, "cur-1", "competitive", 101 * day, true);
+        played(&r, "cur-2", "competitive", 102 * day, false);
+        played(&r, "unrated", "unrated", 103 * day, true);
+        r.upsert_comp_updates(
+            "me",
+            &[
+                rr_row("prev", "act-prev", 99 * day, 30),
+                rr_row("cur-1", "act-cur", 101 * day, 21),
+                rr_row("cur-2", "act-cur", 102 * day, -17),
+            ],
+        )
+        .unwrap();
+        let mmr = json!({
+            "Subject": "me",
+            "QueueSkills": {"competitive": {"SeasonalInfoBySeasonID": {
+                "act-cur": {"SeasonID": "act-cur", "CompetitiveTier": 15, "RankedRating": 42,
+                            "NumberOfWins": 1, "NumberOfGames": 2, "WinsByTier": {"15": 1}}
+            }}}
+        });
+        r.save_mmr_snapshot(&MmrSnapshot {
+            puuid: "me".into(),
+            json: mmr.to_string(),
+            last_comp_match_id: Some("cur-2".into()),
+            fetched_ms: 1,
+        })
+        .unwrap();
+        let lookup = |path: &str| (path == ASCENT).then(|| "uuid-ascent".to_string());
+        let names: HashMap<String, String> =
+            [("uuid-ascent".to_string(), "Ascent".to_string())].into();
+        let utc = |_: i64| 0;
+
+        let stats = load_my_stats(&r, "me", &act, 110 * day, &lookup, &names, &utc).unwrap();
+        // Through a JSON string, as the IPC bridge sends it.
+        let v: Value = serde_json::from_str(&serde_json::to_string(&stats).unwrap()).unwrap();
+
+        assert_camel_case(&v, "");
+        let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "agents",
+                "byDaypart",
+                "byWeekday",
+                "insights",
+                "last5",
+                "maps",
+                "rank",
+                "rrSeries",
+                "session"
+            ]
+        );
+        assert_eq!(v["rank"]["tier"], json!(15));
+        assert_eq!(v["rank"]["rr"], json!(42));
+        assert_eq!(v["rank"]["rrToNext"], json!(58));
+        assert_eq!(
+            (&v["rank"]["wins"], &v["rank"]["losses"]),
+            (&json!(1), &json!(1))
+        );
+        assert_eq!(
+            v["rank"]["netRr"],
+            json!(4),
+            "21 - 17; the previous act's +30 excluded"
+        );
+        let ids: Vec<&str> = v["last5"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["matchId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["cur-2", "cur-1"], "current act, competitive only");
+        let newest = &v["last5"][0];
+        assert_eq!(newest["mapId"], json!("uuid-ascent"));
+        assert_eq!(newest["result"], json!("loss"));
+        assert_eq!(
+            (&newest["roundsWon"], &newest["roundsLost"]),
+            (&json!(7), &json!(13))
+        );
+        assert_eq!(newest["rrEarned"], json!(-17));
+        assert_eq!(newest["acs"], json!(200.0));
+        assert_eq!(newest["hsPct"], json!(0.2));
+        assert_eq!(v["maps"][0]["id"], json!("uuid-ascent"));
+        assert_eq!(v["maps"][0]["games"], json!(2));
+        assert_eq!(v["rrSeries"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn my_stats_without_any_data_is_unknown_not_zero() {
+        let r = repo();
+        let act = Act {
+            id: "act-cur".into(),
+            name: "ACT V".into(),
+            episode_name: "V26".into(),
+            start_ms: 0,
+            end_ms: 1_000,
+        };
+        let none = |_: &str| None;
+        let utc = |_: i64| 0;
+        let stats = load_my_stats(&r, "me", &act, 10, &none, &HashMap::new(), &utc).unwrap();
+        let v = serde_json::to_value(&stats).unwrap();
+        assert_eq!(v["rank"]["tier"], json!(null));
+        assert_eq!(v["rank"]["wins"], json!(null));
+        assert_eq!(v["rank"]["netRr"], json!(null));
+        assert_eq!(v["session"], json!(null));
     }
 
     #[test]

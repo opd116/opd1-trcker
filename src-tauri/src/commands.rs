@@ -7,19 +7,22 @@
 //!   start so it never misses the first snapshot).
 //! - `player_details(puuid)` — cached details now; a background sync then
 //!   emits `"details"` if it found more.
+//! - `my_stats()` — the user's My Stats for the current act, from the DB
+//!   only (no Riot call); `null` while the user or the act is unknown.
 //! - `copy_log()` — the last 500 log lines (R30; the UI copies them).
 //! - `dump_raw()` — redacted raw responses to `app_data/debug/*.json`.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde::Serialize;
 use tauri::State;
 
-use opd1_core::model::{LiveState, PlayerDetails};
+use opd1_core::model::{LiveState, MyStats, PlayerDetails};
 use opd1_riot::assets::Meta;
 
 use crate::logbuf::short;
-use crate::state::AppState;
+use crate::state::{lock, now_ms, AppState};
 
 type AppStateRef<'a> = State<'a, Arc<AppState>>;
 
@@ -83,6 +86,54 @@ pub async fn player_details(
 }
 
 #[tauri::command]
+pub async fn my_stats(state: AppStateRef<'_>) -> Result<Option<MyStats>, String> {
+    build_my_stats(state.inner()).await
+}
+
+/// `my_stats` without the Tauri wrapper: computed on demand from the DB,
+/// never a Riot call. It first awaits `ensure_tables`, the gate `meta()`
+/// uses too — a no-op once the asset tables are loaded; at startup it
+/// waits for the first load instead of racing it (the acts and map names
+/// come from those tables). `None` until the user's puuid is known (first
+/// run) or while no act is current.
+pub async fn build_my_stats(st: &Arc<AppState>) -> Result<Option<MyStats>, String> {
+    // Tables unavailable just means no act yet (-> `None` below).
+    let _ = st.ensure_tables(false).await;
+    let Some(me) = lock(&st.live).self_puuid.clone() else {
+        return Ok(None);
+    };
+    let Some(act) = st.current_act() else {
+        return Ok(None);
+    };
+    let map_names: HashMap<String, String> = st
+        .assets
+        .meta()
+        .map(|meta| meta.maps.into_iter().map(|(id, m)| (id, m.name)).collect())
+        .unwrap_or_default();
+    let assets = st.assets.clone();
+    let now = now_ms();
+    st.db(move |repo| {
+        let lookup = |path: &str| {
+            crate::roster::map_uuid(path, |p| assets.map_uuid_for_path(p).ok().flatten())
+        };
+        crate::store::load_my_stats(repo, &me, &act, now, &lookup, &map_names, &local_offset_ms)
+    })
+    .await
+    .map(Some)
+    .ok_or_else(|| "database unavailable".to_string())
+}
+
+/// The machine's UTC offset (ms) at `utc_ms` — per instant, so a match
+/// on the other side of a DST change lands in the right hour.
+fn local_offset_ms(utc_ms: i64) -> i64 {
+    use chrono::{Local, Offset, TimeZone};
+    Local
+        .timestamp_millis_opt(utc_ms)
+        .single()
+        .map_or(0, |t| i64::from(t.offset().fix().local_minus_utc()) * 1000)
+}
+
+#[tauri::command]
 pub fn copy_log() -> String {
     crate::logbuf::snapshot()
 }
@@ -142,6 +193,142 @@ pub async fn dump_raw(state: AppStateRef<'_>) -> Result<DumpResult, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use opd1_core::db::open_db;
+    use opd1_core::db::repo::{CompUpdateRow, Match, MatchPlayer, Repo};
+    use opd1_core::stats::Act;
+    use opd1_riot::assets::AssetCache;
+    use serde_json::Value;
+
+    use crate::state::EventSink;
+
+    const ME: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+    const DAY: i64 = 86_400_000;
+
+    struct NoEvents;
+
+    impl EventSink for NoEvents {
+        fn live(&self, _: &LiveState) {}
+        fn details(&self, _: &PlayerDetails) {}
+    }
+
+    /// An app with an empty in-memory DB and asset tables that can't load
+    /// (nothing listens on the base URL).
+    fn app(self_puuid: Option<&str>, dir: &Path) -> Arc<AppState> {
+        let repo = Repo::new(open_db(Path::new(":memory:")).unwrap());
+        let assets = AssetCache::with_base(dir.join("assets"), "http://127.0.0.1:1".into());
+        Arc::new(AppState::new(
+            Box::new(NoEvents),
+            repo,
+            assets,
+            dir.join("debug"),
+            self_puuid.map(str::to_string),
+        ))
+    }
+
+    fn act(id: &str, start_ms: i64, end_ms: i64) -> Act {
+        Act {
+            id: id.into(),
+            name: "ACT".into(),
+            episode_name: "V26".into(),
+            start_ms,
+            end_ms,
+        }
+    }
+
+    fn comp_match(repo: &Repo, id: &str, season: &str, start_ms: i64) -> rusqlite::Result<()> {
+        let m = Match {
+            match_id: id.into(),
+            map_id: "/Game/Maps/Ascent/Ascent".into(),
+            queue_id: "competitive".into(),
+            start_ms,
+            winning_team: Some("Blue".into()),
+            is_ranked: true,
+            rounds_played: Some(20),
+        };
+        let me = MatchPlayer {
+            puuid: ME.into(),
+            team_id: "Blue".into(),
+            party_id: None,
+            agent_id: Some("agent".into()),
+            kills: 10,
+            deaths: 5,
+            assists: 2,
+            score: 3000,
+            rounds: Some(20),
+            hs: 1,
+            bs: 3,
+            ls: 0,
+            game_name: None,
+            tag_line: None,
+        };
+        repo.upsert_match(&m, &[], &[me])?;
+        repo.upsert_comp_updates(
+            ME,
+            &[CompUpdateRow {
+                match_id: id.into(),
+                season_id: season.into(),
+                tier_after: 12,
+                tier_before: Some(12),
+                rr_after: 50,
+                rr_earned: 18,
+                map_id: None,
+                start_ms,
+            }],
+        )
+    }
+
+    #[tokio::test]
+    async fn my_stats_is_null_until_the_user_and_the_act_are_known() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        let unknown_user = app(None, dir.path());
+        unknown_user.set_acts_for_test(vec![act("cur", now - DAY, now + DAY)]);
+        assert_eq!(build_my_stats(&unknown_user).await, Ok(None));
+        // Asset tables never loaded (offline first run): no current act.
+        let no_act = app(Some(ME), dir.path());
+        assert_eq!(build_my_stats(&no_act).await, Ok(None));
+    }
+
+    #[tokio::test]
+    async fn my_stats_reads_the_current_act_from_the_db() {
+        let dir = tempfile::tempdir().unwrap();
+        let now = now_ms();
+        let st = app(Some(ME), dir.path());
+        st.set_acts_for_test(vec![
+            act("prev", now - 90 * DAY, now - 30 * DAY),
+            act("cur", now - 30 * DAY, now + 30 * DAY),
+        ]);
+        st.db_blocking(|repo| {
+            comp_match(repo, "old", "prev", now - 40 * DAY)?;
+            comp_match(repo, "new", "cur", now - DAY)
+        })
+        .unwrap();
+
+        let stats = build_my_stats(&st).await.unwrap().expect("stats");
+        let v: Value = serde_json::from_str(&serde_json::to_string(&stats).unwrap()).unwrap();
+        let ids: Vec<&str> = v["last5"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["matchId"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, ["new"]);
+        assert_eq!(v["rank"]["netRr"], serde_json::json!(18));
+        assert_eq!(v["rrSeries"].as_array().unwrap().len(), 1);
+        // Map tables not loaded: an unknown map is "", never the Riot path.
+        assert_eq!(v["last5"][0]["mapId"], serde_json::json!(""));
+        assert_eq!(v["maps"], serde_json::json!([]));
+        assert!(v.get("byWeekday").is_some() && v.get("byDaypart").is_some());
+    }
+
+    #[test]
+    fn local_offset_is_whole_minutes_within_a_day() {
+        let offset = local_offset_ms(now_ms());
+        assert_eq!(offset % 60_000, 0);
+        assert!(offset.abs() < DAY);
+    }
 
     #[test]
     fn uuid_check() {

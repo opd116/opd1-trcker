@@ -1,0 +1,504 @@
+//! My Stats aggregation (CLAUDE.md "My Stats"): one pure function over
+//! the user's stored rows — no DB, no I/O, no clock, no time-zone
+//! database. The caller reads the rows (`Repo::comp_matches`,
+//! `Repo::comp_updates_for_season`), converts map paths to valorant-api
+//! uuids and supplies the local UTC offset.
+//!
+//! Everything covers the current act only, and each number has one
+//! source:
+//! - results, maps, agents, K/D, ACS, the session and the weekday /
+//!   time-of-day buckets: the act's stored matches;
+//! - net RR, the RR chart, rank changes and "last 7 days": the act's
+//!   stored competitive updates;
+//! - tier and RR: the stored MMR snapshot (as on the live card).
+
+use std::collections::HashMap;
+
+use crate::db::repo::{CompMatchRow, CompUpdateRow};
+use crate::model::{
+    match_result, match_summary, CurrentRank, Insight, InsightKind, MatchResultKind, MyStats,
+    RankChange, RankSummary, RrPoint, SessionSummary, StatRow, StreakMark, WinCell,
+};
+use crate::stats::{self, Act, DEFAULT_SESSION_GAP_MS};
+
+/// The smallest sample an insight is based on; each side of a comparison
+/// needs this many games (the brief: "min 5 games" for best/worst map).
+pub const MIN_GAMES: u32 = 5;
+/// CLAUDE.md: "Last 5 comp matches".
+const LAST5: usize = 5;
+/// How many "recent rank changes" the rank card lists.
+const RANK_CHANGES: usize = 5;
+const HOUR_MS: i64 = 3_600_000;
+const DAY_MS: i64 = 24 * HOUR_MS;
+const WEEK_MS: i64 = 7 * DAY_MS;
+/// Tiers 0–2 are unranked / unused.
+const FIRST_RANKED_TIER: u8 = 3;
+/// From Immortal 1 up, RR accumulates instead of resetting every 100.
+const IMMORTAL_1: u8 = 24;
+/// Saturday and Sunday (weekday index 0 = Monday).
+const WEEKEND: [usize; 2] = [5, 6];
+/// In `MyStats::by_daypart` order; lowercase for insight text.
+const DAYPARTS: [&str; 4] = ["morning", "afternoon", "evening", "night"];
+
+pub struct MyStatsInput<'a> {
+    pub act: &'a Act,
+    /// The user's competitive matches, any order; rows outside `act` are
+    /// ignored. `map_id` must already be a valorant-api uuid (`""` when
+    /// unknown — such a match is left out of the Maps table only).
+    pub matches: &'a [CompMatchRow],
+    /// The user's competitive updates; other seasons are ignored.
+    pub comp_updates: &'a [CompUpdateRow],
+    /// The current act's rank from the MMR snapshot.
+    pub current_rank: Option<CurrentRank>,
+    /// valorant-api map uuid -> display name, for insight text. A map
+    /// without a name gets no insight rather than a made-up label.
+    pub map_names: &'a HashMap<String, String>,
+    pub now_ms: i64,
+    /// The local UTC offset (ms) at a given UTC instant, so weekday and
+    /// time-of-day buckets follow the user's clock (DST included).
+    pub utc_offset_ms: &'a dyn Fn(i64) -> i64,
+}
+
+/// RR still needed for the next tier. `None` when unranked, and from
+/// Immortal 1 up: Immortal RR accumulates with no fixed next-tier step,
+/// and Radiant has no next tier.
+pub fn rr_to_next(tier: u8, rr: u16) -> Option<u16> {
+    (FIRST_RANKED_TIER..IMMORTAL_1)
+        .contains(&tier)
+        .then(|| 100u16.saturating_sub(rr))
+}
+
+/// Builds the whole page. See the module docs for where each number
+/// comes from.
+pub fn build(input: MyStatsInput) -> MyStats {
+    let MyStatsInput {
+        act,
+        matches,
+        comp_updates,
+        current_rank,
+        map_names,
+        now_ms,
+        utc_offset_ms,
+    } = input;
+
+    let mut played: Vec<Played> = matches
+        .iter()
+        .filter(|m| (act.start_ms..act.end_ms).contains(&m.start_ms))
+        .map(|row| {
+            let (weekday, hour) = local_weekday_hour(row.start_ms + utc_offset_ms(row.start_ms));
+            Played {
+                row,
+                result: match_result(&row.team_id, row.winning_team.as_deref()),
+                weekday,
+                daypart: daypart(hour),
+            }
+        })
+        .collect();
+    played.sort_by_key(|p| p.row.start_ms); // oldest first
+
+    let mut updates: Vec<&CompUpdateRow> = comp_updates
+        .iter()
+        .filter(|u| u.season_id == act.id)
+        .collect();
+    updates.sort_by_key(|u| u.start_ms); // oldest first
+
+    let mut by_weekday = [Tally::default(); 7];
+    let mut by_daypart = [Tally::default(); 4];
+    for p in &played {
+        by_weekday[p.weekday].add(p);
+        by_daypart[p.daypart].add(p);
+    }
+    let maps = table(&played, |m| {
+        Some(m.map_id.as_str()).filter(|id| !id.is_empty())
+    });
+    let agents = table(&played, |m| m.agent_id.as_deref());
+
+    let mut insights = map_insights(&maps, map_names);
+    insights.extend(time_of_day(&by_daypart));
+    insights.extend(weekday_vs_weekend(&by_weekday));
+    insights.extend(rr_economy(&played));
+    insights.extend(last_7_days(&updates, now_ms));
+
+    MyStats {
+        rank: rank_summary(current_rank, &played, &updates),
+        rr_series: updates
+            .iter()
+            .filter_map(|u| {
+                let tier = ranked_tier(u.tier_after)?;
+                Some(RrPoint {
+                    start_ms: u.start_ms,
+                    absolute_rr: absolute_rr(tier, u.rr_after) as i32,
+                })
+            })
+            .collect(),
+        session: latest_session(&played),
+        last5: played
+            .iter()
+            .rev()
+            .take(LAST5)
+            .map(|p| match_summary(p.row))
+            .collect(),
+        maps,
+        agents,
+        by_weekday: by_weekday.map(|t| t.cell()),
+        by_daypart: by_daypart.map(|t| t.cell()),
+        insights,
+    }
+}
+
+// ---------------------------------------------------------------------
+// per-match view + running totals
+// ---------------------------------------------------------------------
+
+/// One of the act's matches with what every section needs precomputed.
+struct Played<'a> {
+    row: &'a CompMatchRow,
+    result: MatchResultKind,
+    /// Local weekday, 0 = Monday.
+    weekday: usize,
+    /// Index into [`DAYPARTS`].
+    daypart: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct Tally {
+    games: u32,
+    wins: u32,
+    losses: u32,
+    kills: i64,
+    deaths: i64,
+    /// Score and rounds only over matches with a known round count.
+    score: i64,
+    rounds: i64,
+    /// `None` until a match with a stored RR change is added.
+    rr: Option<i32>,
+}
+
+impl Tally {
+    fn add(&mut self, p: &Played) {
+        self.games += 1;
+        match p.result {
+            MatchResultKind::Win => self.wins += 1,
+            MatchResultKind::Loss => self.losses += 1,
+            MatchResultKind::Draw => {}
+        }
+        self.kills += p.row.kills;
+        self.deaths += p.row.deaths;
+        if let Some(rounds) = p.row.rounds.filter(|&r| r > 0) {
+            self.score += p.row.score;
+            self.rounds += rounds;
+        }
+        if let Some(rr) = p.row.rr_earned {
+            *self.rr.get_or_insert(0) += rr as i32;
+        }
+    }
+
+    fn cell(self) -> WinCell {
+        WinCell {
+            games: self.games,
+            wins: self.wins,
+            winrate: stats::winrate(self.wins.into(), self.games.into()),
+        }
+    }
+
+    /// Only called for a group with at least one game.
+    fn row(self, id: String) -> StatRow {
+        StatRow {
+            id,
+            games: self.games,
+            wins: self.wins,
+            losses: self.losses,
+            winrate: self.wins as f32 / self.games as f32,
+            net_rr: self.rr,
+            kd: stats::kd(self.kills, self.deaths),
+            acs: (self.rounds > 0).then(|| self.score as f32 / self.rounds as f32),
+        }
+    }
+}
+
+/// `(weekday, hour)` of a local-time instant; weekday 0 = Monday.
+fn local_weekday_hour(local_ms: i64) -> (usize, i64) {
+    // 1970-01-01 was a Thursday (index 3).
+    let weekday = (local_ms.div_euclid(DAY_MS) + 3).rem_euclid(7) as usize;
+    (weekday, local_ms.rem_euclid(DAY_MS) / HOUR_MS)
+}
+
+/// Morning 05–12, Afternoon 12–17, Evening 17–22, Night 22–05.
+fn daypart(hour: i64) -> usize {
+    match hour {
+        5..=11 => 0,
+        12..=16 => 1,
+        17..=21 => 2,
+        _ => 3,
+    }
+}
+
+/// A stored tier as a ranked tier; `None` for unranked or out of range.
+fn ranked_tier(tier: i64) -> Option<u8> {
+    u8::try_from(tier).ok().filter(|&t| t >= FIRST_RANKED_TIER)
+}
+
+/// See [`RrPoint`]: one line across every rank.
+fn absolute_rr(tier: u8, rr: i64) -> i64 {
+    i64::from(tier.min(IMMORTAL_1)) * 100 + rr
+}
+
+/// The stored RR changes of the matches that ended in `kind`.
+fn rr_of(played: &[Played], kind: MatchResultKind) -> Vec<i64> {
+    played
+        .iter()
+        .filter(|p| p.result == kind)
+        .filter_map(|p| p.row.rr_earned)
+        .collect()
+}
+
+fn mean(values: &[i64]) -> Option<f32> {
+    (!values.is_empty()).then(|| values.iter().sum::<i64>() as f32 / values.len() as f32)
+}
+
+/// One Maps/Agents table: grouped by `key` (rows without a key are left
+/// out), most played first.
+fn table(played: &[Played], key: fn(&CompMatchRow) -> Option<&str>) -> Vec<StatRow> {
+    let mut groups: HashMap<&str, Tally> = HashMap::new();
+    for p in played {
+        if let Some(id) = key(p.row) {
+            groups.entry(id).or_default().add(p);
+        }
+    }
+    let mut rows: Vec<StatRow> = groups
+        .into_iter()
+        .map(|(id, tally)| tally.row(id.to_string()))
+        .collect();
+    rows.sort_by(|a, b| {
+        b.games
+            .cmp(&a.games)
+            .then(b.wins.cmp(&a.wins))
+            .then(a.id.cmp(&b.id))
+    });
+    rows
+}
+
+// ---------------------------------------------------------------------
+// rank card / session
+// ---------------------------------------------------------------------
+
+fn rank_summary(
+    current: Option<CurrentRank>,
+    played: &[Played],
+    updates: &[&CompUpdateRow],
+) -> RankSummary {
+    let count = |kind| played.iter().filter(|p| p.result == kind).count() as u32;
+    let any_match = !played.is_empty();
+    RankSummary {
+        tier: current.map(|c| c.tier),
+        rr: current.map(|c| c.rr),
+        wins: any_match.then(|| count(MatchResultKind::Win)),
+        losses: any_match.then(|| count(MatchResultKind::Loss)),
+        rr_to_next: current.and_then(|c| rr_to_next(c.tier, c.rr)),
+        net_rr: (!updates.is_empty()).then(|| updates.iter().map(|u| u.rr_earned as i32).sum()),
+        avg_win: mean(&rr_of(played, MatchResultKind::Win)),
+        avg_loss: mean(&rr_of(played, MatchResultKind::Loss)),
+        // Placements (unranked -> ranked) aren't a rank change.
+        changes: updates
+            .iter()
+            .rev()
+            .filter_map(|u| {
+                let before = ranked_tier(u.tier_before?)?;
+                let after = ranked_tier(u.tier_after)?;
+                (before != after).then_some(RankChange {
+                    tier: after,
+                    up: after > before,
+                    start_ms: u.start_ms,
+                })
+            })
+            .take(RANK_CHANGES)
+            .collect(),
+    }
+}
+
+/// The session holding the newest match (CLAUDE.md: "A new session
+/// starts after a 6h gap with no comp match"). `played` is oldest first.
+fn latest_session(played: &[Played]) -> Option<SessionSummary> {
+    let starts: Vec<i64> = played.iter().map(|p| p.row.start_ms).collect();
+    let games = &played[stats::split_sessions(&starts, DEFAULT_SESSION_GAP_MS).pop()?];
+    let mut tally = Tally::default();
+    for p in games {
+        tally.add(p);
+    }
+    Some(SessionSummary {
+        net_rr: tally.rr,
+        wins: tally.wins,
+        losses: tally.losses,
+        started_ms: games[0].row.start_ms,
+        streak: games
+            .iter()
+            .map(|p| match p.result {
+                MatchResultKind::Win => StreakMark::Win,
+                MatchResultKind::Loss => StreakMark::Loss,
+                MatchResultKind::Draw => StreakMark::Draw,
+            })
+            .collect(),
+    })
+}
+
+// ---------------------------------------------------------------------
+// insights
+// ---------------------------------------------------------------------
+
+/// A labelled win record — a map, a time of day, weekdays or weekends.
+#[derive(Clone, Copy)]
+struct Bucket<'a> {
+    label: &'a str,
+    games: u32,
+    wins: u32,
+}
+
+impl Bucket<'_> {
+    /// Rounded win percentage, as the insight text shows it.
+    fn pct(&self) -> i64 {
+        (100.0 * f64::from(self.wins) / f64::from(self.games)).round() as i64
+    }
+}
+
+/// The best and the worst of the buckets with [`MIN_GAMES`]+ games —
+/// `None` unless there are two whose shown percentages differ.
+fn best_and_worst<'a>(
+    buckets: impl IntoIterator<Item = Bucket<'a>>,
+) -> Option<(Bucket<'a>, Bucket<'a>)> {
+    let mut ranked: Vec<Bucket> = buckets
+        .into_iter()
+        .filter(|b| b.games >= MIN_GAMES)
+        .collect();
+    // Exact win rate, highest first (ties: more games first).
+    ranked.sort_by(|a, b| {
+        (u64::from(b.wins) * u64::from(a.games))
+            .cmp(&(u64::from(a.wins) * u64::from(b.games)))
+            .then(b.games.cmp(&a.games))
+    });
+    let (best, worst) = (*ranked.first()?, *ranked.last()?);
+    (best.pct() > worst.pct()).then_some((best, worst))
+}
+
+fn compare_text(best: Bucket, worst: Bucket) -> String {
+    format!(
+        "You win {}% of {} {} games, compared with {}% of {} {} games.",
+        best.pct(),
+        best.games,
+        best.label,
+        worst.pct(),
+        worst.games,
+        worst.label
+    )
+}
+
+fn map_insights(maps: &[StatRow], map_names: &HashMap<String, String>) -> Vec<Insight> {
+    let buckets = maps.iter().map(|r| Bucket {
+        label: &r.id,
+        games: r.games,
+        wins: r.wins,
+    });
+    let Some((best, worst)) = best_and_worst(buckets) else {
+        return Vec::new();
+    };
+    [
+        (best, InsightKind::BestMap, "best", true),
+        (worst, InsightKind::WorstMap, "weakest", false),
+    ]
+    .into_iter()
+    .filter_map(|(bucket, kind, word, positive)| {
+        let name = map_names.get(bucket.label)?;
+        Some(Insight {
+            kind,
+            text: format!(
+                "{name} is your {word} map: {}% wins in {} games.",
+                bucket.pct(),
+                bucket.games
+            ),
+            matches: bucket.games,
+            positive,
+        })
+    })
+    .collect()
+}
+
+fn time_of_day(by_daypart: &[Tally; 4]) -> Option<Insight> {
+    let buckets = by_daypart.iter().zip(DAYPARTS).map(|(t, label)| Bucket {
+        label,
+        games: t.games,
+        wins: t.wins,
+    });
+    let (best, worst) = best_and_worst(buckets)?;
+    Some(Insight {
+        kind: InsightKind::TimeOfDay,
+        text: compare_text(best, worst),
+        matches: best.games + worst.games,
+        positive: true,
+    })
+}
+
+fn weekday_vs_weekend(by_weekday: &[Tally; 7]) -> Option<Insight> {
+    let mut weekend = Bucket {
+        label: "weekend",
+        games: 0,
+        wins: 0,
+    };
+    let mut weekday = Bucket {
+        label: "weekday",
+        ..weekend
+    };
+    for (day, t) in by_weekday.iter().enumerate() {
+        let bucket = if WEEKEND.contains(&day) {
+            &mut weekend
+        } else {
+            &mut weekday
+        };
+        bucket.games += t.games;
+        bucket.wins += t.wins;
+    }
+    let (best, worst) = best_and_worst([weekend, weekday])?;
+    Some(Insight {
+        kind: InsightKind::WeekdayWeekend,
+        text: compare_text(best, worst),
+        matches: best.games + worst.games,
+        positive: true,
+    })
+}
+
+fn rr_economy(played: &[Played]) -> Option<Insight> {
+    let wins = rr_of(played, MatchResultKind::Win);
+    let losses = rr_of(played, MatchResultKind::Loss);
+    let matches = (wins.len() + losses.len()) as u32;
+    if matches < MIN_GAMES {
+        return None;
+    }
+    let (avg_win, avg_loss) = (mean(&wins)?, mean(&losses)?);
+    Some(Insight {
+        kind: InsightKind::RrEconomy,
+        text: format!(
+            "Average {:+} RR on wins and {:+} RR on losses.",
+            avg_win.round() as i32,
+            avg_loss.round() as i32
+        ),
+        matches,
+        positive: avg_win + avg_loss >= 0.0,
+    })
+}
+
+fn last_7_days(updates: &[&CompUpdateRow], now_ms: i64) -> Option<Insight> {
+    let recent: Vec<i64> = updates
+        .iter()
+        .filter(|u| u.start_ms >= now_ms - WEEK_MS)
+        .map(|u| u.rr_earned)
+        .collect();
+    let matches = recent.len() as u32;
+    if matches < MIN_GAMES {
+        return None;
+    }
+    let net: i64 = recent.iter().sum();
+    Some(Insight {
+        kind: InsightKind::Last7Days,
+        text: format!("{net:+} RR over {matches} games in the last 7 days."),
+        matches,
+        positive: net >= 0,
+    })
+}

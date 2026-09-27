@@ -276,6 +276,115 @@ fn last_n_comp_filters_competitive_and_orders_newest_first() {
     assert_eq!(rows[1].match_id, "comp1");
 }
 
+fn team(id: &str, won: bool, rounds_won: Option<i64>) -> MatchTeam {
+    MatchTeam {
+        team_id: id.into(),
+        won,
+        rounds_won,
+    }
+}
+
+#[test]
+fn comp_matches_join_round_score_and_rr_within_range() {
+    let repo = repo_in_memory();
+    let me = || sample_player("self", "Blue", "Self", "111");
+    // m1: a 13-9 win with its RR row.
+    repo.upsert_match(
+        &sample_match("m1", 1_000, Some("Blue")),
+        &[team("Blue", true, Some(13)), team("Red", false, Some(9))],
+        &[me(), sample_player("enemy", "Red", "E", "1")],
+    )
+    .unwrap();
+    // m2: no team rows and no RR row stored.
+    repo.upsert_match(&sample_match("m2", 2_000, None), &[], &[me()])
+        .unwrap();
+    // m3: three teams — "rounds lost" has no single opponent.
+    repo.upsert_match(
+        &sample_match("m3", 3_000, Some("Red")),
+        &[
+            team("Blue", false, Some(5)),
+            team("Red", true, Some(13)),
+            team("Green", false, Some(2)),
+        ],
+        &[me()],
+    )
+    .unwrap();
+    // Outside the range, and another queue: both excluded.
+    repo.upsert_match(&sample_match("m4", 4_000, None), &[], &[me()])
+        .unwrap();
+    let mut dm = sample_match("dm", 2_500, None);
+    dm.queue_id = "deathmatch".into();
+    repo.upsert_match(&dm, &[], &[me()]).unwrap();
+    repo.upsert_comp_updates(
+        "self",
+        &[CompUpdateRow {
+            match_id: "m1".into(),
+            season_id: "act".into(),
+            tier_after: 15,
+            tier_before: Some(15),
+            rr_after: 40,
+            rr_earned: 21,
+            map_id: None,
+            start_ms: 1_000,
+        }],
+    )
+    .unwrap();
+    // Another player's RR row for m2 never leaks into the user's row.
+    repo.upsert_comp_updates(
+        "enemy",
+        &[CompUpdateRow {
+            match_id: "m2".into(),
+            season_id: "act".into(),
+            tier_after: 9,
+            tier_before: Some(9),
+            rr_after: 10,
+            rr_earned: -18,
+            map_id: None,
+            start_ms: 2_000,
+        }],
+    )
+    .unwrap();
+
+    let rows = repo.comp_matches("self", 1_000..4_000, 10).unwrap();
+    let ids: Vec<&str> = rows.iter().map(|r| r.match_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["m3", "m2", "m1"],
+        "newest first; range end exclusive; competitive only"
+    );
+    // (rounds won, rounds lost, RR change)
+    let score_rr: Vec<[Option<i64>; 3]> = rows
+        .iter()
+        .map(|r| [r.rounds_won, r.rounds_lost, r.rr_earned])
+        .collect();
+    assert_eq!(
+        score_rr,
+        [
+            [Some(5), None, None],
+            [None, None, None],
+            [Some(13), Some(9), Some(21)],
+        ]
+    );
+    let m1 = &rows[2];
+    assert_eq!(
+        (m1.team_id.as_str(), m1.winning_team.as_deref()),
+        ("Blue", Some("Blue"))
+    );
+    assert_eq!(
+        (m1.kills, m1.deaths, m1.assists, m1.score),
+        (20, 15, 5, 4000)
+    );
+    assert_eq!((m1.rounds, m1.hs, m1.bs, m1.ls), (Some(24), 10, 20, 5));
+    assert_eq!(
+        (m1.map_id.as_str(), m1.agent_id.as_deref()),
+        ("Ascent", Some("jett"))
+    );
+
+    let newest = repo.comp_matches("self", i64::MIN..i64::MAX, 1).unwrap();
+    assert_eq!(newest.len(), 1);
+    assert_eq!(newest[0].match_id, "m4");
+}
+
 // ---------------------------------------------------------------------
 // mmr_snapshots
 // ---------------------------------------------------------------------

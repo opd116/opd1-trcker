@@ -28,7 +28,7 @@ use std::collections::HashMap;
 
 use serde::{Serialize, Serializer};
 
-use crate::db::repo::{CompUpdateRow, MatchPlayerRow};
+use crate::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow};
 use crate::names::display_name;
 use crate::presence::Stage;
 use crate::stats::{self, Act, SeasonalMap};
@@ -281,7 +281,39 @@ pub struct MatchSummary {
     pub kills: i64,
     pub deaths: i64,
     pub assists: i64,
+    /// `stats::kd` (zero deaths -> the kill count, ruling R5).
+    pub kd: f32,
+    /// Average combat score: score / rounds played. `None` when the
+    /// match-details had no stats for the player.
+    pub acs: Option<f32>,
+    /// Headshot fraction 0..1 (R5); `None` when no shot landed.
+    pub hs_pct: Option<f32>,
     pub rr_earned: Option<i32>,
+}
+
+/// One stored competitive match as a [`MatchSummary`] — shared by Player
+/// Details' "Recent" and My Stats' "Last 5". `row.map_id` must already be
+/// a valorant-api uuid (`""` when unknown).
+pub fn match_summary(row: &CompMatchRow) -> MatchSummary {
+    MatchSummary {
+        match_id: row.match_id.clone(),
+        map_id: row.map_id.clone(),
+        start_ms: row.start_ms,
+        result: match_result(&row.team_id, row.winning_team.as_deref()),
+        rounds_won: row.rounds_won,
+        rounds_lost: row.rounds_lost,
+        agent_id: row.agent_id.clone(),
+        kills: row.kills,
+        deaths: row.deaths,
+        assists: row.assists,
+        kd: stats::kd(row.kills, row.deaths),
+        acs: row
+            .rounds
+            .filter(|&r| r > 0)
+            .map(|r| row.score as f32 / r as f32),
+        hs_pct: stats::hs_pct(row.hs, row.bs, row.ls),
+        rr_earned: row.rr_earned.map(|v| v as i32),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -325,6 +357,155 @@ pub struct PlayerDetails {
     pub top_teammates: Vec<TeammateSummary>,
     pub loadout: Loadout,
     pub encounters: Vec<EncounterDetailRow>,
+}
+
+// ---------------------------------------------------------------------
+// MyStats (Task 9)
+// ---------------------------------------------------------------------
+
+/// The My Stats page (CLAUDE.md "My Stats"): the user's own account, the
+/// current act only, built by [`crate::mystats::build`] from what the DB
+/// has — never from a live Riot call. `null` always means "the DB doesn't
+/// know" (the UI shows `—`); a `0` is only ever a counted zero.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MyStats {
+    pub rank: RankSummary,
+    /// The RR chart, oldest first (one point per ranked competitive
+    /// update).
+    pub rr_series: Vec<RrPoint>,
+    /// The latest session (a 6h gap with no competitive match starts a
+    /// new one); `None` when the act has no stored match.
+    pub session: Option<SessionSummary>,
+    /// The act's newest 5 competitive matches, newest first.
+    pub last5: Vec<MatchSummary>,
+    /// Most played first.
+    pub maps: Vec<StatRow>,
+    /// Most played first.
+    pub agents: Vec<StatRow>,
+    /// Local time, Monday first: index 0 = Monday … 6 = Sunday.
+    pub by_weekday: [WinCell; 7],
+    /// Local time: Morning 05–12, Afternoon 12–17, Evening 17–22,
+    /// Night 22–05.
+    pub by_daypart: [WinCell; 4],
+    pub insights: Vec<Insight>,
+}
+
+/// Section 1, the rank card.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankSummary {
+    /// From the stored MMR snapshot, like the live card's rank.
+    pub tier: Option<u8>,
+    pub rr: Option<u16>,
+    /// Counted from the act's stored matches; draws are neither.
+    pub wins: Option<u32>,
+    pub losses: Option<u32>,
+    /// `None` from Immortal up (RR accumulates, no fixed next step) and
+    /// when unranked.
+    pub rr_to_next: Option<u16>,
+    /// Sum of the act's stored RR changes.
+    pub net_rr: Option<i32>,
+    /// Mean RR change over wins / losses with a known RR change
+    /// (`avgLoss` is negative).
+    pub avg_win: Option<f32>,
+    pub avg_loss: Option<f32>,
+    /// The latest tier changes, newest first (at most 5).
+    pub changes: Vec<RankChange>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RankChange {
+    /// The tier reached.
+    pub tier: u8,
+    pub up: bool,
+    pub start_ms: i64,
+}
+
+/// `absoluteRr` puts every rank on one line: `tier * 100 + rr` below
+/// Immortal, `2400 + rr` from Immortal 1 up (Immortal/Radiant RR is
+/// cumulative from Immortal 1's floor).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RrPoint {
+    pub start_ms: i64,
+    pub absolute_rr: i32,
+}
+
+/// Section 3.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionSummary {
+    /// `None` when no match in the session has a stored RR change.
+    pub net_rr: Option<i32>,
+    pub wins: u32,
+    pub losses: u32,
+    pub started_ms: i64,
+    /// Every result of the session, oldest first.
+    pub streak: Vec<StreakMark>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum StreakMark {
+    #[serde(rename = "W")]
+    Win,
+    #[serde(rename = "L")]
+    Loss,
+    #[serde(rename = "D")]
+    Draw,
+}
+
+/// One row of the Maps or Agents table (sections 5–6). `id` is a
+/// valorant-api map or agent uuid.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatRow {
+    pub id: String,
+    pub games: u32,
+    pub wins: u32,
+    pub losses: u32,
+    /// Wins / games (draws count as games), a fraction (R5).
+    pub winrate: f32,
+    /// `None` when none of the row's matches has a stored RR change.
+    pub net_rr: Option<i32>,
+    pub kd: f32,
+    /// `None` when no match of the row has a known round count.
+    pub acs: Option<f32>,
+}
+
+/// One weekday or time-of-day bucket (section 7).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WinCell {
+    pub games: u32,
+    pub wins: u32,
+    /// `None` when the bucket has no games.
+    pub winrate: Option<f32>,
+}
+
+/// Section 8. `text` is finished English UI copy; `matches` is the sample
+/// it's based on. An insight without enough data is left out entirely.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Insight {
+    pub kind: InsightKind,
+    pub text: String,
+    pub matches: u32,
+    /// Good news (a strength, RR gained) vs a weak spot.
+    pub positive: bool,
+}
+
+/// Stable per-insight key, e.g. for picking an icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InsightKind {
+    BestMap,
+    WorstMap,
+    TimeOfDay,
+    WeekdayWeekend,
+    RrEconomy,
+    Last7Days,
 }
 
 // ---------------------------------------------------------------------

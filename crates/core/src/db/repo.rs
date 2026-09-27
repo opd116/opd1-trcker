@@ -8,6 +8,7 @@
 //! the same for the (rate-limited) MMR call.
 
 use std::collections::HashMap;
+use std::ops::Range;
 
 use rusqlite::{params, Connection, OptionalExtension, Result};
 
@@ -133,6 +134,36 @@ pub struct MatchPlayerRow {
     pub ls: i64,
     pub game_name: Option<String>,
     pub tag_line: Option<String>,
+}
+
+/// One of a player's competitive matches with everything a match row in
+/// the UI shows: the stat line, the round score and the RR change — what
+/// [`Repo::comp_matches`] returns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompMatchRow {
+    pub match_id: String,
+    /// As stored (a Riot map path); callers convert it to a valorant-api
+    /// uuid before it reaches the UI.
+    pub map_id: String,
+    pub start_ms: i64,
+    /// `None` for a draw / no team winner (ruling R29).
+    pub winning_team: Option<String>,
+    pub team_id: String,
+    pub agent_id: Option<String>,
+    pub kills: i64,
+    pub deaths: i64,
+    pub assists: i64,
+    pub score: i64,
+    pub rounds: Option<i64>,
+    pub hs: i64,
+    pub bs: i64,
+    pub ls: i64,
+    /// The player's team's rounds won.
+    pub rounds_won: Option<i64>,
+    /// The other team's rounds won, when there are exactly two teams.
+    pub rounds_lost: Option<i64>,
+    /// The player's own `comp_updates` row for the match, if stored.
+    pub rr_earned: Option<i64>,
 }
 
 impl Repo {
@@ -274,6 +305,56 @@ impl Repo {
             })
         })?;
 
+        rows.collect()
+    }
+
+    /// The player's competitive matches with `start_ms` in `range`,
+    /// newest first, at most `limit`.
+    pub fn comp_matches(
+        &self,
+        puuid: &str,
+        range: Range<i64>,
+        limit: u32,
+    ) -> Result<Vec<CompMatchRow>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.match_id, m.map_id, m.start_ms, m.winning_team,
+                    mp.team_id, mp.agent_id, mp.kills, mp.deaths, mp.assists,
+                    mp.score, mp.rounds, mp.hs, mp.bs, mp.ls,
+                    (SELECT t.rounds_won FROM match_teams t
+                      WHERE t.match_id = m.match_id AND t.team_id = mp.team_id),
+                    (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(t.rounds_won) END
+                       FROM match_teams t
+                      WHERE t.match_id = m.match_id AND t.team_id != mp.team_id),
+                    cu.rr_earned
+             FROM match_players mp
+             JOIN matches m ON m.match_id = mp.match_id
+             LEFT JOIN comp_updates cu ON cu.puuid = mp.puuid AND cu.match_id = mp.match_id
+             WHERE mp.puuid = ?1 AND m.queue_id = 'competitive'
+               AND m.start_ms >= ?2 AND m.start_ms < ?3
+             ORDER BY m.start_ms DESC
+             LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(params![puuid, range.start, range.end, limit], |row| {
+            Ok(CompMatchRow {
+                match_id: row.get(0)?,
+                map_id: row.get(1)?,
+                start_ms: row.get(2)?,
+                winning_team: row.get(3)?,
+                team_id: row.get(4)?,
+                agent_id: row.get(5)?,
+                kills: row.get(6)?,
+                deaths: row.get(7)?,
+                assists: row.get(8)?,
+                score: row.get(9)?,
+                rounds: row.get(10)?,
+                hs: row.get(11)?,
+                bs: row.get(12)?,
+                ls: row.get(13)?,
+                rounds_won: row.get(14)?,
+                rounds_lost: row.get(15)?,
+                rr_earned: row.get(16)?,
+            })
+        })?;
         rows.collect()
     }
 }

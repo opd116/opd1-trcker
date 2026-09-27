@@ -94,6 +94,7 @@ pub fn run() {
             commands::meta,
             commands::live_state,
             commands::player_details,
+            commands::my_stats,
             commands::copy_log,
             commands::dump_raw,
         ])

@@ -32,6 +32,11 @@ tokio = { version = "1", features = ["time", "sync", "rt"] }
 # Decoding the presence `private` blob for the party key (`roster.rs`) —
 # same version opd1-core/opd1-riot already use.
 base64 = "0.22"
+# My Stats' weekday / time-of-day buckets need the local UTC offset
+# (`commands::local_offset_ms`). chrono is already in the tree via
+# opd1-riot; `clock` only adds `windows-link` on Windows (already pulled in
+# by tauri's `windows` crates).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
 # `pipeline_tests.rs`: drive the real sync pipeline against a mock Riot

@@ -8,6 +8,7 @@
 pub mod db;
 pub mod lockfile;
 pub mod model;
+pub mod mystats;
 pub mod names;
 pub mod party;
 pub mod presence;

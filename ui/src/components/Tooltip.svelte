@@ -1,7 +1,7 @@
 <!-- The one shared hover bubble. Mounted on <body> by the `tip` attachment on first use. -->
 <script lang="ts">
   import type { Attachment } from "svelte/attachments";
-  import { tipState } from "../lib/tooltip.svelte";
+  import { hideTip, tipState } from "../lib/tooltip.svelte";
 
   const GAP = 6;
   const EDGE = 8;
@@ -20,6 +20,13 @@
     el.style.visibility = "visible";
   };
 </script>
+
+<!-- Escape dismisses the bubble without moving the pointer (WCAG 1.4.13). -->
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape" && tipState.rect) hideTip();
+  }}
+/>
 
 {#if tipState.rect && tipState.lines.length > 0}
   <div class="tip" role="tooltip" {@attach place}>

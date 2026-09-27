@@ -1,6 +1,7 @@
 <!-- Riot ID with a dimmer Tag, or the hidden-name forms (CLAUDE.md "Hidden names"). -->
 <script lang="ts">
   import type { Snippet } from "svelte";
+  import { HIDDEN_TIP, REMEMBERED_TIP } from "../lib/cardTips";
   import { agentName } from "../lib/meta";
   import { meta } from "../lib/stores";
   import { tip } from "../lib/tooltip.svelte";
@@ -29,10 +30,10 @@
       class="name"
       class:remembered
       data-text
-      {@attach tip(remembered && ["Remembered name", "Seen in a match you played"])}>{shown.name}</span
+      {@attach tip(remembered && REMEMBERED_TIP)}>{shown.name}</span
     >
   {:else}
-    <span class="name hidden" data-text {@attach tip("Name hidden by the player")}>{hiddenLabel}</span>
+    <span class="name hidden" data-text {@attach tip(HIDDEN_TIP)}>{hiddenLabel}</span>
   {/if}
 {/snippet}
 

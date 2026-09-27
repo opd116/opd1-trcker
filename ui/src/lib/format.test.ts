@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  actDates,
   actLabel,
   DASH,
   kd,
@@ -56,15 +57,56 @@ describe("actLabel", () => {
   });
 });
 
+describe("actDates", () => {
+  it("shows one year when the act starts and ends in the same year", () => {
+    expect(actDates(Date.parse("2026-08-19T00:00:00Z"), Date.parse("2026-10-14T00:00:00Z"))).toBe(
+      "19 Aug \u2013 14 Oct 2026",
+    );
+  });
+
+  it("shows both years when the act spans new year", () => {
+    expect(actDates(Date.parse("2024-10-23T00:00:00Z"), Date.parse("2025-01-08T00:00:00Z"))).toBe(
+      "23 Oct 2024 \u2013 8 Jan 2025",
+    );
+  });
+
+  it("reads act boundaries in UTC, so the date never slips a day", () => {
+    // 00:00 UTC is still the previous evening in the Americas.
+    expect(actDates(Date.parse("2026-06-24T00:00:00Z"), Date.parse("2026-08-19T00:00:00Z"))).toBe(
+      "24 Jun \u2013 19 Aug 2026",
+    );
+  });
+
+  it("uses Sep, never Sept", () => {
+    expect(actDates(Date.parse("2026-09-01T00:00:00Z"), Date.parse("2026-09-30T00:00:00Z"))).toBe(
+      "1 Sep \u2013 30 Sep 2026",
+    );
+  });
+});
+
 describe("peakLabel", () => {
   it("joins the act label and the time since that act ended", () => {
-    expect(peakLabel({ tier: 21, actLabel: "E8 A3", actName: "Episode 8 Act III", sinceActEndMs: 400 * DAY })).toBe(
+    expect(peakLabel({
+        tier: 21,
+        actLabel: "E8 A3",
+        actName: "EPISODE 8 ACT III",
+        sinceActEndMs: 400 * DAY,
+        actStartMs: Date.parse("2024-04-30T00:00:00Z"),
+        actEndMs: Date.parse("2024-06-26T00:00:00Z"),
+      })).toBe(
       "E8 A3 · 1y",
     );
   });
 
   it("says This Act when the peak is in the current act", () => {
-    expect(peakLabel({ tier: 21, actLabel: "V26 A5", actName: "V26 Act V", sinceActEndMs: null })).toBe("This Act");
+    expect(peakLabel({
+        tier: 21,
+        actLabel: "V26 A5",
+        actName: "V26 ACT V",
+        sinceActEndMs: null,
+        actStartMs: Date.parse("2026-08-19T00:00:00Z"),
+        actEndMs: Date.parse("2026-10-14T00:00:00Z"),
+      })).toBe("This Act");
   });
 });
 
@@ -125,6 +167,7 @@ describe("missing values", () => {
     expect(rr(null)).toBe("—");
     expect(level(null)).toBe("—");
     expect(tierName(null)).toBe("—");
+    expect(actDates(null, null)).toBe("—");
   });
 
   it("renders non-finite numbers as an em dash, never NaN", () => {

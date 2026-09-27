@@ -40,6 +40,22 @@ export function actLabel(label: string | null | undefined): string {
   return label ? label : DASH;
 }
 
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+/**
+ * An act's date range: "19 Aug – 14 Oct 2026", or "23 Oct 2024 – 8 Jan 2025"
+ * across new year. Act boundaries are UTC midnights, so read them in UTC.
+ */
+export function actDates(startMs: Num, endMs: Num): string {
+  if (!ok(startMs) || !ok(endMs)) return DASH;
+  const a = new Date(startMs);
+  const b = new Date(endMs);
+  const day = (d: Date) => `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+  const sameYear = a.getUTCFullYear() === b.getUTCFullYear();
+  const from = sameYear ? day(a) : `${day(a)} ${a.getUTCFullYear()}`;
+  return `${from} – ${day(b)} ${b.getUTCFullYear()}`;
+}
+
 /** "E8 A3 · 1y" (time since that act ended), or "This Act". */
 export function peakLabel(peak: Peak | null | undefined): string {
   if (!peak) return DASH;

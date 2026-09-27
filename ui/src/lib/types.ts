@@ -25,10 +25,13 @@ export interface Peak {
   tier: number;
   /** Short label from the backend, e.g. "E8 A3". */
   actLabel: string;
-  /** Full act name for the hover tooltip. */
+  /** Full act name for the hover tooltip, e.g. "V26 ACT V". */
   actName: string;
   /** Time since the peak act ended; null = the peak is in the current act. */
   sinceActEndMs: number | null;
+  /** Act start / end, epoch ms (ruling R28). */
+  actStartMs: number;
+  actEndMs: number;
 }
 
 export interface Last5Entry {

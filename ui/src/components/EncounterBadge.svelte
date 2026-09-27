@@ -1,5 +1,6 @@
 <!-- ⟲ N: past matches shared with the user. Hover: "N with · M against". -->
 <script lang="ts">
+  import { encounterTip } from "../lib/cardTips";
   import { tip } from "../lib/tooltip.svelte";
   import type { Encounters } from "../lib/types";
 
@@ -11,7 +12,7 @@
 <span
   class="enc"
   data-stat
-  {@attach tip([`${encounters.with} with · ${encounters.against} against`, "Past matches with you"])}
+  {@attach tip(encounterTip(encounters))}
 >
   <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
     <path

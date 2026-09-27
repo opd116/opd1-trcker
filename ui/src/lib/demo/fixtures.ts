@@ -45,9 +45,31 @@ export const MAP = {
 export const LONGEST_NAME = "WWWWWWWWWWWWWWWW";
 export const LONGEST_TAG = "WWWWW";
 
-/** Acts from valorant-api /v1/seasons (end dates are real). */
-function act(label: string, actName: string, endIso: string | null, tier: number, now: number): Peak {
-  return { tier, actLabel: label, actName, sinceActEndMs: endIso === null ? null : now - Date.parse(endIso) };
+/** Acts the fixtures use, with their real dates from valorant-api /v1/seasons. */
+const ACTS = {
+  "E6 A1": { name: "EPISODE 6 ACT I", start: "2023-01-10T00:00:00Z", end: "2023-03-07T00:00:00Z" },
+  "E8 A3": { name: "EPISODE 8 ACT III", start: "2024-04-30T00:00:00Z", end: "2024-06-26T00:00:00Z" },
+  "E9 A3": { name: "EPISODE 9 ACT III", start: "2024-10-23T00:00:00Z", end: "2025-01-08T00:00:00Z" },
+  "V25 A2": { name: "V25 ACT II", start: "2025-03-05T00:00:00Z", end: "2025-04-30T00:00:00Z" },
+  "V25 A6": { name: "V25 ACT VI", start: "2025-10-15T00:00:00Z", end: "2026-01-07T00:00:00Z" },
+  "V26 A4": { name: "V26 ACT IV", start: "2026-06-24T00:00:00Z", end: "2026-08-19T00:00:00Z" },
+  "V26 A5": { name: "V26 ACT V", start: "2026-08-19T00:00:00Z", end: "2026-10-14T00:00:00Z" },
+} as const;
+
+/** The current act (2026-09-27): its peaks read "This Act". */
+const CURRENT_ACT: keyof typeof ACTS = "V26 A5";
+
+function peakIn(label: keyof typeof ACTS, tier: number, now: number): Peak {
+  const a = ACTS[label];
+  const actEndMs = Date.parse(a.end);
+  return {
+    tier,
+    actLabel: label,
+    actName: a.name,
+    sinceActEndMs: label === CURRENT_ACT ? null : now - actEndMs,
+    actStartMs: Date.parse(a.start),
+    actEndMs,
+  };
 }
 
 /** "W+18@2h" style: result, RR change, hours ago. Newest first. */
@@ -71,7 +93,7 @@ function players(now: number) {
     agentId: null,
     rank: { tier: 14, rr: 64 },
     prevActTier: 13,
-    peak: act("E9 A3", "Episode 9 · Act III (23 Oct 2024 – 8 Jan 2025)", "2025-01-08T00:00:00Z", 15, now),
+    peak: peakIn("E9 A3", 15, now),
     kd: 1.18,
     hsPct: 0.231,
     actWinrate: 0.545,
@@ -89,7 +111,7 @@ function players(now: number) {
       agentId: null,
       rank: { tier: 16, rr: 18 },
       prevActTier: 16,
-      peak: act("V25 A6", "V25 · Act VI (15 Oct 2025 – 7 Jan 2026)", "2026-01-07T00:00:00Z", 18, now),
+      peak: peakIn("V25 A6", 18, now),
       kd: 1.31,
       hsPct: 0.268,
       actWinrate: 0.58,
@@ -105,7 +127,7 @@ function players(now: number) {
       agentId: null,
       rank: { tier: 11, rr: 41 },
       prevActTier: 10,
-      peak: act("V26 A5", "V26 · Act V (19 Aug – 14 Oct 2026)", null, 11, now),
+      peak: peakIn("V26 A5", 11, now),
       kd: 0.94,
       hsPct: 0.172,
       actWinrate: 0.5,
@@ -121,7 +143,7 @@ function players(now: number) {
       agentId: null,
       rank: { tier: 12, rr: 7 },
       prevActTier: 12,
-      peak: act("E8 A3", "Episode 8 · Act III (30 Apr – 26 Jun 2024)", "2024-06-26T00:00:00Z", 14, now),
+      peak: peakIn("E8 A3", 14, now),
       kd: 1.02,
       hsPct: 0.194,
       actWinrate: 0.476,
@@ -149,7 +171,7 @@ function players(now: number) {
       agentId: AGENT.jett,
       rank: { tier: 15, rr: 92 },
       prevActTier: 14,
-      peak: act("V26 A4", "V26 · Act IV (24 Jun – 19 Aug 2026)", "2026-08-19T00:00:00Z", 16, now),
+      peak: peakIn("V26 A4", 16, now),
       kd: 19,
       hsPct: 0.312,
       actWinrate: 0.611,
@@ -174,7 +196,7 @@ function players(now: number) {
       agentId: AGENT.sova,
       rank: { tier: 13, rr: 55 },
       prevActTier: 14,
-      peak: act("V25 A6", "V25 · Act VI (15 Oct 2025 – 7 Jan 2026)", "2026-01-07T00:00:00Z", 15, now),
+      peak: peakIn("V25 A6", 15, now),
       kd: 1.07,
       hsPct: 0.205,
       actWinrate: 0.52,
@@ -190,7 +212,7 @@ function players(now: number) {
     agentId: AGENT.omen,
     rank: { tier: 15, rr: 33 },
     prevActTier: 15,
-    peak: act("V26 A5", "V26 · Act V (19 Aug – 14 Oct 2026)", null, 15, now),
+    peak: peakIn("V26 A5", 15, now),
     kd: 0.88,
     hsPct: 0.164,
     actWinrate: 0.44,
@@ -206,7 +228,7 @@ function players(now: number) {
       agentId: AGENT.neon,
       rank: { tier: 25, rr: 187 },
       prevActTier: 26,
-      peak: act("E6 A1", "Episode 6 · Act I (10 Jan – 7 Mar 2023)", "2023-03-07T00:00:00Z", 27, now),
+      peak: peakIn("E6 A1", 27, now),
       kd: 1.46,
       hsPct: 0.338,
       actWinrate: 0.563,
@@ -222,7 +244,7 @@ function players(now: number) {
       agentId: AGENT.viper,
       rank: { tier: 23, rr: 71 },
       prevActTier: 22,
-      peak: act("V26 A5", "V26 · Act V (19 Aug – 14 Oct 2026)", null, 23, now),
+      peak: peakIn("V26 A5", 23, now),
       kd: 1.12,
       hsPct: 0.247,
       actWinrate: 0.534,
@@ -238,7 +260,7 @@ function players(now: number) {
       agentId: AGENT.raze,
       rank: { tier: 20, rr: 46 },
       prevActTier: 19,
-      peak: act("V25 A2", "V25 · Act II (5 Mar – 30 Apr 2025)", "2025-04-30T00:00:00Z", 21, now),
+      peak: peakIn("V25 A2", 21, now),
       kd: 1.24,
       hsPct: 0.291,
       actWinrate: 0.571,
@@ -254,7 +276,7 @@ function players(now: number) {
       agentId: AGENT.killjoy,
       rank: { tier: 21, rr: 12 },
       prevActTier: 20,
-      peak: act("V26 A4", "V26 · Act IV (24 Jun – 19 Aug 2026)", "2026-08-19T00:00:00Z", 21, now),
+      peak: peakIn("V26 A4", 21, now),
       kd: 0.97,
       hsPct: 0.226,
       actWinrate: 0.49,

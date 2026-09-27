@@ -2,7 +2,8 @@
 <script lang="ts">
   import { assetUrl } from "../lib/assets";
   import { DASH } from "../lib/format";
-  import { isRankedTier } from "../lib/meta";
+  import { isRankedTier, tierLabel } from "../lib/meta";
+  import { meta } from "../lib/stores";
   import Skeleton from "./Skeleton.svelte";
 
   interface Props {
@@ -21,7 +22,12 @@
   {#if tier === undefined}
     <Skeleton w="{px}px" h="{px}px" r="50%" />
   {:else if isRankedTier(tier) && failedTier !== tier}
-    <img src={assetUrl("tier", tier)} width={px} height={px} alt="" decoding="async" onerror={() => (failedTier = tier)} />
+    <img
+      src={assetUrl("tier", tier)}
+      width={px}
+      height={px}
+      alt={tierLabel($meta, tier) ?? "Rank"}
+      decoding="async" onerror={() => (failedTier = tier)} />
   {:else}
     <span class="none" data-text>{DASH}</span>
   {/if}

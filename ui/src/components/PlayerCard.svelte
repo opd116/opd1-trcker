@@ -8,10 +8,22 @@
 <script lang="ts">
   import { fade } from "svelte/transition";
   import { assetUrl } from "../lib/assets";
-  import { kd, pct, peakLabel, level, span } from "../lib/format";
+  import {
+    cardDescription,
+    displayNameText,
+    LEVEL_TIP,
+    partyTip,
+    peakTip,
+    prevActTip,
+    rankTip,
+    shownEncounters,
+    shownParty,
+    STAT_TIPS,
+  } from "../lib/cardTips";
+  import { kd, level, pct, peakLabel } from "../lib/format";
   import { agentName, FIRST_UNCAPPED_TIER, isRankedTier, tierColor, tierLabel } from "../lib/meta";
-  import { meta } from "../lib/stores";
-  import { tip, type TipContent } from "../lib/tooltip.svelte";
+  import { meta, now } from "../lib/stores";
+  import { tip } from "../lib/tooltip.svelte";
   import type { PlayerCard } from "../lib/types";
   import EncounterBadge from "./EncounterBadge.svelte";
   import Last5 from "./Last5.svelte";
@@ -30,6 +42,8 @@
   }
 
   let { card, size = "md", showTeam = false, onopen }: Props = $props();
+
+  const uid = $props.id();
 
   /** Icon edges in px per size. */
   const ICONS = {
@@ -50,37 +64,17 @@
   const rrFill = $derived(
     rank && ranked && rank.tier < FIRST_UNCAPPED_TIER ? Math.max(0, Math.min(100, rank.rr)) : null,
   );
-  const curTip = $derived.by((): TipContent => {
-    if (rank === undefined) return null;
-    if (!rank || !ranked) return "Unranked";
-    const name = tierLabel($meta, rank.tier) ?? "Current rank";
-    if (rank.tier >= FIRST_UNCAPPED_TIER) return [name, `${rank.rr} RR`];
-    return [name, `${rank.rr} RR · ${Math.max(0, 100 - rank.rr)} RR to next tier`];
-  });
 
-  // Previous act.
+  // Previous act and peak.
   const prevName = $derived(card.prevActTier == null ? null : tierLabel($meta, card.prevActTier));
-  const prevTip = $derived.by((): TipContent => {
-    if (card.prevActTier === undefined) return null;
-    return ["Previous act", prevName ?? "Unranked"];
-  });
-
-  // Peak.
   const peak = $derived(card.peak);
-  const peakTip = $derived.by((): TipContent => {
-    if (peak === undefined) return null;
-    if (peak === null) return ["Peak rank", "No ranked history"];
-    return [
-      `Peak · ${tierLabel($meta, peak.tier) ?? "—"}`,
-      peak.actName,
-      peak.sinceActEndMs === null ? "This act" : `Act ended ${span(peak.sinceActEndMs)} ago`,
-    ];
-  });
 
-  const stripe = $derived(!card.isSelfParty && card.party ? card.party : null);
-  const showEncounters = $derived(
-    !card.isSelfParty && !!card.encounters && card.encounters.with + card.encounters.against > 0,
-  );
+  const stripe = $derived(shownParty(card));
+  const encounters = $derived(shownEncounters(card));
+
+  // Hover detail is never mouse-only: the card's accessible name + description carry all of it.
+  const label = $derived(displayNameText($meta, card.name));
+  const description = $derived(cardDescription($meta, card, $now));
 
   /** Image ids that failed to load (a changed id gets a fresh attempt). */
   let artFailed = $state<string | null>(null);
@@ -99,8 +93,8 @@
 </script>
 
 {#snippet encounterBadge()}
-  {#if showEncounters && card.encounters}
-    <EncounterBadge encounters={card.encounters} />
+  {#if encounters}
+    <EncounterBadge {encounters} />
   {/if}
 {/snippet}
 
@@ -119,6 +113,8 @@
   class:enemy={card.team === "enemy"}
   role="button"
   tabindex="0"
+  aria-label={label}
+  aria-describedby="{uid}-desc"
   data-card
   data-team={card.team}
   onclick={open}
@@ -129,7 +125,7 @@
       class="stripe"
       class:likely={!stripe.confirmed}
       style:--party="var(--party-{stripe.group % 5})"
-      {@attach tip(stripe.confirmed ? "Party" : "Likely party")}
+      {@attach tip(partyTip(stripe))}
     ></span>
   {/if}
 
@@ -143,7 +139,7 @@
         onerror={() => (artFailed = card.cardId)}
       />
     {/if}
-    <span class="level num" data-text {@attach tip("Account level")}>{level(card.level)}</span>
+    <span class="level num" data-text {@attach tip(LEVEL_TIP)}>{level(card.level)}</span>
     {#if card.agentId && agentFailed !== card.agentId}
       <span class="agent" in:fade={{ duration: 180 }} {@attach tip(agent)}>
         <img src={assetUrl("agent", card.agentId)} alt={agent ?? ""} decoding="async" onerror={() => (agentFailed = card.agentId)} />
@@ -157,7 +153,7 @@
     </div>
 
     <div class="ranks">
-      <div class="slot cur" data-stat {@attach tip(curTip)}>
+      <div class="slot cur" data-stat {@attach tip(rankTip($meta, rank))}>
         <span class="lbl" data-text>Rank</span>
         <span class="ico"><RankBadge tier={curTier} px={icons.cur} /></span>
         <span class="val">
@@ -172,7 +168,7 @@
         </span>
       </div>
 
-      <div class="slot prev" data-stat {@attach tip(prevTip)}>
+      <div class="slot prev" data-stat {@attach tip(prevActTip($meta, card.prevActTier))}>
         <span class="lbl" data-text>Prev act</span>
         <span class="ico"><RankBadge tier={card.prevActTier} px={icons.sub} /></span>
         <span class="val">
@@ -184,7 +180,7 @@
         </span>
       </div>
 
-      <div class="slot peak" data-stat {@attach tip(peakTip)}>
+      <div class="slot peak" data-stat {@attach tip(peakTip($meta, peak))}>
         <span class="lbl" data-text>Peak</span>
         <span class="ico"><RankBadge tier={peak === undefined ? undefined : (peak?.tier ?? null)} px={icons.sub} /></span>
         <span class="val">
@@ -199,17 +195,15 @@
 
     <div class="perf">
       <div class="stats">
-        {@render stat("K/D", card.kd === undefined ? undefined : kd(card.kd), "K/D · last 5 competitive")}
-        {@render stat("HS%", card.hsPct === undefined ? undefined : pct(card.hsPct), "Headshot % · last 5 competitive")}
-        {@render stat(
-          "WR",
-          card.actWinrate === undefined ? undefined : pct(card.actWinrate),
-          "Win rate · current act",
-        )}
+        {@render stat("K/D", card.kd === undefined ? undefined : kd(card.kd), STAT_TIPS.kd)}
+        {@render stat("HS%", card.hsPct === undefined ? undefined : pct(card.hsPct), STAT_TIPS.hs)}
+        {@render stat("WR", card.actWinrate === undefined ? undefined : pct(card.actWinrate), STAT_TIPS.wr)}
       </div>
       <div class="l5"><Last5 items={card.last5} fit={strip ? "fixed" : "fill"} /></div>
     </div>
   </div>
+
+  <span id="{uid}-desc" class="sr-only">{description}</span>
 </div>
 
 <style>

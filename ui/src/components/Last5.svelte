@@ -1,5 +1,6 @@
 <!-- Last 5 competitive results, newest first: W/L (tile colour + fill), RR change, time since. -->
 <script lang="ts">
+  import { resultTip } from "../lib/cardTips";
   import { DASH, rrDelta, timeAgo } from "../lib/format";
   import { now } from "../lib/stores";
   import { tip } from "../lib/tooltip.svelte";
@@ -13,14 +14,6 @@
   }
 
   let { items, fit }: Props = $props();
-
-  const when = new Intl.DateTimeFormat("en-US", {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-    hourCycle: "h23",
-  });
 </script>
 
 <ol class="last5 {fit}" aria-label="Last 5 competitive matches">
@@ -37,7 +30,7 @@
         class:win={m.win}
         class:loss={!m.win}
         data-stat
-        {@attach tip([`${m.win ? "Win" : "Loss"} · ${rrDelta(m.rrEarned)} RR`, when.format(m.startMs)])}
+        {@attach tip(resultTip(m))}
       >
         <span class="d num" data-text>{rrDelta(m.rrEarned)}</span>
         <span class="t num" data-text>{timeAgo(m.startMs, $now)}</span>

@@ -341,9 +341,47 @@ pub struct MatchTeam {
     pub rounds_won: Option<i64>,
 }
 
+/// `matchInfo` — fix-round item 3: Task 3 originally left this out
+/// ("map/time/queue come from the already-fetched, cheaper
+/// `match_history`"), but the controller reversed that: match-details is
+/// meant to be self-sufficient, and relying on a caller to thread the
+/// right `match_id`/`map_id`/`queue_id`/`start_ms` through from a
+/// different call is fragile. `to_core::match_from_details` now builds
+/// `Match` from this struct instead of taking those as parameters.
+///
+/// **Field-name casing is genuinely unsettled between sources**:
+/// techchrism's `valorant-api-types` (`MatchDetails.ts`) documents
+/// `matchId`/`queueID`/`seasonId`, but the Task 3 fixture
+/// (`tests/fixtures/match_details.json`, written against
+/// `docs/PVP Endpoints/GET MatchDetails_FetchMatchDetails.md`) uses
+/// `matchID`/`queueId`. Since neither source is a live-captured sample,
+/// `#[serde(alias = ...)]` accepts both spellings for the two fields that
+/// disagree, so this doesn't silently break against a real payload
+/// however Riot actually cases it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchInfo {
+    #[serde(alias = "matchID")]
+    pub match_id: String,
+    pub map_id: String,
+    pub game_start_millis: i64,
+    #[serde(alias = "queueID")]
+    pub queue_id: String,
+    pub is_ranked: bool,
+    /// `z.enum(['Surrendered', 'Completed', 'VoteDraw', ''])` per
+    /// techchrism's types — not in the Task 3 fixture at all, so this
+    /// defaults to `""` (itself one of the documented values) rather than
+    /// failing the decode.
+    #[serde(default)]
+    pub completion_state: String,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchDetailsResponse {
+    // `rename_all = "camelCase"` on this container already turns
+    // `match_info` into `matchInfo`.
+    pub match_info: MatchInfo,
     pub players: Vec<MatchPlayer>,
     /// `.nullable()` in `MatchDetails.ts` — defaults to empty rather than
     /// failing the decode when Riot sends `null`.

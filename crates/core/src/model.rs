@@ -5,9 +5,9 @@
 //!
 //! # Tri-state fields (ruling R23)
 //!
-//! Every field that's fetched asynchronously (level, rank, prevActTier,
-//! peak, kd, hsPct, actWinrate, last5) needs three distinct states, not
-//! two:
+//! Every field that's fetched asynchronously (name, level, rank,
+//! prevActTier, peak, kd, hsPct, actWinrate, last5) needs three distinct
+//! states, not two:
 //! - **still loading** — the poll loop hasn't attempted this data source
 //!   yet for this player this session. Renders as an absent JSON key, so
 //!   the UI's skeleton loader keeps showing (CLAUDE.md: "Loading uses
@@ -31,6 +31,11 @@ use serde::{Serialize, Serializer};
 use crate::db::repo::{CompUpdateRow, MatchPlayerRow};
 use crate::presence::Stage;
 use crate::stats::{self, Act, SeasonalMap};
+
+/// CLAUDE.md: "Last 5 Competitive results" — the cap `build_card` enforces
+/// on its `last5` output regardless of how many rows the caller passes in
+/// (ruling R35).
+const LAST5_COUNT: usize = 5;
 
 // ---------------------------------------------------------------------
 // Field<T> — the R23 tri-state carrier
@@ -92,8 +97,20 @@ impl<T: Serialize> Serialize for Field<T> {
 /// defined here for Task 6 (`names::display_name()`) — [`build_card`]
 /// never constructs it in 5a (scope note: "fill `name` with a simple
 /// rule").
+///
+/// Fix-round item 1: `rename_all = "camelCase"` alone only renames
+/// *variants* (`HiddenAgent` -> `"hiddenAgent"`); it does nothing to each
+/// variant's *fields*, so `HiddenAgent { agent_id }` was serializing as
+/// `{"kind":"hiddenAgent","agent_id":...}` — the brief's contract is
+/// `agentId`. `rename_all_fields` (serde >= 1.0.183; this workspace is on
+/// 1.0.229) is the separate attribute that renames field names across
+/// every variant.
 #[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum DisplayName {
     Visible { name: String, tag: String },
     Remembered { name: String, tag: String },
@@ -190,7 +207,15 @@ pub struct LastFiveEntry {
 #[serde(rename_all = "camelCase")]
 pub struct PlayerCard {
     pub puuid: String,
-    pub name: DisplayName,
+    /// R34: tri-state like every other async field, not a plain
+    /// `DisplayName`. A hidden player's `HiddenPlayer`/`HiddenAgent` is
+    /// known instantly from identity + selection state (no separate fetch,
+    /// so it's `Field::Value` immediately), but a *visible* player's real
+    /// Riot ID comes from a separate name-service call the roster fetch
+    /// itself doesn't include — until that resolves, this is
+    /// `Field::Loading` (absent key), never `Value(Visible { name: "", tag: "" })`.
+    #[serde(skip_serializing_if = "Field::is_loading")]
+    pub name: Field<DisplayName>,
     #[serde(skip_serializing_if = "Field::is_loading")]
     pub level: Field<u32>,
     pub card_id: String,
@@ -242,6 +267,10 @@ pub struct LiveState {
 #[serde(rename_all = "camelCase")]
 pub struct MatchSummary {
     pub match_id: String,
+    /// A valorant-api map uuid, like every other `map_id` sent to the UI
+    /// in this module — never Riot's `/Game/Maps/...` path. 5b converts
+    /// via `opd1_riot::assets::AssetCache::map_uuid_for_path` before
+    /// constructing one of these.
     pub map_id: String,
     pub start_ms: i64,
     pub result: MatchResultKind,
@@ -277,6 +306,7 @@ pub struct Loadout {
 #[serde(rename_all = "camelCase")]
 pub struct EncounterDetailRow {
     pub match_id: String,
+    /// A valorant-api map uuid — see [`MatchSummary::map_id`]'s doc.
     pub map_id: String,
     pub start_ms: i64,
     pub with: bool,
@@ -312,7 +342,18 @@ pub struct Identity {
     /// Riot's `CharacterID` — `""` before a character is chosen.
     pub character_id: String,
     /// Riot's `CharacterSelectionState` — `""` | `"selected"` | `"locked"`.
+    /// **Only `PregamePlayer` (Agent Select) actually has this field.**
+    /// `CoreGamePlayer` (In Game) has no `CharacterSelectionState` at all —
+    /// every player in a started match already has an agent locked, so a
+    /// 5b caller building an `Identity` from a core-game roster must pass
+    /// `"locked"` here itself (any non-empty value works; `"locked"` is
+    /// the real value pregame uses once a character is confirmed).
+    /// Passing `""` for a core-game player would incorrectly hide their
+    /// already-known agent (see [`build_card`]'s agent-select handling).
     pub character_selection_state: String,
+    /// `""` when not yet known (e.g. before name-service resolves) —
+    /// [`build_card`] treats an empty `game_name`/`tag_line` pair as
+    /// "loading", not "this player has an empty name" (ruling R34).
     pub game_name: String,
     pub tag_line: String,
 }
@@ -406,18 +447,29 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
 
     // CLAUDE.md "Hidden names": visible if not incognito; otherwise
     // `HiddenPlayer` before agent select, `HiddenAgent` after (Task 6 adds
-    // the `Remembered` exception on top of this).
-    let name = if !identity.incognito {
-        DisplayName::Visible {
-            name: identity.game_name.clone(),
-            tag: identity.tag_line.clone(),
-        }
-    } else if let Some(agent) = &agent_id {
-        DisplayName::HiddenAgent {
-            agent_id: agent.clone(),
-        }
+    // the `Remembered` exception on top of this). Ruling R34: the hidden
+    // states are known instantly (no separate fetch — everything they need
+    // is already on `identity`), so they're `Field::Value` immediately;
+    // a *visible* player's name comes from a separate name-service call
+    // the roster fetch doesn't include, so it's `Field::Loading` until
+    // `identity.game_name`/`tag_line` are both non-empty — never
+    // `Value(Visible { name: "", tag: "" })`.
+    let name = if identity.incognito {
+        Field::Value(if let Some(agent) = &agent_id {
+            DisplayName::HiddenAgent {
+                agent_id: agent.clone(),
+            }
+        } else {
+            DisplayName::HiddenPlayer
+        })
     } else {
-        DisplayName::HiddenPlayer
+        match (
+            non_empty(&identity.game_name),
+            non_empty(&identity.tag_line),
+        ) {
+            (Some(name), Some(tag)) => Field::Value(DisplayName::Visible { name, tag }),
+            _ => Field::Loading,
+        }
     };
 
     let level = if identity.hide_account_level {
@@ -426,8 +478,22 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
         Field::Value(identity.account_level)
     };
 
+    // Ruling R35: valorant-api's `/v1/seasons` lists future acts (observed
+    // live — e.g. the act after the current one is already published,
+    // months ahead of its own start date). `stats::peak`/`prev_act_tier`
+    // both assume `ordered_acts`'s *last* element is the current act; an
+    // unstarted future act at the end would break that assumption (the
+    // "previous act" would resolve to the actual current act instead).
+    // Clip to acts that have actually started before doing anything
+    // act-position-sensitive with them.
+    let started_acts: Vec<Act> = ordered_acts
+        .iter()
+        .filter(|a| a.start_ms <= now_ms)
+        .cloned()
+        .collect();
+
     let (rank, prev_act_tier, peak, act_winrate) =
-        build_mmr_fields(&mmr, ordered_acts, current_act_id, now_ms);
+        build_mmr_fields(&mmr, &started_acts, current_act_id, now_ms);
     let (kd, hs_pct, last5_out) = build_last5_fields(&last5, &comp_updates);
 
     PlayerCard {
@@ -530,6 +596,11 @@ fn build_last5_fields(
 
     let mut sorted: Vec<&MatchPlayerRow> = rows.iter().collect();
     sorted.sort_by_key(|r| std::cmp::Reverse(r.start_ms));
+    // Ruling R35: defensively cap at 5 *after* sorting newest-first, even
+    // though every real caller is expected to already pass exactly
+    // `Repo::last_n_comp(puuid, 5)` — kd/hsPct must only ever aggregate
+    // the last 5, not however many rows happened to be passed in.
+    sorted.truncate(LAST5_COUNT);
 
     let total_kills: i64 = sorted.iter().map(|r| r.kills).sum();
     let total_deaths: i64 = sorted.iter().map(|r| r.deaths).sum();

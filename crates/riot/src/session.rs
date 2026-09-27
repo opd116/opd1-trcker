@@ -429,7 +429,13 @@ impl RiotSession {
             .await
             .map_err(|e| RiotError::Http(e.to_string()))?;
         let captured = buffer_response(resp).await?;
-        self.raw_captures.record(path, &captured.body);
+        // Fix-round item 9 / R36: only a 2xx body is ever recorded — an
+        // error body (a 401 before re-auth, a transient 500, etc.) isn't
+        // what Task 11 wants as a fixture, and must not be allowed to
+        // overwrite a good, previously-captured success body.
+        if captured.status.is_success() {
+            self.raw_captures.record(path, &captured.body);
+        }
         Ok(captured)
     }
 
@@ -472,7 +478,12 @@ impl RiotSession {
             .await
             .map_err(|e| RiotError::Http(e.to_string()))?;
         let captured = buffer_response(resp).await?;
-        self.raw_captures.record(path, &captured.body);
+        // See `call_local`'s matching comment: only 2xx bodies are ever
+        // recorded (fix-round item 9 / R36) — this also means a 401 (pre
+        // re-auth) or 429 response never overwrites a good prior capture.
+        if captured.status.is_success() {
+            self.raw_captures.record(path, &captured.body);
+        }
         Ok(captured)
     }
 

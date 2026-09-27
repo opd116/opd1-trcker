@@ -421,3 +421,54 @@ async fn session_debug_output_redacts_secrets() {
     assert!(debug_output.contains(SELF_PUUID));
     assert!(debug_output.contains("redacted"));
 }
+
+#[tokio::test]
+async fn raw_captures_only_records_successful_responses() {
+    // Fix-round item 9 / R36: an error response must never be captured
+    // (nor allowed to overwrite a prior good capture for that endpoint).
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    mount_sessions_with_version(&server, "v1").await;
+
+    let session = connect_against(tmp.path(), &server).await;
+
+    Mock::given(method("GET"))
+        .and(path(format!("/mmr/v1/players/{SELF_PUUID}")))
+        .respond_with(ResponseTemplate::new(500).set_body_string("boom"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let err = session
+        .pd::<Value>(&format!("/mmr/v1/players/{SELF_PUUID}"))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RiotError::Status(500)));
+    assert!(
+        session.raw_captures().iter().all(|(k, _)| k != "mmr"),
+        "a 500 response must not be captured"
+    );
+
+    Mock::given(method("GET"))
+        .and(path(format!("/mmr/v1/players/{SELF_PUUID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "Subject": SELF_PUUID, "QueueSkills": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let _: Value = session
+        .pd(&format!("/mmr/v1/players/{SELF_PUUID}"))
+        .await
+        .expect("the follow-up 200 should succeed");
+
+    let captures = session.raw_captures();
+    let mmr_capture = captures
+        .iter()
+        .find(|(k, _)| k == "mmr")
+        .expect("the successful 200 response must be captured");
+    assert!(mmr_capture.1.contains(SELF_PUUID));
+}

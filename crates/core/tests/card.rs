@@ -327,3 +327,210 @@ fn player_card_json_reflects_all_three_states_together() {
     assert_eq!(json["prevActTier"], serde_json::Value::Null);
     assert_eq!(json["actWinrate"], serde_json::Value::Null);
 }
+
+// ---------------------------------------------------------------------
+// Fix round 1, item 1: DisplayName field-name casing (rename_all_fields).
+// ---------------------------------------------------------------------
+
+#[test]
+fn display_name_json_covers_all_four_variants() {
+    use opd1_core::model::DisplayName;
+
+    assert_eq!(
+        serde_json::to_value(DisplayName::Visible {
+            name: "Shanky".to_string(),
+            tag: "OPD1".to_string(),
+        })
+        .unwrap(),
+        serde_json::json!({ "kind": "visible", "name": "Shanky", "tag": "OPD1" })
+    );
+    assert_eq!(
+        serde_json::to_value(DisplayName::Remembered {
+            name: "Rival".to_string(),
+            tag: "ENEMY".to_string(),
+        })
+        .unwrap(),
+        serde_json::json!({ "kind": "remembered", "name": "Rival", "tag": "ENEMY" })
+    );
+    assert_eq!(
+        serde_json::to_value(DisplayName::HiddenPlayer).unwrap(),
+        serde_json::json!({ "kind": "hiddenPlayer" })
+    );
+    // The bug this test guards: `rename_all` alone renames only the
+    // variant tag, not this variant's own `agent_id` field — without
+    // `rename_all_fields`, this would serialize as `"agent_id"`.
+    assert_eq!(
+        serde_json::to_value(DisplayName::HiddenAgent {
+            agent_id: "agent-1".to_string(),
+        })
+        .unwrap(),
+        serde_json::json!({ "kind": "hiddenAgent", "agentId": "agent-1" })
+    );
+}
+
+// ---------------------------------------------------------------------
+// Fix round 1, item 2 / R34: incognito -> Field<DisplayName>, and the
+// hidden player's real name/tag must never appear anywhere in the card's
+// JSON, even defensively (identity carrying a stale name for some reason
+// must not leak it).
+// ---------------------------------------------------------------------
+
+#[test]
+fn incognito_before_agent_select_serializes_as_hidden_player() {
+    let mut hidden = identity();
+    hidden.incognito = true;
+    hidden.character_selection_state = String::new();
+
+    let card = build_card(base_input(hidden));
+    let json = serde_json::to_value(&card).unwrap();
+
+    assert_eq!(json["name"], serde_json::json!({ "kind": "hiddenPlayer" }));
+}
+
+#[test]
+fn incognito_after_lock_serializes_as_hidden_agent_with_agent_id() {
+    let mut hidden = identity();
+    hidden.incognito = true;
+    hidden.character_selection_state = "locked".to_string();
+    hidden.character_id = "agent-1".to_string();
+
+    let card = build_card(base_input(hidden));
+    let json = serde_json::to_value(&card).unwrap();
+
+    assert_eq!(
+        json["name"],
+        serde_json::json!({ "kind": "hiddenAgent", "agentId": "agent-1" })
+    );
+}
+
+#[test]
+fn hidden_player_json_never_contains_their_game_name_or_tag_anywhere() {
+    // Defensive: even if `identity` somehow still carries a real name for
+    // an incognito player (it shouldn't — Riot's pregame/coregame identity
+    // doesn't include one for other players — but CLAUDE.md's "never...
+    // from any endpoint" deserves a belt-and-suspenders check here), it
+    // must never reach the wire.
+    let mut hidden = identity();
+    hidden.incognito = true;
+    hidden.game_name = "ShouldNeverAppear".to_string();
+    hidden.tag_line = "SECRET".to_string();
+
+    let card = build_card(base_input(hidden));
+    let json_string = serde_json::to_string(&card).unwrap();
+
+    assert!(!json_string.contains("ShouldNeverAppear"));
+    assert!(!json_string.contains("SECRET"));
+}
+
+#[test]
+fn visible_player_name_is_loading_until_both_game_name_and_tag_are_known() {
+    let mut not_yet_resolved = identity();
+    not_yet_resolved.game_name = String::new();
+    not_yet_resolved.tag_line = String::new();
+
+    let card = build_card(base_input(not_yet_resolved));
+    assert_eq!(card.name, Field::Loading);
+
+    let json = serde_json::to_value(&card).unwrap();
+    assert!(
+        !json.as_object().unwrap().contains_key("name"),
+        "a still-loading name must be an absent key, got {json}"
+    );
+
+    // Once both halves resolve, it becomes a real value — never an empty
+    // Visible{}.
+    let resolved = identity(); // game_name "Shanky", tag_line "OPD1"
+    let card = build_card(base_input(resolved));
+    match card.name {
+        Field::Value(opd1_core::model::DisplayName::Visible { name, tag }) => {
+            assert_eq!(name, "Shanky");
+            assert_eq!(tag, "OPD1");
+        }
+        other => panic!("expected a resolved Visible name, got {other:?}"),
+    }
+}
+
+// ---------------------------------------------------------------------
+// Fix round 1, R35: future acts are clipped before prev-act/peak logic;
+// last5 is capped at 5 even if more rows are passed in.
+// ---------------------------------------------------------------------
+
+#[test]
+fn future_acts_are_clipped_before_prev_act_tier_and_peak() {
+    use opd1_core::stats::SeasonInfo;
+    use std::collections::HashMap;
+
+    const FUTURE_ACT_ID: &str = "act-future";
+
+    // Same acts as `acts()`, plus one more that starts *after* `now_ms`
+    // (valorant-api really does list these — the act after the current
+    // one is published months ahead of its own start date).
+    let mut all_acts = acts();
+    all_acts.push(Act {
+        id: FUTURE_ACT_ID.to_string(),
+        name: "ACT VI".to_string(),
+        episode_name: "V26".to_string(),
+        start_ms: 10_000, // now_ms below is 2_500 — this act hasn't started
+        end_ms: 11_000,
+    });
+    let leaked: &'static [Act] = Box::leak(all_acts.into_boxed_slice());
+
+    let mut seasons = HashMap::new();
+    seasons.insert(
+        PREV_ACT_ID.to_string(),
+        SeasonInfo {
+            competitive_tier: 14,
+            wins_by_tier: HashMap::from([(14, 2)]),
+            number_of_wins: 10,
+            number_of_games: 20,
+        },
+    );
+    seasons.insert(
+        CURRENT_ACT_ID.to_string(),
+        SeasonInfo {
+            competitive_tier: 15,
+            wins_by_tier: HashMap::from([(15, 3)]),
+            number_of_wins: 6,
+            number_of_games: 10,
+        },
+    );
+
+    let mut input = base_input(identity());
+    input.ordered_acts = leaked; // now has 3 entries, future one last
+    input.mmr = Field::Value(MmrInput {
+        seasons,
+        current_rank: Some(CurrentRank { tier: 15, rr: 42 }),
+    });
+
+    let card = build_card(input);
+
+    // Without clipping, `ordered_acts`'s *last* element (the future act)
+    // would be treated as "current", making CURRENT_ACT look like the
+    // "previous" one — this must still resolve to PREV_ACT's tier (14).
+    assert_eq!(card.prev_act_tier, Field::Value(14));
+}
+
+#[test]
+fn last5_is_capped_at_five_even_with_more_rows_passed_in() {
+    let mut input = base_input(identity());
+    input.last5 = Field::Value(vec![
+        match_row("m1", 100, "Blue", Some("Blue")),
+        match_row("m2", 200, "Blue", Some("Blue")),
+        match_row("m3", 300, "Blue", Some("Blue")),
+        match_row("m4", 400, "Blue", Some("Blue")),
+        match_row("m5", 500, "Blue", Some("Blue")),
+        match_row("m6", 600, "Blue", Some("Blue")),
+        match_row("m7", 700, "Blue", Some("Blue")),
+    ]);
+
+    let card = build_card(input);
+
+    match card.last5 {
+        Field::Value(entries) => {
+            assert_eq!(entries.len(), 5);
+            let start_times: Vec<i64> = entries.iter().map(|e| e.start_ms).collect();
+            assert_eq!(start_times, vec![700, 600, 500, 400, 300]);
+        }
+        other => panic!("expected last5 to be present, got {other:?}"),
+    }
+}

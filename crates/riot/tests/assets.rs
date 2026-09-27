@@ -521,3 +521,157 @@ async fn ensure_image_returns_not_found_for_an_unknown_agent_uuid() {
         .unwrap_err();
     assert!(matches!(err, opd1_riot::assets::AssetError::NotFound));
 }
+
+// ---------------------------------------------------------------------
+// Fix round 1, item 4: `ensure_image` rejects path-traversal-shaped ids
+// before ever building a path or hitting the network.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn ensure_image_rejects_path_traversal_attempts_without_touching_disk_or_network() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    // Deliberately no image/per-id mocks mounted — if `ensure_image` ever
+    // tried to resolve or download a traversal id, this test would fail
+    // with a connection/404 error rather than the expected `NotFound`.
+
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    cache.refresh_tables().await.unwrap();
+
+    for kind in [
+        AssetKind::Agent,
+        AssetKind::CardSmall,
+        AssetKind::CardWide,
+        AssetKind::Chroma,
+        AssetKind::MapList,
+        AssetKind::MapSplash,
+    ] {
+        for malicious in [
+            "../../../etc/passwd",
+            "..%2f..%2fetc%2fpasswd",
+            "a/../../b",
+            "",
+        ] {
+            let err = cache.ensure_image(kind, malicious).await.unwrap_err();
+            assert!(
+                matches!(err, opd1_riot::assets::AssetError::NotFound),
+                "expected NotFound for {kind:?}/{malicious:?}, got {err:?}"
+            );
+        }
+    }
+
+    // Nothing must have been written under the cache dir as a result of
+    // these attempts (validation runs before any path is even built, so
+    // there is nothing to write in the first place).
+    let images_dir = dir.path().join("images");
+    if images_dir.is_dir() {
+        let written = walk_files(&images_dir);
+        assert!(
+            written.is_empty(),
+            "unexpected files written during traversal attempts: {written:?}"
+        );
+    }
+}
+
+fn walk_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                out.extend(walk_files(&path));
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    out
+}
+
+// ---------------------------------------------------------------------
+// Fix round 1, item 5: concurrent `ensure_image` calls for the same
+// (kind, id) are coalesced into exactly one download.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn ensure_image_deduplicates_concurrent_requests_for_the_same_asset() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    // A delay widens the race window so concurrent callers are actually
+    // likely to overlap while the first download is still in flight.
+    Mock::given(method("GET"))
+        .and(path("/img/agent.png"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(png_bytes(64, 64))
+                .set_delay(std::time::Duration::from_millis(50)),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+
+    let cache = std::sync::Arc::new(AssetCache::with_base(
+        dir.path().to_path_buf(),
+        server.uri(),
+    ));
+    cache.refresh_tables().await.unwrap();
+
+    let mut handles = Vec::new();
+    for _ in 0..10 {
+        let cache = cache.clone();
+        handles.push(tokio::spawn(async move {
+            cache.ensure_image(AssetKind::Agent, AGENT_UUID).await
+        }));
+    }
+
+    for handle in handles {
+        // If a second request had ever reached the server, it would hit
+        // the exhausted (`up_to_n_times(1)`) mock and come back as an
+        // error here, failing this unwrap.
+        handle.await.unwrap().unwrap();
+    }
+}
+
+// ---------------------------------------------------------------------
+// Fix round 1, item 6: offline fallback — `refresh_tables` loads from
+// disk when `/v1/version` can't be reached, as long as a full cache
+// already exists there.
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn refresh_tables_falls_back_to_disk_cache_when_version_is_unreachable() {
+    let dir = tempdir();
+
+    // First, populate a real on-disk cache against a working server.
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    let online_cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    assert!(online_cache.refresh_tables().await.unwrap());
+
+    // Now build a *new* cache instance, same directory, pointed at an
+    // address nothing is listening on — a real connection failure, not a
+    // mocked one.
+    let offline_cache =
+        AssetCache::with_base(dir.path().to_path_buf(), "http://127.0.0.1:1".to_string());
+    let changed = offline_cache.refresh_tables().await.unwrap();
+    assert!(!changed, "offline fallback shouldn't report a fresh fetch");
+
+    // meta/acts/map lookups must work fully offline off that fallback.
+    let meta = offline_cache.meta().unwrap();
+    assert!(meta.agents.contains_key(AGENT_UUID));
+    assert_eq!(
+        offline_cache.map_uuid_for_path(MAP_URL).unwrap().as_deref(),
+        Some(MAP_UUID)
+    );
+    // (acts() just must not error offline; the seasons fixture here has 1 act.)
+    assert_eq!(offline_cache.acts().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn refresh_tables_fails_when_offline_and_no_disk_cache_exists() {
+    let dir = tempdir();
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), "http://127.0.0.1:1".to_string());
+    assert!(cache.refresh_tables().await.is_err());
+}

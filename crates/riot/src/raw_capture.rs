@@ -10,17 +10,27 @@
 //! `call_local`/`call_remote` (it runs before a `RiotSession` even exists,
 //! at `connect()` time, and again bypassing them on re-auth) — see
 //! task-5a-report.md's concerns for what Task 5b should know about this.
+//!
+//! Also not captured: a non-2xx response (fix-round item 9 / R36) — only
+//! `session.rs`'s choke points decide this (they see the status code;
+//! [`RawCaptures::record`] itself has no opinion), by simply not calling
+//! [`RawCaptures::record`] for one. A 500/404/etc body is rarely what
+//! Task 11 wants as a fixture, and skipping it means a real error
+//! response can never overwrite a good, previously-captured success body
+//! for the same endpoint.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use serde_json::Value;
 
-/// A captured body larger than this is truncated before storage. Every
-/// endpoint this app calls returns well under this in practice (the
-/// largest real fixture here is a few KB); this is a memory bound for the
-/// pathological case, not a size anyone should expect to hit.
-pub const MAX_CAPTURE_BYTES: usize = 512 * 1024;
+/// A captured body larger than this is stored as a small truncation
+/// marker instead (see [`RawCaptures::record`]) rather than the body
+/// itself. Real match-details bodies can run several hundred KB to
+/// low-single-digit MB for a long match, so this is sized well above the
+/// ~512KB this module originally shipped with (fix-round item 9 / R36) —
+/// still one bounded body per endpoint, just a more generous bound.
+pub const MAX_CAPTURE_BYTES: usize = 2 * 1024 * 1024;
 
 /// Object keys (matched case-insensitively, by substring) whose value is
 /// always replaced regardless of type or shape.
@@ -223,16 +233,26 @@ impl RawCaptures {
 
     /// Records `body` as the latest response for the endpoint `path`
     /// resolves to, overwriting whatever was captured for that endpoint
-    /// before. Oversized bodies are truncated to [`MAX_CAPTURE_BYTES`]
-    /// (see that constant's doc comment).
+    /// before. Callers (`session.rs`'s choke points) are expected to only
+    /// call this for a 2xx response — see the module docs.
+    ///
+    /// Fix-round item 9 / R36: a body over [`MAX_CAPTURE_BYTES`] is
+    /// **never** byte-truncated into storage — truncating valid JSON mid
+    /// -stream would leave invalid JSON in the debug dump, defeating the
+    /// point of Task 11 reading it back as a fixture. Instead, a small,
+    /// always-valid JSON marker (`{"truncated":true,"bytes":N}`) is stored
+    /// in its place, overwriting whatever was there — an oversized
+    /// response is itself the interesting fact to record, and keeping a
+    /// stale unrelated capture around under this endpoint's name would be
+    /// more misleading than useful.
     pub(crate) fn record(&self, path: &str, body: &[u8]) {
         let key = endpoint_key(path);
-        let capped = if body.len() > MAX_CAPTURE_BYTES {
-            body[..MAX_CAPTURE_BYTES].to_vec()
+        let stored: Vec<u8> = if body.len() > MAX_CAPTURE_BYTES {
+            format!(r#"{{"truncated":true,"bytes":{}}}"#, body.len()).into_bytes()
         } else {
             body.to_vec()
         };
-        self.inner.lock().unwrap().insert(key, capped);
+        self.inner.lock().unwrap().insert(key, stored);
     }
 
     /// Every captured endpoint's last body, redacted, sorted by endpoint
@@ -389,13 +409,30 @@ mod tests {
     }
 
     #[test]
-    fn raw_captures_truncates_oversized_bodies() {
+    fn raw_captures_stores_a_truncation_marker_instead_of_invalid_json_for_oversized_bodies() {
         let captures = RawCaptures::new();
-        let huge = vec![b'a'; MAX_CAPTURE_BYTES + 10];
+        let huge_len = MAX_CAPTURE_BYTES + 10;
+        let huge = vec![b'a'; huge_len];
         captures.record("/name-service/v2/players", &huge);
 
-        let inner = captures.inner.lock().unwrap();
-        let stored = inner.get("names").unwrap();
-        assert_eq!(stored.len(), MAX_CAPTURE_BYTES);
+        // The stored bytes are themselves valid, parseable JSON — never a
+        // byte-truncated (and therefore corrupt) slice of the real body.
+        let snapshot = captures.snapshot();
+        assert_eq!(snapshot.len(), 1);
+        let (key, body) = &snapshot[0];
+        assert_eq!(key, "names");
+        let parsed: Value = serde_json::from_str(body).expect("marker must be valid JSON");
+        assert_eq!(parsed["truncated"], true);
+        assert_eq!(parsed["bytes"], huge_len);
+    }
+
+    #[test]
+    fn raw_captures_records_a_body_under_the_cap_unchanged() {
+        let captures = RawCaptures::new();
+        captures.record("/mmr/v1/players/abc", br#"{"ok":true}"#);
+        let snapshot = captures.snapshot();
+        assert_eq!(snapshot[0].0, "mmr");
+        let parsed: Value = serde_json::from_str(&snapshot[0].1).unwrap();
+        assert_eq!(parsed["ok"], true);
     }
 }

@@ -99,13 +99,7 @@ fn comp_update_rows_from_response_converts_every_match() {
 fn match_from_details_aggregates_hs_bs_ls_and_resolves_winner() {
     let details: MatchDetailsResponse =
         serde_json::from_str(&fixture("match_details.json")).unwrap();
-    let (m, teams, players) = match_from_details(
-        "1a2b3c4d-0000-0000-0000-000000000010",
-        "/Game/Maps/Ascent/Ascent",
-        "competitive",
-        1_758_970_000_000,
-        &details,
-    );
+    let (m, teams, players) = match_from_details(&details);
 
     assert_eq!(m.match_id, "1a2b3c4d-0000-0000-0000-000000000010");
     assert_eq!(m.map_id, "/Game/Maps/Ascent/Ascent");
@@ -158,16 +152,16 @@ fn match_from_details_aggregates_hs_bs_ls_and_resolves_winner() {
 fn match_from_details_handles_null_stats_teams_and_round_results() {
     let details: MatchDetailsResponse =
         serde_json::from_str(&fixture("match_details_nulls.json")).unwrap();
-    let (m, teams, players) = match_from_details(
-        "1a2b3c4d-0000-0000-0000-000000000010",
-        "/Game/Maps/Ascent/Ascent",
-        "unrated",
-        1_758_970_000_000,
-        &details,
-    );
+    let (m, teams, players) = match_from_details(&details);
 
+    // matchInfo itself (present even in this "nulls" fixture) drives these
+    // now, not caller-supplied overrides.
+    assert_eq!(m.match_id, "1a2b3c4d-0000-0000-0000-000000000010");
+    assert_eq!(m.map_id, "/Game/Maps/Ascent/Ascent");
+    assert_eq!(m.queue_id, "competitive");
+    assert_eq!(m.start_ms, 1_758_970_000_000);
     assert_eq!(m.winning_team, None); // no teams at all -> no winner
-    assert!(!m.is_ranked); // queue_id "unrated" -> not competitive
+    assert!(m.is_ranked); // matchInfo.isRanked: true in this fixture too
     assert_eq!(m.rounds_played, None); // no player had `stats`
     assert!(teams.is_empty());
 
@@ -180,6 +174,64 @@ fn match_from_details_handles_null_stats_teams_and_round_results() {
         p.party_id.as_deref(),
         Some("cccccccc-0000-0000-0000-000000000001")
     );
+}
+
+// ---------------------------------------------------------------------
+// Fix round 1, item 3: matchInfo drives Match now, including the
+// isRanked/completionState fields no caller-supplied param could give us,
+// and both documented casings of matchId/queueId are accepted.
+// ---------------------------------------------------------------------
+
+#[test]
+fn is_ranked_false_derives_directly_from_match_info() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fixture("match_details.json")).unwrap();
+    value["matchInfo"]["isRanked"] = serde_json::json!(false);
+    value["matchInfo"]["queueId"] = serde_json::json!("unrated");
+    let details: MatchDetailsResponse = serde_json::from_value(value).unwrap();
+
+    let (m, _teams, _players) = match_from_details(&details);
+    assert!(!m.is_ranked);
+    assert_eq!(m.queue_id, "unrated");
+}
+
+#[test]
+fn vote_draw_completion_state_forces_no_winner_even_if_teams_disagree() {
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fixture("match_details.json")).unwrap();
+    value["matchInfo"]["completionState"] = serde_json::json!("VoteDraw");
+    // `teams` still (spuriously) reports Blue as the winner — completionState
+    // must win the cross-check.
+    let details: MatchDetailsResponse = serde_json::from_value(value).unwrap();
+
+    let (m, _teams, _players) = match_from_details(&details);
+    assert_eq!(m.winning_team, None);
+}
+
+#[test]
+fn match_info_accepts_techchrism_documented_casing_as_well_as_the_fixtures() {
+    // techchrism's valorant-api-types (`MatchDetails.ts`) documents
+    // `matchId`/`queueID`; the Task 3 fixtures use `matchID`/`queueId`.
+    // Neither source is a live capture, so both must decode.
+    let value = serde_json::json!({
+        "matchInfo": {
+            "matchId": "1a2b3c4d-0000-0000-0000-000000000010",
+            "mapId": "/Game/Maps/Ascent/Ascent",
+            "gameStartMillis": 1_758_970_000_000i64,
+            "queueID": "competitive",
+            "isRanked": true,
+            "completionState": "Completed",
+        },
+        "players": [],
+        "teams": [],
+        "roundResults": [],
+    });
+    let details: MatchDetailsResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(
+        details.match_info.match_id,
+        "1a2b3c4d-0000-0000-0000-000000000010"
+    );
+    assert_eq!(details.match_info.queue_id, "competitive");
 }
 
 // ---------------------------------------------------------------------

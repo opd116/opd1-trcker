@@ -150,6 +150,13 @@ async fn match_details_hits_pd() {
     Mock::given(method("GET"))
         .and(path(format!("/match-details/v1/matches/{MATCH_ID}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "matchInfo": {
+                "matchID": MATCH_ID,
+                "mapId": "/Game/Maps/Ascent/Ascent",
+                "gameStartMillis": 1_758_970_000_000i64,
+                "queueId": "competitive",
+                "isRanked": true
+            },
             "players": [], "teams": [], "roundResults": []
         })))
         .mount(&server)

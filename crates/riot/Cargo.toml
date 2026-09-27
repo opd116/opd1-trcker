@@ -13,10 +13,14 @@ opd1-core = { path = "../core" }
 # those are needed for plain JSON GET/PUT calls.
 reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
-# Only `time` (for `throttle.rs`'s `sleep`) — the library itself never
-# builds a runtime or uses `#[tokio::main]`/`#[tokio::test]`, so `rt` and
-# `macros` belong in [dev-dependencies] only.
-tokio = { version = "1", features = ["time"] }
+# `time` (for `throttle.rs`'s `sleep`), `sync` (for `assets.rs`'s
+# per-`(kind,id)` download-dedup lock, fix-round item 5), and
+# `rt` (for `assets.rs`'s `tokio::task::spawn_blocking`, fix-round item 10
+# / R37 — blocking image decode/resize and filesystem work must not run on
+# an async task). The library itself never uses `#[tokio::main]`/
+# `#[tokio::test]`, so `rt-multi-thread`/`macros` stay in
+# [dev-dependencies] only.
+tokio = { version = "1", features = ["time", "sync", "rt"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

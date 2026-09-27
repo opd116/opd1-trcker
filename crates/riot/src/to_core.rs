@@ -185,35 +185,39 @@ fn winning_team_id(teams: &[crate::endpoints::MatchTeam]) -> Option<String> {
 /// `match-details/v1/matches/{id}` -> a `Match` row plus its teams/players,
 /// ready for `Repo::upsert_match`.
 ///
-/// `match_id`/`map_id`/`queue_id`/`start_ms` are passed in by the caller
-/// rather than read from `details` — ruling, matching Task 3's own scope
-/// decision ("`match-details` scope kept minimal... no `matchInfo` (map/
-/// time/queue come from the already-fetched, cheaper `match_history`)"):
-/// `MatchDetailsResponse` deliberately has no `matchInfo`, so this
-/// function takes those four fields from whatever cheaper call already
-/// supplied them (the history-diff step, in the real poll loop).
-/// `is_ranked` is derived as `queue_id == "competitive"` — the only ranked
-/// queue in the current game, so this is exact rather than a heuristic.
+/// Fix-round item 3 (reverses the original Task 5a design): `Match`'s
+/// `match_id`/`map_id`/`queue_id`/`start_ms`/`is_ranked` all come straight
+/// from `details.match_info` now, not from caller-supplied parameters —
+/// match-details is self-sufficient, and threading those four fields
+/// through from a separate, earlier call (the original design's rationale)
+/// is exactly the kind of cross-call coupling that's easy to get wrong.
+/// `winning_team` cross-checks `matchInfo.completionState`: a
+/// `"VoteDraw"` completion always means no winner, even if `teams`
+/// somehow disagreed (e.g. reported a spurious single `won: true`).
 pub fn match_from_details(
-    match_id: &str,
-    map_id: &str,
-    queue_id: &str,
-    start_ms: i64,
     details: &MatchDetailsResponse,
 ) -> (Match, Vec<MatchTeam>, Vec<MatchPlayer>) {
+    let info = &details.match_info;
+
     let rounds_played = details
         .players
         .iter()
         .filter_map(|p| p.stats.as_ref().map(|s| s.rounds_played))
         .max();
 
+    let winning_team = if info.completion_state == "VoteDraw" {
+        None
+    } else {
+        winning_team_id(&details.teams)
+    };
+
     let m = Match {
-        match_id: match_id.to_string(),
-        map_id: map_id.to_string(),
-        queue_id: queue_id.to_string(),
-        start_ms,
-        winning_team: winning_team_id(&details.teams),
-        is_ranked: queue_id == COMPETITIVE_QUEUE,
+        match_id: info.match_id.clone(),
+        map_id: info.map_id.clone(),
+        queue_id: info.queue_id.clone(),
+        start_ms: info.game_start_millis,
+        winning_team,
+        is_ranked: info.is_ranked,
         rounds_played,
     };
 

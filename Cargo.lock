@@ -2358,8 +2358,18 @@ dependencies = [
 name = "opd1-trcker"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
+ "log",
+ "opd1-core",
+ "opd1-riot",
+ "rusqlite",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
+ "tempfile",
+ "tokio",
+ "wiremock",
 ]
 
 [[package]]

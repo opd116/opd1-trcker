@@ -623,3 +623,32 @@ impl Repo {
             .collect())
     }
 }
+
+// ---------------------------------------------------------------------
+// app_state (ruling R31)
+// ---------------------------------------------------------------------
+
+impl Repo {
+    /// A value from the small `app_state` key/value table, or `None` when
+    /// the key was never set (or was set to SQL `NULL`).
+    pub fn get_state(&self, key: &str) -> Result<Option<String>> {
+        self.conn
+            .query_row(
+                "SELECT value FROM app_state WHERE key = ?1",
+                params![key],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    }
+
+    /// Inserts or overwrites one `app_state` value.
+    pub fn set_state(&self, key: &str, value: &str) -> Result<()> {
+        self.conn.execute(
+            "INSERT INTO app_state (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+}

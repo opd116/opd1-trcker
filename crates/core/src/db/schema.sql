@@ -104,6 +104,15 @@ CREATE TABLE mmr_snapshots (
     fetched_ms INTEGER NOT NULL
 );
 
+-- Small app-level key/value settings (ruling R31, Task 5b) — e.g.
+-- `self_puuid`, so the Closed stage (VALORANT not running) can still show
+-- the user's own card from the DB. Amended into migration 1 because no
+-- user DB exists before tag v0.1.0; later additions need a new migration.
+CREATE TABLE app_state (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
 CREATE INDEX idx_match_players_puuid ON match_players(puuid);
 CREATE INDEX idx_history_index_puuid_start ON history_index(puuid, start_ms);
 CREATE INDEX idx_comp_updates_puuid_start ON comp_updates(puuid, start_ms);

@@ -551,3 +551,31 @@ fn top_teammates_tie_breaks_by_recency() {
     assert_eq!(top[0].puuid, "teamB"); // more recent shared match wins the tie
     assert_eq!(top[1].puuid, "teamA");
 }
+
+// ---------------------------------------------------------------------
+// app_state (Task 5b, ruling R31)
+// ---------------------------------------------------------------------
+
+#[test]
+fn app_state_get_set_round_trip() {
+    let repo = repo_in_memory();
+    assert_eq!(repo.get_state("self_puuid").unwrap(), None);
+
+    repo.set_state("self_puuid", "aaaa").unwrap();
+    assert_eq!(
+        repo.get_state("self_puuid").unwrap().as_deref(),
+        Some("aaaa")
+    );
+
+    // Upsert: a second set overwrites, never duplicates.
+    repo.set_state("self_puuid", "bbbb").unwrap();
+    assert_eq!(
+        repo.get_state("self_puuid").unwrap().as_deref(),
+        Some("bbbb")
+    );
+    let rows: i64 = repo
+        .conn()
+        .query_row("SELECT COUNT(*) FROM app_state", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+}

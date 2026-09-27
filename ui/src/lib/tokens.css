@@ -1,0 +1,80 @@
+/* OPD1 TRCKER design tokens.
+   Direction: "scoreboard slate". Blue-grey slate layers like a match HUD at
+   night, VALORANT's own DIN vernacular in type (Barlow Semi Condensed), and
+   one warm sand accent kept for memory (remembered names) and focus.
+   Colour only where it carries meaning: win/loss, party groups, teams, and
+   rank colours from valorant-api /competitivetiers (applied at runtime). */
+
+:root {
+  color-scheme: dark;
+
+  /* Slate layers, darkest to lightest. No pure black, no bright surfaces. */
+  --bg: #141a22;
+  --surface-1: #1b222c; /* cards */
+  --surface-1-hover: #1f2732;
+  --surface-2: #232b37; /* tiles, plates, cells */
+  --surface-3: #2b3441; /* tooltips */
+  --line: #2a3340;
+  --line-strong: #3a4554;
+  --skeleton: #29323e;
+  --scrim: rgb(12 16 22 / 0.78); /* plates over artwork */
+
+  /* Text: off-white body, never #fff. */
+  --text-1: #dde2e8;
+  --text-2: #a6b0bd;
+  --text-3: #8894a3;
+
+  /* The one accent: warm sand. */
+  --accent: #e3b36b;
+  --accent-2: #b99561; /* dimmer partner, e.g. a remembered tag */
+
+  /* Outcomes. */
+  --win: #62c99a;
+  --loss: #e5767e;
+  --win-bg: rgb(98 201 154 / 0.13);
+  --loss-bg: rgb(229 118 126 / 0.09);
+
+  /* Teams (In Game). */
+  --ally: #57bfd6;
+  --enemy: #e5676f;
+
+  /* Party groups: backend group index modulo 5. */
+  --party-0: #a08cf0;
+  --party-1: #6aa2f5;
+  --party-2: #ec8ac0;
+  --party-3: #b9d36a;
+  --party-4: #5fd3c6;
+
+  /* Type. Classical scale; nothing below 12px, anywhere. */
+  --font: "Barlow Semi Condensed", "Segoe UI", system-ui, sans-serif;
+  --fs-xs: 12px;
+  --fs-sm: 13px;
+  --fs-md: 14px;
+  --fs-lg: 16px;
+  --fs-xl: 18px;
+  --fs-2xl: 21px;
+  --fs-3xl: 24px;
+  --fs-4xl: 36px;
+  --fw-body: 500;
+  --fw-strong: 600;
+  --lh-tight: 1.15;
+  --lh-body: 1.35;
+
+  /* Space (4px grid). */
+  --sp-1: 4px;
+  --sp-2: 8px;
+  --sp-3: 12px;
+  --sp-4: 16px;
+  --sp-5: 24px;
+  --sp-6: 32px;
+
+  /* Radii by role, not one radius for everything. */
+  --r-xs: 3px; /* plates, tiles */
+  --r-sm: 5px; /* agent tile */
+  --r-md: 7px; /* cards */
+
+  /* Motion. */
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --dur-fast: 120ms;
+  --dur: 200ms;
+}

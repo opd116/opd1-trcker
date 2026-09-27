@@ -31,8 +31,7 @@ export default defineConfig({
   },
 
   test: {
-    // No tests exist yet (Task 1 is scaffold-only); later tasks add real
-    // component/unit tests. This keeps CI green until then.
-    passWithNoTests: true,
+    // Unit tests only; Playwright specs under tests/ run with `playwright test`.
+    include: ["src/**/*.test.ts"],
   },
 });

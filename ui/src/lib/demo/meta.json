@@ -1,0 +1,280 @@
+{
+  "agents": {
+    "41fb69c1-4189-7b37-f117-bcaf1e96f1bf": {
+      "name": "Astra"
+    },
+    "5f8d3a7f-467b-97f3-062c-13acf203c006": {
+      "name": "Breach"
+    },
+    "9f0d8ba9-4140-b941-57d3-a7ad57c6b417": {
+      "name": "Brimstone"
+    },
+    "22697a3d-45bf-8dd7-4fec-84a9e28c69d7": {
+      "name": "Chamber"
+    },
+    "1dbf2edd-4729-0984-3115-daa5eed44993": {
+      "name": "Clove"
+    },
+    "117ed9e3-49f3-6512-3ccf-0cada7e3823b": {
+      "name": "Cypher"
+    },
+    "cc8b64c8-4b25-4ff9-6e7f-37b4da43d235": {
+      "name": "Deadlock"
+    },
+    "dade69b4-4f5a-8528-247b-219e5a1facd6": {
+      "name": "Fade"
+    },
+    "e370fa57-4757-3604-3648-499e1f642d3f": {
+      "name": "Gekko"
+    },
+    "95b78ed7-4637-86d9-7e41-71ba8c293152": {
+      "name": "Harbor"
+    },
+    "0e38b510-41a8-5780-5e8f-568b2a4f2d6c": {
+      "name": "Iso"
+    },
+    "add6443a-41bd-e414-f6ad-e58d267f4e95": {
+      "name": "Jett"
+    },
+    "601dbbe7-43ce-be57-2a40-4abd24953621": {
+      "name": "KAY/O"
+    },
+    "1e58de9c-4950-5125-93e9-a0aee9f98746": {
+      "name": "Killjoy"
+    },
+    "7c8a4701-4de6-9355-b254-e09bc2a34b72": {
+      "name": "Miks"
+    },
+    "bb2a4828-46eb-8cd1-e765-15848195d751": {
+      "name": "Neon"
+    },
+    "8e253930-4c05-31dd-1b6c-968525494517": {
+      "name": "Omen"
+    },
+    "eb93336a-449b-9c1b-0a54-a891f7921d69": {
+      "name": "Phoenix"
+    },
+    "f94c3b30-42be-e959-889c-5aa313dba261": {
+      "name": "Raze"
+    },
+    "a3bfb853-43b2-7238-a4f1-ad90e9e46bcc": {
+      "name": "Reyna"
+    },
+    "569fdd95-4d10-43ab-ca70-79becc718b46": {
+      "name": "Sage"
+    },
+    "6f2a04ca-43e0-be17-7f36-b3908627744d": {
+      "name": "Skye"
+    },
+    "320b2a48-4d9b-a075-30f1-1f93a9b638fa": {
+      "name": "Sova"
+    },
+    "b444168c-4e35-8076-db47-ef9bf368f384": {
+      "name": "Tejo"
+    },
+    "92eeef5d-43b5-1d4a-8d03-b3927a09034b": {
+      "name": "Veto"
+    },
+    "707eab51-4836-f488-046a-cda6bf494859": {
+      "name": "Viper"
+    },
+    "efba5359-4016-a1e5-7626-b1ae76895940": {
+      "name": "Vyse"
+    },
+    "df1cb487-4902-002e-5c17-d28e83e78588": {
+      "name": "Waylay"
+    },
+    "7f94d92c-4234-0a36-9646-3a87eb8b5c89": {
+      "name": "Yoru"
+    }
+  },
+  "maps": {
+    "224b0a95-48b9-f703-1bd8-67aca101a61f": {
+      "name": "Abyss"
+    },
+    "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319": {
+      "name": "Ascent"
+    },
+    "1f10dab3-4294-3827-fa35-c2aa00213cf3": {
+      "name": "Basic Training"
+    },
+    "2c9d57ec-4431-9c5e-2939-8f9ef6dd5cba": {
+      "name": "Bind"
+    },
+    "2fb9a4fd-47b8-4e7d-a969-74b4046ebd53": {
+      "name": "Breeze"
+    },
+    "1c18ab1f-420d-0d8b-71d0-77ad3c439115": {
+      "name": "Corrode"
+    },
+    "690b3ed2-4dff-945b-8223-6da834e30d24": {
+      "name": "District"
+    },
+    "2c09d728-42d5-30d8-43dc-96a05cc7ee9d": {
+      "name": "Drift"
+    },
+    "b529448b-4d60-346e-e89e-00a4c527a405": {
+      "name": "Fracture"
+    },
+    "dd3a1cd9-41b1-50ea-3bd6-a7bb3c5978bd": {
+      "name": "Gauntlet"
+    },
+    "d6336a5a-428f-c591-98db-c8a291159134": {
+      "name": "Glitch"
+    },
+    "2bee0dc9-4ffe-519b-1cbd-7fbe763a6047": {
+      "name": "Haven"
+    },
+    "e2ad5c54-4114-a870-9641-8ea21279579a": {
+      "name": "Icebox"
+    },
+    "12452a9d-48c3-0b02-e7eb-0381c3520404": {
+      "name": "Kasbah"
+    },
+    "2fe4ed3a-450a-948b-6d6b-e89a78e680a9": {
+      "name": "Lotus"
+    },
+    "fd267378-4d1d-484f-ff52-77821ed10dc2": {
+      "name": "Pearl"
+    },
+    "de28aa9b-4cbe-1003-320e-6cb3ec309557": {
+      "name": "Piazza"
+    },
+    "a9009649-421f-d5d5-f80c-0cbe02c125bb": {
+      "name": "Skirmish A"
+    },
+    "a38a3f9a-4042-844c-8970-a3ac2f7ce93d": {
+      "name": "Skirmish B"
+    },
+    "a264de0f-4a04-9c78-c97a-a6b192ce6e86": {
+      "name": "Skirmish C"
+    },
+    "1c7555fc-4bc6-3b98-9674-789d47ef6c50": {
+      "name": "Skirmish D"
+    },
+    "4490f1d6-4818-bf5f-9b3a-9c9a8dbb52ed": {
+      "name": "Skirmish E"
+    },
+    "d960549e-485c-e861-8d71-aa9d1aed12a2": {
+      "name": "Split"
+    },
+    "756da597-416b-c0f2-f47b-afbdf28670bc": {
+      "name": "Summit"
+    },
+    "92584fbe-486a-b1b2-9faa-39b0f486b498": {
+      "name": "Sunset"
+    },
+    "ee613ee9-28b7-4beb-9666-08db13bb2244": {
+      "name": "The Range"
+    },
+    "5914d1e0-40c4-cfdd-6b88-eba06347686c": {
+      "name": "The Range"
+    }
+  },
+  "tiers": {
+    "0": {
+      "name": "UNRANKED",
+      "color": "ffffffff"
+    },
+    "3": {
+      "name": "IRON 1",
+      "color": "868986ff"
+    },
+    "4": {
+      "name": "IRON 2",
+      "color": "868986ff"
+    },
+    "5": {
+      "name": "IRON 3",
+      "color": "868986ff"
+    },
+    "6": {
+      "name": "BRONZE 1",
+      "color": "a5855dff"
+    },
+    "7": {
+      "name": "BRONZE 2",
+      "color": "a5855dff"
+    },
+    "8": {
+      "name": "BRONZE 3",
+      "color": "a5855dff"
+    },
+    "9": {
+      "name": "SILVER 1",
+      "color": "bbc2c2ff"
+    },
+    "10": {
+      "name": "SILVER 2",
+      "color": "bbc2c2ff"
+    },
+    "11": {
+      "name": "SILVER 3",
+      "color": "bbc2c2ff"
+    },
+    "12": {
+      "name": "GOLD 1",
+      "color": "eccf56ff"
+    },
+    "13": {
+      "name": "GOLD 2",
+      "color": "eccf56ff"
+    },
+    "14": {
+      "name": "GOLD 3",
+      "color": "eccf56ff"
+    },
+    "15": {
+      "name": "PLATINUM 1",
+      "color": "59a9b6ff"
+    },
+    "16": {
+      "name": "PLATINUM 2",
+      "color": "59a9b6ff"
+    },
+    "17": {
+      "name": "PLATINUM 3",
+      "color": "59a9b6ff"
+    },
+    "18": {
+      "name": "DIAMOND 1",
+      "color": "b489c4ff"
+    },
+    "19": {
+      "name": "DIAMOND 2",
+      "color": "b489c4ff"
+    },
+    "20": {
+      "name": "DIAMOND 3",
+      "color": "b489c4ff"
+    },
+    "21": {
+      "name": "ASCENDANT 1",
+      "color": "6ae2afff"
+    },
+    "22": {
+      "name": "ASCENDANT 2",
+      "color": "6ae2afff"
+    },
+    "23": {
+      "name": "ASCENDANT 3",
+      "color": "6ae2afff"
+    },
+    "24": {
+      "name": "IMMORTAL 1",
+      "color": "bb3d65ff"
+    },
+    "25": {
+      "name": "IMMORTAL 2",
+      "color": "bb3d65ff"
+    },
+    "26": {
+      "name": "IMMORTAL 3",
+      "color": "bb3d65ff"
+    },
+    "27": {
+      "name": "RADIANT",
+      "color": "ffffaaff"
+    }
+  }
+}

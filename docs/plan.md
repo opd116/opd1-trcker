@@ -347,7 +347,7 @@ ui/
   - `<PlayerCard card={PlayerCard} size="lg"|"md"|"sm" on:open />`
   - The `live` store. In a Tauri build it listens to `listen("live")`. When `import.meta.env.DEV && !window.__TAURI__`, it plays the demo feed cycling Lobby(1–5) / Queue / Pregame / Ingame with keyboard 1–7. There is no on-screen demo button, so layout is unaffected.
 
-- [ ] **Step 1:** Load the `frontend-design` skill and set the tokens.
+- [ ] **Step 1:** Load the `interface-design` skill (craft-first product UI) plus `svelte-code-writer`, then set the tokens. Use `impeccable` afterwards to audit and polish, not to set direction.
   - Palette: a dark blue-grey base, one accent, rank colors from `/competitivetiers`, off-white text.
   - A type scale with nothing below 12px.
   - `font-variant-numeric: tabular-nums` for stats.

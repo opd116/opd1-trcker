@@ -78,11 +78,12 @@ fn match_details_deserializes() {
     assert_eq!(me.team_id, "Blue");
     assert_eq!(me.party_id, "cccccccc-0000-0000-0000-000000000001");
     assert_eq!(me.character_id, "5f8d3a7f-467b-97f3-062c-13acf203c006");
-    assert_eq!(me.stats.kills, 22);
-    assert_eq!(me.stats.deaths, 15);
-    assert_eq!(me.stats.assists, 6);
-    assert_eq!(me.stats.score, 4800);
-    assert_eq!(me.stats.rounds_played, 24);
+    let stats = me.stats.as_ref().expect("stats present in this fixture");
+    assert_eq!(stats.kills, 22);
+    assert_eq!(stats.deaths, 15);
+    assert_eq!(stats.assists, 6);
+    assert_eq!(stats.score, 4800);
+    assert_eq!(stats.rounds_played, 24);
 
     let blue_team = parsed.teams.iter().find(|t| t.team_id == "Blue").unwrap();
     assert!(blue_team.won);
@@ -107,6 +108,20 @@ fn match_details_deserializes() {
 }
 
 #[test]
+fn match_details_deserializes_when_stats_teams_and_round_results_are_null() {
+    // `players[].stats`, `teams`, and `roundResults` are all `.nullable()`
+    // in techchrism's `valorant-api-types` (`MatchDetails.ts`) — none of
+    // them should fail the decode when Riot actually sends `null`
+    // (fix-round item 2).
+    let parsed: MatchDetailsResponse =
+        serde_json::from_str(&fixture("match_details_nulls.json")).unwrap();
+    assert_eq!(parsed.players.len(), 1);
+    assert_eq!(parsed.players[0].stats, None);
+    assert!(parsed.teams.is_empty());
+    assert!(parsed.round_results.is_empty());
+}
+
+#[test]
 fn mmr_deserializes() {
     let parsed: PlayerMmrResponse = serde_json::from_str(&fixture("mmr.json")).unwrap();
     assert_eq!(parsed.subject, "aaaaaaaa-0000-0000-0000-000000000001");
@@ -124,6 +139,26 @@ fn mmr_deserializes() {
 
     let unrated = parsed.queue_skills.get("unrated").unwrap();
     assert!(unrated.seasonal_info_by_season_id.is_empty());
+}
+
+#[test]
+fn mmr_deserializes_when_seasonal_info_by_season_id_is_null() {
+    // Scout null-guards this exact field
+    // (`(...).get("SeasonalInfoBySeasonID")) or {}` in `live_match.py`) —
+    // `null` must become an empty map, not a decode failure (fix-round
+    // item 2).
+    let parsed: PlayerMmrResponse = serde_json::from_str(&fixture("mmr_nulls.json")).unwrap();
+    let competitive = parsed.queue_skills.get("competitive").unwrap();
+    assert!(competitive.seasonal_info_by_season_id.is_empty());
+}
+
+#[test]
+fn mmr_deserializes_when_queue_skills_itself_is_null() {
+    // Scout null-guards `QueueSkills` too (`r.get("QueueSkills") or {}`) —
+    // same treatment one level up.
+    let parsed: PlayerMmrResponse =
+        serde_json::from_str(&fixture("mmr_no_queue_skills.json")).unwrap();
+    assert!(parsed.queue_skills.is_empty());
 }
 
 #[test]
@@ -162,11 +197,35 @@ fn match_history_deserializes() {
 fn party_deserializes() {
     let parsed: PartyResponse = serde_json::from_str(&fixture("party.json")).unwrap();
     assert_eq!(parsed.id, "cccccccc-0000-0000-0000-000000000001");
-    assert_eq!(parsed.state, "DEFAULT");
+    assert_eq!(parsed.state.as_deref(), Some("DEFAULT"));
     assert_eq!(parsed.members.len(), 1);
     assert_eq!(parsed.members[0].is_owner, Some(true));
-    assert!(parsed.members[0].is_ready);
+    assert_eq!(parsed.members[0].is_ready, Some(true));
     assert!(parsed.eligible_queues.contains(&"competitive".to_string()));
+}
+
+#[test]
+fn party_deserializes_when_unlisted_optional_fields_are_missing() {
+    // `State`/`EligibleQueues`/`IsReady` aren't in the brief's field list
+    // and aren't consumed by this crate yet — an absent value must not
+    // blank the whole `PartyResponse` (fix-round item 2).
+    let value = serde_json::json!({
+        "ID": "cccccccc-0000-0000-0000-000000000001",
+        "Members": [{
+            "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+            "PlayerIdentity": {
+                "Incognito": false,
+                "HideAccountLevel": false,
+                "AccountLevel": 187,
+                "PlayerCardID": "1711d20d-4b1c-c64a-14be-d4ae58a457c6",
+            },
+        }],
+    });
+    let parsed: PartyResponse = serde_json::from_value(value).unwrap();
+    assert_eq!(parsed.state, None);
+    assert!(parsed.eligible_queues.is_empty());
+    assert_eq!(parsed.members[0].is_ready, None);
+    assert_eq!(parsed.members[0].is_owner, None);
 }
 
 #[test]
@@ -197,5 +256,19 @@ fn names_deserializes() {
     assert_eq!(parsed.len(), 2);
     assert_eq!(parsed[0].game_name, "Shanky");
     assert_eq!(parsed[0].tag_line, "OPD1");
-    assert_eq!(parsed[0].display_name, "Shanky#OPD1");
+    assert_eq!(parsed[0].display_name.as_deref(), Some("Shanky#OPD1"));
+}
+
+#[test]
+fn names_deserializes_when_display_name_is_missing() {
+    // `DisplayName` isn't in the brief's field list (`GameName`/`TagLine`
+    // already give the Riot ID display) — an absent value must not fail
+    // the whole `names()` decode (fix-round item 2).
+    let value = serde_json::json!([{
+        "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+        "GameName": "Shanky",
+        "TagLine": "OPD1",
+    }]);
+    let parsed: Vec<NameServiceEntry> = serde_json::from_value(value).unwrap();
+    assert_eq!(parsed[0].display_name, None);
 }

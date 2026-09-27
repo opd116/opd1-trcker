@@ -11,6 +11,35 @@ use std::time::{Duration, Instant};
 
 use tokio::time::sleep;
 
+/// The smallest `rps` a [`Throttle`] will ever actually use. Guards
+/// against a nonsensical `rps <= 0` (or NaN) causing a divide-by-zero (or
+/// by-a-negative-number) when computing how long to wait for the next
+/// token — which would hand a non-finite or negative value to
+/// `Duration::from_secs_f64`, and panic. Release builds use
+/// `panic = "abort"`, so a panic here would take the whole app down. Real
+/// call sites always pass a real positive `rps` (10.0, 0.4); this only
+/// protects against misuse.
+const MIN_RPS: f64 = 0.01;
+
+/// The longest a single `hold_for` call will ever actually hold,
+/// regardless of what it's asked for. Guards against a malformed or
+/// absurd caller value (`f64::INFINITY`, `f64::NAN`, a huge number — e.g.
+/// from a bogus `Retry-After` header) turning into a `Duration`/`Instant`
+/// that panics, or an effectively-infinite hold.
+const MAX_HOLD_SECS: f64 = 30.0;
+
+/// Clamps a `hold_for` duration to `[0, MAX_HOLD_SECS]`. `NaN` (which
+/// `f64::clamp` passes through unchanged rather than clamping) maps to
+/// `0.0` — we can't infer intent from a `NaN`, so we treat it as "no
+/// hold" rather than "the maximum hold".
+fn clamp_hold_secs(secs: f64) -> f64 {
+    if secs.is_nan() {
+        0.0
+    } else {
+        secs.clamp(0.0, MAX_HOLD_SECS)
+    }
+}
+
 #[derive(Debug)]
 struct Inner {
     /// Tokens currently available, in `[0, burst]`.
@@ -34,7 +63,13 @@ pub struct Throttle {
 }
 
 impl Throttle {
+    /// `burst`/`rps` are clamped rather than rejected: a negative or `NaN`
+    /// `burst` becomes `0.0`, and a `rps <= 0` (or `NaN`) becomes
+    /// [`MIN_RPS`] — never a panic, even when called with nonsensical
+    /// values (see [`MIN_RPS`]'s doc comment).
     pub fn new(burst: f64, rps: f64) -> Self {
+        let burst = if burst >= 0.0 { burst } else { 0.0 };
+        let rps = if rps > 0.0 { rps } else { MIN_RPS };
         Self {
             burst,
             rps,
@@ -69,7 +104,7 @@ impl Throttle {
     /// A shorter hold never shrinks an already-active longer one — matches
     /// Scout's `_HOLD_UNTIL[fam] = max(_HOLD_UNTIL[fam], now + seconds)`.
     pub fn hold_for(&self, secs: f64) {
-        let until = Instant::now() + Duration::from_secs_f64(secs.max(0.0));
+        let until = Instant::now() + Duration::from_secs_f64(clamp_hold_secs(secs));
         let mut inner = self.inner.lock().unwrap();
         inner.hold_until = Some(match inner.hold_until {
             Some(existing) if existing > until => existing,
@@ -103,5 +138,38 @@ impl Throttle {
             let need = 1.0 - inner.tokens;
             Err(Duration::from_secs_f64(need / self.rps))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clamp_hold_secs_maps_nan_to_zero() {
+        assert_eq!(clamp_hold_secs(f64::NAN), 0.0);
+    }
+
+    #[test]
+    fn clamp_hold_secs_maps_positive_infinity_to_the_max() {
+        assert_eq!(clamp_hold_secs(f64::INFINITY), MAX_HOLD_SECS);
+    }
+
+    #[test]
+    fn clamp_hold_secs_maps_negative_infinity_and_negatives_to_zero() {
+        assert_eq!(clamp_hold_secs(f64::NEG_INFINITY), 0.0);
+        assert_eq!(clamp_hold_secs(-5.0), 0.0);
+    }
+
+    #[test]
+    fn clamp_hold_secs_clamps_a_huge_finite_value_to_the_max() {
+        assert_eq!(clamp_hold_secs(1_000_000.0), MAX_HOLD_SECS);
+    }
+
+    #[test]
+    fn clamp_hold_secs_passes_through_in_range_values() {
+        assert_eq!(clamp_hold_secs(10.0), 10.0);
+        assert_eq!(clamp_hold_secs(0.0), 0.0);
+        assert_eq!(clamp_hold_secs(MAX_HOLD_SECS), MAX_HOLD_SECS);
     }
 }

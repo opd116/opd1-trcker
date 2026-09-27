@@ -7,7 +7,7 @@
 mod support;
 
 use serde_json::json;
-use wiremock::matchers::{body_json, method, path, query_param};
+use wiremock::matchers::{body_json, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use opd1_riot::endpoints::VisiblePuuid;
@@ -79,7 +79,7 @@ async fn mmr_hits_pd() {
 }
 
 #[tokio::test]
-async fn comp_updates_passes_start_and_end_index_as_query_params() {
+async fn comp_updates_passes_start_and_end_index_and_queue_as_query_params() {
     let (_tmp, server, session) = setup().await;
     Mock::given(method("GET"))
         .and(path(format!(
@@ -87,6 +87,7 @@ async fn comp_updates_passes_start_and_end_index_as_query_params() {
         )))
         .and(query_param("startIndex", "0"))
         .and(query_param("endIndex", "20"))
+        .and(query_param("queue", "competitive"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "Subject": SELF_PUUID, "Matches": []
         })))
@@ -101,14 +102,19 @@ async fn comp_updates_passes_start_and_end_index_as_query_params() {
 }
 
 #[tokio::test]
-async fn comp_updates_omits_query_params_when_not_given() {
+async fn comp_updates_always_sends_queue_competitive_even_without_start_end() {
+    // Ruling R25: without `queue=competitive`, Riot mixes every queue's
+    // matches together with no reliable way to filter them apart
+    // afterwards, so this must be sent unconditionally — even when the
+    // caller doesn't pass `start`/`end`.
     let (_tmp, server, session) = setup().await;
-    // No query_param matcher at all — the request must have *no* query
-    // string, or this mock (and thus the call) will not match.
     Mock::given(method("GET"))
         .and(path(format!(
             "/mmr/v1/players/{SELF_PUUID}/competitiveupdates"
         )))
+        .and(query_param("queue", "competitive"))
+        .and(query_param_is_missing("startIndex"))
+        .and(query_param_is_missing("endIndex"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "Subject": SELF_PUUID, "Matches": []
         })))

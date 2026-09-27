@@ -1,0 +1,25 @@
+{
+  "matchInfo": {
+    "matchID": "1a2b3c4d-0000-0000-0000-000000000010",
+    "mapId": "/Game/Maps/Ascent/Ascent",
+    "gameStartMillis": 1758970000000,
+    "queueId": "competitive",
+    "isRanked": true
+  },
+  "players": [
+    {
+      "subject": "aaaaaaaa-0000-0000-0000-000000000001",
+      "gameName": "Shanky",
+      "tagLine": "OPD1",
+      "teamId": "Blue",
+      "partyId": "cccccccc-0000-0000-0000-000000000001",
+      "characterId": "5f8d3a7f-467b-97f3-062c-13acf203c006",
+      "stats": null
+    }
+  ],
+  "bots": [],
+  "coaches": [],
+  "teams": null,
+  "roundResults": null,
+  "kills": null
+}

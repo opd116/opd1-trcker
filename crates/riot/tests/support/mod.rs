@@ -205,9 +205,12 @@ pub async fn connect_against(tmp: &Path, server: &MockServer) -> opd1_riot::sess
     let base = server.uri();
     opd1_riot::session::RiotSession::connect_with_overrides(
         tmp,
-        Some(base.clone()),
-        Some(base.clone()),
-        Some(base),
+        opd1_riot::session::ConnectOverrides {
+            pd_base: Some(base.clone()),
+            glz_base: Some(base.clone()),
+            valorant_api_base: Some(base),
+            ..Default::default()
+        },
     )
     .await
     .expect("connect should succeed")

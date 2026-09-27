@@ -9,6 +9,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -42,6 +43,22 @@ const MAX_RATE_LIMIT_RETRIES: u32 = 2;
 /// growing by this much on each successive retry — matches Scout's
 /// `pd_get` backoff (`backoff = 3.0; backoff += 3.0`).
 const FALLBACK_BACKOFF_SECS: f64 = 3.0;
+
+/// A `Retry-After` value is only ever trusted up to this many seconds.
+/// Guards against a malformed or absurd header (`"inf"`, a huge number)
+/// turning into a multi-hour (or panicking, pre-fix) hold — see the Task 3
+/// fix-round report.
+const MAX_RETRY_AFTER_SECS: f64 = 30.0;
+
+/// Total-request timeouts, matching Scout's `riot_client.py` (`timeout=5`
+/// for local calls, `timeout=8` for pd/glz). Without these, a
+/// non-responding Riot client/server would hang the caller forever —
+/// exactly the kind of thing CLAUDE.md's "a failed field must eventually
+/// become `—`" rules out.
+const LOCAL_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_TIMEOUT: Duration = Duration::from_secs(8);
+/// How long to wait for the TCP+TLS handshake alone, on remote calls.
+const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Used when every client-version source fails. Requests will likely still
 /// work — Riot's remote endpoints don't appear to hard-reject on a stale
@@ -102,13 +119,18 @@ impl std::error::Error for RiotError {}
 /// The port/password pair a [`RiotSession`] was built from — re-checked
 /// (cheaply, from disk) before every call so a Riot client restart is
 /// caught immediately instead of hanging on a dead port.
-#[derive(Debug)]
+///
+/// Deliberately **not** `#[derive(Debug)]`: `password` is the lockfile
+/// secret used to build the local Basic-auth header, and the user shares
+/// in-app logs (CLAUDE.md), so it must never come out of a `{:?}`.
 struct LockfileSnapshot {
     port: u16,
     password: String,
 }
 
-#[derive(Debug)]
+/// Deliberately **not** `#[derive(Debug)]`: `access_token`/`entitlements_jwt`
+/// are the live Bearer token and entitlements JWT — the same reasoning as
+/// [`LockfileSnapshot`].
 struct AuthState {
     access_token: String,
     entitlements_jwt: String,
@@ -123,7 +145,12 @@ enum RemoteKind {
 
 /// A live connection to the local Riot client, plus everything needed to
 /// call `pd.*.a.pvp.net` and `glz-*.*.a.pvp.net` on its behalf.
-#[derive(Debug)]
+///
+/// `Debug` is hand-written (see [`fmt::Debug`] impl below) rather than
+/// derived, so that printing a session — e.g. in a panic message or a
+/// future "copy log" feature — can never leak `basic_auth` (a Basic-auth
+/// header built from the lockfile password) or the live Bearer
+/// token/entitlements JWT held in `auth`.
 pub struct RiotSession {
     local_app_data: PathBuf,
     lockfile_snapshot: LockfileSnapshot,
@@ -137,6 +164,20 @@ pub struct RiotSession {
     auth: Mutex<AuthState>,
     global_throttle: Throttle,
     mmr_throttle: Throttle,
+}
+
+impl fmt::Debug for RiotSession {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RiotSession")
+            .field("local_app_data", &self.local_app_data)
+            .field("local_base", &self.local_base)
+            .field("basic_auth", &"<redacted>")
+            .field("pd_base", &self.pd_base)
+            .field("glz_base", &self.glz_base)
+            .field("puuid", &self.puuid)
+            .field("auth", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 fn lockfile_path(local_app_data: &Path) -> PathBuf {
@@ -155,12 +196,29 @@ fn shooter_log_path(local_app_data: &Path) -> PathBuf {
         .join("ShooterGame.log")
 }
 
-#[derive(Debug, Deserialize)]
+/// Deliberately **not** `#[derive(Debug)]` — `access_token`/`token` are the
+/// live Bearer token and entitlements JWT, same reasoning as [`AuthState`].
+#[derive(Deserialize)]
 struct EntitlementsResponse {
     #[serde(rename = "accessToken")]
     access_token: String,
     subject: String,
     token: String,
+}
+
+/// Test-only overrides for [`RiotSession::connect_with_overrides`]: mock
+/// server bases in place of the real Riot shards/`valorant-api.com`, and
+/// tighter timeouts so a "server never responds" test doesn't have to wait
+/// out the real 5s/8s production timeouts. Every field defaults to the
+/// real, production behavior.
+#[doc(hidden)]
+#[derive(Debug, Default)]
+pub struct ConnectOverrides {
+    pub pd_base: Option<String>,
+    pub glz_base: Option<String>,
+    pub valorant_api_base: Option<String>,
+    pub local_timeout: Option<Duration>,
+    pub remote_timeout: Option<Duration>,
 }
 
 impl RiotSession {
@@ -169,20 +227,38 @@ impl RiotSession {
     /// token (which also gives us `self_puuid`), and determines the
     /// client version to send on remote calls.
     pub async fn connect(local_app_data: &Path) -> Result<Self, RiotError> {
-        Self::connect_with_overrides(local_app_data, None, None, None).await
+        Self::connect_with_overrides(local_app_data, ConnectOverrides::default()).await
     }
 
     /// Like [`connect`](Self::connect), but lets tests point the pd/glz/
-    /// valorant-api bases at a mock server instead of the real Riot
-    /// shards and `valorant-api.com`. Not meant for production use — the
-    /// public entry point is `connect`.
+    /// valorant-api bases at a mock server (and override the request
+    /// timeouts, so a "the server never responds" test doesn't have to
+    /// wait out the real 5s/8s timeouts) instead of the real Riot shards,
+    /// `valorant-api.com`, and production timeouts. Not meant for
+    /// production use — the public entry point is `connect`.
     #[doc(hidden)]
     pub async fn connect_with_overrides(
         local_app_data: &Path,
-        pd_base_override: Option<String>,
-        glz_base_override: Option<String>,
-        valorant_api_base_override: Option<String>,
+        overrides: ConnectOverrides,
     ) -> Result<Self, RiotError> {
+        // `reqwest`'s `rustls-no-provider` feature (chosen over `rustls` to
+        // avoid pulling in the much heavier aws-lc-rs/aws-lc-sys backend —
+        // see task-3-report.md's fix-round notes) needs a process-wide
+        // crypto provider installed before any TLS connection is made.
+        // Installing twice (e.g. a second `connect()` call, or another
+        // test in the same process) just returns `Err` harmlessly.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let ConnectOverrides {
+            pd_base: pd_base_override,
+            glz_base: glz_base_override,
+            valorant_api_base: valorant_api_base_override,
+            local_timeout,
+            remote_timeout,
+        } = overrides;
+        let local_timeout = local_timeout.unwrap_or(LOCAL_TIMEOUT);
+        let remote_timeout = remote_timeout.unwrap_or(REMOTE_TIMEOUT);
+
         let raw_lockfile = std::fs::read_to_string(lockfile_path(local_app_data))
             .map_err(|_| RiotError::ClientGone)?;
         let lockfile = parse_lockfile(&raw_lockfile).map_err(|_| RiotError::ClientGone)?;
@@ -203,9 +279,12 @@ impl RiotSession {
         // validation.
         let local_client = Client::builder()
             .danger_accept_invalid_certs(true)
+            .timeout(local_timeout)
             .build()
             .map_err(|e| RiotError::Http(e.to_string()))?;
         let remote_client = Client::builder()
+            .timeout(remote_timeout)
+            .connect_timeout(REMOTE_CONNECT_TIMEOUT)
             .build()
             .map_err(|e| RiotError::Http(e.to_string()))?;
 
@@ -277,9 +356,12 @@ impl RiotSession {
         self.remote(RemoteKind::Pd, Method::GET, path, None).await
     }
 
-    /// `PUT`s a JSON body to a path on `pd.{shard}.a.pvp.net` (used by
-    /// `names()`), with the same throttling/retry behavior as [`pd`](Self::pd).
-    pub async fn pd_put<T: DeserializeOwned>(
+    /// `PUT`s a JSON body to a path on `pd.{shard}.a.pvp.net`. `pub(crate)`,
+    /// not `pub`: its only caller is `names()` in `endpoints.rs`, and
+    /// keeping it crate-private closes off a way to bypass
+    /// [`VisiblePuuid`](crate::endpoints::VisiblePuuid) (ruling R16) by
+    /// PUTing straight to `/name-service/v2/players` with raw strings.
+    pub(crate) async fn pd_put<T: DeserializeOwned>(
         &self,
         path: &str,
         body: &Value,
@@ -457,14 +539,27 @@ async fn parse_json<T: DeserializeOwned>(resp: Response) -> Result<T, RiotError>
     serde_json::from_slice(&bytes).map_err(|e| RiotError::Decode(e.to_string()))
 }
 
+/// Parses `Retry-After` as a plain number of seconds (Riot doesn't use the
+/// HTTP-date form). Returns `None` for anything non-finite or negative
+/// (`"inf"`, `"nan"`, a malformed header) so the caller falls back to its
+/// own escalating backoff instead of feeding a bogus value to
+/// [`Throttle::hold_for`](crate::throttle::Throttle::hold_for) — which
+/// would otherwise be the last line of defense against a value that can't
+/// become a valid `Duration`. A huge-but-finite value is clamped to
+/// [`MAX_RETRY_AFTER_SECS`] rather than trusted outright.
 fn retry_after_seconds(resp: &Response) -> Option<f64> {
-    resp.headers()
+    let raw: f64 = resp
+        .headers()
         .get(RETRY_AFTER)?
         .to_str()
         .ok()?
         .trim()
-        .parse::<f64>()
-        .ok()
+        .parse()
+        .ok()?;
+    if !raw.is_finite() || raw < 0.0 {
+        return None;
+    }
+    Some(raw.min(MAX_RETRY_AFTER_SECS))
 }
 
 /// Client version, in priority order (ruling R17):

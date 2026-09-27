@@ -11,10 +11,25 @@
 
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
 use crate::session::{RiotError, RiotSession};
+
+/// Deserializes a field that Riot sometimes sends as an explicit JSON
+/// `null` rather than omitting it (per techchrism's `valorant-api-types`
+/// zod schemas — e.g. match-details' `teams`/`roundResults`, both
+/// `.nullable()` — and Scout's own `(r.get("QueueSkills") or {})`-style
+/// guards) into that type's `Default` instead of failing the whole
+/// response. `#[serde(default)]` alone only covers a field that's
+/// *missing*; this also covers one that's *present but null*.
+fn null_to_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
 
 // ---------------------------------------------------------------------
 // VisiblePuuid — ruling R16
@@ -178,13 +193,23 @@ pub struct SeasonalInfo {
     pub number_of_games: i64,
     #[serde(rename = "WinsByTier")]
     pub wins_by_tier: Option<HashMap<String, i64>>,
-    #[serde(rename = "LeaderboardRank")]
-    pub leaderboard_rank: i64,
+    /// Not in the brief's field list and not consumed by this crate yet;
+    /// kept `Option` (rather than a plain `i64`) so an absent value can't
+    /// fail the whole `PlayerMmrResponse` decode.
+    #[serde(rename = "LeaderboardRank", default)]
+    pub leaderboard_rank: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct QueueSkill {
-    #[serde(rename = "SeasonalInfoBySeasonID")]
+    /// Scout null-guards this exact field (`(... or {}).get("SeasonalInfoBySeasonID")) or {}`
+    /// in `live_match.py`) — defaults to empty on a missing *or* explicit
+    /// `null` value rather than failing the decode.
+    #[serde(
+        rename = "SeasonalInfoBySeasonID",
+        default,
+        deserialize_with = "null_to_default"
+    )]
     pub seasonal_info_by_season_id: HashMap<String, SeasonalInfo>,
 }
 
@@ -192,7 +217,10 @@ pub struct QueueSkill {
 pub struct PlayerMmrResponse {
     #[serde(rename = "Subject")]
     pub subject: String,
-    #[serde(rename = "QueueSkills")]
+    /// Scout null-guards this exact field (`r.get("QueueSkills") or {}` in
+    /// `live_match.py`) — same treatment as
+    /// [`QueueSkill::seasonal_info_by_season_id`].
+    #[serde(rename = "QueueSkills", default, deserialize_with = "null_to_default")]
     pub queue_skills: HashMap<String, QueueSkill>,
 }
 
@@ -273,7 +301,7 @@ pub struct RoundResult {
     pub player_stats: Vec<PlayerRoundStats>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchPlayerStats {
     pub score: i64,
@@ -292,7 +320,12 @@ pub struct MatchPlayer {
     pub team_id: String,
     pub party_id: String,
     pub character_id: String,
-    pub stats: MatchPlayerStats,
+    /// `.nullable()` in techchrism's `valorant-api-types` (`MatchDetails.ts`
+    /// — a player can apparently have no `stats` at all, e.g. an observer
+    /// or a very early surrender), so this must not fail the whole
+    /// `MatchDetailsResponse` decode when it's `null`.
+    #[serde(default)]
+    pub stats: Option<MatchPlayerStats>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -306,7 +339,12 @@ pub struct MatchTeam {
 #[serde(rename_all = "camelCase")]
 pub struct MatchDetailsResponse {
     pub players: Vec<MatchPlayer>,
+    /// `.nullable()` in `MatchDetails.ts` — defaults to empty rather than
+    /// failing the decode when Riot sends `null`.
+    #[serde(default, deserialize_with = "null_to_default")]
     pub teams: Vec<MatchTeam>,
+    /// `.nullable()` in `MatchDetails.ts` — same treatment as `teams`.
+    #[serde(default, deserialize_with = "null_to_default")]
     pub round_results: Vec<RoundResult>,
 }
 
@@ -330,8 +368,11 @@ pub struct PartyMember {
     pub player_identity: PlayerIdentity,
     #[serde(rename = "IsOwner")]
     pub is_owner: Option<bool>,
-    #[serde(rename = "IsReady")]
-    pub is_ready: bool,
+    /// Not in the brief's field list and not consumed by this crate yet;
+    /// kept `Option` so an absent value can't fail the whole
+    /// `PartyResponse` decode.
+    #[serde(rename = "IsReady", default)]
+    pub is_ready: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -340,9 +381,16 @@ pub struct PartyResponse {
     pub id: String,
     #[serde(rename = "Members")]
     pub members: Vec<PartyMember>,
-    #[serde(rename = "State")]
-    pub state: String,
-    #[serde(rename = "EligibleQueues")]
+    /// Not in the brief's field list and not consumed by this crate yet;
+    /// kept `Option` so an absent value can't fail the whole
+    /// `PartyResponse` decode.
+    #[serde(rename = "State", default)]
+    pub state: Option<String>,
+    /// Not in the brief's field list and not consumed by this crate yet;
+    /// `#[serde(default)]` (an empty `Vec`, not `Option`) is the
+    /// equivalent "an absent field can't blank the whole response"
+    /// guard for a collection.
+    #[serde(rename = "EligibleQueues", default)]
     pub eligible_queues: Vec<String>,
 }
 
@@ -369,8 +417,11 @@ pub struct NameServiceEntry {
     pub game_name: String,
     #[serde(rename = "TagLine")]
     pub tag_line: String,
-    #[serde(rename = "DisplayName")]
-    pub display_name: String,
+    /// Not in the brief's field list (`game_name`/`tag_line` already give
+    /// the Riot ID display) and not consumed by this crate yet; kept
+    /// `Option` so an absent value can't fail the whole `names()` decode.
+    #[serde(rename = "DisplayName", default)]
+    pub display_name: Option<String>,
 }
 
 // ---------------------------------------------------------------------
@@ -430,6 +481,11 @@ impl RiotSession {
         self.pd(&format!("/mmr/v1/players/{puuid}")).await
     }
 
+    /// Ruling R25: always filters to the `competitive` queue. Without
+    /// `queue=competitive`, Riot returns *every* queue's matches mixed
+    /// together, and there is no reliable way to filter them back apart
+    /// after the fact (queue isn't part of this endpoint's per-match
+    /// fields — see [`CompetitiveUpdateMatch`]).
     pub async fn comp_updates(
         &self,
         puuid: &str,
@@ -439,6 +495,7 @@ impl RiotSession {
         let query = query_string(&[
             ("startIndex", start.map(|v| v.to_string())),
             ("endIndex", end.map(|v| v.to_string())),
+            ("queue", Some("competitive".to_string())),
         ]);
         self.pd(&format!(
             "/mmr/v1/players/{puuid}/competitiveupdates{query}"

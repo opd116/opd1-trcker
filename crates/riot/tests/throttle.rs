@@ -100,3 +100,55 @@ async fn throttle_take_after_hold_expires_is_fast() {
         "take() after the hold expired should be near-instant, got {elapsed:?}"
     );
 }
+
+#[tokio::test]
+async fn hold_for_never_panics_on_malformed_seconds() {
+    // A malformed/huge `Retry-After` (or any other bogus caller value)
+    // must never reach `Duration::from_secs_f64`/`Instant + Duration`
+    // unclamped — those panic on non-finite or out-of-range input, and
+    // release builds use `panic = "abort"`. This test's assertion *is*
+    // that none of these calls panic (a huge/infinite value clamps to a
+    // real 30s hold internally, per `clamp_hold_secs`'s unit tests in
+    // `src/throttle.rs` — we don't wait it out here, just prove
+    // constructing it doesn't blow up).
+    let throttle = Throttle::new(1000.0, 1000.0);
+    throttle.hold_for(f64::INFINITY);
+    throttle.hold_for(f64::NAN);
+    throttle.hold_for(-5.0);
+    throttle.hold_for(1_000_000.0);
+
+    // NaN/negative hold_for calls above are no-ops (clamp to 0s and never
+    // exceed the already-active hold), so a *separate*, never-held
+    // throttle should still take its burst tokens immediately — proving
+    // the throttle type as a whole stays in a normal, usable state.
+    let fresh = Throttle::new(5.0, 5.0);
+    let start = Instant::now();
+    fresh.take().await;
+    assert!(start.elapsed() < Duration::from_millis(50));
+}
+
+#[tokio::test]
+async fn new_with_non_positive_or_nan_rps_does_not_panic() {
+    // `rps <= 0` divides-by-zero (or by a negative number) when computing
+    // how long to wait for the next token, which used to panic. Burst
+    // tokens must still be handed out immediately regardless.
+    for bad_rps in [0.0, -1.0, f64::NAN, f64::NEG_INFINITY] {
+        let throttle = Throttle::new(5.0, bad_rps);
+        let start = Instant::now();
+        for _ in 0..5 {
+            throttle.take().await;
+        }
+        assert!(
+            start.elapsed() < Duration::from_millis(200),
+            "burst tokens should still be handed out immediately for rps={bad_rps}"
+        );
+    }
+}
+
+#[test]
+fn new_with_negative_or_nan_burst_does_not_panic() {
+    // Construction alone (no `take()`/`hold_for()`) must never panic,
+    // regardless of how nonsensical the arguments are.
+    let _ = Throttle::new(-5.0, 10.0);
+    let _ = Throttle::new(f64::NAN, 10.0);
+}

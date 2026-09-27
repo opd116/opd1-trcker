@@ -5,8 +5,18 @@ edition = "2021"
 
 [dependencies]
 opd1-core = { path = "../core" }
-reqwest = { version = "0.13", default-features = false, features = ["rustls", "json"] }
-tokio = { version = "1", features = ["rt", "macros", "time"] }
+# `rustls-no-provider` (rather than `rustls`, which pulls the aws-lc-rs
+# backend — a heavier binary and a cmake/NASM build dependency that's a
+# real risk on `windows-latest` CI) + a directly-depended, `ring`-only
+# `rustls` so we can install the ring crypto provider ourselves at
+# `RiotSession::connect()` time. No `http2`/`http3`/`charset` — none of
+# those are needed for plain JSON GET/PUT calls.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# Only `time` (for `throttle.rs`'s `sleep`) — the library itself never
+# builds a runtime or uses `#[tokio::main]`/`#[tokio::test]`, so `rt` and
+# `macros` belong in [dev-dependencies] only.
+tokio = { version = "1", features = ["time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 base64 = "0.22"

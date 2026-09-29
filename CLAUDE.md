@@ -8,6 +8,9 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Reference screenshots (content only, never copy their styling): `docs/refs/`
 - Asset lookup table: `docs/refs/valorant-api-assets.md`
 - Implementation plan: `docs/plan.md`
+- Visual design (source of truth): the user's Claude Design file `.superpowers/design/cd-v8/project/OPD1 Tracker v8.dc.html` + `support.js` (project https://claude.ai/design/p/f22fa2f6-6e0d-4aad-ade4-7dda498b5c0a; original zip in the repo root). Rebuild it in Svelte; match its layout, sizes, colours and tooltips. The HTML/JS is the truth; its screens/*.png may be stale. Earlier rounds (local v1–v8, ارشيف/, the Lovable zip) are history only.
+- Precedence: a newer dated user decision (requirements-raw.md or the design file) beats an older rule here; update this file in the same change. The design never overrides Window, Hidden names, Smart data, Hard limits or "No status text". Take any other clash to the user.
+- Build spec: `docs/design-spec.md` (sizes, states, tokens and tests derived from the design; its [C]/[bound] items are Claude calls R74–R86 in `docs/DECISIONS.md`). Keep it in step with the code. It outranks the design file only for those [C]/[bound] gap-fills; if it disagrees with the design on something the design covers, the design wins and the spec is fixed, and any change to a visual the design covers goes to the user first (R92).
 
 ## Working with the user
 
@@ -16,7 +19,9 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Before a task a skill could help with, search for the best-in-class skill (including community skills via `npx skills find`) and load it.
 - Use `graft` for codebase context once code exists (`npx @nanonets/graft init --agents claude`).
 - Before context gets long, or at the end of a phase, ask the user to run `/handoff` (it's user-invoked only) so nothing important is lost. Keep `docs/requirements-raw.md` updated with every new decision as it's made.
-- Design decisions not covered by the spec are Claude's call. Don't ask the user about typography or spacing. Show them the result.
+- Anything the design file doesn't cover (Agent Select states, Lobby, Closed, Hidden Player, edge states) is Claude's call, built only from the design file's own parts and tokens. Don't ask the user about typography or spacing. Show them the result.
+- Every step is committed with a clear conventional message and pushed to the private GitHub repo right away (2026-09-29). Commit explicit paths only (`git commit -m "…" -- <paths>`); never commit `.superpowers/` or root `*.zip`.
+- Repo files: README.md, CHANGELOG.md (Keep a Changelog; the release section is filled at release from `git log`), docs/ARCHITECTURE.md, docs/DECISIONS.md, docs/design-spec.md, AGENTS.md, LICENSE (proprietary), THIRD-PARTY-NOTICES.md, .editorconfig, .gitattributes.
 
 ## Stack (decided, don't revisit without the user)
 
@@ -33,6 +38,8 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - **GitHub:** private repo only. No public repo, no auto-updater.
 - **GitHub Actions** (`windows-latest`) builds the NSIS `Setup.exe` as a workflow artifact. The user downloads it and sends it to friends manually.
 - **The installer must remove the previous version's program files, settings, and image cache.** It must NOT delete the SQLite DB. DB schema changes go through versioned, automatic migrations (`PRAGMA user_version`).
+- DB schema: every change is a new versioned migration appended to `MIGRATIONS` (`PRAGMA user_version`); existing migrations are frozen, migration 1 included (R89, 2026-09-29). No self-heal code, no in-place edits.
+- The uninstaller's optional "Delete app data" checkbox (off by default) removes everything, the DB included — accepted as the user's explicit choice (2026-09-29). A normal reinstall never touches the DB.
 - **Unsigned build.** Friends click through SmartScreen "More info → Run anyway". That's accepted.
 
 ## Window
@@ -45,27 +52,36 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 **Tabs:** `Live` and `My Stats`. The app auto-switches to `Live` when a match is found (Agent Select).
 
 **When VALORANT is closed:**
-- The app opens on `My Stats` with the last saved data.
+- The app opens on `My Stats` with the last saved data. (Until My Stats is built, open on Live with the user's own card — R71.)
 - `Live` shows only the user's own card.
 - Everything refreshes silently when the game opens.
 
-**Live stages** (the player card is identical in all three; only who's shown and the layout change):
-- **Lobby:** the user's party, 1–5 players. Layout and card size adapt to the count. Show Average Party Rank when there are 2 or more players. Queueing changes nothing: no timer, no searching indicator.
-- **Agent Select:** the user's 5 teammates only. **No scrolling.**
-- **In Game:** my team as 5 stacked cards on the left, enemy team as 5 stacked cards on the right, map image + name above (sketch: `docs/refs/ingame-layout-sketch.png`). Enemy ranks and stats are shown. **No scrolling.** No live match stats or round score.
-- **Match end:** return straight to Lobby. No post-match screen in v1.
+**Live stages** — one page in the In Game layout of the design file; the card is identical everywhere. **No scrolling** in any Live stage.
+- **Lobby:** me + my party (1–5) stacked in the left column (same card size as In Game; the rest of the column stays empty — R75). Average Party Rank when 2+ players (placed in the top bar where the map sits in game). Queueing changes nothing: no timer, no searching indicator.
+- **Agent Select:** my team (5) in the left column; the right column shows 5 empty card-shaped slots with a light dashed frame and no text. Map name + image in the top bar as soon as pregame knows the map.
+- **In Game:** my team left, enemy team right (ranks and stats shown). Map name + image at the right end of the top bar. No live match stats or round score.
+- **Deathmatch / FFA:** keep the Lobby (party) view; don't fetch or show the other players. Party detection still uses DM matches from history.
+- **Match end:** return straight to Lobby. No automatic post-match screen.
 
 **Player card fields:**
 - Player Card image
 - Riot ID with the Tag visually distinct
+- Long names: only the name part truncates with `…`; the tag is never cut; the ⟲ badge has a fixed reserved slot; hovering a truncated name shows the full `Name#TAG` (tooltip only when truncated).
 - Account Level
-- Current Rank icon + exact RR
-- Previous Act Rank
-- Peak Rank icon + the act it was reached in (short label like `E8 A3 · 1y`), where the time is since that act ended, not the day the peak was hit. For the current act, say "This Act". Hover shows the full act name and dates.
+- Current Rank: icon + tier name + exact RR
+- Previous Act Rank: icon + tier name (`—` if none)
+- Peak Rank: icon + tier name + the act it was reached in (`V26 A4 · 1mo`, `E9 A3 · 1y`); time is since that act ended, not the day the peak was hit. Current act → `This Act`. Hover shows the full act name and dates (the design's tooltip shows dates only — add the act name). If the peak tier was reached in several acts, show the most recent (R7).
 - K/D and HS% from the last 5 Competitive matches
 - Current-act Win Rate
-- Last 5 Competitive results, newest first, each showing only a W/L (or draw) marker. RR change and time since are on hover (user decision 2026-09-27)
-- Agent **head icon** (`displayIcon`) only after the agent is selected. Never show a placeholder agent.
+- Last 5 Competitive results as W / L / D markers only, oldest → newest left to right. The newest (rightmost) is emphasised as in the design (filled chip + arrow under the row; "Underline" option = underline instead). With fewer than 5 matches, empty dashed slots sit on the left. RR change and time since are on hover.
+- Agent **head icon** (`displayIcon`) only after the agent is locked (hovering doesn't count — R99). Never show a placeholder agent.
+
+**Card indicators** (one meaning, one look, each explained by a tooltip; no visible legend):
+- Outline around the card = the user's own card.
+- Coloured right-edge stripe + party tab = detected party (dashed/outlined = likely, solid/filled = confirmed). Tooltip `Party · likely` / `Party · confirmed`.
+- ⟲ + count = past matches with the user (see Encounters).
+- Eye-off icon + dotted-underlined name + tag = hidden player's name remembered from the user's own finished match. Tooltip `Hidden name · known from your match` + map · date.
+- Eye-off icon + italic agent name = hidden name. Tooltip `Hidden name`.
 
 **Player details** (click any card in any stage; **scrolling allowed**):
 - **Back** button.
@@ -73,6 +89,8 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - **Top 3 Teammates** for the current act, with full names and shared match count. Computed from the last 20 current-act comp matches plus any older matches already in the DB.
 - **Loadout:** Vandal, Phantom, Operator, and Sheriff skins, in the equipped chroma.
 - Encounter history with the user (see Smart data).
+- Hero stats: Win%, Games, W / L for the current act; K/D and HS% from the last ≤20 current-act competitive matches (tooltip `Last N competitive · this act`) (R116, user 2026-09-29).
+- Clicking a recent match or an encounter row opens **Match Details** (the design's scoreboard: ACS, K/D/A, +/−, ADR, HS%, half scores, rank per player). Hidden-name rules apply inside it (see Hidden names).
 
 **My Stats** (the user's own account; **scrolling allowed**; period is the current act):
 1. Rank card: tier, RR, W–L, RR to next tier, net RR, average win/loss RR, recent rank changes
@@ -84,31 +102,41 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 7. Win rate by weekday and by time of day
 8. Auto insights (best/worst map, time of day, weekday vs weekend, RR economy, last 7 days)
 
+**Later (build only when the user asks):** Match History page, Settings page. Tabs stay `Live` / `My Stats` until then.
+
 ## Design rules
 
 - English UI only. Dark, calm, low-glare palette with one accent. No bright white surfaces, and body text is off-white.
-- **Never shrink fonts to make things fit.** Minimum 12px. Key numbers are larger. Use tabular numerals for stats.
+- Follow the design file's type scale (12–28px; tabular numerals for stats). Never below 12px, never shrink fonts to fit. Card size follows the design; only the 1000×800 window is fixed.
 - **No text may overlap or crowd numbers.** Every label/value pair gets its own space and a consistent alignment.
 - **No status text or badges anywhere:** no "Offline", "Last updated", "BETA", "Saved data", "refresh unavailable".
 - Loading uses neutral skeleton shapes with no text. Missing values show `—`.
 - Put extra detail behind hover tooltips instead of adding visible text.
+- Stat scope is not printed on screen (no "Last 5 comp" / "This Act" headings). Each stat's tooltip names its scope: K/D and HS% → "Last 5 competitive"; Win% → "This act · W · L · games"; last 5 → per-match tooltip. The Peak label `This Act` stays.
 - The `docs/refs/` screenshots are the *content* reference only. The user dislikes their fonts and number/label arrangement.
 - **Verify every screen before showing the user.** Render it at exactly 1000×800 in a headless browser, screenshot it, and check for overlap, clipping, and scrollbars on the no-scroll stages.
+- Fonts are bundled locally (latin-subset woff2, only weights used). No runtime requests to Google Fonts or any CDN; images go through the Rust img cache (CSP stays strict).
+- The app ships the design file's options at their defaults (tone Neutral, accent #e3a54f, results Green / Red, fill Tinted, font Barlow, last-5 Arrow). Switching them belongs to the later Settings page.
 
 ## Hidden names (incognito)
 
 - If a player's identity is hidden, hide **only** the Riot ID + Tag. Every other field stays visible.
-- **Before agent select:** show `Hidden Player`.
-- **After agent select:** show the agent name, with no tag.
-- **Exception:** if the DB already knows that player's name from a finished match **the user personally played in** (where the name was shown after the match), show that name during live stages in a distinct color/style.
+- Until the player locks an agent (only possible in Agent Select): `Hidden Player` in the hidden-name style, empty agent slot (never a placeholder agent).
+- Once the player locks an agent (hovering doesn't count — R99, user 2026-09-29): the agent name, no tag.
+- The user's own card always shows the user's own name (from the local chat session, never name-service) (R43/R49).
+- These rules apply everywhere a live player appears, including Player Details (Top 3 Teammates, encounter rows) and Match Details (R18).
+- Account level shows `—` only when Riot itself withholds it (HideAccountLevel) — a separate player setting, not part of the hidden name — except on the user's own card, which always shows the user's own level (R100).
+- **Exception:** if the DB already knows that player's name from a finished match **the user personally played in** (where the name was shown after the match), show that name during live stages in the remembered-name style (Card indicators).
 - **Never request a hidden player's name** from any endpoint (name-service or otherwise). Never take names from other players' match histories.
 - After a match ends, show names as the client/match-details shows them.
+- Match Details: in every view, a player incognito on the live screen now shows as on their card: the remembered name when the user's own finished match knows it, else the agent name (R93). Otherwise, a match the user played shows names as match-details gives them; in a match the user did not play, a player with no stored name shows as the agent name (or the remembered name). Names from matches the user did not play are never stored as known names (R74 — match-details has no incognito flag; a check of the user's DB after the first real test will confirm whether Riot hides those names, R94).
 
 ## Smart data (SQLite)
 
 - **Players are keyed by PUUID**, so they're recognized even after a name change.
 - **Match details are immutable:** fetch once, store forever, never refetch. Store extracted compact rows (~1–2KB per match), not raw JSON.
 - **Sync, don't refetch:** for a known player, fetch the history list (one cheap call), diff it against stored match IDs, and fetch only the new matches. No new comp match means rank is unchanged, so skip the MMR call.
+- **Own history backfill (R101, user 2026-09-29):** on connect and after each match, page the user's own match history (all queues) back to the last match a finished backfill confirmed, and fetch match-details only for unknown ids. Throttled, lowest priority, behind live cards. The first run stops at the current act start or 200 matches (Claude's lightness bound, not the user's).
 - **Assets** (valorant-api JSON + images) are cached on disk after first download.
 - **Retention:** keep everything. The DB is the app's memory and survives reinstalls.
 
@@ -119,11 +147,14 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Link transitively: A–B plus B–C means A–B–C.
 - Display is a per-group color stripe on the card: dashed for likely, solid for confirmed. No text.
 - The user's own party comes directly from the client.
+- Players on opposite teams in the current match are never linked.
+- Marks come only from history synced in this session; a stripe may appear a few seconds after the card.
+- Each group has its own colour across the screen. The design has 2 party colours; extend to 4 per accent (max real groups: 2 ally + 2 enemy, since the user's own party is excluded), distinct from W/L colours and the accent.
 
 **Encounters:**
 - Count every past match shared with the user, with or against.
-- The card shows a small ⟲ icon with the count. Hover shows `N with · M against`.
-- The details view lists the shared matches: map, date, with/against, result.
+- The card shows ⟲ + count only when the count is above 0. Hover: `N with · M against`.
+- Player Details lists shared matches as the design shows them (map, date, side, both players' agent + rank), with the result from the user's side under the header `Your result`. Clicking a row opens Match Details.
 - **The user and their own party members get no party stripe and no encounter badge.**
 
 ## Riot local API essentials
@@ -148,4 +179,4 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 ## Hard limits
 
 - No instalock, no agent-select automation, no dodge, no writes to the Riot client beyond what reading requires.
-- **Demo/fake-data mode is a temporary dev tool only.** It covers Lobby / Queue / Agent Select / In Game, lives behind a dev-only flag (`import.meta.env.DEV` + a Rust `demo` cargo feature), must not affect layout, and is compiled out of release builds. Never design around it.
+- **Demo/fake-data mode is a temporary dev tool only.** It covers Lobby / Queue / Agent Select / In Game, lives behind a dev-only flag, `import.meta.env.DEV` only (no Rust feature, R40), must not affect layout, and is compiled out of release builds. Never design around it.

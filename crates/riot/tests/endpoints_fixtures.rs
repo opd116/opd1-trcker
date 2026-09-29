@@ -90,7 +90,24 @@ fn match_details_deserializes() {
     let red_team = parsed.teams.iter().find(|t| t.team_id == "Red").unwrap();
     assert!(!red_team.won);
 
-    assert_eq!(parsed.round_results.len(), 1);
+    // Phase 2 fields (techchrism `MatchDetails.ts`): the game length, each
+    // player's rank during the match, and who won which round.
+    assert_eq!(parsed.match_info.game_length_millis, Some(2_280_000));
+    assert_eq!(me.competitive_tier, Some(15));
+    let rounds: Vec<(Option<i64>, Option<&str>)> = parsed
+        .round_results
+        .iter()
+        .map(|r| (r.round_num, r.winning_team.as_deref()))
+        .collect();
+    assert_eq!(
+        rounds,
+        [
+            (Some(0), Some("Blue")),
+            (Some(11), Some("Red")),
+            (Some(12), Some("Blue"))
+        ]
+    );
+    assert_eq!(parsed.round_results.len(), 3);
     let round = &parsed.round_results[0];
     let my_round_stats = round
         .player_stats
@@ -119,6 +136,9 @@ fn match_details_deserializes_when_stats_teams_and_round_results_are_null() {
     assert_eq!(parsed.players[0].stats, None);
     assert!(parsed.teams.is_empty());
     assert!(parsed.round_results.is_empty());
+    // None of the Phase 2 fields is in this payload: all default to `None`.
+    assert_eq!(parsed.match_info.game_length_millis, None);
+    assert_eq!(parsed.players[0].competitive_tier, None);
 }
 
 #[test]

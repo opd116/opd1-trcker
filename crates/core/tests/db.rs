@@ -5,7 +5,8 @@ use std::path::Path;
 
 use opd1_core::db::open_db;
 use opd1_core::db::repo::{
-    CompUpdateRow, HistoryEntry, Match, MatchPlayer, MatchTeam, MmrSnapshot, Player, Repo,
+    self, CompUpdateRow, EncounterRow, HistoryEntry, Match, MatchPlayer, MatchTeam, MmrSnapshot,
+    Player, Repo,
 };
 
 fn repo_in_memory() -> Repo {
@@ -22,6 +23,7 @@ fn sample_match(id: &str, start_ms: i64, winning_team: Option<&str>) -> Match {
         winning_team: winning_team.map(str::to_string),
         is_ranked: true,
         rounds_played: Some(24),
+        game_length_ms: None,
     }
 }
 
@@ -41,6 +43,8 @@ fn sample_player(puuid: &str, team_id: &str, game_name: &str, tag_line: &str) ->
         ls: 5,
         game_name: Some(game_name.to_string()),
         tag_line: Some(tag_line.to_string()),
+        competitive_tier: None,
+        damage: None,
     }
 }
 
@@ -58,7 +62,7 @@ fn migrations_idempotent() {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 1);
+        assert_eq!(version, 2);
     }
 
     // Reopening an already-migrated file must succeed, not re-run schema
@@ -67,12 +71,115 @@ fn migrations_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 1);
+    assert_eq!(version, 2);
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM players", [], |r| r.get(0))
         .unwrap();
     assert_eq!(count, 0);
+}
+
+/// Migration 1 is frozen (R89): it is the schema exactly as it stood at
+/// `c9ad7f4`. A DB from an earlier build has run it; editing it would make
+/// fresh and upgraded DBs differ. Every later change is a new migration.
+#[test]
+fn migration1_is_frozen() {
+    assert_eq!(
+        include_str!("../src/db/schema.sql"),
+        include_str!("fixtures/schema_v1.sql"),
+        "migration 1 (schema.sql) is frozen: append a new migration instead"
+    );
+}
+
+fn column_names(conn: &rusqlite::Connection, table: &str) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .unwrap();
+    let names = stmt.query_map([], |r| r.get::<_, String>(1)).unwrap();
+    names.map(Result::unwrap).collect()
+}
+
+fn user_version(conn: &rusqlite::Connection) -> i64 {
+    conn.query_row("PRAGMA user_version", [], |r| r.get(0))
+        .unwrap()
+}
+
+#[test]
+fn fresh_db_has_phase2_columns_at_user_version_2() {
+    let conn = open_db(Path::new(":memory:")).unwrap();
+    assert_eq!(user_version(&conn), 2);
+    for (table, column) in [
+        ("matches", "game_length_ms"),
+        ("match_teams", "rounds_won_h1"),
+        ("match_players", "competitive_tier"),
+        ("match_players", "damage"),
+    ] {
+        assert!(
+            column_names(&conn, table).iter().any(|c| c == column),
+            "{table}.{column} missing"
+        );
+    }
+}
+
+#[test]
+fn v1_db_upgrades_to_user_version_2() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    {
+        // A DB as an earlier build left it: migration 1 only, one match.
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(include_str!("fixtures/schema_v1.sql"))
+            .unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version = 1;
+             INSERT INTO matches VALUES ('old', 'Ascent', 'competitive', 1000, 'Blue', 1, 24);
+             INSERT INTO match_teams VALUES ('old', 'Blue', 1, 13);
+             INSERT INTO match_players VALUES
+                ('old', 'self', 'Blue', NULL, 'jett', 20, 15, 5, 4000, 24, 10, 20, 5, 'Self', '111');",
+        )
+        .unwrap();
+        for (table, column) in [("matches", "game_length_ms"), ("match_players", "damage")] {
+            assert!(!column_names(&conn, table).iter().any(|c| c == column));
+        }
+    }
+
+    let conn = open_db(tmp.path()).expect("upgrade runs migration 2 only");
+    assert_eq!(user_version(&conn), 2);
+    let old: [Option<i64>; 4] = conn
+        .query_row(
+            "SELECT m.game_length_ms, t.rounds_won_h1, p.competitive_tier, p.damage
+             FROM matches m
+             JOIN match_teams t ON t.match_id = m.match_id
+             JOIN match_players p ON p.match_id = m.match_id
+             WHERE m.match_id = 'old'",
+            [],
+            |r| Ok([r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?]),
+        )
+        .unwrap();
+    assert_eq!(old, [None; 4], "the old rows keep NULL in the new columns");
+
+    let repo = Repo::new(conn);
+    let mut m = sample_match("new", 2_000, Some("Blue"));
+    m.game_length_ms = Some(2_280_000);
+    let mut blue = team("Blue", true, Some(13));
+    blue.rounds_won_h1 = Some(7);
+    let mut me = sample_player("self", "Blue", "Self", "111");
+    me.competitive_tier = Some(15);
+    me.damage = Some(3_100);
+    repo.upsert_match(&m, &[blue], &[me]).unwrap();
+    let stored = repo.match_rows("new").unwrap().unwrap();
+    assert_eq!(stored.info.game_length_ms, Some(2_280_000));
+    assert_eq!(stored.teams[0].rounds_won_h1, Some(7));
+    assert_eq!(stored.players[0].competitive_tier, Some(15));
+    assert_eq!(stored.players[0].damage, Some(3_100));
+    drop(repo);
+
+    // A second open runs no migration: `ADD COLUMN` twice would fail.
+    let conn = open_db(tmp.path()).expect("reopen is a no-op");
+    assert_eq!(user_version(&conn), 2);
+    let stored: i64 = conn
+        .query_row("SELECT COUNT(*) FROM matches", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(stored, 2);
 }
 
 #[test]
@@ -139,11 +246,13 @@ fn upsert_match_stores_teams_and_players() {
             team_id: "Blue".into(),
             won: true,
             rounds_won: Some(13),
+            rounds_won_h1: None,
         },
         MatchTeam {
             team_id: "Red".into(),
             won: false,
             rounds_won: Some(9),
+            rounds_won_h1: None,
         },
     ];
     let players = vec![
@@ -281,6 +390,7 @@ fn team(id: &str, won: bool, rounds_won: Option<i64>) -> MatchTeam {
         team_id: id.into(),
         won,
         rounds_won,
+        rounds_won_h1: None,
     }
 }
 
@@ -750,4 +860,361 @@ fn app_state_get_set_round_trip() {
         .query_row("SELECT COUNT(*) FROM app_state", [], |r| r.get(0))
         .unwrap();
     assert_eq!(rows, 1);
+}
+
+// ---------------------------------------------------------------------
+// Task 15: Phase 2 columns, R81 tier rule, R88 comp_matches, encounters
+// ---------------------------------------------------------------------
+
+fn comp_update(match_id: &str, start_ms: i64, tier_after: i64) -> CompUpdateRow {
+    CompUpdateRow {
+        match_id: match_id.into(),
+        season_id: "act".into(),
+        tier_after,
+        tier_before: Some(tier_after),
+        rr_after: 40,
+        rr_earned: 10,
+        map_id: None,
+        start_ms,
+    }
+}
+
+#[test]
+fn upsert_match_round_trips_phase2_columns() {
+    let repo = repo_in_memory();
+    let mut m = sample_match("m1", 1_000, Some("Blue"));
+    m.game_length_ms = Some(2_280_000);
+    let mut blue = team("Blue", true, Some(13));
+    blue.rounds_won_h1 = Some(8);
+    let red = team("Red", false, Some(9)); // rounds_won_h1 stays NULL
+    let mut me = sample_player("self", "Blue", "Self", "111");
+    me.competitive_tier = Some(21);
+    me.damage = Some(3_456);
+    let other = sample_player("other", "Red", "Other", "222"); // both stay NULL
+    repo.upsert_match(&m, &[blue.clone(), red], &[me.clone(), other])
+        .unwrap();
+
+    let stored = repo.match_rows("m1").unwrap().unwrap();
+    assert_eq!(stored.info.game_length_ms, Some(2_280_000));
+    let h1: Vec<(&str, Option<i64>)> = stored
+        .teams
+        .iter()
+        .map(|t| (t.team_id.as_str(), t.rounds_won_h1))
+        .collect();
+    assert_eq!(h1, [("Blue", Some(8)), ("Red", None)]);
+    let by_puuid = |p: &str| stored.players.iter().find(|x| x.puuid == p).unwrap();
+    assert_eq!(
+        (by_puuid("self").competitive_tier, by_puuid("self").damage),
+        (Some(21), Some(3_456))
+    );
+    assert_eq!(
+        (by_puuid("other").competitive_tier, by_puuid("other").damage),
+        (None, None)
+    );
+
+    // Replaying the upsert overwrites the columns like the others.
+    let mut me2 = me;
+    me2.damage = Some(9);
+    m.game_length_ms = Some(1);
+    repo.upsert_match(&m, &[blue], &[me2]).unwrap();
+    let again = repo.match_rows("m1").unwrap().unwrap();
+    assert_eq!(again.info.game_length_ms, Some(1));
+    assert_eq!(
+        again
+            .players
+            .iter()
+            .find(|p| p.puuid == "self")
+            .unwrap()
+            .damage,
+        Some(9)
+    );
+}
+
+#[test]
+fn comp_matches_tier_prefers_match_tier_then_comp_update() {
+    let repo = repo_in_memory();
+    // A promotion game: Riot's at-match tier is 20, the RR row's tier
+    // after the match is 21 (R81).
+    let mut promoted = sample_player("self", "Blue", "Self", "111");
+    promoted.competitive_tier = Some(20);
+    repo.upsert_match(
+        &sample_match("promo", 2_000, Some("Blue")),
+        &[],
+        &[promoted],
+    )
+    .unwrap();
+    // An older row without Riot's tier: the RR row's tier stands in.
+    repo.upsert_match(
+        &sample_match("legacy", 1_000, Some("Blue")),
+        &[],
+        &[sample_player("self", "Blue", "Self", "111")],
+    )
+    .unwrap();
+    repo.upsert_comp_updates(
+        "self",
+        &[
+            comp_update("promo", 2_000, 21),
+            comp_update("legacy", 1_000, 21),
+        ],
+    )
+    .unwrap();
+
+    let rows = repo.comp_matches("self", i64::MIN..i64::MAX, 10).unwrap();
+    let tiers: Vec<(&str, Option<i64>, Option<i64>)> = rows
+        .iter()
+        .map(|r| (r.match_id.as_str(), r.tier, r.tier_after))
+        .collect();
+    assert_eq!(
+        tiers,
+        [
+            ("promo", Some(20), Some(21)),
+            ("legacy", Some(21), Some(21))
+        ],
+        "tier = the at-match rank first; tier_after stays the RR row's, for My Stats' math"
+    );
+}
+
+/// Binds the parameters `COMP_MATCHES_SQL` expects (puuid, from, to,
+/// limit) and returns the `detail` column of each plan row.
+fn comp_matches_plan(conn: &rusqlite::Connection) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", repo::COMP_MATCHES_SQL))
+        .unwrap();
+    let rows = stmt
+        .query_map(rusqlite::params!["self", i64::MIN, i64::MAX, 8u32], |r| {
+            r.get::<_, String>(3)
+        })
+        .unwrap();
+    rows.map(Result::unwrap).collect()
+}
+
+#[test]
+fn comp_matches_has_no_correlated_subqueries() {
+    // R88: the player's rows are limited first, then joined. A correlated
+    // scalar subquery re-runs once per row of the whole competitive
+    // history; the join must read `match_teams` by key only.
+    let conn = open_db(Path::new(":memory:")).unwrap();
+    let plan = comp_matches_plan(&conn);
+    assert!(!plan.is_empty());
+    for detail in &plan {
+        assert!(
+            !detail.contains("CORRELATED"),
+            "correlated subquery in the plan: {detail}\nfull plan: {plan:#?}"
+        );
+    }
+    let team_reads: Vec<&String> = plan.iter().filter(|d| d.contains("match_teams")).collect();
+    assert!(
+        !team_reads.is_empty(),
+        "the plan must read match_teams: {plan:#?}"
+    );
+    for detail in team_reads {
+        assert!(
+            detail.starts_with("SEARCH"),
+            "match_teams is read by key, never scanned: {detail}"
+        );
+    }
+}
+
+#[test]
+fn comp_matches_limits_before_joining() {
+    let repo = repo_in_memory();
+    // 30 competitive matches, 13 - i' rounds lost so every row is distinct;
+    // the 27th has a third team, so it has no single opponent.
+    for i in 1..=30_i64 {
+        let start = i * 1_000;
+        let mut teams = vec![
+            team("Blue", true, Some(13)),
+            team("Red", false, Some(i % 12)),
+        ];
+        if i == 27 {
+            teams.push(team("Green", false, Some(4)));
+        }
+        repo.upsert_match(
+            &sample_match(&format!("m{i:02}"), start, Some("Blue")),
+            &teams,
+            &[sample_player("self", "Blue", "Self", "111")],
+        )
+        .unwrap();
+    }
+
+    let rows = repo.comp_matches("self", i64::MIN..i64::MAX, 8).unwrap();
+    let got: Vec<(String, Option<i64>, Option<i64>)> = rows
+        .iter()
+        .map(|r| (r.match_id.clone(), r.rounds_won, r.rounds_lost))
+        .collect();
+    let want: Vec<(String, Option<i64>, Option<i64>)> = (23..=30_i64)
+        .rev()
+        .map(|i| {
+            let lost = if i == 27 { None } else { Some(i % 12) };
+            (format!("m{i:02}"), Some(13), lost)
+        })
+        .collect();
+    assert_eq!(got, want, "the 8 newest, newest first, scores intact");
+    assert_eq!(
+        repo.comp_matches("self", i64::MIN..i64::MAX, 0).unwrap(),
+        [],
+        "limit 0 reads nothing"
+    );
+}
+
+#[test]
+fn encounters_rows_carry_agents_tiers_score_length() {
+    let repo = repo_in_memory();
+    // Against: self (Jett, tier 21 by Riot's match value) loses 10-13 to
+    // other (Reyna, tier 24 only from the RR row's tier after the match).
+    let mut m = sample_match("m1", 1_000, Some("Red"));
+    m.game_length_ms = Some(2_460_000);
+    let mut me = sample_player("self", "Blue", "Self", "111");
+    me.agent_id = Some("jett".into());
+    me.competitive_tier = Some(21);
+    let mut other = sample_player("other", "Red", "Other", "222");
+    other.agent_id = Some("reyna".into());
+    repo.upsert_match(
+        &m,
+        &[team("Blue", false, Some(10)), team("Red", true, Some(13))],
+        &[me, other],
+    )
+    .unwrap();
+    repo.upsert_comp_updates("other", &[comp_update("m1", 1_000, 24)])
+        .unwrap();
+    // With: same team, no length, no tiers, no teams stored.
+    let mut me2 = sample_player("self", "Blue", "Self", "111");
+    me2.agent_id = None;
+    repo.upsert_match(
+        &sample_match("m2", 2_000, Some("Blue")),
+        &[],
+        &[me2, sample_player("other", "Blue", "Other", "222")],
+    )
+    .unwrap();
+
+    let rows = repo.encounters("self", "other").unwrap().matches;
+    assert_eq!(rows.len(), 2);
+    assert_eq!(
+        rows[1],
+        EncounterRow {
+            match_id: "m1".into(),
+            map_id: "Ascent".into(),
+            start_ms: 1_000,
+            with: false,
+            self_won: Some(false),
+            rounds_won: Some(10),
+            rounds_lost: Some(13),
+            game_length_ms: Some(2_460_000),
+            self_agent_id: Some("jett".into()),
+            other_agent_id: Some("reyna".into()),
+            self_tier: Some(21),
+            other_tier: Some(24),
+        }
+    );
+    assert_eq!(
+        rows[0],
+        EncounterRow {
+            match_id: "m2".into(),
+            map_id: "Ascent".into(),
+            start_ms: 2_000,
+            with: true,
+            self_won: Some(true),
+            rounds_won: None,
+            rounds_lost: None,
+            game_length_ms: None,
+            self_agent_id: None,
+            other_agent_id: Some("jett".into()),
+            self_tier: None,
+            other_tier: None,
+        }
+    );
+}
+
+#[test]
+fn encounter_counts_equal_encounters_len() {
+    let repo = repo_in_memory();
+    assert_eq!(repo.encounter_counts("self", "other").unwrap(), (0, 0));
+    for (id, start, other_team) in [
+        ("m1", 1_000, "Blue"),
+        ("m2", 2_000, "Red"),
+        ("m3", 3_000, "Red"),
+        ("m4", 4_000, "Blue"),
+        ("m5", 5_000, "Blue"),
+    ] {
+        repo.upsert_match(
+            &sample_match(id, start, None),
+            &[],
+            &[
+                sample_player("self", "Blue", "Self", "111"),
+                sample_player("other", other_team, "Other", "222"),
+            ],
+        )
+        .unwrap();
+    }
+    // A match the other player did not play never counts.
+    repo.upsert_match(
+        &sample_match("solo", 6_000, None),
+        &[],
+        &[sample_player("self", "Blue", "Self", "111")],
+    )
+    .unwrap();
+
+    let e = repo.encounters("self", "other").unwrap();
+    assert_eq!(
+        repo.encounter_counts("self", "other").unwrap(),
+        (e.with, e.against)
+    );
+    assert_eq!((e.with, e.against), (3, 2));
+    assert_eq!(e.with + e.against, e.matches.len() as u32);
+}
+
+#[test]
+fn match_rows_returns_teams_players_with_tiers() {
+    let repo = repo_in_memory();
+    let mut m = sample_match("m1", 1_000, Some("Blue"));
+    m.game_length_ms = Some(2_280_000);
+    let mut blue = team("Blue", true, Some(13));
+    blue.rounds_won_h1 = Some(7);
+    let mut a = sample_player("a", "Blue", "A", "1");
+    a.competitive_tier = Some(20); // Riot's at-match value beats tier_after 21
+    a.damage = Some(3_000);
+    let b = sample_player("b", "Blue", "B", "2"); // no match tier: tier_after
+    let c = sample_player("c", "Red", "C", "3"); // neither
+    repo.upsert_match(&m, &[blue, team("Red", false, Some(11))], &[a, b, c])
+        .unwrap();
+    repo.upsert_comp_updates("a", &[comp_update("m1", 1_000, 21)])
+        .unwrap();
+    repo.upsert_comp_updates("b", &[comp_update("m1", 1_000, 15)])
+        .unwrap();
+    // Another match's RR row must not leak into this one.
+    repo.upsert_comp_updates("c", &[comp_update("elsewhere", 900, 9)])
+        .unwrap();
+
+    let stored = repo.match_rows("m1").unwrap().expect("stored");
+    assert_eq!(stored.info.match_id, "m1");
+    assert_eq!(stored.info.queue_id, "competitive");
+    assert_eq!(stored.info.winning_team.as_deref(), Some("Blue"));
+    assert_eq!(stored.info.game_length_ms, Some(2_280_000));
+    assert_eq!(stored.teams.len(), 2);
+    let blue = stored.teams.iter().find(|t| t.team_id == "Blue").unwrap();
+    assert_eq!(
+        (blue.won, blue.rounds_won, blue.rounds_won_h1),
+        (true, Some(13), Some(7))
+    );
+    assert_eq!(stored.players.len(), 3);
+    let tier = |p: &str| {
+        stored
+            .players
+            .iter()
+            .find(|x| x.puuid == p)
+            .unwrap()
+            .competitive_tier
+    };
+    assert_eq!(
+        (tier("a"), tier("b"), tier("c")),
+        (Some(20), Some(15), None)
+    );
+    let a = stored.players.iter().find(|p| p.puuid == "a").unwrap();
+    assert_eq!(
+        (a.agent_id.as_deref(), a.kills, a.score, a.rounds, a.damage),
+        (Some("jett"), 20, 4000, Some(24), Some(3_000))
+    );
+    assert_eq!(a.game_name.as_deref(), Some("A"));
+
+    assert_eq!(repo.match_rows("nope").unwrap(), None);
 }

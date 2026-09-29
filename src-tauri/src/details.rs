@@ -1,20 +1,22 @@
 //! Player Details (`player_details` command): card + recent matches + top
-//! teammates + loadout + encounter history, built from what's cached; the
-//! caller then syncs in the background and emits `"details"` when that
-//! produced more data.
+//! teammates + loadout + encounter history + the hero's act K/D and HS%,
+//! built from what's cached; the caller then syncs in the background and
+//! emits `"details"` when that produced more data.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use opd1_core::db::repo::EncounterRow;
 use opd1_core::db::repo::TeammateRow;
 use opd1_core::model::{
-    DisplayName, EncounterDetailRow, PlayerCard, PlayerDetails, TeammateSummary,
+    display_tier, DisplayName, EncounterDetailRow, HeroStats, Loadout, MatchResultKind, PlayerCard,
+    PlayerDetails, TeammateSummary,
 };
 use opd1_core::names::{display_name, KnownName};
 
 use crate::roster::RosterPlayer;
 use crate::state::{card_clock, closed_self_slot, lock, now_ms, AppState, Slot};
-use crate::store::{load_player_db, recent_matches};
+use crate::store::{act_hero_stats, load_player_db, recent_matches};
 use crate::sync::RECENT_COUNT;
 
 /// CLAUDE.md: "Top 3 Teammates".
@@ -54,6 +56,31 @@ pub fn teammate_name(
     }
 }
 
+/// One shared match as Player Details' Encounters row, from the user's
+/// side: the result and score are the user's, the tiers are each side's
+/// rank during the match (below 3 shows no rank). `lookup` turns the stored
+/// Riot map path into a valorant-api uuid (`""` when unknown).
+fn encounter_row(e: EncounterRow, lookup: &dyn Fn(&str) -> Option<String>) -> EncounterDetailRow {
+    EncounterDetailRow {
+        map_id: lookup(&e.map_id).unwrap_or_default(),
+        match_id: e.match_id,
+        start_ms: e.start_ms,
+        with: e.with,
+        result: match e.self_won {
+            Some(true) => MatchResultKind::Win,
+            Some(false) => MatchResultKind::Loss,
+            None => MatchResultKind::Draw,
+        },
+        rounds_won: e.rounds_won,
+        rounds_lost: e.rounds_lost,
+        duration_ms: e.game_length_ms,
+        them_agent_id: e.other_agent_id,
+        them_tier: display_tier(e.other_tier),
+        self_agent_id: e.self_agent_id,
+        self_tier: display_tier(e.self_tier),
+    }
+}
+
 /// A card for a player that isn't on screen: identity from the `players`
 /// row (as the Closed stage does for the user), data from the DB.
 fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Option<PlayerCard> {
@@ -77,7 +104,7 @@ fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Opt
 
 /// Everything cached for `puuid`'s details view.
 pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, String> {
-    let (on_screen, hidden_now, loadout, self_puuid) = {
+    let (on_screen, hidden_now, self_puuid) = {
         let live = lock(&st.live);
         (
             live.current
@@ -86,7 +113,6 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
                 .find(|c| c.puuid == puuid)
                 .cloned(),
             live.hidden_players(),
-            live.loadouts.get(puuid).cloned().unwrap_or_default(),
             live.self_puuid.clone(),
         )
     };
@@ -96,15 +122,20 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
     let assets = st.assets.clone();
     let need_card = on_screen.is_none();
     let hidden_ids: Vec<String> = hidden_now.keys().cloned().collect();
-    let (recent, teammates, remembered, encounters, db) = st
+    let (recent, hero, teammates, remembered, encounters, db) = st
         .db(move |repo| {
             let lookup = |path: &str| {
                 crate::roster::map_uuid(path, |x| assets.map_uuid_for_path(x).ok().flatten())
             };
             let recent = recent_matches(repo, &p, RECENT_COUNT, &lookup)?;
-            let teammates = match season_start {
-                Some(start) => repo.top_teammates(&p, start, TOP_TEAMMATES)?,
-                None => Vec::new(),
+            // R116: the hero's K/D and HS% — the act's recent matches; with
+            // no current act known, no match belongs to it.
+            let (teammates, hero) = match season_start {
+                Some(start) => (
+                    repo.top_teammates(&p, start, TOP_TEAMMATES)?,
+                    act_hero_stats(repo, &p, start)?,
+                ),
+                None => (Vec::new(), HeroStats::default()),
             };
             // R18: names the user learned in their own matches, only for
             // the teammates hidden on screen right now.
@@ -123,13 +154,7 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
                     .encounters(me, &p)?
                     .matches
                     .into_iter()
-                    .map(|e| EncounterDetailRow {
-                        map_id: lookup(&e.map_id).unwrap_or_default(),
-                        match_id: e.match_id,
-                        start_ms: e.start_ms,
-                        with: e.with,
-                        self_won: e.self_won,
-                    })
+                    .map(|e| encounter_row(e, &lookup))
                     .collect(),
                 _ => Vec::new(),
             };
@@ -138,7 +163,7 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
             } else {
                 None
             };
-            Ok((recent, teammates, remembered, encounters, db))
+            Ok((recent, hero, teammates, remembered, encounters, db))
         })
         .await
         .ok_or_else(|| "database unavailable".to_string())?;
@@ -161,8 +186,13 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
                 count: t.count,
             })
             .collect(),
-        loadout,
+        // Skin names arrive with the loadout work (the next step): until
+        // then every weapon is unknown.
+        loadout: Loadout::default(),
         encounters,
+        hero_kd: hero.kd,
+        hero_hs: hero.hs_pct,
+        hero_matches: hero.matches,
     })
 }
 

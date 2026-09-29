@@ -86,6 +86,9 @@ pub struct Match {
     pub winning_team: Option<String>,
     pub is_ranked: bool,
     pub rounds_played: Option<i64>,
+    /// `matchInfo.gameLengthMillis` (migration 2); `None` when the payload
+    /// lacks it or the row was stored before Phase 2.
+    pub game_length_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +96,10 @@ pub struct MatchTeam {
     pub team_id: String,
     pub won: bool,
     pub rounds_won: Option<i64>,
+    /// Rounds won in rounds `roundNum` 0..=11, the first half (migration
+    /// 2). Filled only for competitive, unrated and premier, whose halves
+    /// are 12 rounds; `None` for any other queue or without round results.
+    pub rounds_won_h1: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -113,6 +120,13 @@ pub struct MatchPlayer {
     /// from name-service for an incognito player. Feeds [`Repo::known_name`].
     pub game_name: Option<String>,
     pub tag_line: Option<String>,
+    /// Riot's rank for the player DURING the match, as stored (migration 2;
+    /// `players[].competitiveTier`, `0` when unranked). [`Repo::match_rows`]
+    /// returns it with the R81 fallback already applied.
+    pub competitive_tier: Option<i64>,
+    /// Σ `roundResults[].playerStats[subject].damage[].damage` (migration
+    /// 2); `None` without round results. ADR is this over `rounds`.
+    pub damage: Option<i64>,
 }
 
 /// A [`MatchPlayer`] joined back with its match's basics — what
@@ -171,7 +185,14 @@ pub struct CompMatchRow {
     pub season_id: Option<String>,
     /// That same row's tiers; below 3 is unranked (placements).
     pub tier_before: Option<i64>,
+    /// The `comp_updates` row's rank AFTER the match (My Stats' RR math).
+    /// It differs from [`CompMatchRow::tier`] on a promotion or demotion
+    /// game; never use one for the other.
     pub tier_after: Option<i64>,
+    /// The player's rank DURING the match, for display (recent rows,
+    /// encounters, scoreboard): `COALESCE(mp.competitive_tier,
+    /// cu.tier_after)`, Riot's at-match value first (R81).
+    pub tier: Option<i64>,
 }
 
 impl Repo {
@@ -188,15 +209,16 @@ impl Repo {
         let tx = self.conn.unchecked_transaction()?;
 
         tx.execute(
-            "INSERT INTO matches (match_id, map_id, queue_id, start_ms, winning_team, is_ranked, rounds_played)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO matches (match_id, map_id, queue_id, start_ms, winning_team, is_ranked, rounds_played, game_length_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
              ON CONFLICT(match_id) DO UPDATE SET
                 map_id = excluded.map_id,
                 queue_id = excluded.queue_id,
                 start_ms = excluded.start_ms,
                 winning_team = excluded.winning_team,
                 is_ranked = excluded.is_ranked,
-                rounds_played = excluded.rounds_played",
+                rounds_played = excluded.rounds_played,
+                game_length_ms = excluded.game_length_ms",
             params![
                 m.match_id,
                 m.map_id,
@@ -204,26 +226,28 @@ impl Repo {
                 m.start_ms,
                 m.winning_team,
                 m.is_ranked,
-                m.rounds_played
+                m.rounds_played,
+                m.game_length_ms
             ],
         )?;
 
         for t in teams {
             tx.execute(
-                "INSERT INTO match_teams (match_id, team_id, won, rounds_won)
-                 VALUES (?1, ?2, ?3, ?4)
+                "INSERT INTO match_teams (match_id, team_id, won, rounds_won, rounds_won_h1)
+                 VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(match_id, team_id) DO UPDATE SET
                     won = excluded.won,
-                    rounds_won = excluded.rounds_won",
-                params![m.match_id, t.team_id, t.won, t.rounds_won],
+                    rounds_won = excluded.rounds_won,
+                    rounds_won_h1 = excluded.rounds_won_h1",
+                params![m.match_id, t.team_id, t.won, t.rounds_won, t.rounds_won_h1],
             )?;
         }
 
         for p in players {
             tx.execute(
                 "INSERT INTO match_players
-                    (match_id, puuid, team_id, party_id, agent_id, kills, deaths, assists, score, rounds, hs, bs, ls, game_name, tag_line)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+                    (match_id, puuid, team_id, party_id, agent_id, kills, deaths, assists, score, rounds, hs, bs, ls, game_name, tag_line, competitive_tier, damage)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)
                  ON CONFLICT(match_id, puuid) DO UPDATE SET
                     team_id = excluded.team_id,
                     party_id = excluded.party_id,
@@ -237,7 +261,9 @@ impl Repo {
                     bs = excluded.bs,
                     ls = excluded.ls,
                     game_name = excluded.game_name,
-                    tag_line = excluded.tag_line",
+                    tag_line = excluded.tag_line,
+                    competitive_tier = excluded.competitive_tier,
+                    damage = excluded.damage",
                 params![
                     m.match_id,
                     p.puuid,
@@ -253,7 +279,9 @@ impl Repo {
                     p.bs,
                     p.ls,
                     p.game_name,
-                    p.tag_line
+                    p.tag_line,
+                    p.competitive_tier,
+                    p.damage
                 ],
             )?;
         }
@@ -317,31 +345,15 @@ impl Repo {
     }
 
     /// The player's competitive matches with `start_ms` in `range`,
-    /// newest first, at most `limit`.
+    /// newest first, at most `limit`. See [`COMP_MATCHES_SQL`] for how the
+    /// rows are read (R88).
     pub fn comp_matches(
         &self,
         puuid: &str,
         range: Range<i64>,
         limit: u32,
     ) -> Result<Vec<CompMatchRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT m.match_id, m.map_id, m.start_ms, m.winning_team,
-                    mp.team_id, mp.agent_id, mp.kills, mp.deaths, mp.assists,
-                    mp.score, mp.rounds, mp.hs, mp.bs, mp.ls,
-                    (SELECT t.rounds_won FROM match_teams t
-                      WHERE t.match_id = m.match_id AND t.team_id = mp.team_id),
-                    (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(t.rounds_won) END
-                       FROM match_teams t
-                      WHERE t.match_id = m.match_id AND t.team_id != mp.team_id),
-                    cu.rr_earned, cu.season_id, cu.tier_before, cu.tier_after
-             FROM match_players mp
-             JOIN matches m ON m.match_id = mp.match_id
-             LEFT JOIN comp_updates cu ON cu.puuid = mp.puuid AND cu.match_id = mp.match_id
-             WHERE mp.puuid = ?1 AND m.queue_id = 'competitive'
-               AND m.start_ms >= ?2 AND m.start_ms < ?3
-             ORDER BY m.start_ms DESC
-             LIMIT ?4",
-        )?;
+        let mut stmt = self.conn.prepare_cached(COMP_MATCHES_SQL)?;
         let rows = stmt.query_map(params![puuid, range.start, range.end, limit], |row| {
             Ok(CompMatchRow {
                 match_id: row.get(0)?,
@@ -364,9 +376,143 @@ impl Repo {
                 season_id: row.get(17)?,
                 tier_before: row.get(18)?,
                 tier_after: row.get(19)?,
+                tier: row.get(20)?,
             })
         })?;
         rows.collect()
+    }
+}
+
+/// The query behind [`Repo::comp_matches`]; parameters `?1` puuid, `?2`
+/// range start, `?3` range end (exclusive), `?4` limit.
+///
+/// R88: the player's competitive rows in the range are limited first
+/// (`mine`: newest first, `LIMIT ?4`), and only those few rows are joined
+/// to `match_teams` (both teams, aggregated per match: the player's team's
+/// rounds won, and the other team's when there is exactly one) and to the
+/// player's `comp_updates` row (by its primary key). No correlated
+/// subquery, so the read cost grows with `limit`, not with the stored
+/// history. Exposed for `EXPLAIN QUERY PLAN` in `tests/db.rs`.
+#[doc(hidden)]
+pub const COMP_MATCHES_SQL: &str = "\
+WITH mine AS (
+    SELECT m.match_id, m.map_id, m.start_ms, m.winning_team,
+           mp.puuid, mp.team_id, mp.agent_id, mp.kills, mp.deaths, mp.assists,
+           mp.score, mp.rounds, mp.hs, mp.bs, mp.ls, mp.competitive_tier
+    FROM match_players mp
+    JOIN matches m ON m.match_id = mp.match_id
+    WHERE mp.puuid = ?1 AND m.queue_id = 'competitive'
+      AND m.start_ms >= ?2 AND m.start_ms < ?3
+    ORDER BY m.start_ms DESC
+    LIMIT ?4
+)
+SELECT mine.match_id, mine.map_id, mine.start_ms, mine.winning_team,
+       mine.team_id, mine.agent_id, mine.kills, mine.deaths, mine.assists,
+       mine.score, mine.rounds, mine.hs, mine.bs, mine.ls,
+       MAX(CASE WHEN t.team_id = mine.team_id THEN t.rounds_won END),
+       CASE WHEN COUNT(CASE WHEN t.team_id != mine.team_id THEN 1 END) = 1
+            THEN MAX(CASE WHEN t.team_id != mine.team_id THEN t.rounds_won END) END,
+       cu.rr_earned, cu.season_id, cu.tier_before, cu.tier_after,
+       COALESCE(mine.competitive_tier, cu.tier_after)
+FROM mine
+LEFT JOIN match_teams t ON t.match_id = mine.match_id
+LEFT JOIN comp_updates cu ON cu.puuid = mine.puuid AND cu.match_id = mine.match_id
+GROUP BY mine.match_id
+ORDER BY mine.start_ms DESC";
+
+/// One stored match with all of its teams and players — what
+/// [`Repo::match_rows`] returns for Match Details.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredMatch {
+    pub info: Match,
+    pub teams: Vec<MatchTeam>,
+    /// Ordered by puuid. Each player's `competitive_tier` is
+    /// `COALESCE(mp.competitive_tier, cu.tier_after)` (R81): Riot's
+    /// at-match rank, else that player's own RR row's tier.
+    pub players: Vec<MatchPlayer>,
+}
+
+impl Repo {
+    /// A stored match with its teams and players, or `None` when the match
+    /// isn't in the DB. Three plain key lookups, no aggregation.
+    pub fn match_rows(&self, match_id: &str) -> Result<Option<StoredMatch>> {
+        let info = self
+            .conn
+            .query_row(
+                "SELECT match_id, map_id, queue_id, start_ms, winning_team, is_ranked,
+                        rounds_played, game_length_ms
+                 FROM matches WHERE match_id = ?1",
+                params![match_id],
+                |row| {
+                    Ok(Match {
+                        match_id: row.get(0)?,
+                        map_id: row.get(1)?,
+                        queue_id: row.get(2)?,
+                        start_ms: row.get(3)?,
+                        winning_team: row.get(4)?,
+                        is_ranked: row.get(5)?,
+                        rounds_played: row.get(6)?,
+                        game_length_ms: row.get(7)?,
+                    })
+                },
+            )
+            .optional()?;
+        let Some(info) = info else {
+            return Ok(None);
+        };
+
+        let mut stmt = self.conn.prepare(
+            "SELECT team_id, won, rounds_won, rounds_won_h1
+             FROM match_teams WHERE match_id = ?1 ORDER BY team_id",
+        )?;
+        let teams = stmt
+            .query_map(params![match_id], |row| {
+                Ok(MatchTeam {
+                    team_id: row.get(0)?,
+                    won: row.get(1)?,
+                    rounds_won: row.get(2)?,
+                    rounds_won_h1: row.get(3)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+
+        let mut stmt = self.conn.prepare(
+            "SELECT mp.puuid, mp.team_id, mp.party_id, mp.agent_id, mp.kills, mp.deaths,
+                    mp.assists, mp.score, mp.rounds, mp.hs, mp.bs, mp.ls, mp.game_name,
+                    mp.tag_line, COALESCE(mp.competitive_tier, cu.tier_after), mp.damage
+             FROM match_players mp
+             LEFT JOIN comp_updates cu ON cu.puuid = mp.puuid AND cu.match_id = mp.match_id
+             WHERE mp.match_id = ?1
+             ORDER BY mp.puuid",
+        )?;
+        let players = stmt
+            .query_map(params![match_id], |row| {
+                Ok(MatchPlayer {
+                    puuid: row.get(0)?,
+                    team_id: row.get(1)?,
+                    party_id: row.get(2)?,
+                    agent_id: row.get(3)?,
+                    kills: row.get(4)?,
+                    deaths: row.get(5)?,
+                    assists: row.get(6)?,
+                    score: row.get(7)?,
+                    rounds: row.get(8)?,
+                    hs: row.get(9)?,
+                    bs: row.get(10)?,
+                    ls: row.get(11)?,
+                    game_name: row.get(12)?,
+                    tag_line: row.get(13)?,
+                    competitive_tier: row.get(14)?,
+                    damage: row.get(15)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+
+        Ok(Some(StoredMatch {
+            info,
+            teams,
+            players,
+        }))
     }
 }
 
@@ -541,6 +687,7 @@ impl Repo {
 // ---------------------------------------------------------------------
 
 /// One past match shared with `other` (with or against), newest first.
+/// Scores, agents and tiers are from the user's (`self`'s) side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncounterRow {
     pub match_id: String,
@@ -550,6 +697,18 @@ pub struct EncounterRow {
     pub with: bool,
     /// `None` for a draw / no team winner.
     pub self_won: Option<bool>,
+    /// The user's team's rounds won.
+    pub rounds_won: Option<i64>,
+    /// The other team's rounds won, when there is exactly one other team
+    /// (`None` in modes with more or no team rows).
+    pub rounds_lost: Option<i64>,
+    pub game_length_ms: Option<i64>,
+    pub self_agent_id: Option<String>,
+    pub other_agent_id: Option<String>,
+    /// Each side's rank during the match, by the one R81 rule:
+    /// `COALESCE(mp.competitive_tier, cu.tier_after)`.
+    pub self_tier: Option<i64>,
+    pub other_tier: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -563,14 +722,32 @@ impl Repo {
     /// Every match where both `self_puuid` and `other` have a
     /// `match_players` row, any mode. Deathmatch players are always on
     /// different team ids, so they naturally count as "against".
+    ///
+    /// The two teams of each match are aggregated with a join (the user's
+    /// team's rounds, and the other team's when there is exactly one), not
+    /// a per-row subquery; each side's RR row is looked up by its primary
+    /// key. [`Repo::encounter_counts`] answers "how many" without reading
+    /// any of this.
     pub fn encounters(&self, self_puuid: &str, other: &str) -> Result<Encounters> {
         let mut stmt = self.conn.prepare(
-            "SELECT m.match_id, m.map_id, m.start_ms, mp_self.team_id, mp_other.team_id, m.winning_team
+            "SELECT m.match_id, m.map_id, m.start_ms, mp_self.team_id, mp_other.team_id, m.winning_team,
+                    MAX(CASE WHEN t.team_id = mp_self.team_id THEN t.rounds_won END),
+                    CASE WHEN COUNT(CASE WHEN t.team_id != mp_self.team_id THEN 1 END) = 1
+                         THEN MAX(CASE WHEN t.team_id != mp_self.team_id THEN t.rounds_won END) END,
+                    m.game_length_ms, mp_self.agent_id, mp_other.agent_id,
+                    COALESCE(mp_self.competitive_tier, cu_self.tier_after),
+                    COALESCE(mp_other.competitive_tier, cu_other.tier_after)
              FROM match_players mp_self
              JOIN match_players mp_other
                ON mp_other.match_id = mp_self.match_id AND mp_other.puuid = ?2
              JOIN matches m ON m.match_id = mp_self.match_id
+             LEFT JOIN match_teams t ON t.match_id = m.match_id
+             LEFT JOIN comp_updates cu_self
+               ON cu_self.puuid = mp_self.puuid AND cu_self.match_id = m.match_id
+             LEFT JOIN comp_updates cu_other
+               ON cu_other.puuid = mp_other.puuid AND cu_other.match_id = m.match_id
              WHERE mp_self.puuid = ?1
+             GROUP BY m.match_id
              ORDER BY m.start_ms DESC",
         )?;
 
@@ -586,6 +763,13 @@ impl Repo {
                 start_ms: row.get(2)?,
                 with,
                 self_won,
+                rounds_won: row.get(6)?,
+                rounds_lost: row.get(7)?,
+                game_length_ms: row.get(8)?,
+                self_agent_id: row.get(9)?,
+                other_agent_id: row.get(10)?,
+                self_tier: row.get(11)?,
+                other_tier: row.get(12)?,
             })
         })?;
 
@@ -598,6 +782,22 @@ impl Repo {
             against,
             matches,
         })
+    }
+
+    /// `(with, against)`: how many matches `self_puuid` shared with
+    /// `other`, on the same team / not — one `COUNT` query over the two
+    /// players' rows, for the ⟲ badge on every card.
+    pub fn encounter_counts(&self, self_puuid: &str, other: &str) -> Result<(u32, u32)> {
+        self.conn.query_row(
+            "SELECT COALESCE(SUM(mp_self.team_id = mp_other.team_id), 0),
+                    COALESCE(SUM(mp_self.team_id != mp_other.team_id), 0)
+             FROM match_players mp_self
+             JOIN match_players mp_other
+               ON mp_other.match_id = mp_self.match_id AND mp_other.puuid = ?2
+             WHERE mp_self.puuid = ?1",
+            params![self_puuid, other],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
     }
 
     /// The most recent non-empty name `other` used in a match `self_puuid`

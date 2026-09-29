@@ -14,8 +14,8 @@ use tauri::{AppHandle, Emitter};
 
 use opd1_core::db::repo::Repo;
 use opd1_core::model::{
-    build_card, shown_agent, BuildCardInput, Field, Identity, LiveState, Loadout, MmrInput,
-    PartyMark, PlayerCard, PlayerDetails, Team,
+    build_card, shown_agent, BuildCardInput, Field, Identity, LiveState, MmrInput, PartyMark,
+    PlayerCard, PlayerDetails, Team,
 };
 use opd1_core::party::detect_parties;
 use opd1_core::presence::Stage;
@@ -25,8 +25,8 @@ use opd1_riot::to_core::{current_rank_from_mmr, seasonal_map_from_mmr};
 use opd1_riot::RiotSession;
 
 use crate::logbuf::short;
-use crate::roster::{current_act, RosterPlayer};
-use crate::store::{PlayerDb, StoredPlayer};
+use crate::roster::{current_act, RawLoadout, RosterPlayer};
+use crate::store::{PlayerDb, StoredPlayer, SELF_LOADOUT_KEY};
 
 /// A failed asset-table load isn't retried more often than this (offline
 /// first run: `meta()` and every `img` request would otherwise each hit
@@ -88,8 +88,15 @@ pub struct LiveModel {
     pub map_id: Option<String>,
     /// Display/sync order (`roster::order_players`).
     pub slots: Vec<Slot>,
-    /// Equipped chromas from the current core-game match (Player Details).
-    pub loadouts: HashMap<String, Loadout>,
+    /// Equipped skins of the current match's players (Player Details):
+    /// core-game loadouts In Game, pre-game loadouts (allies) in Agent
+    /// Select (R83). Skin names resolve later, from valorant-api.
+    pub loadouts: HashMap<String, RawLoadout>,
+    /// The user's own equipped skins, read once per connect from the pd
+    /// personalization endpoint (R90) — so their Details shows skins
+    /// outside a match too. Cleared when the account changes; also restored
+    /// at startup from the copy kept in `app_state` (Closed stage).
+    pub self_loadout: Option<RawLoadout>,
     pub coregame_match_id: Option<String>,
     pub self_puuid: Option<String>,
     /// The user's own Riot ID from the local chat session
@@ -135,6 +142,7 @@ impl LiveModel {
             map_id: None,
             slots: Vec::new(),
             loadouts: HashMap::new(),
+            self_loadout: None,
             coregame_match_id: None,
             self_puuid,
             self_name: None,
@@ -522,12 +530,22 @@ impl AppState {
         debug_dir: PathBuf,
         self_puuid: Option<String>,
     ) -> Self {
+        // R90: the user's own last-known loadout, kept in `app_state` by
+        // `sync::fetch_self_loadout`, so their Details shows their skins
+        // while VALORANT is closed. A copy that doesn't parse is ignored.
+        let stored_loadout: Option<RawLoadout> = repo
+            .get_state(SELF_LOADOUT_KEY)
+            .ok()
+            .flatten()
+            .and_then(|json| serde_json::from_str(&json).ok());
+        let mut live = LiveModel::new(self_puuid);
+        live.self_loadout = stored_loadout;
         Self {
             sink,
             repo: Arc::new(Mutex::new(repo)),
             assets: Arc::new(assets),
             session: RwLock::new(None),
-            live: Mutex::new(LiveModel::new(self_puuid)),
+            live: Mutex::new(live),
             acts: RwLock::new(Arc::new(Vec::new())),
             tables: tokio::sync::Mutex::new(TablesStatus::default()),
             details_synced: Mutex::new(HashMap::new()),

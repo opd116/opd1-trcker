@@ -7,6 +7,8 @@
 //!   start so it never misses the first snapshot).
 //! - `player_details(puuid)` — cached details now; a background sync then
 //!   emits `"details"` if it found more.
+//! - `match_details(matchId, focusPuuid)` — one match as the Match Details
+//!   scoreboard, from the DB (fetched once when it isn't stored yet).
 //! - `my_stats()` — the user's My Stats for the current act, from the DB
 //!   only (no Riot call); `null` while the user or the act is unknown.
 //! - `copy_log()` — the last 500 log lines (R30; the UI copies them).
@@ -18,7 +20,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::State;
 
-use opd1_core::model::{LiveState, MyStats, PlayerDetails};
+use opd1_core::model::{LiveState, MatchDetailsView, MyStats, PlayerDetails};
 use opd1_riot::assets::Meta;
 
 use crate::logbuf::short;
@@ -35,6 +37,19 @@ fn is_uuid(s: &str) -> bool {
                 c.is_ascii_hexdigit()
             }
         })
+}
+
+/// Both ids of a `match_details` call must be uuids — they end up in a DB
+/// key and a Riot URL path, the same check `player_details` applies to its
+/// puuid. The match id is checked first.
+fn check_match_args(match_id: &str, focus_puuid: &str) -> Result<(), String> {
+    if !is_uuid(match_id) {
+        return Err("invalid match id".into());
+    }
+    if !is_uuid(focus_puuid) {
+        return Err("invalid player id".into());
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -83,6 +98,16 @@ pub async fn player_details(
         }
     }
     Ok(details)
+}
+
+#[tauri::command]
+pub async fn match_details(
+    match_id: String,
+    focus_puuid: String,
+    state: AppStateRef<'_>,
+) -> Result<MatchDetailsView, String> {
+    check_match_args(&match_id, &focus_puuid)?;
+    crate::match_details::load(state.inner(), &match_id, &focus_puuid).await
 }
 
 #[tauri::command]
@@ -246,6 +271,7 @@ mod tests {
             winning_team: Some("Blue".into()),
             is_ranked: true,
             rounds_played: Some(20),
+            game_length_ms: None,
         };
         let me = MatchPlayer {
             puuid: ME.into(),
@@ -262,6 +288,8 @@ mod tests {
             ls: 0,
             game_name: None,
             tag_line: None,
+            competitive_tier: None,
+            damage: None,
         };
         repo.upsert_match(&m, &[], &[me])?;
         repo.upsert_comp_updates(
@@ -335,6 +363,35 @@ mod tests {
         assert!(is_uuid("aaaaaaaa-0000-0000-0000-000000000001"));
         assert!(!is_uuid("../../etc"));
         assert!(!is_uuid(""));
+    }
+
+    #[test]
+    fn match_details_args_must_be_uuids() {
+        // Both ids reach a DB key and a URL path: the same shape check
+        // `player_details` applies to its puuid.
+        let id = "1a2b3c4d-0000-0000-0000-000000000010";
+        assert_eq!(
+            check_match_args("not-a-match", ME),
+            Err("invalid match id".to_string())
+        );
+        assert_eq!(
+            check_match_args("../../etc/passwd", ME),
+            Err("invalid match id".to_string())
+        );
+        assert_eq!(
+            check_match_args(id, "../x"),
+            Err("invalid player id".to_string())
+        );
+        assert_eq!(
+            check_match_args(id, ""),
+            Err("invalid player id".to_string())
+        );
+        assert_eq!(check_match_args(id, ME), Ok(()));
+        // The match id is checked first.
+        assert_eq!(
+            check_match_args("", "../x"),
+            Err("invalid match id".to_string())
+        );
     }
 
     #[test]

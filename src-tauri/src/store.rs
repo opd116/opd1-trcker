@@ -19,7 +19,9 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde_json::{json, Map, Value};
 
 use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow, Repo};
-use opd1_core::model::{match_summary, EncounterCount, MatchSummary, MyStats};
+use opd1_core::model::{
+    hero_stats, match_summary, EncounterCount, HeroStats, MatchSummary, MyStats,
+};
 use opd1_core::mystats::{self, MyStatsInput};
 use opd1_core::names::KnownName;
 use opd1_core::party::SharedRef;
@@ -28,10 +30,16 @@ use opd1_riot::endpoints::PlayerMmrResponse;
 use opd1_riot::to_core::current_rank_from_mmr;
 
 use crate::roster::is_ffa_queue;
+use crate::sync::TEAMMATE_WINDOW;
 
 /// `app_state` key holding the user's own puuid (R31) — lets the Closed
 /// stage show the user's card before the Riot client is ever reached.
 pub const SELF_PUUID_KEY: &str = "self_puuid";
+
+/// `app_state` key holding the user's own last-known loadout as
+/// `RawLoadout` JSON (R90) — shown in their Details while VALORANT is
+/// closed.
+pub const SELF_LOADOUT_KEY: &str = "self_loadout";
 
 /// The queue key Riot uses for ranked in `QueueSkills`.
 const COMPETITIVE: &str = "competitive";
@@ -227,11 +235,10 @@ pub fn load_player_db(repo: &Repo, self_puuid: Option<&str>, puuid: &str) -> Res
         .and_then(|snap| parse_mmr_snapshot(&snap.json));
     let (remembered, encounters) = match self_puuid {
         Some(me) if me != puuid => {
-            let e = repo.encounters(me, puuid)?;
-            let count = (e.with + e.against > 0).then_some(EncounterCount {
-                with: e.with,
-                against: e.against,
-            });
+            // One COUNT query: the card only needs the two numbers, not the
+            // shared matches themselves (those are Player Details').
+            let (with, against) = repo.encounter_counts(me, puuid)?;
+            let count = (with + against > 0).then_some(EncounterCount { with, against });
             (repo.known_name(me, puuid)?, count)
         }
         _ => (None, None),
@@ -383,6 +390,15 @@ pub fn recent_matches(
     let mut rows = repo.comp_matches(puuid, i64::MIN..i64::MAX, n)?;
     to_map_uuids(&mut rows, map_uuid);
     Ok(rows.iter().map(match_summary).collect())
+}
+
+/// R116: Player Details' hero K/D and HS% — pooled over `puuid`'s most
+/// recent [`TEAMMATE_WINDOW`] (20) competitive matches of the current act
+/// (`start_ms >= act_start_ms`), the same set Top 3 Teammates reads, so it
+/// costs no request. See [`hero_stats`] for what counts.
+pub fn act_hero_stats(repo: &Repo, puuid: &str, act_start_ms: i64) -> Result<HeroStats> {
+    let rows = repo.comp_matches(puuid, act_start_ms..i64::MAX, TEAMMATE_WINDOW)?;
+    Ok(hero_stats(&rows))
 }
 
 // ---------------------------------------------------------------------
@@ -572,6 +588,7 @@ mod tests {
             winning_team: None,
             is_ranked: true,
             rounds_played: None,
+            game_length_ms: None,
         };
         r.upsert_match(
             &m,
@@ -630,6 +647,8 @@ mod tests {
             ls: 0,
             game_name: name.map(|(n, _)| n.to_string()),
             tag_line: name.map(|(_, t)| t.to_string()),
+            competitive_tier: None,
+            damage: None,
         }
     }
 
@@ -642,6 +661,7 @@ mod tests {
             winning_team: None,
             is_ranked: false,
             rounds_played: None,
+            game_length_ms: None,
         };
         r.upsert_match(&m, &[], players).unwrap();
     }
@@ -762,17 +782,20 @@ mod tests {
             winning_team: Some("Blue".into()),
             is_ranked: true,
             rounds_played: Some(23),
+            game_length_ms: None,
         };
         let teams = [
             MatchTeam {
                 team_id: "Blue".into(),
                 won: true,
                 rounds_won: Some(13),
+                rounds_won_h1: None,
             },
             MatchTeam {
                 team_id: "Red".into(),
                 won: false,
                 rounds_won: Some(10),
+                rounds_won_h1: None,
             },
         ];
         let p = MatchPlayer {
@@ -790,6 +813,10 @@ mod tests {
             ls: 3,
             game_name: None,
             tag_line: None,
+            // Riot's rank during the match (14) differs from the RR row's
+            // tier after it (15): the summary shows the former (R81).
+            competitive_tier: Some(14),
+            damage: None,
         };
         r.upsert_match(&m, &teams, &[p]).unwrap();
         r.upsert_comp_updates(
@@ -815,7 +842,11 @@ mod tests {
         assert_eq!(s.result, MatchResultKind::Win);
         assert_eq!((s.rounds_won, s.rounds_lost), (Some(13), Some(10)));
         assert_eq!(s.rr_earned, Some(21));
-        assert_eq!((s.kills, s.deaths, s.assists), (20, 10, 4));
+        assert_eq!(
+            (s.kills, s.deaths, s.assists),
+            (Some(20), Some(10), Some(4))
+        );
+        assert_eq!(s.tier, Some(14), "the at-match rank, not tier_after");
         assert_eq!(s.kd, Some(2.0));
         assert_eq!(s.acs, Some(5000.0 / 23.0));
         assert_eq!(s.hs_pct, Some(1.0 / 6.0));
@@ -838,6 +869,7 @@ mod tests {
             winning_team: Some(if won { "Blue" } else { "Red" }.into()),
             is_ranked: queue == "competitive",
             rounds_played: Some(20),
+            game_length_ms: None,
         };
         let (blue, red) = if won { (13, 7) } else { (7, 13) };
         let teams = [
@@ -845,11 +877,13 @@ mod tests {
                 team_id: "Blue".into(),
                 won,
                 rounds_won: Some(blue),
+                rounds_won_h1: None,
             },
             MatchTeam {
                 team_id: "Red".into(),
                 won: !won,
                 rounds_won: Some(red),
+                rounds_won_h1: None,
             },
         ];
         let me = MatchPlayer {
@@ -1102,6 +1136,7 @@ mod tests {
             winning_team: None,
             is_ranked: true,
             rounds_played: None,
+            game_length_ms: None,
         };
         r.upsert_match(&m, &[], &[]).unwrap();
         // Details arrived first: an unrated match would count as landed…

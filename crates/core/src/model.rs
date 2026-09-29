@@ -302,19 +302,32 @@ pub struct MatchSummary {
     pub rounds_won: Option<i64>,
     pub rounds_lost: Option<i64>,
     pub agent_id: Option<String>,
-    pub kills: i64,
-    pub deaths: i64,
-    pub assists: i64,
+    /// The stat line is `None` (`null`, shown as `—`) when the match's
+    /// details had no stats row for the player (stored 0/0/0 with no
+    /// rounds): an unknown value is never a counted zero (R102). The same
+    /// goes for `kd`, `acs` and `hs_pct` below.
+    pub kills: Option<i64>,
+    pub deaths: Option<i64>,
+    pub assists: Option<i64>,
     /// `stats::kd` (zero deaths -> the kill count, ruling R5). `None`
-    /// exactly when `acs` is: no stats for the player (the stored 0/0/0
-    /// is no counted zero).
+    /// exactly when the stat line is.
     pub kd: Option<f32>,
-    /// Average combat score: score / rounds played. `None` when the
-    /// match-details had no stats for the player (no rounds played).
+    /// Average combat score: score / rounds played. `None` without stats.
     pub acs: Option<f32>,
-    /// Headshot fraction 0..1 (R5); `None` when no shot landed.
+    /// Headshot fraction 0..1 (R5); `None` when no shot landed or the
+    /// player has no stats row.
     pub hs_pct: Option<f32>,
     pub rr_earned: Option<i32>,
+    /// The player's rank during the match (R81), `None` when unknown or
+    /// below 3 (unranked); see [`display_tier`].
+    pub tier: Option<u8>,
+}
+
+/// A stored tier as the UI shows it: `None` below 3 (unranked, placements,
+/// unrated queues) and for a value no tier table has, so the UI draws no
+/// rank icon rather than a wrong one.
+pub fn display_tier(tier: Option<i64>) -> Option<u8> {
+    tier.and_then(|t| u8::try_from(t).ok()).filter(|&t| t >= 3)
 }
 
 /// One stored competitive match as a [`MatchSummary`] — shared by Player
@@ -322,8 +335,9 @@ pub struct MatchSummary {
 /// a valorant-api uuid (`""` when unknown).
 pub fn match_summary(row: &CompMatchRow) -> MatchSummary {
     // `match_from_details` stores no round count when the player's stats
-    // were missing.
+    // were missing: then the whole stat line is unknown (R102).
     let rounds = row.rounds.filter(|&r| r > 0);
+    let has_stats = rounds.is_some();
     MatchSummary {
         match_id: row.match_id.clone(),
         map_id: row.map_id.clone(),
@@ -332,13 +346,44 @@ pub fn match_summary(row: &CompMatchRow) -> MatchSummary {
         rounds_won: row.rounds_won,
         rounds_lost: row.rounds_lost,
         agent_id: row.agent_id.clone(),
-        kills: row.kills,
-        deaths: row.deaths,
-        assists: row.assists,
-        kd: rounds.map(|_| stats::kd(row.kills, row.deaths)),
+        kills: has_stats.then_some(row.kills),
+        deaths: has_stats.then_some(row.deaths),
+        assists: has_stats.then_some(row.assists),
+        kd: has_stats.then(|| stats::kd(row.kills, row.deaths)),
         acs: rounds.map(|r| row.score as f32 / r as f32),
-        hs_pct: stats::hs_pct(row.hs, row.bs, row.ls),
+        hs_pct: stats::hs_pct(row.hs, row.bs, row.ls).filter(|_| has_stats),
         rr_earned: row.rr_earned.map(|v| v as i32),
+        tier: display_tier(row.tier),
+    }
+}
+
+/// Player Details' hero K/D and HS% (R116): pooled over `rows`, the
+/// player's most recent (up to 20) competitive matches of the current act,
+/// the same set Top 3 Teammates reads. Only rows with a stats row count
+/// (R102): a match without one adds no kills, deaths or shots and is not
+/// in `matches`. No such row: everything is `None` / 0.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct HeroStats {
+    pub kd: Option<f32>,
+    /// Headshots / shots landed, 0..1.
+    pub hs_pct: Option<f32>,
+    /// How many matches `kd` and `hs_pct` are computed over.
+    pub matches: u32,
+}
+
+pub fn hero_stats(rows: &[CompMatchRow]) -> HeroStats {
+    let counted: Vec<&CompMatchRow> = rows
+        .iter()
+        .filter(|r| r.rounds.is_some_and(|n| n > 0))
+        .collect();
+    if counted.is_empty() {
+        return HeroStats::default();
+    }
+    let sum = |f: fn(&CompMatchRow) -> i64| counted.iter().map(|r| f(r)).sum::<i64>();
+    HeroStats {
+        kd: Some(stats::kd(sum(|r| r.kills), sum(|r| r.deaths))),
+        hs_pct: stats::hs_pct(sum(|r| r.hs), sum(|r| r.bs), sum(|r| r.ls)),
+        matches: counted.len() as u32,
     }
 }
 
@@ -350,17 +395,51 @@ pub struct TeammateSummary {
     pub count: u32,
 }
 
-/// Vandal/Phantom/Operator/Sheriff's equipped chroma uuid, or `None` when
-/// not equipped/not resolvable.
-#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+/// One equipped weapon skin, named (R97/R83): `skin_name` is the skin's
+/// display name minus the trailing weapon word (`"Reaver Vandal"` ->
+/// `"Reaver"`), `chroma_name` the `X` of the chroma's `(Variant N X)`
+/// (`None` for the base chroma), `tier_id` the skin's content-tier uuid
+/// (`None` for default and battle-pass skins).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Loadout {
-    pub vandal: Option<String>,
-    pub phantom: Option<String>,
-    pub operator: Option<String>,
-    pub sheriff: Option<String>,
+pub struct WeaponSkin {
+    pub chroma_id: String,
+    pub skin_name: String,
+    pub chroma_name: Option<String>,
+    pub tier_id: Option<String>,
 }
 
+/// Vandal/Phantom/Operator/Sheriff, each with the R23 tri-state (R97):
+/// the key is absent while the skin's name is still resolving
+/// ([`Field::Loading`]), `null` when the player has no such skin or it
+/// can't be known ([`Field::Missing`]), else the [`WeaponSkin`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Loadout {
+    #[serde(skip_serializing_if = "Field::is_loading")]
+    pub vandal: Field<WeaponSkin>,
+    #[serde(skip_serializing_if = "Field::is_loading")]
+    pub phantom: Field<WeaponSkin>,
+    #[serde(skip_serializing_if = "Field::is_loading")]
+    pub operator: Field<WeaponSkin>,
+    #[serde(skip_serializing_if = "Field::is_loading")]
+    pub sheriff: Field<WeaponSkin>,
+}
+
+impl Default for Loadout {
+    /// Nothing known: all four weapons [`Field::Missing`] (`null`).
+    fn default() -> Self {
+        Self {
+            vandal: Field::Missing,
+            phantom: Field::Missing,
+            operator: Field::Missing,
+            sheriff: Field::Missing,
+        }
+    }
+}
+
+/// One shared match in Player Details' Encounters, from the user's side
+/// (`result`, `rounds_*`, `self_*`) with the other player as `them_*`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EncounterDetailRow {
@@ -369,8 +448,18 @@ pub struct EncounterDetailRow {
     pub map_id: String,
     pub start_ms: i64,
     pub with: bool,
-    /// `None` for a draw / no team winner (ruling R29).
-    pub self_won: Option<bool>,
+    /// The user's result (`Draw` for no team winner, ruling R29).
+    pub result: MatchResultKind,
+    /// The user's team's rounds won / the opponent's (`None` when the
+    /// match has no exactly-two-team score).
+    pub rounds_won: Option<i64>,
+    pub rounds_lost: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub them_agent_id: Option<String>,
+    /// Ranks during that match (R81), `None` below 3; see [`display_tier`].
+    pub them_tier: Option<u8>,
+    pub self_agent_id: Option<String>,
+    pub self_tier: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -383,6 +472,74 @@ pub struct PlayerDetails {
     pub top_teammates: Vec<TeammateSummary>,
     pub loadout: Loadout,
     pub encounters: Vec<EncounterDetailRow>,
+    /// R116: the hero's K/D over the player's most recent (up to 20)
+    /// competitive matches of the current act; `null` when there is none.
+    pub hero_kd: Option<f32>,
+    /// R116: HS% (0..1) over the same set.
+    pub hero_hs: Option<f32>,
+    /// R116: how many matches `hero_kd` / `hero_hs` use (0..=20).
+    pub hero_matches: u32,
+}
+
+// ---------------------------------------------------------------------
+// MatchDetailsView (Task 15): the Match Details scoreboard
+// ---------------------------------------------------------------------
+
+/// Whose side the scoreboard is drawn from: the user's when the user
+/// played the match (`self`), else the focus player's (`focus`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Perspective {
+    #[serde(rename = "self")]
+    SelfView,
+    Focus,
+}
+
+/// `match_details(matchId, focusPuuid)`: built by
+/// [`crate::matchview::build_match_view`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchDetailsView {
+    pub match_id: String,
+    /// A valorant-api map uuid (`""` when unknown), never a Riot path.
+    pub map_id: String,
+    pub queue_id: String,
+    pub start_ms: i64,
+    pub duration_ms: Option<i64>,
+    pub perspective: Perspective,
+    /// `[0]` is the perspective team. A mode without two teams (Deathmatch)
+    /// is one block with an empty `team_id` and no result or score.
+    pub teams: Vec<MatchTeamView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchTeamView {
+    pub team_id: String,
+    pub result: Option<MatchResultKind>,
+    pub rounds_won: Option<i64>,
+    /// Rounds won in the first half (rounds 1–12), when known.
+    pub first_half: Option<i64>,
+    /// Sorted by ACS descending, rows without ACS last.
+    pub players: Vec<ScoreRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScoreRow {
+    pub puuid: String,
+    pub name: DisplayName,
+    pub agent_id: Option<String>,
+    /// The player's rank during the match (R81); `None` below 3.
+    pub tier: Option<u8>,
+    pub kills: i64,
+    pub deaths: i64,
+    pub assists: i64,
+    pub acs: Option<f32>,
+    pub adr: Option<f32>,
+    pub hs_pct: Option<f32>,
+    pub is_self: bool,
+    pub is_focus: bool,
 }
 
 // ---------------------------------------------------------------------

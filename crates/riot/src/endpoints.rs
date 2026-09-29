@@ -303,6 +303,14 @@ pub struct PlayerRoundStats {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoundResult {
+    /// Zero-based round number (`MatchDetails.ts`); rounds 0..=11 are the
+    /// first half of a 12-round-half queue. Optional so a payload variant
+    /// without it can't fail the whole decode.
+    #[serde(default)]
+    pub round_num: Option<i64>,
+    /// The team id that won the round (`""` on a round nobody won).
+    #[serde(default)]
+    pub winning_team: Option<String>,
     pub player_stats: Vec<PlayerRoundStats>,
 }
 
@@ -331,6 +339,10 @@ pub struct MatchPlayer {
     /// `MatchDetailsResponse` decode when it's `null`.
     #[serde(default)]
     pub stats: Option<MatchPlayerStats>,
+    /// Riot's rank for the player during this match (`MatchDetails.ts`;
+    /// `0` when unranked). Optional: absent in older captures.
+    #[serde(default)]
+    pub competitive_tier: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -379,6 +391,10 @@ pub struct MatchInfo {
     /// failing the decode.
     #[serde(default)]
     pub completion_state: String,
+    /// How long the game ran (`MatchDetails.ts`). Optional: absent in older
+    /// captures.
+    #[serde(default)]
+    pub game_length_millis: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

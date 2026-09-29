@@ -9,7 +9,7 @@
 //!   ([`order_players`])
 //! - the presence "party key" that triggers a lobby party re-fetch
 //!   ([`party_key`])
-//! - equipped Vandal/Phantom/Operator/Sheriff chromas from core-game
+//! - equipped Vandal/Phantom/Operator/Sheriff skins from core-game
 //!   loadouts ([`extract_loadouts`])
 //! - Riot map path -> valorant-api map uuid ([`map_uuid`])
 //! - the current act ([`current_act`])
@@ -23,9 +23,10 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use opd1_core::model::{Loadout, Team};
+use opd1_core::model::Team;
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
 use opd1_riot::endpoints::{
@@ -419,25 +420,69 @@ pub const SHERIFF: &str = "e336c6b8-418d-9340-d77f-7a9e4cfe0702";
 
 /// The loadout socket that holds a weapon's equipped skin *chroma*
 /// ("Skin Variants" in techchrism's item-type table; the skin itself is
-/// socket `bcef87d6-…`, the skin level `e7c63390-…`).
+/// [`SKIN_SOCKET`], the skin level `e7c63390-…`).
 pub const CHROMA_SOCKET: &str = "3ad1b2b2-acdb-4524-852f-954a76ddae0a";
 
-fn chroma_of(items: &Value, weapon: &str) -> Option<String> {
+/// The loadout socket that holds a weapon's equipped *skin* (Scout
+/// `backend/valapi.py`): its item id is valorant-api's skin uuid.
+pub const SKIN_SOCKET: &str = "bcef87d6-209b-46c6-8b19-fbe40bd95abc";
+
+/// One equipped weapon skin as the loadout endpoints name it: the skin's
+/// uuid (`/v1/weapons/skins/{skin_id}`) and the equipped chroma's uuid.
+/// Both are stored lower-case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EquippedSkin {
+    pub skin_id: String,
+    pub chroma_id: String,
+}
+
+/// A player's four equipped skins, before any name is known. The names
+/// resolve from valorant-api on demand (`details::resolve_skins`, R83).
+/// `None` = not equipped or not readable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawLoadout {
+    pub vandal: Option<EquippedSkin>,
+    pub phantom: Option<EquippedSkin>,
+    pub operator: Option<EquippedSkin>,
+    pub sheriff: Option<EquippedSkin>,
+}
+
+/// `Sockets[socket].Item.ID` of a core-game / pre-game loadout item,
+/// lower-cased; `None` when absent or empty.
+fn socket_item(items: &Value, weapon: &str, socket: &str) -> Option<String> {
     let id = items
         .get(weapon)?
         .get("Sockets")?
-        .get(CHROMA_SOCKET)?
+        .get(socket)?
         .get("Item")?
         .get("ID")?
         .as_str()?;
     (!id.is_empty()).then(|| id.to_ascii_lowercase())
 }
 
-/// puuid -> the four equipped chromas, from `core-game/.../loadouts`.
+/// The equipped skin of `weapon`: its skin and chroma ids (a weapon
+/// without both is unknown, not half a skin).
+fn equipped(items: &Value, weapon: &str) -> Option<EquippedSkin> {
+    Some(EquippedSkin {
+        skin_id: socket_item(items, weapon, SKIN_SOCKET)?,
+        chroma_id: socket_item(items, weapon, CHROMA_SOCKET)?,
+    })
+}
+
+fn raw_loadout_of(items: &Value) -> RawLoadout {
+    RawLoadout {
+        vandal: equipped(items, VANDAL),
+        phantom: equipped(items, PHANTOM),
+        operator: equipped(items, OPERATOR),
+        sheriff: equipped(items, SHERIFF),
+    }
+}
+
+/// puuid -> the four equipped skins, from `core-game/.../loadouts`.
 /// The subject lives inside `Loadout.Subject` (techchrism's current
 /// `loadoutsSchema`); an entry without a subject is skipped rather than
 /// guessed by position.
-pub fn extract_loadouts(resp: &CoreGameLoadoutsResponse) -> HashMap<String, Loadout> {
+pub fn extract_loadouts(resp: &CoreGameLoadoutsResponse) -> HashMap<String, RawLoadout> {
     let mut out = HashMap::new();
     for entry in &resp.loadouts {
         let loadout = &entry.loadout;
@@ -445,15 +490,7 @@ pub fn extract_loadouts(resp: &CoreGameLoadoutsResponse) -> HashMap<String, Load
             continue;
         };
         let items = loadout.get("Items").unwrap_or(&Value::Null);
-        out.insert(
-            subject.to_string(),
-            Loadout {
-                vandal: chroma_of(items, VANDAL),
-                phantom: chroma_of(items, PHANTOM),
-                operator: chroma_of(items, OPERATOR),
-                sheriff: chroma_of(items, SHERIFF),
-            },
-        );
+        out.insert(subject.to_string(), raw_loadout_of(items));
     }
     out
 }
@@ -812,19 +849,31 @@ mod tests {
         assert_eq!(party_key("%%%not base64"), None);
     }
 
+    /// A loadout item as core-game / pre-game send it: the skin in its
+    /// socket and the chroma in the chroma socket.
+    fn item(skin: &str, chroma: &str) -> Value {
+        json!({"ID": "w", "TypeID": "t", "Sockets": {
+            SKIN_SOCKET: {"ID": SKIN_SOCKET, "Item": {"ID": skin, "TypeID": "t"}},
+            CHROMA_SOCKET: {"ID": CHROMA_SOCKET, "Item": {"ID": chroma, "TypeID": "t"}}
+        }})
+    }
+
+    fn skin(skin_id: &str, chroma_id: &str) -> Option<EquippedSkin> {
+        Some(EquippedSkin {
+            skin_id: skin_id.into(),
+            chroma_id: chroma_id.into(),
+        })
+    }
+
     #[test]
-    fn loadouts_pick_the_chroma_socket_of_the_four_weapons() {
-        let item = |chroma: &str| {
-            json!({"ID": "w", "TypeID": "t", "Sockets": {
-                "bcef87d6-209b-46c6-8b19-fbe40bd95abc": {"ID": "s", "Item": {"ID": "skin", "TypeID": "t"}},
-                CHROMA_SOCKET: {"ID": CHROMA_SOCKET, "Item": {"ID": chroma, "TypeID": "t"}}
-            }})
-        };
+    fn extract_loadouts_reads_skin_and_chroma() {
         let resp: CoreGameLoadoutsResponse = serde_json::from_value(json!({
             "Loadouts": [
                 {"CharacterID": "c", "Loadout": {"Subject": "me", "Items": {
-                    VANDAL: item("19629AE1-4996-AE98-7742-24A240D41F99"),
-                    SHERIFF: item("0d3c5ca0-49a2-eef8-d01a-2e9dd8d5d574")
+                    VANDAL: item("30388628-42F0-606C-82C0-73AD43DE997F", "B2A065C0-4632-CCAA-F496-7681DC2A6185"),
+                    SHERIFF: item("skin-sheriff", "chroma-sheriff"),
+                    // A weapon with a skin but no chroma socket is unknown.
+                    PHANTOM: {"ID": "w", "Sockets": {SKIN_SOCKET: {"Item": {"ID": "skin-phantom"}}}}
                 }}},
                 {"CharacterID": "c", "Loadout": {"Items": {}}}
             ]
@@ -834,14 +883,15 @@ mod tests {
         assert_eq!(loadouts.len(), 1, "an entry without a subject is skipped");
         let me = &loadouts["me"];
         assert_eq!(
-            me.vandal.as_deref(),
-            Some("19629ae1-4996-ae98-7742-24a240d41f99")
+            me.vandal,
+            skin(
+                "30388628-42f0-606c-82c0-73ad43de997f",
+                "b2a065c0-4632-ccaa-f496-7681dc2a6185"
+            ),
+            "ids are stored lower-case"
         );
-        assert_eq!(
-            me.sheriff.as_deref(),
-            Some("0d3c5ca0-49a2-eef8-d01a-2e9dd8d5d574")
-        );
-        assert_eq!(me.phantom, None);
+        assert_eq!(me.sheriff, skin("skin-sheriff", "chroma-sheriff"));
+        assert_eq!(me.phantom, None, "skin without chroma: not a known skin");
         assert_eq!(me.operator, None);
     }
 

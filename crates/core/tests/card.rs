@@ -2,10 +2,10 @@
 //! and the pure [`build_card`]. No DB, no network — every input is a
 //! plain `opd1_core` value.
 
-use opd1_core::db::repo::{CompUpdateRow, MatchPlayerRow};
+use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow};
 use opd1_core::model::{
-    build_card, shown_agent, BuildCardInput, CurrentRank, Field, Identity, MatchResultKind,
-    MmrInput, Team,
+    build_card, hero_stats, match_summary, shown_agent, BuildCardInput, CurrentRank, Field,
+    Identity, MatchResultKind, MmrInput, Team,
 };
 use opd1_core::names::KnownName;
 use opd1_core::stats::Act;
@@ -811,4 +811,155 @@ fn remembered_name_serializes_source() {
     let name = json["name"].as_object().unwrap();
     assert_eq!(name["fromMapId"], serde_json::Value::Null);
     assert_eq!(name["fromStartMs"], serde_json::Value::Null);
+}
+
+// ---------------------------------------------------------------------
+// Task 15: MatchSummary.tier (R81) and the no-stats match (R102)
+// ---------------------------------------------------------------------
+
+/// A stored competitive match of the player: 20/10/5, 4000 score over 20
+/// rounds (ACS 200), 10/30/10 shots (HS 20%).
+fn comp_row() -> CompMatchRow {
+    CompMatchRow {
+        match_id: "m1".into(),
+        map_id: "map-uuid".into(),
+        start_ms: 1_000,
+        winning_team: Some("Blue".into()),
+        team_id: "Blue".into(),
+        agent_id: Some("agent-jett".into()),
+        kills: 20,
+        deaths: 10,
+        assists: 5,
+        score: 4000,
+        rounds: Some(20),
+        hs: 10,
+        bs: 30,
+        ls: 10,
+        rounds_won: Some(13),
+        rounds_lost: Some(7),
+        rr_earned: Some(18),
+        season_id: Some("act".into()),
+        tier_before: Some(14),
+        tier_after: Some(15),
+        tier: Some(14),
+    }
+}
+
+#[test]
+fn match_summary_tier_below_3_is_null() {
+    let tier_of = |tier: Option<i64>| {
+        let summary = match_summary(&CompMatchRow { tier, ..comp_row() });
+        serde_json::to_value(summary).unwrap()["tier"].clone()
+    };
+    assert_eq!(tier_of(Some(15)), serde_json::json!(15));
+    assert_eq!(tier_of(Some(3)), serde_json::json!(3));
+    // Below 3 is unranked (placements, unrated queues): no rank shown.
+    for unranked in [Some(0), Some(1), Some(2), None] {
+        assert_eq!(tier_of(unranked), serde_json::Value::Null, "{unranked:?}");
+    }
+    // A value no tier table has never reaches the wire as a wrapped u8.
+    assert_eq!(tier_of(Some(300)), serde_json::Value::Null);
+    assert_eq!(tier_of(Some(-4)), serde_json::Value::Null);
+}
+
+#[test]
+fn match_summary_without_a_stats_row_is_null_not_zero() {
+    // R102: match-details had no stats for the player (stored 0/0/0, no
+    // rounds): every stat is unknown, never a counted zero.
+    let mut blank = comp_row();
+    (blank.kills, blank.deaths, blank.assists, blank.score) = (0, 0, 0, 0);
+    blank.rounds = None;
+    let json = serde_json::to_value(match_summary(&blank)).unwrap();
+    for key in ["kills", "deaths", "assists", "kd", "acs", "hsPct"] {
+        assert_eq!(json[key], serde_json::Value::Null, "{key} must be null");
+        assert!(json.get(key).is_some(), "{key} is present, not absent");
+    }
+    // The rest of the row still shows.
+    assert_eq!(json["result"], "win");
+    assert_eq!(json["roundsWon"], serde_json::json!(13));
+    assert_eq!(json["rrEarned"], serde_json::json!(18));
+
+    // A zero round count is the same "no stats" (never a divide by zero).
+    let mut zero_rounds = comp_row();
+    zero_rounds.rounds = Some(0);
+    let json = serde_json::to_value(match_summary(&zero_rounds)).unwrap();
+    assert_eq!(json["kills"], serde_json::Value::Null);
+    assert_eq!(json["acs"], serde_json::Value::Null);
+
+    // With stats a real zero stays a zero: 0 kills is a counted result.
+    let mut winless = comp_row();
+    (winless.kills, winless.deaths, winless.assists) = (0, 12, 0);
+    let json = serde_json::to_value(match_summary(&winless)).unwrap();
+    assert_eq!(json["kills"], serde_json::json!(0));
+    assert_eq!(json["assists"], serde_json::json!(0));
+    assert_eq!(json["kd"], serde_json::json!(0.0));
+}
+
+// ---------------------------------------------------------------------
+// R116: Player Details hero K/D and HS% over the act's recent matches
+// ---------------------------------------------------------------------
+
+fn stat_row(id: &str, kills: i64, deaths: i64, shots: (i64, i64, i64)) -> CompMatchRow {
+    let mut r = comp_row();
+    r.match_id = id.into();
+    (r.kills, r.deaths) = (kills, deaths);
+    (r.hs, r.bs, r.ls) = shots;
+    r
+}
+
+fn no_stats_row(id: &str) -> CompMatchRow {
+    let mut r = stat_row(id, 0, 0, (0, 0, 0));
+    r.score = 0;
+    r.rounds = None;
+    r
+}
+
+#[test]
+fn hero_stats_pool_kills_deaths_and_shots_over_the_matches() {
+    // 30 kills / 20 deaths; 15 headshots of 60 shots.
+    let rows = [
+        stat_row("a", 20, 10, (10, 30, 10)),
+        stat_row("b", 10, 10, (5, 5, 0)),
+    ];
+    let hero = hero_stats(&rows);
+    assert_eq!(hero.matches, 2);
+    assert_eq!(hero.kd, Some(1.5), "pooled kills / pooled deaths");
+    assert_eq!(hero.hs_pct, Some(0.25), "pooled headshots / pooled shots");
+}
+
+#[test]
+fn hero_stats_count_only_matches_with_a_stats_row() {
+    // R102: a match without stats is no counted zero — it adds neither a
+    // death-free kill/death pair nor to the match count.
+    let rows = [
+        stat_row("a", 20, 10, (10, 30, 10)),
+        no_stats_row("blank"),
+        stat_row("b", 10, 10, (5, 5, 0)),
+    ];
+    let hero = hero_stats(&rows);
+    assert_eq!(hero.matches, 2);
+    assert_eq!(hero.kd, Some(1.5));
+    assert_eq!(hero.hs_pct, Some(0.25));
+}
+
+#[test]
+fn hero_stats_are_null_without_act_matches() {
+    let none = hero_stats(&[]);
+    assert_eq!((none.kd, none.hs_pct, none.matches), (None, None, 0));
+    // Matches exist but none has stats: still nothing to average.
+    let blank = hero_stats(&[no_stats_row("x"), no_stats_row("y")]);
+    assert_eq!((blank.kd, blank.hs_pct, blank.matches), (None, None, 0));
+}
+
+#[test]
+fn hero_stats_edge_cases() {
+    // No death at all: K/D is the kill count (R5), not infinity.
+    let flawless = hero_stats(&[stat_row("a", 25, 0, (10, 10, 5))]);
+    assert_eq!(flawless.kd, Some(25.0));
+    // Stats but not one shot landed: K/D known, HS% unknown.
+    let no_shots = hero_stats(&[stat_row("a", 4, 8, (0, 0, 0))]);
+    assert_eq!(
+        (no_shots.kd, no_shots.hs_pct, no_shots.matches),
+        (Some(0.5), None, 1)
+    );
 }

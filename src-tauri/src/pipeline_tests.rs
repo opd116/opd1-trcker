@@ -14,7 +14,9 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use opd1_core::db::open_db;
-use opd1_core::db::repo::{HistoryEntry, Match, MatchPlayer, MmrSnapshot, Repo};
+use opd1_core::db::repo::{
+    CompUpdateRow, HistoryEntry, Match, MatchPlayer, MatchTeam, MmrSnapshot, Repo,
+};
 use opd1_core::model::{DisplayName, EncounterCount, Field, LiveState, PlayerDetails, Team};
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
@@ -459,6 +461,8 @@ async fn store_foreign_match(st: &AppState) {
         ls: 0,
         game_name: Some(name.into()),
         tag_line: Some("LEAK".into()),
+        competitive_tier: None,
+        damage: None,
     };
     let m = Match {
         match_id: "m-foreign".into(),
@@ -468,6 +472,7 @@ async fn store_foreign_match(st: &AppState) {
         winning_team: None,
         is_ranked: false,
         rounds_played: None,
+        game_length_ms: None,
     };
     let players = vec![player(HIDDEN, "SecretName"), player(STRANGER, "LeakedName")];
     st.db(move |repo| repo.upsert_match(&m, &[], &players))
@@ -671,6 +676,8 @@ fn player_row(puuid: &str, team: &str, name: &str, tag: &str) -> MatchPlayer {
         ls: 0,
         game_name: Some(name.into()),
         tag_line: Some(tag.into()),
+        competitive_tier: None,
+        damage: None,
     }
 }
 
@@ -686,6 +693,7 @@ async fn store_split_match(st: &AppState) -> i64 {
         winning_team: None,
         is_ranked: false,
         rounds_played: None,
+        game_length_ms: None,
     };
     let players = vec![
         player_row(ME, "Blue", "Me", "TAG"),
@@ -959,6 +967,7 @@ async fn store_earlier_shared_matches(st: &AppState) {
                 winning_team: None,
                 is_ranked: false,
                 rounds_played: None,
+                game_length_ms: None,
             };
             let players = [
                 player_row(OTHER, "Red", "Other", "OTH"),
@@ -1107,4 +1116,333 @@ async fn failed_bundle_reload_never_feeds_party_marks() {
         "the sync itself ran"
     );
     assert_no_party_stripe(&h);
+}
+
+// ---------------------------------------------------------------------
+// Task 15: match_details command, extended encounters, hero stats
+// ---------------------------------------------------------------------
+
+/// The `name` of one scoreboard row.
+fn row_name(view: &opd1_core::model::MatchDetailsView, puuid: &str) -> DisplayName {
+    view.teams
+        .iter()
+        .flat_map(|t| t.players.iter())
+        .find(|p| p.puuid == puuid)
+        .unwrap_or_else(|| panic!("{puuid} not on the scoreboard"))
+        .name
+        .clone()
+}
+
+#[tokio::test]
+async fn match_details_reads_db_and_fetches_unknown_once() {
+    let h = harness().await;
+    h.st.set_session(Some(h.session.clone()));
+    let path = "/match-details/v1/matches/m1";
+
+    // Unknown to the DB: exactly one match-details request, then stored.
+    let view = crate::match_details::load(&h.st, "m1", HIDDEN)
+        .await
+        .expect("fetched and stored");
+    assert_eq!(count(&h.server, "GET", path).await, 1);
+    assert_eq!(view.teams.len(), 2);
+    assert_eq!(view.match_id, "m1");
+    assert_eq!(view.queue_id, "competitive");
+    assert_eq!(
+        view.map_id, "",
+        "asset tables not loaded: no uuid, never the path"
+    );
+    assert!(!serde_json::to_string(&view).unwrap().contains("/Game/"));
+    // ME played it: their own view, the user's team first.
+    assert_eq!(view.perspective, opd1_core::model::Perspective::SelfView);
+    assert_eq!(view.teams[0].team_id, "Blue");
+    let me = &view.teams[0].players[0];
+    assert!(me.is_self && !me.is_focus && me.puuid == ME);
+    let hidden = &view.teams[1].players[0];
+    assert!(hidden.is_focus && !hidden.is_self && hidden.puuid == HIDDEN);
+    // Post-match names show as match-details gives them (CLAUDE.md).
+    assert_eq!(
+        row_name(&view, HIDDEN),
+        DisplayName::Visible {
+            name: "SecretName".into(),
+            tag: "HID".into()
+        }
+    );
+
+    // Known now: served from the DB, no new request.
+    let again = crate::match_details::load(&h.st, "m1", HIDDEN)
+        .await
+        .unwrap();
+    assert_eq!(count(&h.server, "GET", path).await, 1);
+    assert_eq!(again, view);
+
+    // A match nobody has: one attempt, then "unknown match".
+    assert_eq!(
+        crate::match_details::load(&h.st, "nope", HIDDEN).await,
+        Err("unknown match".to_string())
+    );
+
+    // Closed (no session): only what the DB has, and no request at all.
+    h.st.set_session(None);
+    assert_eq!(
+        crate::match_details::load(&h.st, "m2", HIDDEN).await,
+        Err("unknown match".to_string())
+    );
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m2").await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn match_details_hides_live_incognito_rows() {
+    let h = harness().await;
+    store_split_match(&h.st).await; // ME and HIDDEN, "m-split"
+    store_foreign_match(&h.st).await; // HIDDEN and STRANGER, without ME
+    {
+        // HIDDEN and STRANGER are incognito on the live screen right now.
+        let slots = vec![
+            slot_for(&h.st, ME, false).await,
+            slot_for(&h.st, HIDDEN, true).await,
+            slot_for(&h.st, STRANGER, true).await,
+        ];
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.slots = slots;
+    }
+
+    // A match ME played: HIDDEN follows their card, which shows the name
+    // ME learned in this very match, in the remembered style (R93).
+    let view = crate::match_details::load(&h.st, "m-split", ME)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            row_name(&view, HIDDEN),
+            DisplayName::Remembered { ref name, .. } if name == "SecretName"
+        ),
+        "{:?}",
+        row_name(&view, HIDDEN)
+    );
+
+    // A match ME did not play: HIDDEN is remembered from ME's own match;
+    // STRANGER (never met ME) shows no name, and the leaked names stay out.
+    let view = crate::match_details::load(&h.st, "m-foreign", HIDDEN)
+        .await
+        .unwrap();
+    assert_eq!(view.perspective, opd1_core::model::Perspective::Focus);
+    assert!(matches!(
+        row_name(&view, HIDDEN),
+        DisplayName::Remembered { ref name, .. } if name == "SecretName"
+    ));
+    assert_eq!(row_name(&view, STRANGER), DisplayName::HiddenPlayer);
+    let text = serde_json::to_string(&view).unwrap();
+    assert!(
+        !text.contains("LeakedName") && !text.contains("LEAK"),
+        "the foreign match's stored names never reach the wire: {text}"
+    );
+    assert!(!text.contains("/Game/"));
+}
+
+/// ME (Jett, tier 21 during the match) lost 10-13 against OTHER (Reyna,
+/// whose tier only the RR row's tier after the match knows) on Split, and
+/// they later won together on the same team. Returns nothing: the rows are
+/// in the DB.
+async fn store_encounters(st: &AppState) -> (i64, i64) {
+    let (against_start, with_start) = (now_ms() - 7_200_000, now_ms() - 3_600_000);
+    st.db(move |repo| {
+        let stats = |puuid: &str, team: &str, agent: &str, name: &str, tag: &str| MatchPlayer {
+            agent_id: Some(agent.into()),
+            ..player_row(puuid, team, name, tag)
+        };
+        let m = |id: &str, start_ms: i64, winner: &str, length: Option<i64>| Match {
+            match_id: id.into(),
+            map_id: SPLIT_PATH.into(),
+            queue_id: "competitive".into(),
+            start_ms,
+            winning_team: Some(winner.into()),
+            is_ranked: true,
+            rounds_played: Some(23),
+            game_length_ms: length,
+        };
+        let team = |id: &str, won: bool, rounds: i64| MatchTeam {
+            team_id: id.into(),
+            won,
+            rounds_won: Some(rounds),
+            rounds_won_h1: None,
+        };
+        let mut me = stats(ME, "Blue", "agent-jett", "Me", "TAG");
+        me.competitive_tier = Some(21);
+        repo.upsert_match(
+            &m("enc-against", against_start, "Red", Some(2_460_000)),
+            &[team("Blue", false, 10), team("Red", true, 13)],
+            &[me, stats(OTHER, "Red", "agent-reyna", "Other", "OTH")],
+        )?;
+        repo.upsert_comp_updates(
+            OTHER,
+            &[CompUpdateRow {
+                match_id: "enc-against".into(),
+                season_id: ACT.into(),
+                tier_after: 24,
+                tier_before: Some(23),
+                rr_after: 10,
+                rr_earned: 20,
+                map_id: None,
+                start_ms: against_start,
+            }],
+        )?;
+        known_player(repo, OTHER);
+        repo.upsert_match(
+            &m("enc-with", with_start, "Blue", None),
+            &[team("Blue", true, 13), team("Red", false, 5)],
+            &[
+                stats(ME, "Blue", "agent-sova", "Me", "TAG"),
+                stats(OTHER, "Blue", "agent-omen", "Other", "OTH"),
+            ],
+        )
+    })
+    .await
+    .unwrap();
+    (against_start, with_start)
+}
+
+#[tokio::test]
+async fn player_details_encounter_rows_are_extended() {
+    let h = harness().await;
+    mount_asset_tables(&h.assets_server).await;
+    h.st.ensure_tables(false).await.expect("tables load");
+    let (against_start, with_start) = store_encounters(&h.st).await;
+
+    let d = crate::details::build(&h.st, OTHER).await.unwrap();
+    let json = serde_json::to_value(&d).unwrap();
+    let rows = json["encounters"].as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    // Newest first; every key of the wire type, `selfWon` gone.
+    assert_eq!(
+        rows[1],
+        json!({
+            "matchId": "enc-against", "mapId": SPLIT_UUID, "startMs": against_start,
+            "with": false, "result": "loss", "roundsWon": 10, "roundsLost": 13,
+            "durationMs": 2_460_000,
+            "themAgentId": "agent-reyna", "themTier": 24,
+            "selfAgentId": "agent-jett", "selfTier": 21
+        })
+    );
+    assert_eq!(
+        rows[0],
+        json!({
+            "matchId": "enc-with", "mapId": SPLIT_UUID, "startMs": with_start,
+            "with": true, "result": "win", "roundsWon": 13, "roundsLost": 5,
+            "durationMs": null,
+            "themAgentId": "agent-omen", "themTier": null,
+            "selfAgentId": "agent-sova", "selfTier": null
+        })
+    );
+    assert!(rows.iter().all(|r| r.get("selfWon").is_none()));
+    assert!(!json.to_string().contains("/Game/"));
+}
+
+/// A `players` row, so Details can build an off-screen card for `puuid`.
+fn known_player(repo: &Repo, puuid: &str) {
+    save_player(
+        repo.conn(),
+        &PlayerUpdate {
+            puuid: puuid.into(),
+            name: Some(("Someone".into(), "TAG".into())),
+            account_level: 50,
+            card_id: "card".into(),
+        },
+        now_ms(),
+    )
+    .unwrap();
+}
+
+/// `start_ms` of the i-th newest act match (1 = an hour ago).
+fn act_match_start(i: i64) -> i64 {
+    now_ms() - i * 3_600_000
+}
+
+/// Stores `who`'s competitive match `i`: `kills` kills over 2 deaths, 1
+/// headshot of 4 shots, or no stats row at all when `kills` is `None`.
+fn store_act_match(repo: &Repo, who: &str, i: i64, start_ms: i64, kills: Option<i64>) {
+    let m = Match {
+        match_id: format!("act-{i}"),
+        map_id: SPLIT_PATH.into(),
+        queue_id: "competitive".into(),
+        start_ms,
+        winning_team: Some("Blue".into()),
+        is_ranked: true,
+        rounds_played: kills.map(|_| 20),
+        game_length_ms: None,
+    };
+    let mut p = player_row(who, "Blue", "Someone", "TAG");
+    if let Some(kills) = kills {
+        (p.kills, p.deaths, p.rounds, p.score) = (kills, 2, Some(20), 4_000);
+        (p.hs, p.bs, p.ls) = (1, 3, 0);
+    }
+    repo.upsert_match(&m, &[], &[p]).unwrap();
+}
+
+#[tokio::test]
+async fn player_details_hero_stats_cover_the_acts_recent_matches() {
+    let h = harness().await;
+    // OTHER's current-act competitive matches: 1 (newest) .. 22. Match 3
+    // has no stats row; 21 and 22 lie beyond the 20 newest and carry absurd
+    // kills; an older match (before the act began) does too.
+    h.st.db(|repo| {
+        known_player(repo, OTHER);
+        for i in 1..=22 {
+            let kills = match i {
+                3 => None,
+                21 | 22 => Some(1_000),
+                _ => Some(i),
+            };
+            store_act_match(repo, OTHER, i, act_match_start(i), kills);
+        }
+        store_act_match(repo, OTHER, 99, now_ms() - 40 * 86_400_000, Some(999));
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let d = crate::details::build(&h.st, OTHER).await.unwrap();
+    // The 20 newest act matches, minus the one without stats: 19 used,
+    // 207 kills (1..=20 without 3) over 19 * 2 deaths, 19 of 76 shots.
+    assert_eq!(d.hero_matches, 19);
+    assert_eq!(d.hero_kd, Some(207.0 / 38.0));
+    assert_eq!(d.hero_hs, Some(0.25));
+    let json = serde_json::to_value(&d).unwrap();
+    assert_eq!(json["heroMatches"], json!(19));
+    assert!((json["heroKd"].as_f64().unwrap() - 207.0 / 38.0).abs() < 1e-5);
+    assert_eq!(json["heroHs"], json!(0.25));
+    // R102 on the same payload: the recent row without stats is null.
+    let blank = json["recent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["matchId"] == "act-3")
+        .expect("act-3 is among the 8 newest");
+    for key in ["kills", "deaths", "assists", "kd", "acs", "hsPct"] {
+        assert_eq!(blank[key], Value::Null, "{key}");
+    }
+}
+
+#[tokio::test]
+async fn player_details_hero_stats_are_null_without_act_matches() {
+    let h = harness().await;
+    // STRANGER only has a match from before the act began.
+    h.st.db(|repo| {
+        known_player(repo, STRANGER);
+        store_act_match(repo, STRANGER, 1, now_ms() - 40 * 86_400_000, Some(30));
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let d = crate::details::build(&h.st, STRANGER).await.unwrap();
+    assert_eq!((d.hero_kd, d.hero_hs, d.hero_matches), (None, None, 0));
+    let json = serde_json::to_value(&d).unwrap();
+    assert_eq!(json["heroKd"], Value::Null);
+    assert_eq!(json["heroHs"], Value::Null);
+    assert_eq!(json["heroMatches"], json!(0));
+    // The pre-act match still shows in Recent (any act).
+    assert_eq!(d.recent.len(), 1);
 }

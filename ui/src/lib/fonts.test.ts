@@ -1,6 +1,7 @@
 /// <reference types="node" />
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import { DEFAULT_THEME, TONES } from "./theme";
 
 const SRC = new URL("../", import.meta.url);
 const FONTS = new URL("assets/fonts/", SRC);
@@ -75,6 +76,12 @@ describe("app.css", () => {
     expect(css).not.toMatch(/box-sizing/);
     expect(css).not.toMatch(/line-height/);
     expect(css).not.toMatch(/(^|\n)\s*(\*|img)\s*[,{]/);
+  });
+
+  it("the html,body background fallback is the default tone's --bg (no drift from theme.ts)", () => {
+    const fallback = /html,\s*body\s*\{[^}]*background:\s*var\(--bg,\s*(#[0-9a-fA-F]{6})\)/.exec(css)?.[1];
+    expect(fallback, "html,body needs a var(--bg, #rrggbb) fallback").toBeDefined();
+    expect(fallback!.toLowerCase()).toBe(TONES[DEFAULT_THEME.tone].bg.toLowerCase());
   });
 
   it("has the keyboard-only focus ring (R106) and nothing that shows on mouse focus", () => {

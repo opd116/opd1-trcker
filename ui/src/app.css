@@ -136,8 +136,10 @@
 }
 
 
-/* The only global rules (spec §0). The fallback keeps the window dark in the moment
-   before main.ts writes the theme variables. */
+/* The only global rules. Exactly two things go beyond the design's own CSS: the `--bg`
+   fallback, which equals the default tone's bg (fonts.test.ts pins that) and keeps the
+   window dark in the moment before main.ts writes the theme variables, and the R106
+   focus ring below. Once the variables exist the fallback is never used. */
 html,
 body {
   margin: 0;

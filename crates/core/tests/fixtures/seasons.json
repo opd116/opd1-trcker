@@ -1,0 +1,92 @@
+[
+  {
+    "uuid": "0df5adb9-4dcb-6899-1306-3e9860661dd3",
+    "displayName": "Closed Beta",
+    "title": null,
+    "type": null,
+    "startTime": "2020-04-06T16:00:00Z",
+    "endTime": "2020-05-29T06:59:00Z",
+    "parentUuid": null
+  },
+  {
+    "uuid": "808202d6-4f2b-a8ff-1feb-b3a0590ad79f",
+    "displayName": "EPISODE 4",
+    "title": null,
+    "type": null,
+    "startTime": "2022-01-11T00:00:00Z",
+    "endTime": "2022-06-21T00:00:00Z",
+    "parentUuid": null
+  },
+  {
+    "uuid": "3e47230a-463c-a301-eb7d-67bb60357d4f",
+    "displayName": "ACT III",
+    "title": null,
+    "type": "EAresSeasonType::Act",
+    "startTime": "2022-04-26T00:00:00Z",
+    "endTime": "2022-06-21T00:00:00Z",
+    "parentUuid": "808202d6-4f2b-a8ff-1feb-b3a0590ad79f"
+  },
+  {
+    "uuid": "79f9d00f-433a-85d6-dfc3-60aef115e699",
+    "displayName": "EPISODE 5",
+    "title": null,
+    "type": null,
+    "startTime": "2022-06-21T00:00:00Z",
+    "endTime": "2023-01-10T00:00:00Z",
+    "parentUuid": null
+  },
+  {
+    "uuid": "67e373c7-48f7-b422-641b-079ace30b427",
+    "displayName": "ACT I",
+    "title": null,
+    "type": "EAresSeasonType::Act",
+    "startTime": "2022-06-21T00:00:00Z",
+    "endTime": "2022-08-23T00:00:00Z",
+    "parentUuid": "79f9d00f-433a-85d6-dfc3-60aef115e699"
+  },
+  {
+    "uuid": "843cc465-4f0a-7466-ccda-19a427f8e478",
+    "displayName": "EPISODE 8",
+    "title": "DEFIANCE",
+    "type": null,
+    "startTime": "2024-01-09T00:00:00Z",
+    "endTime": "2024-06-26T00:00:00Z",
+    "parentUuid": null
+  },
+  {
+    "uuid": "4539cac3-47ae-90e5-3d01-b3812ca3274e",
+    "displayName": "ACT III",
+    "title": "EPISODE 8 // ACT III",
+    "type": "EAresSeasonType::Act",
+    "startTime": "2024-04-30T00:00:00Z",
+    "endTime": "2024-06-26T00:00:00Z",
+    "parentUuid": "843cc465-4f0a-7466-ccda-19a427f8e478"
+  },
+  {
+    "uuid": "3737c391-497a-6e82-aeb5-cc9f701f72e2",
+    "displayName": "V26",
+    "title": null,
+    "type": null,
+    "startTime": "2026-06-24T00:00:00Z",
+    "endTime": "2027-01-06T00:00:00Z",
+    "parentUuid": null
+  },
+  {
+    "uuid": "4f0864e2-40af-28a4-de2c-0e9e64e75f23",
+    "displayName": "ACT IV",
+    "title": "V26 // ACT IV",
+    "type": "EAresSeasonType::Act",
+    "startTime": "2026-06-24T00:00:00Z",
+    "endTime": "2026-08-19T00:00:00Z",
+    "parentUuid": "3737c391-497a-6e82-aeb5-cc9f701f72e2"
+  },
+  {
+    "uuid": "8102cd81-43a0-d0d7-bd59-47b8fe9bed1b",
+    "displayName": "ACT V",
+    "title": "V26 // ACT V",
+    "type": "EAresSeasonType::Act",
+    "startTime": "2026-08-19T00:00:00Z",
+    "endTime": "2026-10-14T00:00:00Z",
+    "parentUuid": "3737c391-497a-6e82-aeb5-cc9f701f72e2"
+  }
+]

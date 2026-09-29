@@ -1,0 +1,54 @@
+{
+  "Version": 11,
+  "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+  "NewPlayerExperienceFinished": true,
+  "QueueSkills": {
+    "competitive": {
+      "TotalGamesNeededForRating": 5,
+      "TotalGamesNeededForLeaderboard": 0,
+      "CurrentSeasonGamesNeededForRating": 0,
+      "SeasonalInfoBySeasonID": {
+        "3e47230a-463c-a301-eb7d-67bb60357d4f": {
+          "SeasonID": "3e47230a-463c-a301-eb7d-67bb60357d4f",
+          "NumberOfWins": 34,
+          "NumberOfWinsWithPlacements": 34,
+          "NumberOfGames": 61,
+          "Rank": 15,
+          "CapstoneWins": 0,
+          "LeaderboardRank": 0,
+          "CompetitiveTier": 15,
+          "RankedRating": 42,
+          "WinsByTier": {
+            "13": 4,
+            "14": 10,
+            "15": 20
+          },
+          "GamesNeededForRating": 0,
+          "TotalWinsNeededForRank": 0
+        }
+      }
+    },
+    "unrated": {
+      "TotalGamesNeededForRating": 0,
+      "TotalGamesNeededForLeaderboard": 0,
+      "CurrentSeasonGamesNeededForRating": 0,
+      "SeasonalInfoBySeasonID": {}
+    }
+  },
+  "LatestCompetitiveUpdate": {
+    "MatchID": "1a2b3c4d-0000-0000-0000-000000000010",
+    "MapID": "/Game/Maps/Ascent/Ascent",
+    "SeasonID": "3e47230a-463c-a301-eb7d-67bb60357d4f",
+    "MatchStartTime": 1758970000000,
+    "TierAfterUpdate": 15,
+    "TierBeforeUpdate": 14,
+    "RankedRatingAfterUpdate": 42,
+    "RankedRatingBeforeUpdate": 18,
+    "RankedRatingEarned": 24,
+    "RankedRatingPerformanceBonus": 4,
+    "CompetitiveMovement": "MOVEMENT_UNKNOWN",
+    "AFKPenalty": 0
+  },
+  "IsLeaderboardAnonymized": false,
+  "IsActRankBadgeHidden": false
+}

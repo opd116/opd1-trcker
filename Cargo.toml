@@ -5,3 +5,11 @@ members = [
     "crates/riot",
     "src-tauri",
 ]
+
+[workspace.dependencies]
+# `bundled`: compiles SQLite from source rather than requiring a system
+# libsqlite3 — the Windows CI runner and the user's machine shouldn't need
+# one installed. Kept as a workspace dependency (rather than pinned only
+# in `crates/core/Cargo.toml`) since Task 5/6/9 in `src-tauri` will also
+# need to open/pass around `rusqlite::Connection`.
+rusqlite = { version = "0.40", features = ["bundled"] }

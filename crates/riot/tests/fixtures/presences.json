@@ -1,0 +1,26 @@
+{
+  "presences": [
+    {
+      "actor": null,
+      "basic": "",
+      "details": null,
+      "game_name": "Shanky",
+      "game_tag": "OPD1",
+      "location": null,
+      "msg": null,
+      "name": "",
+      "patchline": null,
+      "pid": "aaaaaaaa-0000-0000-0000-000000000001",
+      "platform": null,
+      "private": "eyJzZXNzaW9uTG9vcFN0YXRlIjoiTUVOVVMifQ==",
+      "privateJwt": null,
+      "product": "valorant",
+      "puuid": "aaaaaaaa-0000-0000-0000-000000000001",
+      "region": "na",
+      "resource": "",
+      "state": "chat",
+      "summary": "",
+      "time": 1758970000000
+    }
+  ]
+}

@@ -1,0 +1,113 @@
+{
+  "ID": "1a2b3c4d-0000-0000-0000-000000000010",
+  "Version": 1,
+  "Teams": [
+    {
+      "TeamID": "Blue",
+      "Players": [
+        {
+          "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+          "CharacterID": "5f8d3a7f-467b-97f3-062c-13acf203c006",
+          "CharacterSelectionState": "selected",
+          "PregamePlayerState": "joined",
+          "CompetitiveTier": 15,
+          "PlayerIdentity": {
+            "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+            "PlayerCardID": "1711d20d-4b1c-c64a-14be-d4ae58a457c6",
+            "PlayerTitleID": "b3a2f52f-0000-0000-0000-000000000000",
+            "AccountLevel": 187,
+            "PreferredLevelBorderID": "",
+            "Incognito": false,
+            "HideAccountLevel": false
+          },
+          "SeasonalBadgeInfo": {
+            "SeasonID": "",
+            "NumberOfWins": 0,
+            "WinsByTier": null,
+            "Rank": 0,
+            "LeaderboardRank": 0
+          },
+          "IsCaptain": false
+        },
+        {
+          "Subject": "aaaaaaaa-0000-0000-0000-000000000002",
+          "CharacterID": "",
+          "CharacterSelectionState": "",
+          "PregamePlayerState": "joined",
+          "CompetitiveTier": 18,
+          "PlayerIdentity": {
+            "Subject": "aaaaaaaa-0000-0000-0000-000000000002",
+            "PlayerCardID": "c8b2f5fd-4331-b172-f3b7-c8a26f356a1f",
+            "PlayerTitleID": "",
+            "AccountLevel": 0,
+            "PreferredLevelBorderID": "",
+            "Incognito": true,
+            "HideAccountLevel": true
+          },
+          "SeasonalBadgeInfo": {
+            "SeasonID": "",
+            "NumberOfWins": 0,
+            "WinsByTier": null,
+            "Rank": 0,
+            "LeaderboardRank": 0
+          },
+          "IsCaptain": false
+        }
+      ]
+    }
+  ],
+  "AllyTeam": {
+    "TeamID": "Blue",
+    "Players": [
+      {
+        "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+        "CharacterID": "5f8d3a7f-467b-97f3-062c-13acf203c006",
+        "CharacterSelectionState": "selected",
+        "PregamePlayerState": "joined",
+        "CompetitiveTier": 15,
+        "PlayerIdentity": {
+          "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+          "PlayerCardID": "1711d20d-4b1c-c64a-14be-d4ae58a457c6",
+          "PlayerTitleID": "b3a2f52f-0000-0000-0000-000000000000",
+          "AccountLevel": 187,
+          "PreferredLevelBorderID": "",
+          "Incognito": false,
+          "HideAccountLevel": false
+        },
+        "SeasonalBadgeInfo": {
+          "SeasonID": "",
+          "NumberOfWins": 0,
+          "WinsByTier": null,
+          "Rank": 0,
+          "LeaderboardRank": 0
+        },
+        "IsCaptain": false
+      }
+    ]
+  },
+  "EnemyTeam": null,
+  "ObserverSubjects": [],
+  "MatchCoaches": [],
+  "EnemyTeamSize": 5,
+  "EnemyTeamLockCount": 0,
+  "PregameState": "character_select_active",
+  "LastUpdated": "2026-09-27T12:00:00.000Z",
+  "MapID": "/Game/Maps/Ascent/Ascent",
+  "MapSelectPool": [],
+  "BannedMapIDs": [],
+  "MapSelectSteps": [],
+  "MapSelectStep": 0,
+  "Team1": "Blue",
+  "GamePodID": "na-gp-ashburn-1",
+  "Mode": "/Game/GameModes/Bomb/BombGameMode.BombGameMode_C",
+  "VoiceSessionID": "",
+  "MUCName": "",
+  "QueueID": "competitive",
+  "ProvisioningFlow": "Matchmaking",
+  "IsRanked": true,
+  "PhaseTimeRemainingNS": 0,
+  "StepTimeRemainingNS": 0,
+  "altModesFlagADA": false,
+  "TournamentMetadata": null,
+  "RosterMetadata": null
+}

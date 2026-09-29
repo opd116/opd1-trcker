@@ -1,0 +1,10 @@
+{
+  "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+  "BeginIndex": 0,
+  "EndIndex": 2,
+  "Total": 214,
+  "History": [
+    { "MatchID": "1a2b3c4d-0000-0000-0000-000000000010", "GameStartTime": 1758970000000, "QueueID": "competitive" },
+    { "MatchID": "2b3c4d5e-0000-0000-0000-000000000011", "GameStartTime": 1758880000000, "QueueID": "competitive" }
+  ]
+}

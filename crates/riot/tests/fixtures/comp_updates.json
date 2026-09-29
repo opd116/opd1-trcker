@@ -1,0 +1,34 @@
+{
+  "Version": 5,
+  "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+  "Matches": [
+    {
+      "MatchID": "1a2b3c4d-0000-0000-0000-000000000010",
+      "MapID": "/Game/Maps/Ascent/Ascent",
+      "SeasonID": "3e47230a-463c-a301-eb7d-67bb60357d4f",
+      "MatchStartTime": 1758970000000,
+      "TierAfterUpdate": 15,
+      "TierBeforeUpdate": 14,
+      "RankedRatingAfterUpdate": 42,
+      "RankedRatingBeforeUpdate": 18,
+      "RankedRatingEarned": 24,
+      "RankedRatingPerformanceBonus": 4,
+      "CompetitiveMovement": "MOVEMENT_UNKNOWN",
+      "AFKPenalty": 0
+    },
+    {
+      "MatchID": "2b3c4d5e-0000-0000-0000-000000000011",
+      "MapID": "/Game/Maps/Bonsai/Bonsai",
+      "SeasonID": "3e47230a-463c-a301-eb7d-67bb60357d4f",
+      "MatchStartTime": 1758880000000,
+      "TierAfterUpdate": 14,
+      "TierBeforeUpdate": 14,
+      "RankedRatingAfterUpdate": 18,
+      "RankedRatingBeforeUpdate": 40,
+      "RankedRatingEarned": -22,
+      "RankedRatingPerformanceBonus": 0,
+      "CompetitiveMovement": "MOVEMENT_UNKNOWN",
+      "AFKPenalty": 0
+    }
+  ]
+}

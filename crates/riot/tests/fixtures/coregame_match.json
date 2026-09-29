@@ -1,0 +1,59 @@
+{
+  "MatchID": "1a2b3c4d-0000-0000-0000-000000000010",
+  "Version": 1,
+  "State": "IN_PROGRESS",
+  "MapID": "/Game/Maps/Ascent/Ascent",
+  "ModeID": "/Game/GameModes/Bomb/BombGameMode.BombGameMode_C",
+  "ProvisioningFlow": "Matchmaking",
+  "GamePodID": "na-gp-ashburn-1",
+  "AllMUCName": "",
+  "TeamMUCName": "",
+  "TeamVoiceID": "",
+  "IsReconnectable": true,
+  "ConnectionDetails": {
+    "GameServerHosts": [],
+    "GameServerHost": "",
+    "GameServerPort": 0,
+    "GameServerObfuscatedIP": 0,
+    "GameClientHash": 0,
+    "PlayerKey": ""
+  },
+  "PostGameDetails": null,
+  "Players": [
+    {
+      "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+      "TeamID": "Blue",
+      "CharacterID": "5f8d3a7f-467b-97f3-062c-13acf203c006",
+      "PlayerIdentity": {
+        "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+        "PlayerCardID": "1711d20d-4b1c-c64a-14be-d4ae58a457c6",
+        "PlayerTitleID": "b3a2f52f-0000-0000-0000-000000000000",
+        "AccountLevel": 187,
+        "PreferredLevelBorderID": "",
+        "Incognito": false,
+        "HideAccountLevel": false
+      },
+      "SeasonalBadgeInfo": null,
+      "IsCoach": false,
+      "IsAssociated": true
+    },
+    {
+      "Subject": "bbbbbbbb-0000-0000-0000-000000000001",
+      "TeamID": "Red",
+      "CharacterID": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+      "PlayerIdentity": {
+        "Subject": "bbbbbbbb-0000-0000-0000-000000000001",
+        "PlayerCardID": "eef542d2-4724-bc47-f53f-239f8c9c2623",
+        "PlayerTitleID": "",
+        "AccountLevel": 0,
+        "PreferredLevelBorderID": "",
+        "Incognito": true,
+        "HideAccountLevel": true
+      },
+      "SeasonalBadgeInfo": null,
+      "IsCoach": false,
+      "IsAssociated": true
+    }
+  ],
+  "MatchmakingData": null
+}

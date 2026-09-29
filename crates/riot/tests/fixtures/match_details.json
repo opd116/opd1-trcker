@@ -1,0 +1,106 @@
+{
+  "matchInfo": {
+    "matchID": "1a2b3c4d-0000-0000-0000-000000000010",
+    "mapId": "/Game/Maps/Ascent/Ascent",
+    "gameStartMillis": 1758970000000,
+    "queueId": "competitive",
+    "isRanked": true
+  },
+  "players": [
+    {
+      "subject": "aaaaaaaa-0000-0000-0000-000000000001",
+      "gameName": "Shanky",
+      "tagLine": "OPD1",
+      "platformInfo": {
+        "platformType": "PC",
+        "platformOS": "Windows",
+        "platformOSVersion": "10.0.19045.1.256.64bit",
+        "platformChipset": "Unknown"
+      },
+      "teamId": "Blue",
+      "partyId": "cccccccc-0000-0000-0000-000000000001",
+      "characterId": "5f8d3a7f-467b-97f3-062c-13acf203c006",
+      "stats": {
+        "score": 4800,
+        "roundsPlayed": 24,
+        "kills": 22,
+        "deaths": 15,
+        "assists": 6,
+        "playTimeMillis": 1800000
+      },
+      "competitiveTier": 15,
+      "accountLevel": 187
+    },
+    {
+      "subject": "bbbbbbbb-0000-0000-0000-000000000001",
+      "gameName": "Rival",
+      "tagLine": "ENEMY",
+      "platformInfo": {
+        "platformType": "PC",
+        "platformOS": "Windows",
+        "platformOSVersion": "10.0.19045.1.256.64bit",
+        "platformChipset": "Unknown"
+      },
+      "teamId": "Red",
+      "partyId": "dddddddd-0000-0000-0000-000000000001",
+      "characterId": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+      "stats": {
+        "score": 3900,
+        "roundsPlayed": 24,
+        "kills": 17,
+        "deaths": 19,
+        "assists": 4,
+        "playTimeMillis": 1800000
+      },
+      "competitiveTier": 18,
+      "accountLevel": 240
+    }
+  ],
+  "bots": [],
+  "coaches": [],
+  "teams": [
+    { "teamId": "Blue", "won": true, "roundsPlayed": 24, "roundsWon": 13, "numPoints": 13 },
+    { "teamId": "Red", "won": false, "roundsPlayed": 24, "roundsWon": 11, "numPoints": 11 }
+  ],
+  "roundResults": [
+    {
+      "roundNum": 0,
+      "roundResult": "Eliminated",
+      "roundCeremony": "CeremonyDefault",
+      "winningTeam": "Blue",
+      "plantSite": "",
+      "roundResultCode": "Elimination",
+      "playerStats": [
+        {
+          "subject": "aaaaaaaa-0000-0000-0000-000000000001",
+          "kills": [],
+          "damage": [
+            { "receiver": "bbbbbbbb-0000-0000-0000-000000000001", "damage": 150, "legshots": 0, "bodyshots": 1, "headshots": 1 }
+          ],
+          "score": 200,
+          "economy": { "loadoutValue": 4700, "weapon": "", "armor": "", "remaining": 0, "spent": 4700 },
+          "ability": { "grenadeEffects": null, "ability1Effects": null, "ability2Effects": null, "ultimateEffects": null },
+          "wasAfk": false,
+          "wasPenalized": false,
+          "stayedInSpawn": false
+        },
+        {
+          "subject": "bbbbbbbb-0000-0000-0000-000000000001",
+          "kills": [],
+          "damage": [
+            { "receiver": "aaaaaaaa-0000-0000-0000-000000000001", "damage": 60, "legshots": 0, "bodyshots": 2, "headshots": 0 }
+          ],
+          "score": 0,
+          "economy": { "loadoutValue": 4300, "weapon": "", "armor": "", "remaining": 0, "spent": 4300 },
+          "ability": { "grenadeEffects": null, "ability1Effects": null, "ability2Effects": null, "ultimateEffects": null },
+          "wasAfk": false,
+          "wasPenalized": false,
+          "stayedInSpawn": false
+        }
+      ],
+      "playerEconomies": [],
+      "playerScores": []
+    }
+  ],
+  "kills": []
+}

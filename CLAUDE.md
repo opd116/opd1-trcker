@@ -64,7 +64,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Peak Rank icon + the act it was reached in (short label like `E8 A3 · 1y`), where the time is since that act ended, not the day the peak was hit. For the current act, say "This Act". Hover shows the full act name and dates.
 - K/D and HS% from the last 5 Competitive matches
 - Current-act Win Rate
-- Last 5 Competitive results, newest first, each showing W/L, RR change, and time since
+- Last 5 Competitive results, newest first, each showing only a W/L (or draw) marker. RR change and time since are on hover (user decision 2026-09-27)
 - Agent **head icon** (`displayIcon`) only after the agent is selected. Never show a placeholder agent.
 
 **Player details** (click any card in any stage; **scrolling allowed**):

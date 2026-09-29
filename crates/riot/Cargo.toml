@@ -2,3 +2,46 @@
 name = "opd1-riot"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+opd1-core = { path = "../core" }
+# `rustls-no-provider` (rather than `rustls`, which pulls the aws-lc-rs
+# backend — a heavier binary and a cmake/NASM build dependency that's a
+# real risk on `windows-latest` CI) + a directly-depended, `ring`-only
+# `rustls` so we can install the ring crypto provider ourselves at
+# `RiotSession::connect()` time. No `http2`/`http3`/`charset` — none of
+# those are needed for plain JSON GET/PUT calls.
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+# `time` (for `throttle.rs`'s `sleep`), `sync` (for `assets.rs`'s
+# per-`(kind,id)` download-dedup lock, fix-round item 5), and
+# `rt` (for `assets.rs`'s `tokio::task::spawn_blocking`, fix-round item 10
+# / R37 — blocking image decode/resize and filesystem work must not run on
+# an async task). The library itself never uses `#[tokio::main]`/
+# `#[tokio::test]`, so `rt-multi-thread`/`macros` stay in
+# [dev-dependencies] only.
+tokio = { version = "1", features = ["time", "sync", "rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+base64 = "0.22"
+# RFC3339 parsing only (`to_core::acts_from_seasons`'s `startTime`/`endTime`
+# -> epoch ms) — `default-features = false` + `std` skips `clock`/`now()`
+# and any timezone-database features we don't need. Already resolved
+# elsewhere in this workspace's `Cargo.lock` (pulled in transitively via
+# `serde_with`), so this adds an edge to the dependency graph, not a new
+# crate to compile.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+# `image`: decode-once, cache-forever downscaling for the handful of
+# valorant-api image kinds that are far larger than the UI ever displays
+# them (`assets.rs` — agent head icons, rank tier icons, map splash art).
+# `default-features = false` + only `png`/`jpeg` (every valorant-api image
+# asset is one of those two) keeps this to ~20 small, pure-Rust codec
+# crates — no cmake/NASM/system-library build step, consistent with this
+# crate's existing `rustls-no-provider` choice. See task-5a-report.md for
+# the measured dependency count.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+wiremock = "0.6"
+tempfile = "3"

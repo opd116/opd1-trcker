@@ -17,3 +17,30 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
+opd1-core = { path = "../crates/core" }
+opd1-riot = { path = "../crates/riot" }
+rusqlite = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# The in-memory ring-buffer logger (`logbuf.rs`, ruling R30) implements
+# `log::Log`; already in the tree via tauri, so no new crate.
+log = "0.4"
+# `time` (poll-loop timers), `sync` (tables-load mutex), `rt` (`JoinSet`
+# for the per-player match-details fan-out). Same tokio tauri already runs
+# on — no new crates, only feature edges.
+tokio = { version = "1", features = ["time", "sync", "rt"] }
+# Decoding the presence `private` blob for the party key (`roster.rs`) —
+# same version opd1-core/opd1-riot already use.
+base64 = "0.22"
+# My Stats' weekday / time-of-day buckets need the local UTC offset
+# (`commands::local_offset_ms`). chrono is already in the tree via
+# opd1-riot; `clock` only adds `windows-link` on Windows (already pulled in
+# by tauri's `windows` crates).
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[dev-dependencies]
+# `pipeline_tests.rs`: drive the real sync pipeline against a mock Riot
+# (same wiremock/tokio/tempfile opd1-riot's own tests use — no new crates).
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
+wiremock = "0.6"
+tempfile = "3"

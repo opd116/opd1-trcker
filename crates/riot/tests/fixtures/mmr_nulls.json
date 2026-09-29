@@ -1,0 +1,15 @@
+{
+  "Version": 11,
+  "Subject": "aaaaaaaa-0000-0000-0000-000000000001",
+  "NewPlayerExperienceFinished": false,
+  "QueueSkills": {
+    "competitive": {
+      "TotalGamesNeededForRating": 5,
+      "TotalGamesNeededForLeaderboard": 0,
+      "CurrentSeasonGamesNeededForRating": 5,
+      "SeasonalInfoBySeasonID": null
+    }
+  },
+  "IsLeaderboardAnonymized": false,
+  "IsActRankBadgeHidden": false
+}

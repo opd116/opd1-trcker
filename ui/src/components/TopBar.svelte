@@ -1,4 +1,5 @@
-<!-- Top bar (spec §2.2): wordmark and tabs. The right group (map, average party rank) arrives with the Live screen. -->
+<!-- Top bar (spec §2.2): wordmark and tabs. The right group (map, average party rank) arrives with the Live
+     screen (Task 17): it is rendered on the Live grid route only and left out on Details and Match. -->
 <script lang="ts">
   import { go } from "../lib/router.svelte";
 </script>

@@ -1,5 +1,14 @@
 // The tooltip catalogue (spec §4.2): pure strings. Names from meta come through meta.ts; a pending or
 // missing part is dropped (spec §5.8), so no tip ever contains "undefined" or "null".
+//
+// Built so far: the name wrapper, peak, win, last-5 tile, encounter badge, party and average-party-rank rows.
+// The rest of §4.2 lands HERE as pure functions with tests, never inline in a screen (Tasks 17 and 18):
+//   - "Last 5 competitive" (K/D, HS%) and "This act" (Games, W/L blocks)
+//   - recent-row time text and rank-icon tier name; encounter map cell ({Mon D} · {h:mm AM/PM} · {N min})
+//   - top-3 live icons: "In this match · {Agent}", or "In this match" when the agent is unknown or the
+//     meta lookup is pending or missing (§5.8: the part is dropped)
+//   - loadout well "{Tier} Edition" (none for a default skin)
+//   - match screen: halves "First half · Second half", the ACS / +/− / ADR headers, scoreboard rank icon
 import { actDates, actTitle, count, dateLong, rrDelta, span } from "./format";
 import { mapName } from "./meta";
 import type { DisplayName, EncounterCount, Last5Entry, Meta, PartyMark, Peak, PlayerCard } from "./types";

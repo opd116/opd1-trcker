@@ -1,6 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
-import type { LiveState } from "./types";
+import type { LiveState, Meta } from "./types";
 
 const state = (stage: LiveState["stage"]): LiveState => ({ stage, mapId: null, players: [] });
 
@@ -52,5 +52,59 @@ describe("stores", () => {
     go({ name: "details", puuid: "p1", more: false });
     applyLive(state("pregame"));
     expect(router.route).toEqual({ name: "live" });
+  });
+
+  describe("startFeeds under Tauri", () => {
+    const good: Meta = { agents: {}, maps: { m1: { name: "Ascent" } }, tiers: {} };
+
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.doUnmock("@tauri-apps/api/core");
+      vi.doUnmock("./api");
+    });
+
+    /** Stores wired to a fake Tauri bridge whose `meta` command rejects `failures` times before it resolves. */
+    async function underTauri(failures: number) {
+      let metaCalls = 0;
+      const invoke = vi.fn(async (cmd: string) => {
+        if (cmd === "live_state") return state("closed");
+        if (cmd === "meta") {
+          if (metaCalls++ < failures) throw new Error("asset tables unavailable");
+          return good;
+        }
+        throw new Error(`unexpected ${cmd}`);
+      });
+      const listen = vi.fn(async () => () => {});
+      vi.doMock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
+      vi.doMock("./api", () => ({ tauriBridge: { invoke, listen } }));
+      vi.spyOn(console, "error").mockImplementation(() => {});
+      return { ...(await load()), invoke, metaCalls: () => metaCalls };
+    }
+
+    it("a rejected meta() does not leave meta pending: EMPTY_META now, the real tables on a retry", async () => {
+      vi.useFakeTimers();
+      const { startFeeds, meta, live, invoke } = await underTauri(1);
+      await startFeeds(); // resolves without waiting for meta
+      expect(get(live)?.stage).toBe("closed"); // the live feed is not held up by a failing meta()
+      await vi.advanceTimersByTimeAsync(0);
+      expect(get(meta)).toEqual({ agents: {}, maps: {}, tiers: {} }); // loaded-miss "—", never a skeleton forever
+      expect(get(meta)).not.toBeNull();
+      expect(console.error).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(get(meta)).toEqual(good);
+      expect(invoke.mock.calls.filter(([cmd]) => cmd === "meta")).toHaveLength(2);
+    });
+
+    it("a healthy meta() is set once with no retry", async () => {
+      vi.useFakeTimers();
+      const { startFeeds, meta, metaCalls } = await underTauri(0);
+      await startFeeds();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(get(meta)).toEqual(good);
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(metaCalls()).toBe(1);
+      expect(console.error).not.toHaveBeenCalled();
+    });
   });
 });

@@ -1,6 +1,16 @@
-import { describe, expect, it, vi } from "vitest";
-import { applyDetailsEvent, keyAction, runKeyAction, startLive, type Bridge } from "./boot";
-import type { LiveState, PlayerDetails } from "./types";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  META_RETRY_FIRST_MS,
+  META_RETRY_MAX_MS,
+  applyDetailsEvent,
+  keyAction,
+  loadMeta,
+  runKeyAction,
+  startLive,
+  type Bridge,
+} from "./boot";
+import { EMPTY_META } from "./meta";
+import type { LiveState, Meta, PlayerDetails } from "./types";
 
 const live = (stage: LiveState["stage"]): LiveState => ({ stage, mapId: null, players: [] });
 
@@ -116,5 +126,76 @@ describe("applyDetailsEvent", () => {
 
   it("ignores events while nothing is open", () => {
     expect(applyDetailsEvent(null, details("p1", "x"))).toBeNull();
+  });
+});
+
+describe("loadMeta (spec §5.8: a rejected meta() must not stay pending)", () => {
+  const good: Meta = { agents: { a1: { name: "Jett" } }, maps: {}, tiers: {} };
+
+  afterEach(() => vi.useRealTimers());
+
+  /** A bridge whose `meta` rejects `failures` times, then resolves `good`. */
+  function flaky(failures: number) {
+    let calls = 0;
+    const invoke = vi.fn(async (cmd: string) => {
+      if (cmd !== "meta") throw new Error(`unexpected ${cmd}`);
+      if (calls++ < failures) throw new Error("asset tables unavailable");
+      return good;
+    });
+    return { b: { invoke } as unknown as Bridge, invoke };
+  }
+
+  it("success on the first try: sets the tables once, no retry", async () => {
+    vi.useFakeTimers();
+    const { b, invoke } = flaky(0);
+    const set = vi.fn();
+    await loadMeta(b, set);
+    expect(set.mock.calls).toEqual([[good]]);
+    await vi.advanceTimersByTimeAsync(META_RETRY_MAX_MS * 2);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it("a rejection sets EMPTY_META at once, then retries with a doubling backoff until it succeeds", async () => {
+    vi.useFakeTimers();
+    const { b, invoke } = flaky(2);
+    const set = vi.fn();
+    const errors: number[] = [];
+    const done = loadMeta(b, set, (_err, attempt) => errors.push(attempt));
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(set.mock.calls).toEqual([[EMPTY_META]]); // loaded-miss "—", not a skeleton that never resolves
+
+    await vi.advanceTimersByTimeAsync(META_RETRY_FIRST_MS - 1);
+    expect(invoke).toHaveBeenCalledTimes(1); // not before the first delay
+    await vi.advanceTimersByTimeAsync(1);
+    expect(invoke).toHaveBeenCalledTimes(2); // second try fails too
+    expect(set).toHaveBeenCalledTimes(1); // EMPTY_META is set only once
+
+    await vi.advanceTimersByTimeAsync(META_RETRY_FIRST_MS * 2 - 1);
+    expect(invoke).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await done;
+    expect(invoke).toHaveBeenCalledTimes(3);
+    expect(set.mock.calls).toEqual([[EMPTY_META], [good]]); // the real tables replace the loaded-miss
+    expect(errors).toEqual([0, 1]);
+
+    await vi.advanceTimersByTimeAsync(META_RETRY_MAX_MS * 2);
+    expect(invoke).toHaveBeenCalledTimes(3); // and it stops
+  });
+
+  it("the backoff is capped", async () => {
+    vi.useFakeTimers();
+    const { b, invoke } = flaky(Number.POSITIVE_INFINITY);
+    void loadMeta(b, vi.fn());
+    // 2s, 4s, 8s, 16s, then 30s (the cap) every time: 5 tries by 30s, 6th at 60s, 7th at 90s.
+    await vi.advanceTimersByTimeAsync(META_RETRY_FIRST_MS * (1 + 2 + 4 + 8));
+    expect(invoke).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(META_RETRY_MAX_MS - 1);
+    expect(invoke).toHaveBeenCalledTimes(5);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(invoke).toHaveBeenCalledTimes(6);
+    await vi.advanceTimersByTimeAsync(META_RETRY_MAX_MS);
+    expect(invoke).toHaveBeenCalledTimes(7);
   });
 });

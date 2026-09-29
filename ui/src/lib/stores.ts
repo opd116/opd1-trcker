@@ -1,7 +1,7 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { readable, writable } from "svelte/store";
 import { tauriBridge } from "./api";
-import { applyDetailsEvent, startLive } from "./boot";
+import { applyDetailsEvent, loadMeta, startLive } from "./boot";
 import { onStage } from "./router.svelte";
 import type { LiveState, Meta, PlayerDetails, Stage } from "./types";
 
@@ -48,12 +48,17 @@ export async function startFeeds(): Promise<void> {
   }
 
   const failed = (what: string) => (err: unknown) => console.error(`${what} failed`, err);
+  // Not awaited: while the asset tables are unavailable it keeps retrying (see loadMeta), and the other feeds
+  // must not wait for it. Only the first failure is logged, so an offline session doesn't repeat itself.
+  void loadMeta(
+    tauriBridge,
+    (m) => meta.set(m),
+    (err, attempt) => {
+      if (attempt === 0) failed("meta()")(err);
+    },
+  );
   await Promise.all([
     startLive(tauriBridge, applyLive).catch(failed("live feed")),
-    tauriBridge
-      .invoke<Meta>("meta")
-      .then((m) => meta.set(m))
-      .catch(failed("meta()")),
     tauriBridge
       .listen<PlayerDetails>("details", (e) => openDetails.update((open) => applyDetailsEvent(open, e.payload)))
       .catch(failed("details listener")),

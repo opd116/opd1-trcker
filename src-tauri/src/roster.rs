@@ -33,6 +33,8 @@ use opd1_riot::endpoints::{
     PregameMatchResponse,
 };
 
+use crate::store::PlayerUpdate;
+
 /// One player in the current live roster: everything that arrives with the
 /// roster fetch itself (no per-player call needed).
 #[derive(Debug, Clone, PartialEq)]
@@ -73,6 +75,36 @@ impl RosterPlayer {
             card_id: identity.player_card_id.clone(),
             character_id: character_id.to_string(),
             selection_state: selection_state.to_string(),
+        }
+    }
+
+    /// R100: this is the user's own entry, their level is known, and it
+    /// differs from the stored row's level (`None` = no row). Such an entry
+    /// is saved even though its slot is already on screen (the Closed-stage
+    /// slot from startup, or an earlier stage), so the stored level, which
+    /// the Closed card and the user's own Player Details read, can't stay
+    /// `0` or stale.
+    pub fn own_level_stale(&self, me: &str, stored_level: Option<i64>) -> bool {
+        self.puuid == me
+            && self.account_level > 0
+            && stored_level != Some(i64::from(self.account_level))
+    }
+
+    /// The `players` row upsert for this roster player; `me` is the user's
+    /// PUUID. A level another player hides (`HideAccountLevel`) is never
+    /// stored (`0` = unknown; the upsert keeps what the row has). The user's
+    /// own level is always stored (R100): the Closed-stage card and the
+    /// user's own Player Details read it back from this row.
+    pub fn player_update(&self, me: &str) -> PlayerUpdate {
+        PlayerUpdate {
+            puuid: self.puuid.clone(),
+            name: None,
+            account_level: if self.hide_account_level && self.puuid != me {
+                0
+            } else {
+                self.account_level
+            },
+            card_id: self.card_id.clone(),
         }
     }
 }
@@ -474,6 +506,80 @@ mod tests {
             ]
         }))
         .unwrap()
+    }
+
+    fn roster_player(puuid: &str, hide_account_level: bool, account_level: u32) -> RosterPlayer {
+        RosterPlayer {
+            puuid: puuid.into(),
+            team_id: "Blue".into(),
+            team: Team::Ally,
+            is_self_party: puuid == "me",
+            incognito: false,
+            hide_account_level,
+            account_level,
+            card_id: "card-1".into(),
+            character_id: String::new(),
+            selection_state: String::new(),
+        }
+    }
+
+    #[test]
+    fn player_update_stores_the_users_own_level_even_when_hidden() {
+        // R100: the user's own level is always theirs to see, so the roster
+        // save keeps it (the Closed stage and the user's own Player Details
+        // read it back from the DB).
+        let u = roster_player("me", true, 87).player_update("me");
+        assert_eq!(u.puuid, "me");
+        assert_eq!(u.account_level, 87);
+        assert_eq!(u.card_id, "card-1");
+        assert_eq!(u.name, None);
+        assert_eq!(
+            roster_player("me", false, 87)
+                .player_update("me")
+                .account_level,
+            87
+        );
+    }
+
+    #[test]
+    fn own_level_stale_only_for_the_user_with_a_known_different_level() {
+        let me = roster_player("me", true, 87);
+        assert!(me.own_level_stale("me", None), "no row yet");
+        assert!(me.own_level_stale("me", Some(0)), "stored 0 is unknown");
+        assert!(me.own_level_stale("me", Some(80)), "levelled up since");
+        assert!(!me.own_level_stale("me", Some(87)), "already stored");
+        assert!(
+            !roster_player("me", true, 0).own_level_stale("me", Some(0)),
+            "an unknown level is never saved"
+        );
+        assert!(
+            !roster_player("x", false, 120).own_level_stale("me", None),
+            "only the user's own entry is refreshed this way"
+        );
+    }
+
+    #[test]
+    fn player_update_never_stores_another_players_hidden_level() {
+        assert_eq!(
+            roster_player("x", true, 120)
+                .player_update("me")
+                .account_level,
+            0
+        );
+        assert_eq!(
+            roster_player("x", false, 120)
+                .player_update("me")
+                .account_level,
+            120
+        );
+        // An unknown level (0) stays 0 for the user too: the DB then keeps
+        // whatever it already had.
+        assert_eq!(
+            roster_player("me", true, 0)
+                .player_update("me")
+                .account_level,
+            0
+        );
     }
 
     #[test]

@@ -27,7 +27,7 @@ use crate::state::{lock, now_ms, AppState, EventSink, Slot};
 use crate::store::{load_player_db, save_player, trim_mmr, PlayerDb, PlayerUpdate};
 use crate::sync::{fetch_self_name, run_worker, sync_player};
 
-const ME: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+pub(crate) const ME: &str = "aaaaaaaa-0000-0000-0000-000000000001";
 const HIDDEN: &str = "bbbbbbbb-0000-0000-0000-000000000002";
 const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
 /// Incognito, and never in a match with ME: their name is only in the DB
@@ -224,19 +224,19 @@ fn write_client_files(dir: &Path, port: u16) {
     .unwrap();
 }
 
-struct Harness {
+pub(crate) struct Harness {
     server: MockServer,
     /// valorant-api. No routes are mounted until a test calls
     /// [`mount_asset_tables`], so it answers 404: the asset tables stay
     /// unloaded and every map id resolves to `None`.
     assets_server: MockServer,
     _dir: tempfile::TempDir,
-    session: Arc<RiotSession>,
-    st: Arc<AppState>,
+    pub(crate) session: Arc<RiotSession>,
+    pub(crate) st: Arc<AppState>,
     rec: Arc<Recorder>,
 }
 
-async fn harness() -> Harness {
+pub(crate) async fn harness() -> Harness {
     let server = MockServer::start().await;
     mock_riot(&server).await;
     let dir = tempfile::tempdir().unwrap();
@@ -425,7 +425,7 @@ async fn warm_db_skips_known_details_and_unchanged_mmr() {
     );
 }
 
-fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
+pub(crate) fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
     RosterPlayer {
         puuid: puuid.into(),
         team_id: if puuid == ME { "Blue" } else { "Red" }.into(),
@@ -710,7 +710,7 @@ async fn slot_for(st: &AppState, puuid: &str, incognito: bool) -> Slot {
     }
 }
 
-fn card_json(st: &AppState, puuid: &str) -> Value {
+pub(crate) fn card_json(st: &AppState, puuid: &str) -> Value {
     let state = st.live_state();
     let card = state
         .players
@@ -870,6 +870,74 @@ async fn player_details_card_carries_act_wins_games() {
     let rate = card["actWinrate"].as_f64().unwrap();
     assert!((rate - 39.0 / 61.0).abs() < 1e-3, "actWinrate {rate}");
     assert_eq!(card["isSelf"], json!(false));
+}
+
+// ---------------------------------------------------------------------
+// Task 14 fix round 1: the user's own level survives HideAccountLevel
+// ---------------------------------------------------------------------
+
+/// The user's own roster row while `HideAccountLevel` is on (level 87), saved
+/// the way `apply_roster` saves it: the level must reach the DB (R100).
+async fn save_hidden_self(st: &AppState) {
+    let mut me = roster(ME, false);
+    me.hide_account_level = true;
+    me.account_level = 87;
+    let now = now_ms();
+    st.db(move |repo| save_player(repo.conn(), &me.player_update(ME), now))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn own_hidden_level_shows_on_the_closed_card() {
+    let h = harness().await;
+    save_hidden_self(&h.st).await;
+    let db =
+        h.st.db(|repo| load_player_db(repo, Some(ME), ME))
+            .await
+            .unwrap();
+    assert_eq!(db.row.as_ref().unwrap().account_level, 87);
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Closed;
+        live.slots = vec![crate::state::closed_self_slot(ME, db).unwrap()];
+    }
+    h.st.publish();
+    let card = card_json(&h.st, ME);
+    assert_eq!(card["isSelf"], json!(true));
+    assert_eq!(
+        card["level"],
+        json!(87),
+        "the Closed stage shows the user's own level"
+    );
+}
+
+#[tokio::test]
+async fn own_hidden_level_shows_in_own_off_screen_details() {
+    let h = harness().await;
+    save_hidden_self(&h.st).await;
+    assert!(lock(&h.st.live).slots.is_empty());
+    let d = crate::details::build(&h.st, ME).await.unwrap();
+    let card = serde_json::to_value(&d.card).unwrap();
+    assert_eq!(card["isSelf"], json!(true));
+    assert_eq!(card["level"], json!(87));
+}
+
+#[tokio::test]
+async fn another_players_hidden_level_is_never_stored() {
+    let h = harness().await;
+    let mut other = roster(OTHER, false);
+    other.hide_account_level = true;
+    other.account_level = 120;
+    let now = now_ms();
+    let db =
+        h.st.db(move |repo| {
+            save_player(repo.conn(), &other.player_update(ME), now)?;
+            load_player_db(repo, Some(ME), OTHER)
+        })
+        .await
+        .unwrap();
+    assert_eq!(db.row.unwrap().account_level, 0);
 }
 
 // ---------------------------------------------------------------------

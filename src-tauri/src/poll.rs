@@ -42,9 +42,7 @@ use crate::roster::{
     RosterFetch, RosterPlayer,
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
-use crate::store::{
-    load_player_db, match_landed, save_player, PlayerDb, PlayerUpdate, SELF_PUUID_KEY,
-};
+use crate::store::{load_player_db, match_landed, save_player, PlayerDb, SELF_PUUID_KEY};
 
 /// Closed: how often the lockfile's existence is checked.
 const CLOSED_CHECK: Duration = Duration::from_secs(5);
@@ -643,7 +641,8 @@ impl Poller {
 
     /// Installs a roster: cached-first slots (DB) → publish → worker.
     /// Players already on screen keep their DB bundle; only new ones are
-    /// read (and get a `players` row upsert).
+    /// read (and get a `players` row upsert), plus the user's own row when
+    /// their level is new or changed (R100).
     async fn apply_roster(
         &mut self,
         session: &Arc<RiotSession>,
@@ -658,7 +657,18 @@ impl Poller {
             let live = lock(&self.st.live);
             roster
                 .iter()
-                .filter(|p| !live.slots.iter().any(|s| s.roster.puuid == p.puuid))
+                .filter(
+                    |p| match live.slots.iter().find(|s| s.roster.puuid == p.puuid) {
+                        None => true,
+                        // R100: the user's slot is already on screen (the
+                        // Closed one from startup); their level is still
+                        // saved when it is new or changed.
+                        Some(s) => {
+                            let stored = s.db.row.as_ref().map(|r| r.account_level);
+                            p.own_level_stale(&me, stored)
+                        }
+                    },
+                )
                 .cloned()
                 .collect()
         };
@@ -671,20 +681,7 @@ impl Poller {
                 .db(move |repo| {
                     let mut out = HashMap::new();
                     for p in &new_players {
-                        save_player(
-                            repo.conn(),
-                            &PlayerUpdate {
-                                puuid: p.puuid.clone(),
-                                name: None,
-                                account_level: if p.hide_account_level {
-                                    0
-                                } else {
-                                    p.account_level
-                                },
-                                card_id: p.card_id.clone(),
-                            },
-                            now,
-                        )?;
+                        save_player(repo.conn(), &p.player_update(&me), now)?;
                         out.insert(p.puuid.clone(), load_player_db(repo, Some(&me), &p.puuid)?);
                     }
                     Ok(out)
@@ -700,13 +697,19 @@ impl Poller {
             let slots: Vec<Slot> = roster
                 .into_iter()
                 .map(|r| {
-                    let db = live
-                        .slots
-                        .iter()
-                        .find(|s| s.roster.puuid == r.puuid)
-                        .map(|s| s.db.clone())
-                        .or_else(|| loaded.remove(&r.puuid))
-                        .unwrap_or_default();
+                    let db = match live.slots.iter().find(|s| s.roster.puuid == r.puuid) {
+                        Some(s) => {
+                            let mut db = s.db.clone();
+                            // The user's freshly saved `players` row (own
+                            // level, R100) replaces the stale one; the rest
+                            // of the bundle stays the worker's.
+                            if let Some(fresh) = loaded.remove(&r.puuid) {
+                                db.row = fresh.row;
+                            }
+                            db
+                        }
+                        None => loaded.remove(&r.puuid).unwrap_or_default(),
+                    };
                     Slot { roster: r, db }
                 })
                 .collect();
@@ -840,4 +843,76 @@ fn lockfile_path(local_app_data: &Path) -> PathBuf {
         .join("Riot Client")
         .join("Config")
         .join("lockfile")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::*;
+    use crate::pipeline_tests::{card_json, harness, roster, ME};
+    use crate::store::{save_player, PlayerUpdate};
+
+    /// R100 through the real `apply_roster`: the user already has a `players`
+    /// row (level 0: it was created before their level was known) and the
+    /// app started with the Closed-stage slot on screen, so the user is not a
+    /// "new" player when the roster arrives. Their level (87, with
+    /// `HideAccountLevel` on) must still reach the DB, or the Closed card
+    /// the app opens on shows `Lv —`.
+    #[tokio::test]
+    async fn own_level_is_stored_when_the_closed_slot_is_already_on_screen() {
+        let h = harness().await;
+        let now = now_ms();
+        h.st.db(move |repo| {
+            save_player(
+                repo.conn(),
+                &PlayerUpdate {
+                    puuid: ME.into(),
+                    name: Some(("Me".into(), "OPD1".into())),
+                    account_level: 0,
+                    card_id: "card".into(),
+                },
+                now,
+            )
+        })
+        .await
+        .unwrap();
+        // What `lib.rs` does at startup.
+        let db =
+            h.st.db(|repo| load_player_db(repo, Some(ME), ME))
+                .await
+                .unwrap();
+        lock(&h.st.live).slots = vec![closed_self_slot(ME, db).unwrap()];
+
+        let mut me = roster(ME, false);
+        me.hide_account_level = true;
+        me.account_level = 87;
+        let mut poller = Poller::new(h.st.clone());
+        poller
+            .apply_roster(&h.session, Stage::Menus, None, vec![me])
+            .await;
+        poller.stop_worker();
+
+        let stored =
+            h.st.db(|repo| load_player_db(repo, Some(ME), ME))
+                .await
+                .unwrap();
+        assert_eq!(stored.row.unwrap().account_level, 87, "stored in the DB");
+        let on_screen = lock(&h.st.live)
+            .slots
+            .iter()
+            .find(|s| s.roster.puuid == ME)
+            .and_then(|s| s.db.row.clone())
+            .unwrap();
+        assert_eq!(
+            on_screen.account_level, 87,
+            "the on-screen row follows, so the next roster does not re-save"
+        );
+
+        // The app goes back to Closed and re-reads the row.
+        poller.enter_closed().await;
+        let card = card_json(&h.st, ME);
+        assert_eq!(card["isSelf"], json!(true));
+        assert_eq!(card["level"], json!(87));
+    }
 }

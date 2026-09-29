@@ -1,0 +1,276 @@
+{
+  "mapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+  "players": [
+    {
+      "actGames": 60,
+      "actWinrate": 0.5,
+      "actWins": 30,
+      "agentId": "agent-jett",
+      "cardId": "card-uuid",
+      "encounters": null,
+      "hsPct": 0.25,
+      "isSelf": true,
+      "isSelfParty": true,
+      "kd": 2.0,
+      "last5": [
+        {
+          "result": "win",
+          "rrEarned": 19,
+          "startMs": 2300
+        },
+        {
+          "result": "loss",
+          "rrEarned": -18,
+          "startMs": 2200
+        },
+        {
+          "result": "win",
+          "rrEarned": 21,
+          "startMs": 2100
+        }
+      ],
+      "level": 187,
+      "name": {
+        "kind": "visible",
+        "name": "Me",
+        "tag": "TAG"
+      },
+      "party": null,
+      "peak": {
+        "actEndMs": 2000,
+        "actLabel": "V26 A4",
+        "actName": "V26 ACT IV",
+        "actStartMs": 1000,
+        "sinceActEndMs": 500,
+        "tier": 17
+      },
+      "prevActTier": 16,
+      "puuid": "puuid-self",
+      "rank": {
+        "rr": 42,
+        "tier": 15
+      },
+      "team": "ally"
+    },
+    {
+      "actGames": 60,
+      "actWinrate": 0.5,
+      "actWins": 30,
+      "agentId": "agent-jett",
+      "cardId": "card-uuid",
+      "encounters": {
+        "against": 1,
+        "with": 2
+      },
+      "hsPct": 0.25,
+      "isSelf": false,
+      "isSelfParty": false,
+      "kd": 2.0,
+      "last5": [
+        {
+          "result": "win",
+          "rrEarned": 19,
+          "startMs": 2300
+        },
+        {
+          "result": "loss",
+          "rrEarned": -18,
+          "startMs": 2200
+        },
+        {
+          "result": "win",
+          "rrEarned": 21,
+          "startMs": 2100
+        }
+      ],
+      "level": 187,
+      "name": {
+        "fromMapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+        "fromStartMs": 1758970000000,
+        "kind": "remembered",
+        "name": "Rival",
+        "tag": "ENEMY"
+      },
+      "party": {
+        "confirmed": true,
+        "group": 0
+      },
+      "peak": {
+        "actEndMs": 2000,
+        "actLabel": "V26 A4",
+        "actName": "V26 ACT IV",
+        "actStartMs": 1000,
+        "sinceActEndMs": 500,
+        "tier": 17
+      },
+      "prevActTier": 16,
+      "puuid": "puuid-known",
+      "rank": {
+        "rr": 42,
+        "tier": 15
+      },
+      "team": "enemy"
+    },
+    {
+      "actGames": 60,
+      "actWinrate": 0.5,
+      "actWins": 30,
+      "agentId": "agent-jett",
+      "cardId": "card-uuid",
+      "encounters": null,
+      "hsPct": 0.25,
+      "isSelf": false,
+      "isSelfParty": false,
+      "kd": 2.0,
+      "last5": [
+        {
+          "result": "win",
+          "rrEarned": 19,
+          "startMs": 2300
+        },
+        {
+          "result": "loss",
+          "rrEarned": -18,
+          "startMs": 2200
+        },
+        {
+          "result": "win",
+          "rrEarned": 21,
+          "startMs": 2100
+        }
+      ],
+      "level": 187,
+      "name": {
+        "fromMapId": null,
+        "fromStartMs": null,
+        "kind": "remembered",
+        "name": "Rival",
+        "tag": "ENEMY"
+      },
+      "party": null,
+      "peak": {
+        "actEndMs": 2000,
+        "actLabel": "V26 A4",
+        "actName": "V26 ACT IV",
+        "actStartMs": 1000,
+        "sinceActEndMs": 500,
+        "tier": 17
+      },
+      "prevActTier": 16,
+      "puuid": "puuid-unsourced",
+      "rank": {
+        "rr": 42,
+        "tier": 15
+      },
+      "team": "enemy"
+    },
+    {
+      "actGames": null,
+      "actWinrate": null,
+      "actWins": null,
+      "agentId": null,
+      "cardId": "card-uuid",
+      "encounters": null,
+      "hsPct": null,
+      "isSelf": false,
+      "isSelfParty": false,
+      "kd": null,
+      "last5": null,
+      "level": 187,
+      "name": {
+        "kind": "hiddenPlayer"
+      },
+      "party": null,
+      "peak": null,
+      "prevActTier": null,
+      "puuid": "puuid-hidden",
+      "rank": null,
+      "team": "enemy"
+    },
+    {
+      "actGames": 60,
+      "actWinrate": 0.5,
+      "actWins": 30,
+      "agentId": "agent-jett",
+      "cardId": "card-uuid",
+      "encounters": null,
+      "hsPct": 0.25,
+      "isSelf": false,
+      "isSelfParty": false,
+      "kd": 2.0,
+      "last5": [
+        {
+          "result": "win",
+          "rrEarned": 19,
+          "startMs": 2300
+        },
+        {
+          "result": "loss",
+          "rrEarned": -18,
+          "startMs": 2200
+        },
+        {
+          "result": "win",
+          "rrEarned": 21,
+          "startMs": 2100
+        }
+      ],
+      "level": 187,
+      "name": {
+        "agentId": "agent-jett",
+        "kind": "hiddenAgent"
+      },
+      "party": {
+        "confirmed": false,
+        "group": 1
+      },
+      "peak": {
+        "actEndMs": 2000,
+        "actLabel": "V26 A4",
+        "actName": "V26 ACT IV",
+        "actStartMs": 1000,
+        "sinceActEndMs": 500,
+        "tier": 17
+      },
+      "prevActTier": 16,
+      "puuid": "puuid-agent",
+      "rank": {
+        "rr": 42,
+        "tier": 15
+      },
+      "team": "enemy"
+    },
+    {
+      "agentId": null,
+      "cardId": "card-uuid",
+      "encounters": null,
+      "isSelf": false,
+      "isSelfParty": false,
+      "party": null,
+      "puuid": "puuid-loading",
+      "team": "ally"
+    },
+    {
+      "actGames": null,
+      "actWinrate": null,
+      "actWins": null,
+      "agentId": null,
+      "cardId": "card-uuid",
+      "encounters": null,
+      "hsPct": null,
+      "isSelf": false,
+      "isSelfParty": false,
+      "kd": null,
+      "last5": null,
+      "level": null,
+      "name": null,
+      "party": null,
+      "peak": null,
+      "prevActTier": null,
+      "puuid": "puuid-missing",
+      "rank": null,
+      "team": "ally"
+    }
+  ],
+  "stage": "ingame"
+}

@@ -1,0 +1,189 @@
+[
+  {
+    "durationMs": 2280000,
+    "mapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+    "matchId": "competitive-match",
+    "perspective": "self",
+    "queueId": "competitive",
+    "startMs": 1758970000000,
+    "teams": [
+      {
+        "firstHalf": 4,
+        "players": [
+          {
+            "acs": 250.0,
+            "adr": 130.0,
+            "agentId": "agent-ally",
+            "assists": 5,
+            "deaths": 15,
+            "hsPct": 0.25,
+            "isFocus": true,
+            "isSelf": false,
+            "kills": 20,
+            "name": {
+              "kind": "visible",
+              "name": "Ally",
+              "tag": "TAG"
+            },
+            "puuid": "ally",
+            "tier": 15
+          },
+          {
+            "acs": 200.0,
+            "adr": 130.0,
+            "agentId": "agent-puuid-self",
+            "assists": 5,
+            "deaths": 15,
+            "hsPct": 0.25,
+            "isFocus": false,
+            "isSelf": true,
+            "kills": 20,
+            "name": {
+              "kind": "visible",
+              "name": "Me",
+              "tag": "TAG"
+            },
+            "puuid": "puuid-self",
+            "tier": 15
+          }
+        ],
+        "result": "loss",
+        "roundsWon": 11,
+        "teamId": "Red"
+      },
+      {
+        "firstHalf": 8,
+        "players": [
+          {
+            "acs": 300.0,
+            "adr": 130.0,
+            "agentId": "agent-enemy-1",
+            "assists": 5,
+            "deaths": 15,
+            "hsPct": 0.25,
+            "isFocus": false,
+            "isSelf": false,
+            "kills": 20,
+            "name": {
+              "fromMapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+              "fromStartMs": 1758970000000,
+              "kind": "remembered",
+              "name": "Rival",
+              "tag": "ENEMY"
+            },
+            "puuid": "enemy-1",
+            "tier": 15
+          },
+          {
+            "acs": 150.0,
+            "adr": 130.0,
+            "agentId": "agent-enemy-2",
+            "assists": 5,
+            "deaths": 15,
+            "hsPct": 0.25,
+            "isFocus": false,
+            "isSelf": false,
+            "kills": 20,
+            "name": {
+              "agentId": "agent-enemy-2",
+              "kind": "hiddenAgent"
+            },
+            "puuid": "enemy-2",
+            "tier": 15
+          },
+          {
+            "acs": null,
+            "adr": null,
+            "agentId": "agent-enemy-3",
+            "assists": 0,
+            "deaths": 0,
+            "hsPct": null,
+            "isFocus": false,
+            "isSelf": false,
+            "kills": 0,
+            "name": {
+              "agentId": "agent-enemy-3",
+              "kind": "hiddenAgent"
+            },
+            "puuid": "enemy-3",
+            "tier": null
+          }
+        ],
+        "result": "win",
+        "roundsWon": 13,
+        "teamId": "Blue"
+      }
+    ]
+  },
+  {
+    "durationMs": 2280000,
+    "mapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+    "matchId": "deathmatch-match",
+    "perspective": "focus",
+    "queueId": "deathmatch",
+    "startMs": 1758970000000,
+    "teams": [
+      {
+        "firstHalf": null,
+        "players": [
+          {
+            "acs": 3600.0,
+            "adr": null,
+            "agentId": "agent-dm-2",
+            "assists": 5,
+            "deaths": 15,
+            "hsPct": 0.25,
+            "isFocus": false,
+            "isSelf": false,
+            "kills": 20,
+            "name": {
+              "agentId": "agent-dm-2",
+              "kind": "hiddenAgent"
+            },
+            "puuid": "dm-2",
+            "tier": null
+          },
+          {
+            "acs": 2400.0,
+            "adr": null,
+            "agentId": "agent-dm-3",
+            "assists": 5,
+            "deaths": 15,
+            "hsPct": 0.25,
+            "isFocus": true,
+            "isSelf": false,
+            "kills": 20,
+            "name": {
+              "kind": "visible",
+              "name": "Three",
+              "tag": "TAG"
+            },
+            "puuid": "dm-3",
+            "tier": null
+          },
+          {
+            "acs": 1200.0,
+            "adr": null,
+            "agentId": "agent-dm-1",
+            "assists": 5,
+            "deaths": 15,
+            "hsPct": 0.25,
+            "isFocus": false,
+            "isSelf": false,
+            "kills": 20,
+            "name": {
+              "kind": "visible",
+              "name": "One",
+              "tag": "TAG"
+            },
+            "puuid": "dm-1",
+            "tier": null
+          }
+        ],
+        "result": null,
+        "roundsWon": null,
+        "teamId": ""
+      }
+    ]
+  }
+]

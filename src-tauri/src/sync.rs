@@ -56,10 +56,10 @@ pub struct Gone;
 /// What a per-player sync learned beyond the DB writes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SyncOutcome {
-    /// The player's match-history call answered. Party detection reads the
-    /// stored history, so a player whose history failed this cycle must not
-    /// take part: the stored one may be from an earlier session (a false
-    /// stripe).
+    /// The player's match-history call answered *and* was written to
+    /// SQLite. Party detection reads the stored history, so a player whose
+    /// history failed this cycle (the call or the write) must not take part:
+    /// the stored one may be from an earlier session (a false stripe).
     pub history_ok: bool,
 }
 
@@ -230,8 +230,10 @@ pub async fn sync_player(
             let entries = history_entries(&resp);
             ids.extend(entries.iter().map(|e| e.match_id.clone()));
             let p = puuid.to_string();
-            st.db(move |repo| repo.index_history(&p, &entries)).await;
-            true
+            // A SQLite failure (`None`) leaves the earlier session's rows.
+            st.db(move |repo| repo.index_history(&p, &entries))
+                .await
+                .is_some()
         }
         Err(e) => {
             check(e, "match history", puuid)?;
@@ -342,7 +344,10 @@ async fn sync_step(
     {
         let mut live = lock(&st.live);
         live.synced.insert(puuid.clone());
-        if outcome.history_ok {
+        // Party marks need the stored history to be this cycle's: the
+        // history was written and the bundle built from it was read back.
+        // Either SQLite step failing leaves the slot on earlier rows.
+        if outcome.history_ok && db.is_some() {
             live.party_ready.insert(puuid.clone());
         }
         if let (Some(db), Some(slot)) =

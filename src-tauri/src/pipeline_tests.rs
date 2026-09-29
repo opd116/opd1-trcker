@@ -992,7 +992,9 @@ fn history_of(puuid: &str) -> Value {
 /// Syncs ME, OTHER and MATE in an In Game roster where OTHER and MATE
 /// shared their last two matches. MATE's history always answers; OTHER's
 /// answers only when `other_history_ok` (otherwise it stays the harness's 500).
-async fn run_party_scenario(other_history_ok: bool) -> Harness {
+/// `sabotage_sql` runs once the slots are built and before the worker starts:
+/// it breaks a SQLite read or write the sync depends on (`""` = nothing).
+async fn run_party_scenario(other_history_ok: bool, sabotage_sql: &str) -> Harness {
     let h = harness().await;
     store_earlier_shared_matches(&h.st).await;
     get(
@@ -1020,6 +1022,10 @@ async fn run_party_scenario(other_history_ok: bool) -> Harness {
         live.stage = Stage::Ingame;
         live.slots = slots;
     }
+    let sql = sabotage_sql.to_string();
+    h.st.db(move |repo| repo.conn().execute_batch(&sql))
+        .await
+        .expect("sabotage applies");
     fetch_self_name(&h.st, &h.session).await.unwrap();
     let id = lock(&h.st.live).try_start_worker().expect("work pending");
     run_worker(h.st.clone(), h.session.clone(), id).await;
@@ -1030,7 +1036,7 @@ async fn run_party_scenario(other_history_ok: bool) -> Harness {
 async fn failed_history_never_feeds_party_marks() {
     // OTHER's match history fails (500): the history stored from an earlier
     // session must not link OTHER to MATE, so neither card gets a stripe.
-    let h = run_party_scenario(false).await;
+    let h = run_party_scenario(false, "").await;
     {
         let live = lock(&h.st.live);
         assert!(live.synced.contains(OTHER), "the sync itself ran");
@@ -1042,7 +1048,7 @@ async fn failed_history_never_feeds_party_marks() {
     assert_eq!(card_json(&h.st, MATE)["party"], Value::Null);
 
     // Control: with the history answering, the same DB links the two.
-    let h = run_party_scenario(true).await;
+    let h = run_party_scenario(true, "").await;
     assert!(lock(&h.st.live).party_ready.contains(OTHER));
     let (other, mate) = (
         card_json(&h.st, OTHER)["party"].clone(),
@@ -1050,4 +1056,55 @@ async fn failed_history_never_feeds_party_marks() {
     );
     assert!(other.is_object(), "OTHER is in a party: {other}");
     assert_eq!(other["group"], mate["group"], "same party");
+}
+
+/// Both stored histories link OTHER and MATE (see `store_earlier_shared_matches`),
+/// so any path that lets OTHER into `party_ready` on stale rows paints a stripe.
+fn assert_no_party_stripe(h: &Harness) {
+    assert!(
+        !lock(&h.st.live).party_ready.contains(OTHER),
+        "a SQLite failure must not mark OTHER's history as current"
+    );
+    assert_eq!(card_json(&h.st, OTHER)["party"], Value::Null);
+    assert_eq!(card_json(&h.st, MATE)["party"], Value::Null);
+}
+
+#[tokio::test]
+async fn failed_history_write_never_feeds_party_marks() {
+    // OTHER's history answers, but writing it to SQLite fails: what is stored
+    // is still the earlier session's, so it must not link OTHER to MATE.
+    let h = run_party_scenario(
+        true,
+        "CREATE TRIGGER no_history_writes BEFORE INSERT ON history_index
+         BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+    )
+    .await;
+    assert!(
+        lock(&h.st.live).synced.contains(OTHER),
+        "the sync itself ran"
+    );
+    assert_no_party_stripe(&h);
+}
+
+#[tokio::test]
+async fn failed_bundle_reload_never_feeds_party_marks() {
+    // The history is written, but the post-sync reload of OTHER's bundle
+    // fails (a corrupt comp_updates row makes the read error), so the slot
+    // keeps the earlier session's `recent`: no party mark from it.
+    let h = run_party_scenario(
+        true,
+        &format!(
+            "INSERT INTO comp_updates
+                 (puuid, match_id, season_id, tier_after, rr_after, rr_earned, start_ms)
+             VALUES ('{OTHER}', 'bad', 's', 'x', 0, 0, 1);"
+        ),
+    )
+    .await;
+    let reload = h.st.db(|repo| load_player_db(repo, Some(ME), OTHER)).await;
+    assert!(reload.is_none(), "the sabotage really breaks the reload");
+    assert!(
+        lock(&h.st.live).synced.contains(OTHER),
+        "the sync itself ran"
+    );
+    assert_no_party_stripe(&h);
 }

@@ -78,7 +78,10 @@ pub fn display_name(
         return DisplayName::Remembered {
             name: known.name,
             tag: known.tag,
-            from_map_id: known.map_id,
+            // Defence in depth (R84/R95): a uuid never starts with '/', a
+            // Riot path (`/Game/…`) does. A caller that skipped
+            // `with_map_uuid` still can't put a path on the wire.
+            from_map_id: known.map_id.filter(|m| !m.starts_with('/')),
             from_start_ms: known.start_ms,
         };
     }

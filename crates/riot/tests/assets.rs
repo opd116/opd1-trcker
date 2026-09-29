@@ -4,7 +4,7 @@
 //! touches the real valorant-api.com.
 
 use image::ImageFormat;
-use serde_json::json;
+use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -165,6 +165,36 @@ async fn mount_all_tables(server: &MockServer, version: &str) {
     mount_maps(server, None).await;
     mount_tiers(server, None).await;
     mount_seasons(server, None).await;
+}
+
+/// Mounts `/v1/playercards/{CARD_UUID}` with small/wide art on this server
+/// and `large_art` as the `largeArt` value (a URL string, or `Value::Null`
+/// for a card that has none).
+async fn mount_playercard(server: &MockServer, large_art: Value) {
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/playercards/{CARD_UUID}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": 200,
+            "data": {
+                "uuid": CARD_UUID,
+                "smallArt": format!("{}/img/card-small.png", server.uri()),
+                "wideArt": format!("{}/img/card-wide.png", server.uri()),
+                "largeArt": large_art,
+            }
+        })))
+        .mount(server)
+        .await;
+}
+
+/// How many times `/v1/playercards/{CARD_UUID}` has been requested.
+async fn playercard_requests(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == format!("/v1/playercards/{CARD_UUID}"))
+        .count()
 }
 
 // ---------------------------------------------------------------------
@@ -476,19 +506,11 @@ async fn card_large_uses_large_art_downscaled_to_160() {
     let dir = tempdir();
     let server = MockServer::start().await;
     mount_all_tables(&server, "v1").await;
-    Mock::given(method("GET"))
-        .and(path(format!("/v1/playercards/{CARD_UUID}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "status": 200,
-            "data": {
-                "uuid": CARD_UUID,
-                "smallArt": format!("{}/img/card-small.png", server.uri()),
-                "wideArt": format!("{}/img/card-wide.png", server.uri()),
-                "largeArt": format!("{}/img/card-large.png", server.uri()),
-            }
-        })))
-        .mount(&server)
-        .await;
+    mount_playercard(
+        &server,
+        json!(format!("{}/img/card-large.png", server.uri())),
+    )
+    .await;
     Mock::given(method("GET"))
         .and(path("/img/card-large.png"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(512, 1024)))
@@ -512,19 +534,11 @@ async fn playercard_cache_without_large_art_refetches() {
     let dir = tempdir();
     let server = MockServer::start().await;
     mount_all_tables(&server, "v1").await;
-    Mock::given(method("GET"))
-        .and(path(format!("/v1/playercards/{CARD_UUID}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "status": 200,
-            "data": {
-                "uuid": CARD_UUID,
-                "smallArt": format!("{}/img/card-small.png", server.uri()),
-                "wideArt": format!("{}/img/card-wide.png", server.uri()),
-                "largeArt": format!("{}/img/card-large.png", server.uri()),
-            }
-        })))
-        .mount(&server)
-        .await;
+    mount_playercard(
+        &server,
+        json!(format!("{}/img/card-large.png", server.uri())),
+    )
+    .await;
     Mock::given(method("GET"))
         .and(path("/img/card-large.png"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(512, 1024)))
@@ -554,22 +568,13 @@ async fn playercard_cache_without_large_art_refetches() {
 
     let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
     cache.refresh_tables().await.unwrap();
-    let card_requests = || async {
-        server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .filter(|r| r.url.path() == format!("/v1/playercards/{CARD_UUID}"))
-            .count()
-    };
 
     // Small art is served from the old json as before: no refetch for it.
     cache
         .ensure_image(AssetKind::CardSmall, CARD_UUID)
         .await
         .unwrap();
-    assert_eq!(card_requests().await, 0);
+    assert_eq!(playercard_requests(&server).await, 0);
 
     let path = cache
         .ensure_image(AssetKind::CardLarge, CARD_UUID)
@@ -577,7 +582,7 @@ async fn playercard_cache_without_large_art_refetches() {
         .unwrap();
     assert!(path.is_file());
     assert_eq!(
-        card_requests().await,
+        playercard_requests(&server).await,
         1,
         "the stale json is fetched once more"
     );
@@ -588,7 +593,7 @@ async fn playercard_cache_without_large_art_refetches() {
         .ensure_image(AssetKind::CardLarge, CARD_UUID)
         .await
         .unwrap();
-    assert_eq!(card_requests().await, 1);
+    assert_eq!(playercard_requests(&server).await, 1);
 }
 
 #[tokio::test]
@@ -598,19 +603,7 @@ async fn card_without_large_art_shows_nothing_and_never_breaks_small_art() {
     let dir = tempdir();
     let server = MockServer::start().await;
     mount_all_tables(&server, "v1").await;
-    Mock::given(method("GET"))
-        .and(path(format!("/v1/playercards/{CARD_UUID}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "status": 200,
-            "data": {
-                "uuid": CARD_UUID,
-                "smallArt": format!("{}/img/card-small.png", server.uri()),
-                "wideArt": format!("{}/img/card-wide.png", server.uri()),
-                "largeArt": null,
-            }
-        })))
-        .mount(&server)
-        .await;
+    mount_playercard(&server, Value::Null).await;
     Mock::given(method("GET"))
         .and(path("/img/card-small.png"))
         .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(128, 128)))
@@ -619,15 +612,6 @@ async fn card_without_large_art_shows_nothing_and_never_breaks_small_art() {
 
     let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
     cache.refresh_tables().await.unwrap();
-    let card_requests = || async {
-        server
-            .received_requests()
-            .await
-            .unwrap()
-            .iter()
-            .filter(|r| r.url.path() == format!("/v1/playercards/{CARD_UUID}"))
-            .count()
-    };
 
     for _ in 0..2 {
         let err = cache
@@ -639,7 +623,11 @@ async fn card_without_large_art_shows_nothing_and_never_breaks_small_art() {
             "{err:?}"
         );
     }
-    assert_eq!(card_requests().await, 1, "one fetch, not one per request");
+    assert_eq!(
+        playercard_requests(&server).await,
+        1,
+        "one fetch, not one per request"
+    );
     assert!(!dir.path().join("images").join("cardLarge").exists());
 
     let small = cache
@@ -647,7 +635,11 @@ async fn card_without_large_art_shows_nothing_and_never_breaks_small_art() {
         .await
         .unwrap();
     assert!(small.is_file());
-    assert_eq!(card_requests().await, 1, "small art reads the cached json");
+    assert_eq!(
+        playercard_requests(&server).await,
+        1,
+        "small art reads the cached json"
+    );
 }
 
 #[tokio::test]

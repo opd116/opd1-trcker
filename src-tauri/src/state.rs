@@ -326,8 +326,8 @@ impl LiveModel {
         card
     }
 
-    /// Players shown hidden right now, with the agent their card shows (if
-    /// selected) — R18: their names must not leak through Player Details'
+    /// Players shown hidden right now, with the agent their card shows (once
+    /// locked, R99) — R18: their names must not leak through Player Details'
     /// Top Teammates either; there they're shown by the same rules as on
     /// their card. The user's own name is known locally (chat session) and
     /// is not hidden from the user.
@@ -820,6 +820,8 @@ mod tests {
             "kd",
             "hsPct",
             "actWinrate",
+            "actWins",
+            "actGames",
             "last5",
         ] {
             assert!(

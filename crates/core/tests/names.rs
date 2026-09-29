@@ -162,3 +162,24 @@ fn known_name_with_map_uuid_converts_path() {
     // No map stays no map.
     assert_eq!(from(None).with_map_uuid(&lookup).map_id, None);
 }
+
+#[test]
+fn display_name_never_passes_a_map_path_to_from_map_id() {
+    // Defence in depth: a caller that forgot `with_map_uuid` must not put a
+    // Riot path (`/Game/…`) on the wire. The name itself is still shown.
+    let path_source = Some(KnownName {
+        name: "Rival".into(),
+        tag: "ENEMY".into(),
+        map_id: Some("/Game/Maps/Bonsai/Bonsai".into()),
+        start_ms: Some(42),
+    });
+    assert_eq!(
+        display_name(true, None, Some("agent-jett"), path_source),
+        DisplayName::Remembered {
+            name: "Rival".into(),
+            tag: "ENEMY".into(),
+            from_map_id: None,
+            from_start_ms: Some(42),
+        }
+    );
+}

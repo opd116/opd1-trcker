@@ -159,17 +159,20 @@ pub fn trim_mmr(resp: &PlayerMmrResponse) -> Value {
     })
 }
 
-/// Whether `puuid`'s MMR must be fetched again: a new competitive match
-/// landed since the snapshot (`Repo::needs_mmr_refresh`), or the stored
-/// snapshot predates [`MMR_SNAPSHOT_VERSION`] (an old shape is refetched
-/// once, even when no new match landed).
+/// Whether `puuid`'s MMR must be fetched again: there is no snapshot, a new
+/// competitive match landed since it (`last_comp_match_id` differs from
+/// `latest_comp_match_id`, as `Repo::needs_mmr_refresh` decides), or the
+/// stored snapshot predates [`MMR_SNAPSHOT_VERSION`] (an old shape is
+/// refetched once, even when no new match landed). One SELECT: both checks
+/// read the same row.
 pub fn mmr_refresh_needed(repo: &Repo, puuid: &str, latest_comp_match_id: &str) -> Result<bool> {
-    if repo.needs_mmr_refresh(puuid, latest_comp_match_id)? {
-        return Ok(true);
-    }
-    Ok(repo
-        .load_mmr_snapshot(puuid)?
-        .is_none_or(|snap| snapshot_version(&snap.json) < MMR_SNAPSHOT_VERSION))
+    Ok(match repo.load_mmr_snapshot(puuid)? {
+        None => true,
+        Some(snap) => {
+            snap.last_comp_match_id.as_deref() != Some(latest_comp_match_id)
+                || snapshot_version(&snap.json) < MMR_SNAPSHOT_VERSION
+        }
+    })
 }
 
 /// The `SnapshotVersion` of a stored snapshot; 0 when it has none or

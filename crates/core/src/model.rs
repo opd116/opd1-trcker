@@ -555,10 +555,11 @@ pub struct Identity {
     /// `CoreGamePlayer` (In Game) has no `CharacterSelectionState` at all —
     /// every player in a started match already has an agent locked, so a
     /// 5b caller building an `Identity` from a core-game roster must pass
-    /// `"locked"` here itself (any non-empty value works; `"locked"` is
-    /// the real value pregame uses once a character is confirmed).
-    /// Passing `""` for a core-game player would incorrectly hide their
-    /// already-known agent (see [`build_card`]'s agent-select handling).
+    /// `"locked"` here itself. The value must be `"locked"` (R99: only a
+    /// locked pick shows an agent; `"selected"`, `""` or anything else
+    /// hides it). Passing `""` for a core-game player would incorrectly
+    /// hide their already-known agent (see [`build_card`]'s agent-select
+    /// handling).
     pub character_selection_state: String,
     /// `""` when not yet known (e.g. before name-service resolves) —
     /// [`build_card`] treats an empty `game_name`/`tag_line` pair as

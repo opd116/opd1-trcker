@@ -327,6 +327,20 @@ struct Tables {
     seasons: Vec<SeasonEntry>,
 }
 
+impl Tables {
+    /// `TablesNotLoaded` while nothing was ever fetched or read from disk.
+    fn ensure_loaded(&self) -> Result<(), AssetError> {
+        if self.agents.is_empty()
+            && self.maps.is_empty()
+            && self.tiers.is_empty()
+            && self.seasons.is_empty()
+        {
+            return Err(AssetError::TablesNotLoaded);
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PlayerCardEntry {
     small_art: String,
@@ -579,13 +593,7 @@ impl AssetCache {
 
     fn tables_snapshot(&self) -> Result<Tables, AssetError> {
         let tables = self.tables.read().unwrap();
-        if tables.agents.is_empty()
-            && tables.maps.is_empty()
-            && tables.tiers.is_empty()
-            && tables.seasons.is_empty()
-        {
-            return Err(AssetError::TablesNotLoaded);
-        }
+        tables.ensure_loaded()?;
         Ok(tables.clone())
     }
 
@@ -638,8 +646,13 @@ impl AssetCache {
     /// table: "match by mapUrl"). `Ok(None)` when no cached map matches —
     /// distinct from [`AssetError::TablesNotLoaded`], which means the
     /// tables were never even fetched.
+    ///
+    /// Searches under the read lock and clones only the matched uuid: this
+    /// runs once per remembered card on every publish, so it must not copy
+    /// the whole [`Tables`] (unlike [`Self::tables_snapshot`]).
     pub fn map_uuid_for_path(&self, riot_map_path: &str) -> Result<Option<String>, AssetError> {
-        let tables = self.tables_snapshot()?;
+        let tables = self.tables.read().unwrap();
+        tables.ensure_loaded()?;
         Ok(tables
             .maps
             .iter()

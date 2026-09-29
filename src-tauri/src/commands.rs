@@ -68,15 +68,58 @@ pub async fn player_details(
     puuid: String,
     state: AppStateRef<'_>,
 ) -> Result<PlayerDetails, String> {
-    if !is_uuid(&puuid) {
+    player_details_for(state.inner(), &puuid).await
+}
+
+/// `player_details` without the Tauri wrapper: the cached details now, with
+/// two background jobs behind them, each emitting `"details"` when it
+/// changed the result:
+/// - the Riot sync ([`crate::sync::sync_details`]), at most every 120s per
+///   player (`claim_details_sync`);
+/// - the skin-name fetch (R83, R97), whenever a loadout skin's name isn't
+///   known yet — from valorant-api only, so it is *not* gated by the 120s
+///   claim. While it runs the answer carries that weapon's key absent
+///   (resolving); when it ends, success or failure, the details are rebuilt
+///   and a name still unknown is `null`.
+pub(crate) async fn player_details_for(
+    st: &Arc<AppState>,
+    puuid: &str,
+) -> Result<PlayerDetails, String> {
+    if !is_uuid(puuid) {
         return Err("invalid player id".into());
     }
-    let st = state.inner().clone();
-    let details = crate::details::build(&st, &puuid).await?;
+    let (st, puuid) = (st.clone(), puuid.to_string());
+
+    // Marked before the build, so the answer itself has the resolving keys
+    // absent (R97).
+    let resolve = crate::details::skins_pending(&st, &puuid);
+    if resolve {
+        st.begin_skin_resolve(&puuid);
+    }
+    let details = match crate::details::build(&st, &puuid).await {
+        Ok(details) => details,
+        Err(e) => {
+            if resolve {
+                st.end_skin_resolve(&puuid);
+            }
+            return Err(e);
+        }
+    };
+
+    if resolve {
+        let (st, puuid, before) = (st.clone(), puuid.clone(), details.clone());
+        tauri::async_runtime::spawn(async move {
+            crate::details::resolve_skins(&st, &puuid).await;
+            st.end_skin_resolve(&puuid);
+            rebuild_and_emit(&st, &puuid, &before).await;
+        });
+    }
 
     if let Some(session) = st.session() {
         if st.claim_details_sync(&puuid) {
             let before = details.clone();
+            let puuid = puuid.clone();
+            let st = st.clone();
             tauri::async_runtime::spawn(async move {
                 if crate::sync::sync_details(&st, &session, &puuid)
                     .await
@@ -86,18 +129,24 @@ pub async fn player_details(
                 }
                 // The card on screen may have gained matches too.
                 st.reload_slot(&puuid).await;
-                match crate::details::build(&st, &puuid).await {
-                    Ok(fresh) if fresh != before => {
-                        log::debug!("details for {} updated", short(&puuid));
-                        st.emit_details(&fresh);
-                    }
-                    Ok(_) => {}
-                    Err(e) => log::warn!("details rebuild failed: {e}"),
-                }
+                rebuild_and_emit(&st, &puuid, &before).await;
             });
         }
     }
     Ok(details)
+}
+
+/// Rebuilds `puuid`'s details and emits them when they differ from
+/// `before` (what the UI was last given).
+async fn rebuild_and_emit(st: &Arc<AppState>, puuid: &str, before: &PlayerDetails) {
+    match crate::details::build(st, puuid).await {
+        Ok(fresh) if fresh != *before => {
+            log::debug!("details for {} updated", short(puuid));
+            st.emit_details(&fresh);
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("details rebuild failed: {e}"),
+    }
 }
 
 #[tauri::command]

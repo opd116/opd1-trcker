@@ -32,9 +32,9 @@ use opd1_riot::to_core::{comp_update_rows_from_response, match_from_details};
 use opd1_riot::{RiotError, RiotSession, VisiblePuuid};
 
 use crate::logbuf::short;
-use crate::roster::extract_loadouts;
+use crate::roster::{extract_loadouts, extract_player_loadout};
 use crate::state::{lock, now_ms, AppState, Job};
-use crate::store::{mmr_refresh_needed, save_player, trim_mmr, PlayerUpdate};
+use crate::store::{mmr_refresh_needed, save_player, trim_mmr, PlayerUpdate, SELF_LOADOUT_KEY};
 
 /// Match-details requests in flight at once. They're large responses
 /// (hundreds of KB each); a small window overlaps latency without holding
@@ -274,8 +274,9 @@ pub async fn sync_player(
 
 /// Player Details' deeper sync: the last [`TEAMMATE_WINDOW`] competitive
 /// updates, then details for the newest 8 + the current act's matches
-/// (only those not in the DB). Also picks up the core-game loadouts if
-/// the live loop's fetch of them failed.
+/// (only those not in the DB). Also picks up the core-game loadouts (the
+/// equipped skin ids; their names resolve separately, from valorant-api,
+/// `details::resolve_skins`) if the live loop's fetch of them failed.
 pub async fn sync_details(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
@@ -476,6 +477,35 @@ pub async fn fetch_self_name(st: &Arc<AppState>, session: &RiotSession) -> Resul
         save_names(st, vec![(me, n, t)]).await;
     }
     st.publish();
+    Ok(())
+}
+
+/// R90: the user's own equipped skins, read once per connect from
+/// `pd .../personalization/v2/players/{self}/playerloadout` (a read-only
+/// `GET`, always the user's own puuid): kept in the live model for their
+/// Details, and in `app_state` (only when it changed) so it still shows
+/// while VALORANT is closed. A failure is logged and not retried until the
+/// next connect.
+pub async fn fetch_self_loadout(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+) -> Result<(), Gone> {
+    let me = session.self_puuid().to_string();
+    let resp = match session.player_loadout(&me).await {
+        Ok(resp) => resp,
+        Err(e) => return check(e, "player loadout", &me),
+    };
+    let loadout = extract_player_loadout(&resp);
+    let stored = serde_json::to_string(&loadout).unwrap_or_default();
+    lock(&st.live).self_loadout = Some(loadout);
+    st.db(move |repo| {
+        if repo.get_state(SELF_LOADOUT_KEY)?.as_deref() != Some(stored.as_str()) {
+            repo.set_state(SELF_LOADOUT_KEY, &stored)?;
+        }
+        Ok(())
+    })
+    .await;
+    log::debug!("own loadout read");
     Ok(())
 }
 

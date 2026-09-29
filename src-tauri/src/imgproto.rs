@@ -37,6 +37,7 @@ pub fn parse_path(path: &str) -> Option<(AssetKind, &str)> {
         "mapList" => AssetKind::MapList,
         "mapSplash" => AssetKind::MapSplash,
         "chroma" => AssetKind::Chroma,
+        "contentTier" => AssetKind::ContentTier,
         _ => return None,
     };
     Some((kind, id))
@@ -101,6 +102,7 @@ mod tests {
             ("mapList", AssetKind::MapList),
             ("mapSplash", AssetKind::MapSplash),
             ("chroma", AssetKind::Chroma),
+            ("contentTier", AssetKind::ContentTier),
         ] {
             assert_eq!(parse_path(&format!("/{name}/{UUID}")), Some((kind, UUID)));
         }

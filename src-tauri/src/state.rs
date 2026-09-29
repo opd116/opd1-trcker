@@ -518,6 +518,11 @@ pub struct AppState {
     acts: RwLock<Arc<Vec<Act>>>,
     tables: tokio::sync::Mutex<TablesStatus>,
     details_synced: Mutex<HashMap<String, Instant>>,
+    /// Players whose skin names are being fetched right now, with how many
+    /// fetches run (R97): while a puuid is in here its Details loadout
+    /// weapons are still "resolving" (absent keys); once it leaves, an
+    /// unknown name is `null`.
+    skins_inflight: Mutex<HashMap<String, usize>>,
     /// `app_data_dir()/debug` — where `dump_raw` writes.
     pub debug_dir: PathBuf,
 }
@@ -549,6 +554,7 @@ impl AppState {
             acts: RwLock::new(Arc::new(Vec::new())),
             tables: tokio::sync::Mutex::new(TablesStatus::default()),
             details_synced: Mutex::new(HashMap::new()),
+            skins_inflight: Mutex::new(HashMap::new()),
             debug_dir,
         }
     }
@@ -719,6 +725,33 @@ impl AppState {
             }
         }
         self.publish();
+    }
+
+    /// R97: `true` only while a skin-name fetch for `puuid` runs (between
+    /// [`Self::begin_skin_resolve`] and [`Self::end_skin_resolve`]). A
+    /// Details loadout weapon whose name isn't known is "resolving" (its
+    /// key absent) exactly then, so a skeleton never outlives the attempt.
+    pub fn skins_resolving(&self, puuid: &str) -> bool {
+        lock(&self.skins_inflight).contains_key(puuid)
+    }
+
+    /// Marks a skin-name fetch for `puuid` as running (see
+    /// [`Self::skins_resolving`]); every call needs its
+    /// [`Self::end_skin_resolve`].
+    pub fn begin_skin_resolve(&self, puuid: &str) {
+        *lock(&self.skins_inflight)
+            .entry(puuid.to_string())
+            .or_default() += 1;
+    }
+
+    pub fn end_skin_resolve(&self, puuid: &str) {
+        let mut inflight = lock(&self.skins_inflight);
+        if let Some(n) = inflight.get_mut(puuid) {
+            *n -= 1;
+            if *n == 0 {
+                inflight.remove(puuid);
+            }
+        }
     }
 
     /// `true` (and records now) when `puuid`'s Player Details data hasn't

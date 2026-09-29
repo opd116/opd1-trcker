@@ -124,15 +124,47 @@ pub struct PregameMatchResponse {
 }
 
 /// Skins/sprays for a pregame match. Riot's payload nulls out most of this
-/// until characters are locked, and no field here was called out as
-/// needed yet (loadout display is a later task), so we keep it as opaque
-/// JSON rather than guessing at the shape.
+/// until characters are locked. Each `Loadouts[]` entry carries `Subject`
+/// and `Items` at the top level (no `Loadout` wrapper, unlike core-game);
+/// they stay opaque JSON here and `roster::extract_pregame_loadouts` reads
+/// the four weapons out.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PregameLoadoutsResponse {
     #[serde(rename = "Loadouts")]
     pub loadouts: Vec<Value>,
     #[serde(rename = "LoadoutsValid")]
     pub loadouts_valid: bool,
+}
+
+// ---------------------------------------------------------------------
+// The user's own loadout (personalization)
+// ---------------------------------------------------------------------
+
+/// One gun of `personalization/v2/players/{puuid}/playerloadout` (techchrism
+/// `PlayerLoadout.ts`): the weapon uuid and what is equipped on it. Charm
+/// fields, `SkinLevelID` and `Attachments` are ignored.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoadoutGun {
+    /// The weapon's uuid (`/v1/weapons/{uuid}`); the knife is in the list too.
+    #[serde(rename = "ID")]
+    pub id: String,
+    /// The equipped skin's uuid (`/v1/weapons/skins/{uuid}`).
+    #[serde(rename = "SkinID", default)]
+    pub skin_id: String,
+    /// The equipped chroma's uuid.
+    #[serde(rename = "ChromaID", default)]
+    pub chroma_id: String,
+}
+
+/// `personalization/v2/players/{puuid}/playerloadout` — "only works for
+/// your own PUUID" (techchrism), so the app calls it for the user only
+/// (R90). `Sprays`, `Identity`, `Incognito` and the rest are ignored.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlayerLoadoutResponse {
+    #[serde(rename = "Subject")]
+    pub subject: String,
+    #[serde(rename = "Guns", default, deserialize_with = "null_to_default")]
+    pub guns: Vec<LoadoutGun>,
 }
 
 // ---------------------------------------------------------------------
@@ -524,6 +556,15 @@ impl RiotSession {
     ) -> Result<PregameLoadoutsResponse, RiotError> {
         self.glz(&format!("/pregame/v1/matches/{match_id}/loadouts"))
             .await
+    }
+
+    /// The user's own equipped skins (R90): a read-only pd `GET`, made once
+    /// per connect and only ever with the user's own puuid.
+    pub async fn player_loadout(&self, puuid: &str) -> Result<PlayerLoadoutResponse, RiotError> {
+        self.pd(&format!(
+            "/personalization/v2/players/{puuid}/playerloadout"
+        ))
+        .await
     }
 
     pub async fn coregame_player(&self, puuid: &str) -> Result<MatchRef, RiotError> {

@@ -6,16 +6,16 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use opd1_core::db::repo::EncounterRow;
-use opd1_core::db::repo::TeammateRow;
+use opd1_core::db::repo::{EncounterRow, TeammateRow};
 use opd1_core::model::{
-    display_tier, DisplayName, EncounterDetailRow, HeroStats, Loadout, MatchResultKind, PlayerCard,
-    PlayerDetails, TeammateSummary,
+    display_tier, DisplayName, EncounterDetailRow, Field, HeroStats, Loadout, MatchResultKind,
+    PlayerCard, PlayerDetails, TeammateSummary,
 };
 use opd1_core::names::{display_name, KnownName};
 
-use crate::roster::RosterPlayer;
-use crate::state::{card_clock, closed_self_slot, lock, now_ms, AppState, Slot};
+use crate::logbuf::short;
+use crate::roster::{EquippedSkin, RawLoadout, RosterPlayer};
+use crate::state::{card_clock, closed_self_slot, lock, now_ms, AppState, LiveModel, Slot};
 use crate::store::{act_hero_stats, load_player_db, recent_matches};
 use crate::sync::RECENT_COUNT;
 
@@ -54,6 +54,104 @@ pub fn teammate_name(
             None,
         ),
     }
+}
+
+// ---------------------------------------------------------------------
+// loadout (R83, R90, R97)
+// ---------------------------------------------------------------------
+
+/// The equipped skins of `puuid` we can read (R83): another player's come
+/// from the current match's loadouts only (core-game In Game, pre-game for
+/// Agent Select allies), never from anywhere else. The user's are the
+/// match's first (the freshest), else their own last read (R90: once per
+/// connect, restored from `app_state` at startup).
+fn raw_loadout(live: &LiveModel, puuid: &str) -> Option<RawLoadout> {
+    live.loadouts.get(puuid).cloned().or_else(|| {
+        (live.self_puuid.as_deref() == Some(puuid))
+            .then(|| live.self_loadout.clone())
+            .flatten()
+    })
+}
+
+/// The Details loadout with the R97 tri-state per weapon: a skin whose name
+/// is in memory is the [`WeaponSkin`](opd1_core::model::WeaponSkin); a name
+/// that isn't is [`Field::Loading`] (key absent) only while a name fetch for
+/// `puuid` runs, else [`Field::Missing`] (`null`) — so a skeleton never
+/// outlives the attempt; no skin equipped, or nothing readable, is `null`.
+/// Memory only (`weapon_skin_cached`): nothing here touches disk or network.
+fn loadout_view(st: &AppState, puuid: &str, raw: Option<&RawLoadout>) -> Loadout {
+    let Some(raw) = raw else {
+        return Loadout::default();
+    };
+    let resolving = st.skins_resolving(puuid);
+    let weapon = |slot: &Option<EquippedSkin>| match slot {
+        None => Field::Missing,
+        Some(e) => match st.assets.weapon_skin_cached(&e.skin_id, &e.chroma_id) {
+            Some(skin) => Field::Value(skin),
+            None if resolving => Field::Loading,
+            None => Field::Missing,
+        },
+    };
+    Loadout {
+        vandal: weapon(&raw.vandal),
+        phantom: weapon(&raw.phantom),
+        operator: weapon(&raw.operator),
+        sheriff: weapon(&raw.sheriff),
+    }
+}
+
+/// The equipped skins of `puuid` whose names aren't in memory yet: the
+/// caller then resolves them (`resolve_skins`) whether or not a Riot sync
+/// runs (R83).
+fn unnamed_skins(st: &AppState, puuid: &str) -> Vec<EquippedSkin> {
+    let Some(raw) = raw_loadout(&lock(&st.live), puuid) else {
+        return Vec::new();
+    };
+    raw.slots()
+        .into_iter()
+        .flatten()
+        .filter(|e| {
+            st.assets
+                .weapon_skin_cached(&e.skin_id, &e.chroma_id)
+                .is_none()
+        })
+        .cloned()
+        .collect()
+}
+
+/// `puuid` has an equipped skin (from [`raw_loadout`]) whose name isn't in
+/// memory yet.
+pub fn skins_pending(st: &AppState, puuid: &str) -> bool {
+    !unnamed_skins(st, puuid).is_empty()
+}
+
+/// Fetches the names of `puuid`'s unnamed skins from valorant-api (R83):
+/// up to four small JSON requests at once, each cached forever, independent
+/// of the 120s Riot details sync. `true` when at least one name became
+/// known. A failure is logged and leaves that skin unnamed; it is retried
+/// on the next open of the Details, not before (R97).
+pub async fn resolve_skins(st: &Arc<AppState>, puuid: &str) -> bool {
+    let mut set = tokio::task::JoinSet::new();
+    for skin in unnamed_skins(st, puuid) {
+        let assets = st.assets.clone();
+        set.spawn(async move {
+            let named = assets.weapon_skin(&skin.skin_id, &skin.chroma_id).await;
+            (skin, named)
+        });
+    }
+    let mut learned = false;
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok((_, Ok(_))) => learned = true,
+            Ok((skin, Err(e))) => log::debug!(
+                "skin {} for {} not resolved: {e}",
+                short(&skin.skin_id),
+                short(puuid)
+            ),
+            Err(e) => log::warn!("skin task failed: {e}"),
+        }
+    }
+    learned
 }
 
 /// One shared match as Player Details' Encounters row, from the user's
@@ -104,7 +202,7 @@ fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Opt
 
 /// Everything cached for `puuid`'s details view.
 pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, String> {
-    let (on_screen, hidden_now, self_puuid) = {
+    let (on_screen, hidden_now, raw_loadout, self_puuid) = {
         let live = lock(&st.live);
         (
             live.current
@@ -113,6 +211,7 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
                 .find(|c| c.puuid == puuid)
                 .cloned(),
             live.hidden_players(),
+            raw_loadout(&live, puuid),
             live.self_puuid.clone(),
         )
     };
@@ -186,9 +285,7 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
                 count: t.count,
             })
             .collect(),
-        // Skin names arrive with the loadout work (the next step): until
-        // then every weapon is unknown.
-        loadout: Loadout::default(),
+        loadout: loadout_view(st, puuid, raw_loadout.as_ref()),
         encounters,
         hero_kd: hero.kd,
         hero_hs: hero.hs_pct,

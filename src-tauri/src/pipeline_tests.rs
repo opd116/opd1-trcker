@@ -41,10 +41,16 @@ const ACT: &str = "act-current";
 /// valorant-api's Split: the map the remembered-name tests play on.
 const SPLIT_PATH: &str = "/Game/Maps/Bonsai/Bonsai";
 const SPLIT_UUID: &str = "d960549e-485c-e861-8d71-aa9d1aed12a2";
+/// valorant-api's Reaver Vandal (`weapon_skin_reaver_vandal.json`, captured
+/// from the live API), its red chroma and its Premium content tier.
+const REAVER: &str = "30388628-42f0-606c-82c0-73ad43de997f";
+const REAVER_RED: &str = "b2a065c0-4632-ccaa-f496-7681dc2a6185";
+const TIER_PREMIUM: &str = "60bca009-4182-7998-dee7-b8a2558dc369";
 
 #[derive(Default)]
 struct Recorder {
     live: Mutex<Vec<LiveState>>,
+    details: Mutex<Vec<PlayerDetails>>,
 }
 
 struct Sink(Arc<Recorder>);
@@ -53,7 +59,9 @@ impl EventSink for Sink {
     fn live(&self, state: &LiveState) {
         self.0.live.lock().unwrap().push(state.clone());
     }
-    fn details(&self, _details: &PlayerDetails) {}
+    fn details(&self, details: &PlayerDetails) {
+        self.0.details.lock().unwrap().push(details.clone());
+    }
 }
 
 fn comp_updates(matches: &[(&str, i64, i64)]) -> Value {
@@ -227,6 +235,9 @@ fn write_client_files(dir: &Path, port: u16) {
 }
 
 pub(crate) struct Harness {
+    /// The DB file when the harness was built `with_db_file`, else the DB
+    /// is in memory.
+    db_path: Option<std::path::PathBuf>,
     server: MockServer,
     /// valorant-api. No routes are mounted until a test calls
     /// [`mount_asset_tables`], so it answers 404: the asset tables stay
@@ -239,6 +250,16 @@ pub(crate) struct Harness {
 }
 
 pub(crate) async fn harness() -> Harness {
+    build_harness(false).await
+}
+
+/// A harness whose DB is a file, so a second `AppState` can open the same
+/// DB (a restart).
+async fn harness_with_db_file() -> Harness {
+    build_harness(true).await
+}
+
+async fn build_harness(db_file: bool) -> Harness {
     let server = MockServer::start().await;
     mock_riot(&server).await;
     let dir = tempfile::tempdir().unwrap();
@@ -257,7 +278,8 @@ pub(crate) async fn harness() -> Harness {
     .expect("connect to the mock client");
 
     let rec = Arc::new(Recorder::default());
-    let repo = Repo::new(open_db(Path::new(":memory:")).unwrap());
+    let db_path = db_file.then(|| dir.path().join("opd1.sqlite"));
+    let repo = Repo::new(open_db(db_path.as_deref().unwrap_or(Path::new(":memory:"))).unwrap());
     // No asset tables until a test mounts them: map ids resolve to None,
     // never to a path.
     let assets_server = MockServer::start().await;
@@ -278,6 +300,7 @@ pub(crate) async fn harness() -> Harness {
         end_ms: now + 30 * 86_400_000,
     }]);
     Harness {
+        db_path,
         server,
         assets_server,
         _dir: dir,
@@ -333,6 +356,15 @@ async fn mount_asset_tables(server: &MockServer) {
             "assetObjectName": "Episode1_CompetitiveTierDataTable",
             "tiers": [{"tier": 15, "tierName": "PLATINUM 1", "color": "4f514fff",
                        "largeIcon": format!("{}/img/tier.png", server.uri())}]
+        }]}),
+    )
+    .await;
+    get(
+        server,
+        "/v1/contenttiers",
+        json!({"status": 200, "data": [{
+            "uuid": TIER_PREMIUM, "displayName": "Premium Edition",
+            "displayIcon": format!("{}/img/content-tier.png", server.uri())
         }]}),
     )
     .await;
@@ -1445,4 +1477,603 @@ async fn player_details_hero_stats_are_null_without_act_matches() {
     assert_eq!(json["heroMatches"], json!(0));
     // The pre-act match still shows in Recent (any act).
     assert_eq!(d.recent.len(), 1);
+}
+
+// ---------------------------------------------------------------------
+// Task 15: loadouts — pre-game polling, skin names (R83, R97), own loadout (R90)
+// ---------------------------------------------------------------------
+
+use crate::poll::Poller;
+use crate::roster::{EquippedSkin, RawLoadout};
+
+/// A fixture from `opd1-riot`'s test fixtures.
+fn riot_fixture(name: &str) -> String {
+    let path = format!(
+        "{}/../crates/riot/tests/fixtures/{name}",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    std::fs::read_to_string(path).unwrap_or_else(|e| panic!("missing fixture {name}: {e}"))
+}
+
+/// The Reaver Vandal as `/v1/weapons/skins/{uuid}` answers, for `uuid`
+/// with `chroma` as its red variant.
+fn skin_body(uuid: &str, chroma: &str) -> Value {
+    let mut body: Value =
+        serde_json::from_str(&riot_fixture("weapon_skin_reaver_vandal.json")).unwrap();
+    body["data"]["uuid"] = json!(uuid);
+    body["data"]["chromas"] = json!([{
+        "uuid": chroma, "displayName": "Reaver Vandal Level 4\r\n(Variant 1 Red)"
+    }]);
+    body
+}
+
+async fn mount_skin(server: &MockServer, uuid: &str, chroma: &str) {
+    get(
+        server,
+        &format!("/v1/weapons/skins/{uuid}"),
+        skin_body(uuid, chroma),
+    )
+    .await;
+}
+
+async fn mount_failing_skin(server: &MockServer, uuid: &str) {
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/weapons/skins/{uuid}")))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(server)
+        .await;
+}
+
+async fn skin_requests(h: &Harness) -> usize {
+    h.assets_server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().starts_with("/v1/weapons/skins/"))
+        .count()
+}
+
+fn equipped(skin: &str, chroma: &str) -> Option<EquippedSkin> {
+    Some(EquippedSkin {
+        skin_id: skin.into(),
+        chroma_id: chroma.into(),
+    })
+}
+
+/// OTHER equips the Reaver Vandal (red) and nothing else readable.
+fn reaver_loadout() -> RawLoadout {
+    RawLoadout {
+        vandal: equipped(REAVER, REAVER_RED),
+        ..RawLoadout::default()
+    }
+}
+
+/// `puuid`'s `details` events after the first `seen`, waiting (up to 5s)
+/// for one that satisfies `ok`.
+async fn details_event_after(
+    rec: &Recorder,
+    seen: usize,
+    puuid: &str,
+    ok: impl Fn(&Value) -> bool,
+) -> Value {
+    for _ in 0..100 {
+        let found = rec
+            .details
+            .lock()
+            .unwrap()
+            .iter()
+            .skip(seen)
+            .filter(|d| d.card.puuid == puuid)
+            .map(|d| serde_json::to_value(d).unwrap())
+            .find(|v| ok(v));
+        if let Some(found) = found {
+            return found;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no matching details event for {puuid}");
+}
+
+fn details_events(rec: &Recorder) -> usize {
+    rec.details.lock().unwrap().len()
+}
+
+fn loadout_of(details: &PlayerDetails) -> Value {
+    serde_json::to_value(details).unwrap()["loadout"].clone()
+}
+
+/// The pre-game endpoints of one Agent Select `pg-1` with ME, OTHER and
+/// MATE as allies. The first `/loadouts` answer is `LoadoutsValid: false`
+/// (Riot nulls it until the picks are in), the following ones are the
+/// capture-based valid response for the three allies.
+async fn mock_pregame(server: &MockServer) {
+    let player = |puuid: &str| {
+        json!({"Subject": puuid, "CharacterID": "", "CharacterSelectionState": "",
+               "PlayerIdentity": {"Incognito": false, "HideAccountLevel": false,
+                                  "AccountLevel": 10, "PlayerCardID": "card"}})
+    };
+    let team = json!({"TeamID": "Blue", "Players": [player(ME), player(OTHER), player(MATE)]});
+    get(
+        server,
+        &format!("/pregame/v1/players/{ME}"),
+        json!({"Subject": ME, "MatchID": "pg-1"}),
+    )
+    .await;
+    get(
+        server,
+        "/pregame/v1/matches/pg-1",
+        json!({"MapID": SPLIT_PATH, "Teams": [team.clone()], "AllyTeam": team, "EnemyTeam": null}),
+    )
+    .await;
+
+    let mut valid: Value = serde_json::from_str(&riot_fixture("pregame_loadouts.json")).unwrap();
+    let entries = valid["Loadouts"].as_array_mut().unwrap();
+    let third = entries[0].clone();
+    entries.truncate(2);
+    entries.push(third);
+    for (entry, puuid) in entries.iter_mut().zip([ME, OTHER, MATE]) {
+        entry["Subject"] = json!(puuid);
+    }
+    let loadouts = "/pregame/v1/matches/pg-1/loadouts";
+    Mock::given(method("GET"))
+        .and(path(loadouts))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"Loadouts": [], "LoadoutsValid": false})),
+        )
+        .up_to_n_times(1)
+        .mount(server)
+        .await;
+    get(server, loadouts, valid).await;
+}
+
+#[tokio::test]
+async fn pregame_loadouts_polled_once_then_stops() {
+    let loadouts = "/pregame/v1/matches/pg-1/loadouts";
+    let h = harness().await;
+    mock_pregame(&h.server).await;
+    let mut poller = Poller::new(h.st.clone());
+    poller.fetch_pregame(&h.session, ME).await.unwrap();
+    assert_eq!(count(&h.server, "GET", loadouts).await, 0);
+
+    // Re-poll 1: Riot's answer is not valid yet — asked, nothing read.
+    poller.pregame_repoll(&h.session).await.unwrap();
+    assert_eq!(count(&h.server, "GET", loadouts).await, 1);
+    assert!(lock(&h.st.live).loadouts.is_empty());
+
+    // Re-poll 2: valid — the three allies' skins are in.
+    poller.pregame_repoll(&h.session).await.unwrap();
+    assert_eq!(count(&h.server, "GET", loadouts).await, 2);
+    {
+        let live = lock(&h.st.live);
+        let mut who: Vec<&str> = live.loadouts.keys().map(String::as_str).collect();
+        who.sort_unstable();
+        assert_eq!(who, [ME, OTHER, MATE]);
+        assert_eq!(
+            live.loadouts[ME].vandal,
+            equipped(REAVER, REAVER_RED),
+            "the capture's first entry, lower-case ids"
+        );
+    }
+
+    // Re-polls 3 and 4: a valid answer was seen, so no more calls.
+    poller.pregame_repoll(&h.session).await.unwrap();
+    poller.pregame_repoll(&h.session).await.unwrap();
+    assert_eq!(
+        count(&h.server, "GET", loadouts).await,
+        2,
+        "exactly two GETs over four re-polls"
+    );
+
+    // A second Agent Select where every ally already has a loadout asks for
+    // nothing at all.
+    let h = harness().await;
+    mock_pregame(&h.server).await;
+    lock(&h.st.live).loadouts = [ME, OTHER, MATE]
+        .into_iter()
+        .map(|p| (p.to_string(), RawLoadout::default()))
+        .collect();
+    let mut poller = Poller::new(h.st.clone());
+    poller.fetch_pregame(&h.session, ME).await.unwrap();
+    for _ in 0..4 {
+        poller.pregame_repoll(&h.session).await.unwrap();
+    }
+    assert_eq!(count(&h.server, "GET", loadouts).await, 0);
+}
+
+/// Stage `menus` with `puuid` on screen (a `players` row is enough for its
+/// Details card).
+async fn lobby_with(h: &Harness, puuid: &'static str) {
+    h.st.db(move |repo| {
+        known_player(repo, puuid);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    lock(&h.st.live).stage = Stage::Menus;
+}
+
+#[tokio::test]
+async fn player_details_resolves_skins_without_riot_sync() {
+    let h = harness().await;
+    lobby_with(&h, OTHER).await;
+    // With a session, Details also runs the (120s-gated) Riot sync: its
+    // claim must not decide whether the skin names resolve.
+    h.st.set_session(Some(h.session.clone()));
+    mount_skin(&h.assets_server, REAVER, REAVER_RED).await;
+    let comp = format!("/mmr/v1/players/{OTHER}/competitiveupdates");
+
+    // 1. Opened before any loadout arrived: all four weapons are `null`
+    //    (nothing known), never absent, and no name is fetched.
+    let first = crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    let null = Value::Null;
+    let loadout = loadout_of(&first);
+    for weapon in ["vandal", "phantom", "operator", "sheriff"] {
+        assert_eq!(loadout[weapon], null, "{weapon}: {loadout}");
+    }
+    assert_eq!(skin_requests(&h).await, 0);
+    // The Riot sync claimed OTHER for the next 120 s.
+    assert!(!h.st.claim_details_sync(OTHER));
+    let seen = details_events(&h.rec);
+
+    // 2. The loadouts arrive. Reopening inside the 120 s (the sync claim
+    //    refuses) still resolves the names: the Vandal is resolving (key
+    //    absent), the weapons nobody equipped are `null`.
+    lock(&h.st.live)
+        .loadouts
+        .insert(OTHER.into(), reaver_loadout());
+    let second = crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    let loadout = loadout_of(&second);
+    assert!(
+        loadout.get("vandal").is_none(),
+        "resolving: the key is absent: {loadout}"
+    );
+    for weapon in ["phantom", "operator", "sheriff"] {
+        assert_eq!(loadout[weapon], null, "{weapon} is not equipped");
+    }
+    // ... and the details event carries the named skin.
+    let event = details_event_after(&h.rec, seen, OTHER, |d| {
+        d["loadout"].get("vandal").is_some_and(|v| v.is_object())
+    })
+    .await;
+    assert_eq!(
+        event["loadout"]["vandal"],
+        json!({
+            "chromaId": REAVER_RED, "skinName": "Reaver",
+            "chromaName": "Red", "tierId": TIER_PREMIUM
+        })
+    );
+    assert_eq!(skin_requests(&h).await, 1);
+    assert!(!h.st.skins_resolving(OTHER), "the attempt is over");
+    assert_eq!(
+        count(&h.server, "GET", &comp).await,
+        1,
+        "the second open made no Riot sync"
+    );
+
+    // 3. The next open has the skin in memory: answered directly, and no
+    //    new skin request.
+    let third = crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    assert_eq!(loadout_of(&third)["vandal"], event["loadout"]["vandal"]);
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(skin_requests(&h).await, 1);
+}
+
+#[tokio::test]
+async fn failed_skin_fetch_settles_to_null() {
+    // R97: a failed name fetch never leaves a skeleton behind.
+    let h = harness().await;
+    lobby_with(&h, OTHER).await;
+    mount_failing_skin(&h.assets_server, REAVER).await;
+    lock(&h.st.live)
+        .loadouts
+        .insert(OTHER.into(), reaver_loadout());
+
+    let seen = details_events(&h.rec);
+    let first = crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    assert!(
+        loadout_of(&first).get("vandal").is_none(),
+        "resolving while the fetch runs"
+    );
+    let event = details_event_after(&h.rec, seen, OTHER, |d| {
+        d["loadout"].get("vandal") == Some(&Value::Null)
+    })
+    .await;
+    assert_eq!(event["loadout"]["vandal"], Value::Null, "settled to null");
+    assert!(!h.st.skins_resolving(OTHER));
+    assert_eq!(skin_requests(&h).await, 1);
+    // Nothing stays absent once `resolve_skins` has returned.
+    let settled = crate::details::build(&h.st, OTHER).await.unwrap();
+    assert_eq!(loadout_of(&settled)["vandal"], Value::Null);
+
+    // The next open tries the fetch once more (R83), and settles again.
+    let seen = details_events(&h.rec);
+    let again = crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    assert!(loadout_of(&again).get("vandal").is_none());
+    details_event_after(&h.rec, seen, OTHER, |d| {
+        d["loadout"].get("vandal") == Some(&Value::Null)
+    })
+    .await;
+    assert_eq!(skin_requests(&h).await, 2);
+    assert!(!h.st.skins_resolving(OTHER));
+}
+
+#[tokio::test]
+async fn others_loadout_null_outside_match() {
+    // R83: another player's loadout is readable only In Game and for Agent
+    // Select allies; in the Lobby all four weapons are `null` (not absent)
+    // and no skin request is made — even though the user's own is known.
+    let h = harness().await;
+    lobby_with(&h, OTHER).await;
+    lock(&h.st.live).self_loadout = Some(reaver_loadout());
+    mount_skin(&h.assets_server, REAVER, REAVER_RED).await;
+
+    let details = crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    let loadout = loadout_of(&details);
+    for weapon in ["vandal", "phantom", "operator", "sheriff"] {
+        assert_eq!(
+            loadout.get(weapon),
+            Some(&Value::Null),
+            "{weapon}: {loadout}"
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert_eq!(skin_requests(&h).await, 0);
+    assert!(!h.st.skins_resolving(OTHER));
+}
+
+/// The player-loadout fixture's four equipped skins, lower-case.
+fn fixture_loadout() -> (RawLoadout, Value) {
+    let body: Value = serde_json::from_str(&riot_fixture("player_loadout.json")).unwrap();
+    let gun = |i: usize| {
+        equipped(
+            &body["Guns"][i]["SkinID"]
+                .as_str()
+                .unwrap()
+                .to_ascii_lowercase(),
+            &body["Guns"][i]["ChromaID"]
+                .as_str()
+                .unwrap()
+                .to_ascii_lowercase(),
+        )
+    };
+    let raw = RawLoadout {
+        vandal: gun(0),
+        phantom: gun(1),
+        operator: gun(2),
+        sheriff: gun(3),
+    };
+    (raw, body)
+}
+
+async fn playerloadout_requests(h: &Harness) -> Vec<String> {
+    h.server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().starts_with("/personalization/"))
+        .map(|r| r.url.path().to_string())
+        .collect()
+}
+
+/// Waits (up to 5s) until `n` own-loadout requests were made and read.
+async fn wait_for_playerloadouts(h: &Harness, n: usize) {
+    for _ in 0..100 {
+        if playerloadout_requests(h).await.len() >= n {
+            // Give the response a moment to land in the live model.
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("no own-loadout request #{n}");
+}
+
+#[tokio::test]
+async fn self_loadout_fetched_once_per_connect() {
+    let h = harness().await;
+    let (raw, body) = fixture_loadout();
+    let own_path = format!("/personalization/v2/players/{ME}/playerloadout");
+    get(&h.server, &own_path, body).await;
+    let vandal = raw.vandal.clone().unwrap();
+    mount_skin(&h.assets_server, &vandal.skin_id, &vandal.chroma_id).await;
+    lobby_with(&h, ME).await;
+
+    // The connect asks once.
+    let mut poller = Poller::new(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    wait_for_playerloadouts(&h, 1).await;
+    assert_eq!(
+        playerloadout_requests(&h).await,
+        std::slice::from_ref(&own_path)
+    );
+    assert_eq!(lock(&h.st.live).self_loadout, Some(raw.clone()));
+
+    // The user's Details in the Lobby (no match loadouts): their own skins.
+    lock(&h.st.live).stage = Stage::Menus;
+    let seen = details_events(&h.rec);
+    let details = crate::commands::player_details_for(&h.st, ME)
+        .await
+        .unwrap();
+    assert!(loadout_of(&details).get("vandal").is_none(), "resolving");
+    let event = details_event_after(&h.rec, seen, ME, |d| {
+        d["loadout"].get("vandal").is_some_and(|v| v.is_object())
+    })
+    .await;
+    assert_eq!(
+        event["loadout"]["vandal"]["chromaId"],
+        json!(vandal.chroma_id)
+    );
+    assert_eq!(event["loadout"]["vandal"]["skinName"], json!("Reaver"));
+    assert_eq!(event["loadout"]["vandal"]["chromaName"], json!("Red"));
+    // The other three skins aren't known to valorant-api here: `null`.
+    for weapon in ["phantom", "operator", "sheriff"] {
+        assert_eq!(event["loadout"][weapon], Value::Null, "{weapon}");
+    }
+
+    // More activity (publishes, another open) asks for nothing more.
+    h.st.publish();
+    crate::commands::player_details_for(&h.st, ME)
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    assert_eq!(playerloadout_requests(&h).await.len(), 1);
+
+    // A reconnect asks once more, and only ever for the user.
+    poller.on_connected(h.session.clone()).await;
+    wait_for_playerloadouts(&h, 2).await;
+    assert_eq!(
+        playerloadout_requests(&h).await,
+        [own_path.clone(), own_path]
+    );
+}
+
+#[tokio::test]
+async fn self_loadout_kept_in_app_state() {
+    let h = harness_with_db_file().await;
+    let (raw, body) = fixture_loadout();
+    get(
+        &h.server,
+        &format!("/personalization/v2/players/{ME}/playerloadout"),
+        body,
+    )
+    .await;
+    let vandal = raw.vandal.clone().unwrap();
+    mount_skin(&h.assets_server, &vandal.skin_id, &vandal.chroma_id).await;
+    lobby_with(&h, ME).await;
+
+    let mut poller = Poller::new(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    wait_for_playerloadouts(&h, 1).await;
+    // The four skins are kept in `app_state`.
+    let stored =
+        h.st.db(|repo| repo.get_state("self_loadout"))
+            .await
+            .unwrap()
+            .expect("stored");
+    let stored: RawLoadout = serde_json::from_str(&stored).unwrap();
+    assert_eq!(stored, raw);
+    assert!(stored.slots().iter().all(|slot| slot.is_some()));
+
+    // A fresh app on the same DB, with no Riot session (VALORANT closed):
+    // the user's Details still resolves the same skins from the stored copy.
+    let rec = Arc::new(Recorder::default());
+    let repo = Repo::new(open_db(h.db_path.as_deref().unwrap()).unwrap());
+    let assets = AssetCache::with_base(h._dir.path().join("assets-restart"), h.assets_server.uri());
+    let restarted = Arc::new(AppState::new(
+        Box::new(Sink(rec.clone())),
+        repo,
+        assets,
+        h._dir.path().join("debug-restart"),
+        Some(ME.into()),
+    ));
+    assert!(restarted.session().is_none());
+    assert_eq!(lock(&restarted.live).self_loadout, Some(raw));
+    let details = crate::commands::player_details_for(&restarted, ME)
+        .await
+        .unwrap();
+    assert!(loadout_of(&details).get("vandal").is_none(), "resolving");
+    let event = details_event_after(&rec, 0, ME, |d| {
+        d["loadout"].get("vandal").is_some_and(|v| v.is_object())
+    })
+    .await;
+    assert_eq!(event["loadout"]["vandal"]["skinName"], json!("Reaver"));
+    assert_eq!(
+        playerloadout_requests(&h).await.len(),
+        1,
+        "the restart read the stored copy, no request"
+    );
+}
+
+#[tokio::test]
+async fn resolve_skins_reports_whether_a_name_became_known() {
+    // A failing fetch: nothing learned, still pending (retried next open).
+    let h = harness().await;
+    mount_failing_skin(&h.assets_server, REAVER).await;
+    lock(&h.st.live)
+        .loadouts
+        .insert(OTHER.into(), reaver_loadout());
+    assert!(crate::details::skins_pending(&h.st, OTHER));
+    assert!(!crate::details::resolve_skins(&h.st, OTHER).await);
+    assert!(crate::details::skins_pending(&h.st, OTHER));
+
+    // A working one: learned once, then nothing left to resolve (and no
+    // second request).
+    let h = harness().await;
+    mount_skin(&h.assets_server, REAVER, REAVER_RED).await;
+    lock(&h.st.live)
+        .loadouts
+        .insert(OTHER.into(), reaver_loadout());
+    assert!(crate::details::skins_pending(&h.st, OTHER));
+    assert!(crate::details::resolve_skins(&h.st, OTHER).await);
+    assert!(!crate::details::skins_pending(&h.st, OTHER));
+    assert!(!crate::details::resolve_skins(&h.st, OTHER).await);
+    assert_eq!(skin_requests(&h).await, 1);
+
+    // No loadout at all (or none equipped): nothing pending.
+    assert!(!crate::details::skins_pending(&h.st, STRANGER));
+    lock(&h.st.live)
+        .loadouts
+        .insert(STRANGER.into(), RawLoadout::default());
+    assert!(!crate::details::skins_pending(&h.st, STRANGER));
+    assert!(!crate::details::resolve_skins(&h.st, STRANGER).await);
+}
+
+#[tokio::test]
+async fn account_switch_forgets_the_previous_users_loadout() {
+    let h = harness_with_db_file().await;
+    // A previous account's skins, in memory and in the stored copy.
+    let (raw, _) = fixture_loadout();
+    {
+        let mut live = lock(&h.st.live);
+        live.self_puuid = Some("previous-account".into());
+        live.self_loadout = Some(raw.clone());
+    }
+    let stored = serde_json::to_string(&raw).unwrap();
+    h.st.db(move |repo| repo.set_state("self_loadout", &stored))
+        .await
+        .unwrap();
+
+    // ME connects (the playerloadout mock isn't mounted: the read fails and
+    // is not retried): the previous account's loadout is gone everywhere.
+    let mut poller = Poller::new(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    wait_for_playerloadouts(&h, 1).await;
+    assert_eq!(lock(&h.st.live).self_puuid.as_deref(), Some(ME));
+    assert_eq!(lock(&h.st.live).self_loadout, None);
+    let kept =
+        h.st.db(|repo| repo.get_state("self_loadout"))
+            .await
+            .unwrap();
+    assert_eq!(
+        kept.as_deref(),
+        Some(""),
+        "blanked, not left for the next start"
+    );
+
+    // A restart does not resurrect it.
+    let repo = Repo::new(open_db(h.db_path.as_deref().unwrap()).unwrap());
+    let assets = AssetCache::with_base(h._dir.path().join("assets-restart"), h.assets_server.uri());
+    let restarted = AppState::new(
+        Box::new(Sink(Arc::new(Recorder::default()))),
+        repo,
+        assets,
+        h._dir.path().join("debug-restart"),
+        Some(ME.into()),
+    );
+    assert_eq!(lock(&restarted.live).self_loadout, None);
 }

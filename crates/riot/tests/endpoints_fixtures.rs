@@ -8,8 +8,8 @@
 
 use opd1_riot::endpoints::{
     CompetitiveUpdatesResponse, CoreGameMatchResponse, MatchDetailsResponse, MatchHistoryResponse,
-    MatchRef, NameServiceEntry, PartyOfResponse, PartyResponse, PlayerMmrResponse,
-    PregameMatchResponse, PresencesResponse,
+    MatchRef, NameServiceEntry, PartyOfResponse, PartyResponse, PlayerLoadoutResponse,
+    PlayerMmrResponse, PregameLoadoutsResponse, PregameMatchResponse, PresencesResponse,
 };
 
 fn fixture(name: &str) -> String {
@@ -291,4 +291,65 @@ fn names_deserializes_when_display_name_is_missing() {
     }]);
     let parsed: Vec<NameServiceEntry> = serde_json::from_value(value).unwrap();
     assert_eq!(parsed[0].display_name, None);
+}
+
+#[test]
+fn player_loadout_fixture_parses() {
+    // R90, built from techchrism's `player-loadout/response.json` (field
+    // names per `PlayerLoadout.ts`): `Subject`, `Guns[].{ID, SkinID,
+    // ChromaID}`; the other keys (`Sprays`, `Identity`, charms ...) are
+    // ignored.
+    let parsed: PlayerLoadoutResponse =
+        serde_json::from_str(&fixture("player_loadout.json")).unwrap();
+    assert_eq!(parsed.subject, "49e4dd9b-f2b5-4155-96a6-9ae7af3dd95d");
+    assert_eq!(parsed.guns.len(), 18, "the fixture's gun count (knife too)");
+    for gun in &parsed.guns {
+        assert!(!gun.id.is_empty(), "{gun:?}");
+        assert!(!gun.skin_id.is_empty(), "{gun:?}");
+        assert!(!gun.chroma_id.is_empty(), "{gun:?}");
+    }
+    // The four weapons the app reads carry the real weapon ids (the Sheriff
+    // in upper case, to prove matching ignores case).
+    let ids: Vec<&str> = parsed.guns.iter().take(4).map(|g| g.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        [
+            "9c82e19d-4575-0200-1a81-3eacf00cf872",
+            "ee8e8d15-496b-07ac-e5f6-8fae5d4c7b1a",
+            "a03b24d3-4319-996d-0f8c-94bbfba1dfc7",
+            "E336C6B8-418D-9340-D77F-7A9E4CFE0702",
+        ]
+    );
+}
+
+#[test]
+fn player_loadout_without_guns_or_with_null_guns_parses() {
+    let parsed: PlayerLoadoutResponse =
+        serde_json::from_str(r#"{"Subject": "p", "Guns": null}"#).unwrap();
+    assert!(parsed.guns.is_empty());
+    let parsed: PlayerLoadoutResponse = serde_json::from_str(r#"{"Subject": "p"}"#).unwrap();
+    assert!(parsed.guns.is_empty());
+}
+
+#[test]
+fn pregame_loadouts_fixture_parses() {
+    // Each `Loadouts[]` entry carries `Subject` + `Items` at the top level
+    // (no `Loadout` wrapper as in core-game); one entry has no `Subject`.
+    let parsed: PregameLoadoutsResponse =
+        serde_json::from_str(&fixture("pregame_loadouts.json")).unwrap();
+    assert!(parsed.loadouts_valid);
+    assert_eq!(parsed.loadouts.len(), 3);
+    let subjects: Vec<Option<&str>> = parsed
+        .loadouts
+        .iter()
+        .map(|l| l.get("Subject").and_then(|s| s.as_str()))
+        .collect();
+    assert_eq!(
+        subjects,
+        [
+            Some("a6bbe1f1-a9be-457b-9b58-35db705f7499"),
+            Some("b7c1a2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d"),
+            None
+        ]
+    );
 }

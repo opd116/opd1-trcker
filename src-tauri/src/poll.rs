@@ -7,12 +7,14 @@
 //!   │  (fail → back off 5s,10s,20s,40s,60s; a rewritten    │ 5 presence errors /
 //!   │   lockfile retries at once — R47)                    │ VALORANT (re)started
 //!   ▼                                                      │ under a game-less
-//! Connected: own Riot ID from /chat/v1/session (R43)       │ session (R46)
+//! Connected: own Riot ID from /chat/v1/session (R43),      │ session (R46)
+//!   own loadout once (R90)                                 │
 //!   presence (local) every 2s (5s while closed) ───────────┘
 //!   │  own VALORANT presence absent twice → stage Closed (own card from DB)
 //!   │  view_stage(sessionLoopState, queueId) change → plan_transition():
 //!   │     MENUS   → party roster   (+ re-fetch on partyId/partySize change)
-//!   │     PREGAME → ally team      (+ re-poll every 3s for agent picks, R39)
+//!   │     PREGAME → ally team      (+ re-poll every 3s for agent picks, R39;
+//!   │                               ally skins until a valid answer, R83)
 //!   │     INGAME  → both teams + loadouts
 //!   │     PREGAME/INGAME in a free-for-all queue → stays MENUS (R41)
 //!   │     INGAME→MENUS = match end: back to Lobby + post-match follow-up
@@ -37,12 +39,14 @@ use opd1_riot::{RiotError, RiotSession};
 
 use crate::logbuf::short;
 use crate::roster::{
-    connect_retry_delay, extract_loadouts, from_coregame, from_party, from_pregame, is_ffa_roster,
-    order_players, party_key, plan_transition, view_stage, GameVerdict, GameWatch, PartyKey,
-    RosterFetch, RosterPlayer,
+    connect_retry_delay, extract_loadouts, extract_pregame_loadouts, from_coregame, from_party,
+    from_pregame, is_ffa_roster, order_players, party_key, plan_transition, view_stage,
+    want_pregame_loadouts, GameVerdict, GameWatch, PartyKey, RosterFetch, RosterPlayer,
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
-use crate::store::{load_player_db, match_landed, save_player, PlayerDb, SELF_PUUID_KEY};
+use crate::store::{
+    load_player_db, match_landed, save_player, PlayerDb, SELF_LOADOUT_KEY, SELF_PUUID_KEY,
+};
 
 /// Closed: how often the lockfile's existence is checked.
 const CLOSED_CHECK: Duration = Duration::from_secs(5);
@@ -63,7 +67,8 @@ const ROSTER_RETRY_MAX: Duration = Duration::from_secs(30);
 const POST_MATCH_DELAYS: [Duration; 2] = [Duration::from_secs(30), Duration::from_secs(90)];
 
 /// Why the connected tick stopped.
-enum Stop {
+#[derive(Debug)]
+pub(crate) enum Stop {
     /// Drop the session and go back to Disconnected.
     Reconnect(&'static str),
 }
@@ -82,7 +87,7 @@ pub fn start(st: Arc<AppState>) {
     });
 }
 
-struct Poller {
+pub(crate) struct Poller {
     st: Arc<AppState>,
     local_app_data: Option<PathBuf>,
     session: Option<Arc<RiotSession>>,
@@ -99,6 +104,9 @@ struct Poller {
     party_key: Option<PartyKey>,
     self_party: HashSet<String>,
     pregame_match_id: Option<String>,
+    /// Riot answered `LoadoutsValid` for the current Agent Select: the
+    /// pre-game loadouts are not asked for again (R83).
+    pregame_loadouts_valid: bool,
     next_presence: Instant,
     next_pregame: Option<Instant>,
     roster_retry: Option<(Instant, u32)>,
@@ -115,7 +123,7 @@ struct Poller {
 }
 
 impl Poller {
-    fn new(st: Arc<AppState>) -> Self {
+    pub(crate) fn new(st: Arc<AppState>) -> Self {
         let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
         if local_app_data.is_none() {
             log::warn!("LOCALAPPDATA is not set; the Riot client can't be found");
@@ -132,6 +140,7 @@ impl Poller {
             party_key: None,
             self_party: HashSet::new(),
             pregame_match_id: None,
+            pregame_loadouts_valid: false,
             next_presence: Instant::now(),
             next_pregame: None,
             roster_retry: None,
@@ -210,13 +219,14 @@ impl Poller {
         }
     }
 
-    async fn on_connected(&mut self, session: Arc<RiotSession>) {
+    pub(crate) async fn on_connected(&mut self, session: Arc<RiotSession>) {
         let me = session.self_puuid().to_string();
         log::info!("connected to the Riot client as {}", short(&me));
         self.last_connect_error = None;
-        {
+        let switched = {
             let mut live = lock(&self.st.live);
-            if live.self_puuid.as_deref() != Some(me.as_str()) {
+            let switched = live.self_puuid.as_deref() != Some(me.as_str());
+            if switched {
                 // A different account: nothing learned about the previous
                 // one's session applies.
                 live.synced.clear();
@@ -224,13 +234,23 @@ impl Poller {
                 live.names_attempted.clear();
                 live.self_roster = None;
                 live.self_name = None;
+                live.self_loadout = None;
             }
             live.self_puuid = Some(me.clone());
             live.self_name_attempted = false;
-        }
+            switched
+        };
         let key_value = me.clone();
         self.st
-            .db(move |repo| repo.set_state(SELF_PUUID_KEY, &key_value))
+            .db(move |repo| {
+                repo.set_state(SELF_PUUID_KEY, &key_value)?;
+                if switched {
+                    // The previous account's loadout copy must not show for
+                    // this one (an unreadable value is no loadout).
+                    repo.set_state(SELF_LOADOUT_KEY, "")?;
+                }
+                Ok(())
+            })
             .await;
         self.st.set_session(Some(session.clone()));
         self.session = Some(session.clone());
@@ -239,6 +259,12 @@ impl Poller {
         self.next_presence = Instant::now();
         // R43: the user's own Riot ID, from the local chat session.
         let _ = crate::sync::fetch_self_name(&self.st, &session).await;
+        // R90: the user's own equipped skins, once per connect (one
+        // read-only call; a failure waits for the next connect).
+        let (st, s) = (self.st.clone(), session.clone());
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::sync::fetch_self_loadout(&st, &s).await;
+        });
 
         // One cheap /v1/version check per client start (new patch → new
         // tables); the tables themselves only download when it changed.
@@ -474,6 +500,7 @@ impl Poller {
         self.stage = next;
         self.party_key = key;
         self.pregame_match_id = None;
+        self.pregame_loadouts_valid = false;
         self.next_pregame = None;
         self.roster_retry = None;
 
@@ -553,7 +580,7 @@ impl Poller {
         }
     }
 
-    async fn fetch_pregame(
+    pub(crate) async fn fetch_pregame(
         &mut self,
         session: &Arc<RiotSession>,
         me: &str,
@@ -567,6 +594,10 @@ impl Poller {
         let m = session.pregame_match(&match_id).await?;
         let roster = from_pregame(&m, me, &self.self_party);
         log::info!("agent select: {} allies", roster.len());
+        if self.pregame_match_id.as_deref() != Some(match_id.as_str()) {
+            // A new Agent Select: its loadouts start unknown.
+            self.pregame_loadouts_valid = false;
+        }
         self.pregame_match_id = Some(match_id);
         self.next_pregame = Some(Instant::now() + PREGAME_REPOLL);
         self.apply_roster(session, Stage::Pregame, Some(m.map_id), roster)
@@ -575,8 +606,9 @@ impl Poller {
     }
 
     /// R39: re-read the pregame match only to pick up agent selections
-    /// (applied in place; the worker isn't restarted).
-    async fn pregame_repoll(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
+    /// (applied in place; the worker isn't restarted). R83: on the same
+    /// re-poll the allies' skins are asked for, until Riot answers valid.
+    pub(crate) async fn pregame_repoll(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
         let Some(match_id) = self.pregame_match_id.clone() else {
             return Ok(());
         };
@@ -584,14 +616,54 @@ impl Poller {
             Ok(m) => {
                 let me = session.self_puuid().to_string();
                 let roster = from_pregame(&m, &me, &self.self_party);
+                let allies: Vec<String> = roster.iter().map(|p| p.puuid.clone()).collect();
                 self.apply_roster(session, Stage::Pregame, Some(m.map_id), roster)
                     .await;
-                Ok(())
+                self.pregame_loadouts_step(session, &match_id, &allies)
+                    .await
             }
             Err(RiotError::ClientGone) => Err(Stop::Reconnect("Riot client closed")),
             // Typically 404 right as Agent Select ends — presence moves on.
             Err(e) => {
                 log::debug!("pregame re-poll: {e}");
+                Ok(())
+            }
+        }
+    }
+
+    /// R83: at most one `pregame/.../loadouts` call per re-poll, and only
+    /// while [`want_pregame_loadouts`]: not once Riot answered
+    /// `LoadoutsValid`, nor when every ally's skins are already known. Riot
+    /// nulls the payload until the picks are in, so the first answers can
+    /// be invalid; a valid one is merged into `live.loadouts` (Details).
+    async fn pregame_loadouts_step(
+        &mut self,
+        session: &Arc<RiotSession>,
+        match_id: &str,
+        allies: &[String],
+    ) -> Result<(), Stop> {
+        let want = {
+            let live = lock(&self.st.live);
+            want_pregame_loadouts(allies, &live.loadouts, self.pregame_loadouts_valid)
+        };
+        if !want {
+            return Ok(());
+        }
+        match session.pregame_loadouts(match_id).await {
+            Ok(resp) => {
+                if resp.loadouts_valid {
+                    self.pregame_loadouts_valid = true;
+                }
+                let found = extract_pregame_loadouts(&resp);
+                if !found.is_empty() {
+                    lock(&self.st.live).loadouts.extend(found);
+                }
+                Ok(())
+            }
+            Err(RiotError::ClientGone) => Err(Stop::Reconnect("Riot client closed")),
+            // Typically 404 right as Agent Select ends — presence moves on.
+            Err(e) => {
+                log::debug!("pregame loadouts: {e}");
                 Ok(())
             }
         }

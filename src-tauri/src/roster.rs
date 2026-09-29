@@ -10,7 +10,9 @@
 //! - the presence "party key" that triggers a lobby party re-fetch
 //!   ([`party_key`])
 //! - equipped Vandal/Phantom/Operator/Sheriff skins from core-game
-//!   loadouts ([`extract_loadouts`])
+//!   loadouts ([`extract_loadouts`]), pre-game loadouts
+//!   ([`extract_pregame_loadouts`], gated by [`want_pregame_loadouts`]) and
+//!   the user's own ([`extract_player_loadout`])
 //! - Riot map path -> valorant-api map uuid ([`map_uuid`])
 //! - the current act ([`current_act`])
 //! - free-for-all queues keep the Lobby view (R41, [`view_stage`],
@@ -31,7 +33,7 @@ use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
 use opd1_riot::endpoints::{
     CoreGameLoadoutsResponse, CoreGameMatchResponse, PartyResponse, PlayerIdentity,
-    PregameMatchResponse,
+    PlayerLoadoutResponse, PregameLoadoutsResponse, PregameMatchResponse,
 };
 
 use crate::store::PlayerUpdate;
@@ -447,6 +449,14 @@ pub struct RawLoadout {
     pub sheriff: Option<EquippedSkin>,
 }
 
+impl RawLoadout {
+    /// The four slots in the Details order: Vandal, Phantom, Operator,
+    /// Sheriff.
+    pub fn slots(&self) -> [&Option<EquippedSkin>; 4] {
+        [&self.vandal, &self.phantom, &self.operator, &self.sheriff]
+    }
+}
+
 /// `Sockets[socket].Item.ID` of a core-game / pre-game loadout item,
 /// lower-cased; `None` when absent or empty.
 fn socket_item(items: &Value, weapon: &str, socket: &str) -> Option<String> {
@@ -493,6 +503,63 @@ pub fn extract_loadouts(resp: &CoreGameLoadoutsResponse) -> HashMap<String, RawL
         out.insert(subject.to_string(), raw_loadout_of(items));
     }
     out
+}
+
+/// puuid -> the four equipped skins, from `pregame/.../loadouts` (Agent
+/// Select, allies only). Unlike core-game, each `Loadouts[]` entry carries
+/// `Subject` and `Items` at the top level. An entry without a `Subject` is
+/// skipped, never matched by position (as [`extract_loadouts`]); and the
+/// map is empty unless `LoadoutsValid` — Riot nulls most of the payload
+/// until the picks are in.
+pub fn extract_pregame_loadouts(resp: &PregameLoadoutsResponse) -> HashMap<String, RawLoadout> {
+    let mut out = HashMap::new();
+    if !resp.loadouts_valid {
+        return out;
+    }
+    for entry in &resp.loadouts {
+        let Some(subject) = entry.get("Subject").and_then(Value::as_str) else {
+            continue;
+        };
+        let items = entry.get("Items").unwrap_or(&Value::Null);
+        out.insert(subject.to_string(), raw_loadout_of(items));
+    }
+    out
+}
+
+/// R90: the user's own four skins from the personalization endpoint: the
+/// `Guns[]` entry whose `ID` is the weapon (matched ignoring case), with
+/// its `SkinID` and `ChromaID` stored lower-case. A weapon that is missing
+/// from the response, or has no skin or chroma id, is `None`.
+pub fn extract_player_loadout(resp: &PlayerLoadoutResponse) -> RawLoadout {
+    let gun = |weapon: &str| {
+        let gun = resp
+            .guns
+            .iter()
+            .find(|g| g.id.eq_ignore_ascii_case(weapon))?;
+        (!gun.skin_id.is_empty() && !gun.chroma_id.is_empty()).then(|| EquippedSkin {
+            skin_id: gun.skin_id.to_ascii_lowercase(),
+            chroma_id: gun.chroma_id.to_ascii_lowercase(),
+        })
+    };
+    RawLoadout {
+        vandal: gun(VANDAL),
+        phantom: gun(PHANTOM),
+        operator: gun(OPERATOR),
+        sheriff: gun(SHERIFF),
+    }
+}
+
+/// R83: whether the Agent Select re-poll should ask for the pre-game
+/// loadouts: only until Riot answered `LoadoutsValid` once (`seen_valid`),
+/// and only while some ally has no [`RawLoadout`] yet. So at most one call
+/// per 3s re-poll, none after a valid answer, and none at all when every
+/// ally's loadout is already known.
+pub fn want_pregame_loadouts(
+    allies: &[String],
+    have: &HashMap<String, RawLoadout>,
+    seen_valid: bool,
+) -> bool {
+    !seen_valid && allies.iter().any(|puuid| !have.contains_key(puuid))
 }
 
 // ---------------------------------------------------------------------
@@ -893,6 +960,161 @@ mod tests {
         assert_eq!(me.sheriff, skin("skin-sheriff", "chroma-sheriff"));
         assert_eq!(me.phantom, None, "skin without chroma: not a known skin");
         assert_eq!(me.operator, None);
+    }
+
+    fn fixture(name: &str) -> String {
+        let path = format!(
+            "{}/../crates/riot/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("missing fixture {name}: {e}"))
+    }
+
+    #[test]
+    fn pregame_loadouts_by_subject() {
+        // Built from techchrism's real pre-game capture: 3 entries, the
+        // last without a `Subject`.
+        let resp: PregameLoadoutsResponse =
+            serde_json::from_str(&fixture("pregame_loadouts.json")).unwrap();
+        assert_eq!(resp.loadouts.len(), 3);
+        let loadouts = extract_pregame_loadouts(&resp);
+        assert_eq!(
+            loadouts.len(),
+            2,
+            "the entry without a Subject is skipped, not matched by position"
+        );
+        let first = &loadouts["a6bbe1f1-a9be-457b-9b58-35db705f7499"];
+        assert_eq!(
+            first.vandal,
+            skin(
+                "30388628-42f0-606c-82c0-73ad43de997f",
+                "b2a065c0-4632-ccaa-f496-7681dc2a6185"
+            )
+        );
+        assert_eq!(
+            first.phantom,
+            skin(
+                "11111111-1111-4111-8111-111111111111",
+                "11111111-1111-4111-8111-111111111112"
+            )
+        );
+        assert_eq!(
+            first.sheriff,
+            skin(
+                "33333333-3333-4333-8333-333333333331",
+                "33333333-3333-4333-8333-333333333332"
+            )
+        );
+        assert_eq!(first.operator, None, "not in this entry");
+        // The second subject has other skins on other weapons.
+        let second = &loadouts["b7c1a2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d"];
+        assert_eq!(
+            second.vandal,
+            skin(
+                "44444444-4444-4444-8444-444444444441",
+                "44444444-4444-4444-8444-444444444442"
+            )
+        );
+        assert_eq!(
+            second.operator,
+            skin(
+                "55555555-5555-4555-8555-555555555551",
+                "55555555-5555-4555-8555-555555555552"
+            )
+        );
+        assert_eq!((&second.phantom, &second.sheriff), (&None, &None));
+    }
+
+    #[test]
+    fn pregame_loadouts_invalid_is_empty() {
+        let mut value: Value = serde_json::from_str(&fixture("pregame_loadouts.json")).unwrap();
+        value["LoadoutsValid"] = json!(false);
+        let resp: PregameLoadoutsResponse = serde_json::from_value(value).unwrap();
+        assert!(
+            extract_pregame_loadouts(&resp).is_empty(),
+            "Riot nulls the payload until it is valid: nothing is read"
+        );
+        let resp: PregameLoadoutsResponse =
+            serde_json::from_value(json!({"Loadouts": [], "LoadoutsValid": true})).unwrap();
+        assert!(extract_pregame_loadouts(&resp).is_empty());
+    }
+
+    #[test]
+    fn pregame_loadouts_gate() {
+        let allies: Vec<String> = ["me", "a", "b"].map(String::from).into();
+        let have = |who: &[&str]| -> HashMap<String, RawLoadout> {
+            who.iter()
+                .map(|p| (p.to_string(), RawLoadout::default()))
+                .collect()
+        };
+        // Nothing known, no valid answer yet: ask.
+        assert!(want_pregame_loadouts(&allies, &have(&[]), false));
+        // Some ally still missing: ask.
+        assert!(want_pregame_loadouts(&allies, &have(&["me", "a"]), false));
+        // A valid answer was seen: never again, even with allies missing.
+        assert!(!want_pregame_loadouts(&allies, &have(&["me"]), true));
+        assert!(!want_pregame_loadouts(&allies, &have(&[]), true));
+        // Everyone already has a loadout: nothing to ask for.
+        assert!(!want_pregame_loadouts(
+            &allies,
+            &have(&["me", "a", "b"]),
+            false
+        ));
+        // No allies (an empty roster) has nothing to ask about.
+        assert!(!want_pregame_loadouts(&[], &have(&[]), false));
+    }
+
+    #[test]
+    fn extract_player_loadout_reads_four_guns() {
+        // The real capture (techchrism `player-loadout/response.json`) with
+        // the first four `ID`s set to the four weapons — the Sheriff's in
+        // upper case, to prove matching ignores case.
+        let resp: PlayerLoadoutResponse =
+            serde_json::from_str(&fixture("player_loadout.json")).unwrap();
+        let loadout = extract_player_loadout(&resp);
+        let gun = |i: usize| {
+            skin(
+                &resp.guns[i].skin_id.to_ascii_lowercase(),
+                &resp.guns[i].chroma_id.to_ascii_lowercase(),
+            )
+        };
+        assert_eq!(loadout.vandal, gun(0));
+        assert_eq!(loadout.phantom, gun(1));
+        assert_eq!(loadout.operator, gun(2));
+        assert_eq!(loadout.sheriff, gun(3), "the upper-case Sheriff id matches");
+        assert_eq!(
+            loadout.vandal,
+            skin(
+                "19af9724-ad73-4d6b-b103-c150ce5f03da",
+                "f831fb66-b68e-4dab-acd1-d48a29bf00f4"
+            )
+        );
+
+        // Ids are stored lower-case even when Riot sends them upper-case,
+        // and a weapon that isn't in the response is `None`.
+        let resp: PlayerLoadoutResponse = serde_json::from_value(json!({
+            "Subject": "me",
+            "Guns": [
+                {"ID": VANDAL.to_uppercase(), "SkinID": "AAAAAAAA-0000-0000-0000-000000000001",
+                 "ChromaID": "BBBBBBBB-0000-0000-0000-000000000001"},
+                // A gun without a skin or chroma id is unknown too.
+                {"ID": PHANTOM, "SkinID": "", "ChromaID": "cccccccc-0000-0000-0000-000000000001"},
+                {"ID": "2f59173c-4bed-b6c3-2191-dea9b58be9c7", "SkinID": "s", "ChromaID": "c"}
+            ]
+        }))
+        .unwrap();
+        let loadout = extract_player_loadout(&resp);
+        assert_eq!(
+            loadout.vandal,
+            skin(
+                "aaaaaaaa-0000-0000-0000-000000000001",
+                "bbbbbbbb-0000-0000-0000-000000000001"
+            )
+        );
+        assert_eq!(
+            (&loadout.phantom, &loadout.operator, &loadout.sheriff),
+            (&None, &None, &None)
+        );
     }
 
     #[test]

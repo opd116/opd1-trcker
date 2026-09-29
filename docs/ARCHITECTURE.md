@@ -2,7 +2,7 @@
 
 OPD1 TRCKER reads the local Riot client API and shows live Lobby / Agent Select / In Game player cards, plus the user's own competitive stats. Lightness is priority #1 (RAM, CPU, bundle size, request count); design is #2.
 
-Facts on this page come from the code on `main` at the end of Phase 1 (`c9ad7f4`). Phase 2 adds Match Details, migration 2, the user's own loadout and the own-history backfill. Task 19 (release) records those here once their lanes have landed. An interactive diagram of the same system is in [`docs/architecture.html`](architecture.html).
+Facts on this page come from the code on `main` at the end of Phase 1 (`c9ad7f4`). Phase 2 adds Match Details, migration 2, the user's own loadout, the own-history backfill, lock-only agent names (R99) and the own card's level (R100). Task 19 (release) records those here once their lanes have landed. An interactive diagram of the same system is in [`docs/architecture.html`](architecture.html).
 
 - Product rules: [`CLAUDE.md`](../CLAUDE.md). Every ruling and its status: [`DECISIONS.md`](DECISIONS.md). Build spec for the UI: [`design-spec.md`](design-spec.md).
 
@@ -54,7 +54,7 @@ Connected     ── local presence every 2s (5s while VALORANT is closed)
                  own VALORANT presence absent twice → stage Closed (own card from the DB)
                  sessionLoopState / queueId change → plan_transition()
                     MENUS   → party roster (re-fetched when partyId / partySize change)
-                    PREGAME → ally team   (re-polled every 3s only to pick up agent locks, R39)
+                    PREGAME → ally team   (re-polled every 3s only to pick up agent selections, R39)
                     INGAME  → both teams + loadouts
                     PREGAME / INGAME in a free-for-all queue → stays MENUS (R41)
                     INGAME → MENUS = match end: back to Lobby + post-match follow-up
@@ -78,7 +78,7 @@ Registered in `src-tauri/src/lib.rs`, implemented in `commands.rs`:
 | `live_state` | The current `LiveState` (the UI's first snapshot; later ones arrive as `"live"` events) |
 | `player_details` | `PlayerDetails` for one puuid, then a possible `"details"` event |
 | `my_stats` | `Option<MyStats>` for the user's own account and the current act (`null` until the user and the act are known) |
-| `copy_log` | The last 500 log lines. The UI writes them to the clipboard on Ctrl+Shift+L, so there is no clipboard plugin (R30) |
+| `copy_log` | The last 500 log lines. The UI writes them to the clipboard, so there is no clipboard plugin (R30). The Ctrl+Shift+L binding is a Phase 2 target (Task 16a): at `c9ad7f4` no `ui/src` code calls `copy_log` yet |
 | `dump_raw` | Writes the redacted raw Riot responses to `debug/` in the app data dir, for fixtures |
 
 Task 19 adds `match_details` here once lane B has landed.
@@ -118,12 +118,12 @@ Assets come from valorant-api. The tables (agents, tiers, maps, seasons, chromas
 
 ## Hidden names
 
-Rules in `CLAUDE.md` "Hidden names". How the code enforces them:
+Rules in `CLAUDE.md` "Hidden names". How the code enforces them at `c9ad7f4`. Where a rule is newer than that commit, the bullet says so: it is a Phase 2 target that Task 19 records here once it has landed.
 
 - **Type-level guard (R16).** `endpoints::names()` accepts only `VisiblePuuid`, a newtype built from `(puuid, incognito = false)`. A hidden player's name cannot be requested by construction.
-- **Precedence (`names::display_name`).** Visible, else the remembered name, else the agent name (only once the agent is locked, R99), else `Hidden Player`. Remembered names are learned only from finished matches the user played, and never from another player's history (R18).
-- **The user's own card** shows the user's own name from the local `/chat/v1/session` and never goes to name-service (R43, R49). The own account level also shows always (R100).
-- **Match Details (R74, R93).** match-details has no incognito flag, so in a match the user did not play, a row shows as its agent name (or the remembered name) when its puuid is incognito on the live screen now or its stored name is empty. The first real test confirms whether Riot hides those names (R94).
+- **Precedence (`names::display_name`).** Visible, else the remembered name, else the agent name, else `Hidden Player`. Remembered names are learned only from finished matches the user played, and never from another player's history (R18). At `c9ad7f4` an agent counts as shown as soon as `CharacterSelectionState` is non-empty (`model::shown_agent`), so a hover already counts. **Phase 2 target (R99, Task 14):** only a locked agent counts (`CharacterSelectionState == "locked"`).
+- **The user's own card** shows the user's own name from the local `/chat/v1/session` and never goes to name-service (R43, R49). At `c9ad7f4`, `build_card` shows `Lv —` for every player with `HideAccountLevel`, the user's own card included. **Phase 2 target (R100, Task 14):** the own card always shows the user's own level.
+- **Match Details (R74, R93): Phase 2 target (Task 15).** No `match_details` command exists at `c9ad7f4`. The rule it will follow: match-details has no incognito flag, so in a match the user did not play, a row shows as its agent name (or the remembered name) when its puuid is incognito on the live screen now or its stored name is empty. The first real test checks whether Riot hides those names (R94).
 
 ## The `img://` scheme and throttling
 

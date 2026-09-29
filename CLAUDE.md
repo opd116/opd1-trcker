@@ -57,7 +57,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Everything refreshes silently when the game opens.
 
 **Live stages** — one page in the In Game layout of the design file; the card is identical everywhere. **No scrolling** in any Live stage.
-- **Lobby:** me + my party (1–5) stacked in the left column. Average Party Rank when 2+ players (placed in the top bar where the map sits in game). Queueing changes nothing: no timer, no searching indicator.
+- **Lobby:** me + my party (1–5) stacked in the left column (same card size as In Game; the rest of the column stays empty — R75). Average Party Rank when 2+ players (placed in the top bar where the map sits in game). Queueing changes nothing: no timer, no searching indicator.
 - **Agent Select:** my team (5) in the left column; the right column shows 5 empty card-shaped slots with a light dashed frame and no text. Map name + image in the top bar as soon as pregame knows the map.
 - **In Game:** my team left, enemy team right (ranks and stats shown). Map name + image at the right end of the top bar. No live match stats or round score.
 - **Deathmatch / FFA:** keep the Lobby (party) view; don't fetch or show the other players. Party detection still uses DM matches from history.

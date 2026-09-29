@@ -709,8 +709,8 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R108). Each
 
 ### R101 — Own-history backfill
 
-- **What:** User decision: on connect (and after each match), page the user's own match history (all queues) back to the newest already-stored match id, then fetch match-details only for unknown ids. Throttled, lowest priority behind live cards. The first run stops at the current act start or 200 matches.
-- **Why:** The user wants matches played while the app was closed never to be forgotten; the bounds keep it light.
+- **What:** User decision: on connect (and after each match), page the user's own match history (all queues) back to the anchor, which is the newest match of the last completed backfill run (`app_state` key `self_history_anchor`), then fetch match-details only for unknown ids. The anchor moves only when a run completes. Throttled, lowest priority behind live cards. The first run, with no anchor yet, stops at the current act start or 200 matches (Claude's lightness bound, not the user's).
+- **Why:** The user wants matches played while the app was closed never to be forgotten; the bounds keep it light. The anchor is not "the newest stored match id": the live sync stores the user's newest matches first, so that rule would stop on page 0 and miss the matches played while the app was closed (plan Task 15b, `plan.md:1338`).
 - **Cost:** Extra calls on the first run only.
 - **Status:** active
 

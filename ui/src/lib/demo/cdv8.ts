@@ -309,20 +309,33 @@ const MATES: Record<string, Array<[string, string, number]>> = {
 };
 const MATES_DEFAULT: Array<[string, string, number]> = [["Kova", "0482", 12], ["Tarek", "0552", 8], ["Fennec", "4402", 5]];
 
-function mates(r: Raw): TeammateSummary[] {
+/**
+ * R93: a player who is hidden on the live screen (their live card's name is not `visible`) shows as that card
+ * does in every row that names them, never as the raw roster name. Returns a copy, or null when the live
+ * cards do not hide this puuid (or there are no live cards).
+ */
+function hiddenName(live: readonly PlayerCard[] | undefined, puuid: string): DisplayName | null {
+  const n = live?.find((c) => c.puuid === puuid)?.name;
+  return n && n.kind !== "visible" ? { ...n } : null;
+}
+
+function mates(r: Raw, live?: readonly PlayerCard[]): TeammateSummary[] {
   return (MATES[r.id] ?? MATES_DEFAULT).map(([name, tag, count]) => {
-    const live = ROSTER_RAW.find((x) => x.name === name && x.tag === tag);
+    const onRoster = ROSTER_RAW.find((x) => x.name === name && x.tag === tag);
     const pool = POOL.findIndex((p) => p[0] === name && p[1] === tag);
-    const puuid = live ? PUUID[live.id]! : pool >= 0 ? poolPuuid(pool) : KOVA;
-    return { puuid, name: { kind: "visible", name, tag }, count };
+    const puuid = onRoster ? PUUID[onRoster.id]! : pool >= 0 ? poolPuuid(pool) : KOVA;
+    return { puuid, name: hiddenName(live, puuid) ?? { kind: "visible", name, tag }, count };
   });
 }
 
-/** Everything Player Details shows for a roster player. `c` is the card as the scene has it. */
-export function detailsFor(id: string, c?: PlayerCard): PlayerDetails {
+/**
+ * Everything Player Details shows for a roster player, as fresh objects on every call. `c` is the card as the
+ * scene has it (copied); `live` are the scene's live cards, whose hidden names the Top 3 rows follow (R93).
+ */
+export function detailsFor(id: string, c?: PlayerCard, live?: readonly PlayerCard[]): PlayerDetails {
   const r = rawById(id);
   if (!r) throw new Error(`demo: no roster player ${id}`);
-  const base = c ?? roster().find((x) => x.puuid === PUUID[id])!;
+  const base = c ? structuredClone(c) : roster().find((x) => x.puuid === PUUID[id])!;
   const rec = recentData(r).map((m): MatchSummary =>
     recent({
       matchId: rid(id, m.i), mapId: MAPS[m.map], startMs: m.startMs, letter: m.letter, rounds: m.rounds,
@@ -337,7 +350,7 @@ export function detailsFor(id: string, c?: PlayerCard): PlayerDetails {
       themAgentId: AG[e.them[0]], themTier: e.them[1], selfAgentId: AG[e.me[0]], selfTier: e.me[1],
     };
   });
-  return { card: base, recent: rec, topTeammates: mates(r), loadout: loadout(), encounters: enc };
+  return { card: base, recent: rec, topTeammates: mates(r, live), loadout: loadout(), encounters: enc };
 }
 
 /** Details for a player with no history at all (`details-empty`): nothing to list, nothing known about the loadout. */
@@ -361,7 +374,7 @@ function scoreRow(o: RowIn): ScoreRow {
   const [kills, deaths, assists] = o.kda;
   const acs = acsOf(kills, assists);
   return {
-    puuid: o.puuid, name: o.name, agentId: AG[o.agent], tier: o.tier, kills, deaths, assists, acs,
+    puuid: o.puuid, name: { ...o.name }, agentId: AG[o.agent], tier: o.tier, kills, deaths, assists, acs,
     adr: Math.round(acs * 0.64), hsPct: o.hs / 100, isSelf: !!o.isSelf, isFocus: !!o.isFocus,
   };
 }
@@ -383,9 +396,16 @@ const FAHAD_ROW: RowIn = {
 /**
  * The match behind a recent row (`mdemo:<id>:r<i>`, the focus player's own game) or an encounter row
  * (`mdemo:<id>:e<i>`, a game shared with the user: self perspective), or the Deathmatch (`mdemo:<id>:dm`).
- * Throws for any other id.
+ * Throws for any other id. Fresh objects on every call; `live` are the scene's live cards, and a row whose
+ * puuid is hidden there shows as its card does, never as the raw roster name (R93).
  */
-export function matchFor(matchId: string): MatchDetailsView {
+export function matchFor(matchId: string, live?: readonly PlayerCard[]): MatchDetailsView {
+  const view = buildMatch(matchId);
+  for (const t of view.teams) for (const p of t.players) p.name = hiddenName(live, p.puuid) ?? p.name;
+  return view;
+}
+
+function buildMatch(matchId: string): MatchDetailsView {
   if (/^mdemo:[a-z]+:dm$/.test(matchId)) return deathmatch(matchId);
   const m = /^mdemo:([a-z]+):([re])(\d)$/.exec(matchId);
   const r = m && rawById(m[1]!);

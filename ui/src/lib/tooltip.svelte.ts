@@ -50,9 +50,7 @@ export function tipOver(target: Element | null, root: Element): void {
   if (el && el === current) return;
   hideTip();
   if (!el) return;
-  const text = el.getAttribute("data-tip");
-  if (!text) return;
-  if (text.startsWith("wl:") && !parseWl(text)) return;
+  if (!el.getAttribute("data-tip")) return;
   current = el;
   if (el.getAttribute("data-tip-ov") === "1") {
     // Overflow-only (a Riot ID name): the trigger's first span must actually be cut off.
@@ -61,6 +59,10 @@ export function tipOver(target: Element | null, root: Element): void {
   }
   timer = setTimeout(() => {
     if (current !== el) return;
+    // Read at fire time, as the design does (v8:525): a trigger whose text changed during the delay shows the
+    // new string, and one that went empty or malformed shows nothing.
+    const text = el.getAttribute("data-tip");
+    if (!text || (text.startsWith("wl:") && !parseWl(text))) return;
     tipState.tip = { text, ...tipPosition(el.getBoundingClientRect(), root.getBoundingClientRect()) };
   }, DELAY_MS);
 }

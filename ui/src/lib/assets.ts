@@ -12,9 +12,12 @@ export type AssetKind =
   | "cardWide"
   | "mapSplash";
 
-/** Tauri 2 custom schemes: `http://img.localhost/` on Windows (WebView2), `img://localhost/` elsewhere. */
+let base: string | undefined;
+
+/** Tauri 2 custom schemes: `http://img.localhost/` on Windows (WebView2), `img://localhost/` elsewhere. Read once. */
 function imgBase(): string {
-  return navigator.userAgent.includes("Windows") ? "http://img.localhost/" : "img://localhost/";
+  base ??= navigator.userAgent.includes("Windows") ? "http://img.localhost/" : "img://localhost/";
+  return base;
 }
 
 /** Image URL for a valorant-api asset. The backend downloads and caches on first request. */

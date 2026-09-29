@@ -92,16 +92,16 @@ const hueGap = (a: string, b: string) => {
 };
 
 /**
- * The 4 party colours for an accent. Listed accents use the table. For any other accent the rule is
- * applied to the fallback pair: keep the pair colours that are ≥ 30° of hue from the accent, add the
- * first reserve colours that are ≥ 30° from the accent, GREEN, LOSS and every colour already taken,
- * and if that leaves fewer than 4, fill from the reserve in order.
+ * The 4 party colours for an accent. Listed accents use the table. For any other accent the design's fixed
+ * fallback pair is party[0..1] unchanged (v8:554: `PARTY_SETS[accent] || ['#7fa6e8', '#b596e0']`); the reserve
+ * walk runs only for party[2..3]: the first reserve colours that are ≥ 30° of hue from the accent, GREEN, LOSS
+ * and every colour already taken, and if that leaves fewer than 4, fill from the reserve in order.
  */
 export function partySet(accent: string): [string, string, string, string] {
   const known = PARTY_SETS4[accent.toLowerCase()];
   if (known) return [...known];
 
-  const set = FALLBACK_PAIR.filter((c) => hueGap(c, accent) >= 30);
+  const set = [...FALLBACK_PAIR];
   for (const c of RESERVE) {
     if (set.length >= 4) break;
     const clear = [accent, GREEN, LOSS, ...set].every((o) => hueGap(c, o) >= 30);

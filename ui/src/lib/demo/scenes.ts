@@ -55,11 +55,11 @@ const ingame = (players: PlayerCard[] = roster()) => state("ingame", MAPS.Haven,
 /** Fahad alone, as when VALORANT is closed: values from the DB, no agent. */
 const closed = (): LiveState => state("closed", null, [{ ...roster()[0]!, agentId: null }]);
 
-/** Self plus n−1 party members, no agents, no party marks (the client gives the party). */
+/** Self plus n−1 party members, no agents, no party marks (the client gives the party). Every card is `isSelfParty`, self included, as the backend sends it. */
 function lobby(n: number, edit?: (p: PlayerCard[]) => void): LiveState {
   const players = roster()
     .slice(0, n)
-    .map((c, i): PlayerCard => ({ ...c, agentId: null, party: null, encounters: null, isSelfParty: i > 0 }));
+    .map((c): PlayerCard => ({ ...c, agentId: null, party: null, encounters: null, isSelfParty: true }));
   edit?.(players);
   return state("menus", null, players);
 }
@@ -138,11 +138,9 @@ function unrankedRoster(): PlayerCard[] {
 }
 
 // ── details and matches ─────────────────────────────────────────────────────────
-let rosterDetailsMemo: Record<string, PlayerDetails> | undefined;
-/** Details for all 10 roster players, keyed by puuid. */
+/** Details for all 10 roster players, keyed by puuid. Fresh objects on every call: no two scenes share one. */
 function rosterDetails(): Record<string, PlayerDetails> {
-  rosterDetailsMemo ??= Object.fromEntries(Object.entries(PUUID).map(([id, puuid]) => [puuid, detailsFor(id)]));
-  return rosterDetailsMemo;
+  return Object.fromEntries(Object.entries(PUUID).map(([id, puuid]) => [puuid, detailsFor(id)]));
 }
 
 const details = (puuid: string, more = false): Route => ({ name: "details", puuid, more });
@@ -302,23 +300,29 @@ const sceneOf = (scene: string | null): Scene | undefined =>
 const never = <T>() => new Promise<T>(() => {});
 
 /**
- * `player_details` for the DEV browser. A scene's own entry wins ('pending' never resolves); any roster
- * player without one gets the roster details, shown with the scene's live card.
+ * `player_details` for the DEV browser. A scene's own entry wins as authored ('pending' never resolves); any
+ * roster player without one gets the roster details built with the scene's live card, and a Top 3 row for a
+ * player who is hidden on that live screen follows the card (R93). Always a copy: the answer is the caller's
+ * to mutate.
  */
 export async function resolveDetails(scene: string | null, puuid: string): Promise<PlayerDetails> {
   const s = sceneOf(scene);
   const own = s?.details?.[puuid];
   if (own === "pending") return never();
-  if (own) return own;
-  const base = rosterDetails()[puuid];
-  if (!base) throw new Error(`demo: no details for ${puuid}`);
-  const liveCard = s?.live?.players.find((c) => c.puuid === puuid);
-  return liveCard ? { ...base, card: liveCard } : base;
+  if (own) return structuredClone(own);
+  const id = Object.keys(PUUID).find((k) => PUUID[k] === puuid);
+  if (!id) throw new Error(`demo: no details for ${puuid}`);
+  const live = s?.live?.players;
+  return detailsFor(id, live?.find((c) => c.puuid === puuid), live);
 }
 
-/** `match_details` for the DEV browser: the scene's own view, or one built from the demo match id. */
+/**
+ * `match_details` for the DEV browser: the scene's own view as authored (a copy), or one built from the demo
+ * match id whose rows follow the scene's live hidden names, never the raw roster names (R93).
+ */
 export async function resolveMatch(scene: string | null, matchId: string, _focusPuuid: string): Promise<MatchDetailsView> {
-  const own = sceneOf(scene)?.matches?.[matchId];
+  const s = sceneOf(scene);
+  const own = s?.matches?.[matchId];
   if (own === "pending") return never();
-  return own ?? matchFor(matchId);
+  return own ? structuredClone(own) : matchFor(matchId, s?.live?.players);
 }

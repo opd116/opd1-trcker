@@ -1,8 +1,9 @@
+/// <reference types="node" />
 import { readFileSync, readdirSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { writable } from "svelte/store";
 import demoMeta from "./demo/meta.json";
-import { DEMO_NOW } from "./demo/cdv8";
+import { DEMO_NOW, detailsFor, encounterMatchId, matchFor, PUUID, recentMatchId, roster } from "./demo/cdv8";
 import * as fixtures from "./demo/fixtures";
 import { resolveDetails, resolveMatch, SCENES, type SceneName } from "./demo/scenes";
 import { dateLong, durationMin, score, time12 } from "./format";
@@ -126,7 +127,15 @@ describe("live scenes", () => {
 
   it("Math.round(actWinrate*100) equals the design's win[0] for all 10 players", () => {
     expect(players("ingame").map((c) => Math.round(c.actWinrate! * 100))).toEqual([58, 52, 49, 55, 61, 63, 54, 56, 49, 67]);
-    for (const c of players("ingame")) expect(c.actWins! + (c.actGames! - c.actWins!)).toBe(c.actGames);
+  });
+
+  it("wins and losses are the design's win[1] / win[2] for all 10 players (v8 roster)", () => {
+    const p = players("ingame");
+    for (const c of p) expect(c.actWins!).toBeLessThanOrEqual(c.actGames!);
+    expect(p.map((c) => [c.actWins, c.actGames! - c.actWins!])).toEqual([
+      [31, 22], [22, 20], [19, 20], [27, 22], [25, 16], [41, 24], [30, 26], [28, 22], [20, 21], [2, 1],
+    ]);
+    expect(p.map((c) => c.actGames)).toEqual([53, 42, 39, 49, 41, 65, 56, 50, 41, 3]);
   });
 
   it("the design's roster: party marks, encounters, hidden and remembered names", () => {
@@ -140,7 +149,20 @@ describe("live scenes", () => {
     expect(hiddenAgent).toHaveLength(1);
     const enc = players("ingame").filter((c) => c.encounters && c.encounters.with + c.encounters.against > 0);
     expect(enc.map((c) => (c.name && "name" in c.name ? c.name.name : "?")).sort()).toEqual(["Kilo", "Mara", "Rook", "VesperUnbreakabl"]);
-    expect(players("ingame").every((c) => !c.isSelfParty)).toBe(true);
+    // The backend marks the user's own card `isSelfParty` too (state.rs `r.is_self_party || is_self`): only Fahad here.
+    expect(players("ingame").filter((c) => c.isSelfParty).map((c) => c.puuid)).toEqual([players("ingame")[0]!.puuid]);
+  });
+
+  it("wire invariant in every scene: the self card is isSelfParty, and own-party cards carry no party or encounters", () => {
+    for (const n of NAMES) {
+      for (const c of players(n)) {
+        if (c.isSelf) expect(c.isSelfParty, `${n}: self card`).toBe(true);
+        if (c.isSelfParty) {
+          expect(c.party, `${n}: own party`).toBeNull();
+          expect(c.encounters, `${n}: own party`).toBeNull();
+        }
+      }
+    }
   });
 
   it("closed has only the user's own card, with the outline flag", () => {
@@ -158,7 +180,8 @@ describe("live scenes", () => {
       expect(SCENES[s].live?.stage).toBe("menus");
       expect(p, s).toHaveLength(i + 1);
       expect(p[0]!.isSelf).toBe(true);
-      expect(p.slice(1).every((c) => c.isSelfParty && !c.isSelf && c.party === null && c.encounters === null)).toBe(true);
+      expect(p.every((c) => c.isSelfParty && c.party === null && c.encounters === null)).toBe(true);
+      expect(p.slice(1).every((c) => !c.isSelf)).toBe(true);
     });
   });
 
@@ -447,6 +470,91 @@ describe("resolvers (DEV api)", () => {
     const fallback = await resolveMatch("ingame", r.matchId, r.focusPuuid);
     expect(fallback.matchId).toBe(r.matchId);
     await expect(resolveMatch("ingame", "nonsense", r.focusPuuid)).rejects.toThrow();
+  });
+
+  it("resolveMatch follows the scene's live hidden names, never the raw roster name (R93)", async () => {
+    const rowOf = (m: MatchDetailsView, puuid: string) => m.teams.flatMap((t) => t.players).find((p) => p.puuid === puuid)!;
+    // pregame: Nova is a hidden player who has not locked. Her own recent match must not print `Nova#3341`.
+    const nova = PUUID.nova!;
+    expect(players("pregame").find((c) => c.puuid === nova)?.name).toEqual({ kind: "hiddenPlayer" });
+    const hidden = await resolveMatch("pregame", recentMatchId("nova", 0), nova);
+    expect(rowOf(hidden, nova).name).toEqual({ kind: "hiddenPlayer" });
+    expect(JSON.stringify(hidden)).not.toMatch(/Nova|3341/);
+    // The same match where she is visible keeps her name.
+    expect(rowOf(await resolveMatch("ingame", recentMatchId("nova", 0), nova), nova).name).toEqual({
+      kind: "visible", name: "Nova", tag: "3341",
+    });
+    // Cypher (hiddenAgent) and Rook (remembered) show as their live cards do.
+    const cypher = PUUID.cypher!;
+    const rook = PUUID.rook!;
+    const live = (id: string) => players("ingame").find((c) => c.puuid === id)!.name;
+    expect(rowOf(await resolveMatch("ingame", recentMatchId("cypher", 0), cypher), cypher).name).toEqual(live(cypher));
+    expect(rowOf(await resolveMatch("ingame", recentMatchId("rook", 0), rook), rook).name).toEqual(live(rook));
+  });
+
+  it("matchFor / detailsFor apply a hidden live card to every row that names it (R93)", () => {
+    const kilo = PUUID.kilo!;
+    const live = roster();
+    live.find((c) => c.puuid === kilo)!.name = { kind: "hiddenAgent", agentId: "hidden-agent-id" };
+    // Kilo is on Mara's team in her recent match, and is her top teammate.
+    const m = matchFor(recentMatchId("mara", 0), live);
+    expect(m.teams.flatMap((t) => t.players).find((p) => p.puuid === kilo)?.name).toEqual({
+      kind: "hiddenAgent", agentId: "hidden-agent-id",
+    });
+    expect(JSON.stringify(m)).not.toContain("Kilo");
+    const d = detailsFor("mara", undefined, live);
+    expect(d.topTeammates[0]).toMatchObject({ puuid: kilo, count: 14, name: { kind: "hiddenAgent", agentId: "hidden-agent-id" } });
+    expect(d.topTeammates.slice(1).every((t) => t.name.kind === "visible")).toBe(true);
+    // A Deathmatch built from the id follows the live names too (Mara is its focus row).
+    live.find((c) => c.puuid === PUUID.mara)!.name = { kind: "hiddenAgent", agentId: "hidden-agent-id" };
+    const dm = matchFor("mdemo:mara:dm", live);
+    expect(dm.queueId).toBe("deathmatch");
+    expect(dm.teams[0]!.players.find((p) => p.isFocus)?.name).toEqual({ kind: "hiddenAgent", agentId: "hidden-agent-id" });
+    // Without live cards the rows are the roster's own.
+    expect(detailsFor("mara").topTeammates[0]!.name).toMatchObject({ kind: "visible", name: "Kilo" });
+    expect(JSON.stringify(matchFor(recentMatchId("mara", 0)))).toContain("Kilo");
+  });
+
+  it("resolvers return copies: no scene, roster or memoized object is shared", async () => {
+    const mara = routeOf("details", "details").puuid;
+    const a = await resolveDetails("details", mara);
+    const b = await resolveDetails("details", mara);
+    expect(a).toEqual(b);
+    expect(a).not.toBe(b);
+    expect(a.card).not.toBe(b.card);
+    expect(a).not.toBe(SCENES.details.details![mara]);
+    a.card.level = 1;
+    a.recent.pop();
+    a.topTeammates[0]!.name = { kind: "hiddenPlayer" };
+    expect(b.recent).toHaveLength(8);
+    expect((await resolveDetails("details", mara)).topTeammates[0]!.name.kind).toBe("visible");
+    expect(detailsOf("details", mara).recent).toHaveLength(8);
+    // No two scenes share a details record.
+    expect(SCENES.details.details).not.toBe(SCENES["details-more"].details);
+    expect(SCENES.details.details![mara]).not.toBe(SCENES["details-more"].details![mara]);
+
+    // The fallback card is a copy of the scene's live card.
+    const self = players("lobby1")[0]!;
+    const f = await resolveDetails("lobby1", self.puuid);
+    expect(f.card).toEqual(self);
+    expect(f.card).not.toBe(self);
+    f.card.level = 1;
+    expect(players("lobby1")[0]!.level).toBe(312);
+
+    // Match views: the scene's own entry and the built ones.
+    const r = routeOf("match", "match");
+    const own = await resolveMatch("match", r.matchId, r.focusPuuid);
+    expect(own).toEqual(matchOf("match"));
+    expect(own).not.toBe(matchOf("match"));
+    own.teams[0]!.players[0]!.name = { kind: "hiddenPlayer" };
+    expect(matchOf("match").teams[0]!.players[0]!.name.kind).not.toBe("hiddenPlayer");
+
+    // Fahad's row in an encounter match is not one shared name object.
+    const selfName = (m: MatchDetailsView) => m.teams.flatMap((t) => t.players).find((p) => p.isSelf)!.name;
+    const e1 = matchFor(encounterMatchId("mara", 0));
+    const e2 = matchFor(encounterMatchId("mara", 0));
+    expect(selfName(e1)).toEqual(selfName(e2));
+    expect(selfName(e1)).not.toBe(selfName(e2));
   });
 });
 

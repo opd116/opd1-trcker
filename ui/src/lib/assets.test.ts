@@ -17,30 +17,49 @@ const WIN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg
 
 afterEach(() => vi.unstubAllGlobals());
 
-function inTauri(userAgent: string) {
+/** `imgBase()` is memoised per module, so each user-agent case loads a fresh copy of `assets.ts`. */
+async function inTauri(userAgent: string) {
+  vi.resetModules();
   vi.stubGlobal("isTauri", true);
   vi.stubGlobal("navigator", { userAgent });
+  return (await import("./assets")).assetUrl;
 }
 
 describe("assetUrl in Tauri", () => {
-  it("serves every kind from the img scheme", () => {
-    inTauri(MAC_UA);
+  it("serves every kind from the img scheme", async () => {
+    const url = await inTauri(MAC_UA);
     for (const kind of KINDS) {
-      expect(assetUrl(kind, "abc-123")).toBe(`img://localhost/${kind}/abc-123`);
+      expect(url(kind, "abc-123")).toBe(`img://localhost/${kind}/abc-123`);
     }
   });
 
-  it("uses the Windows (WebView2) base when the UA says Windows", () => {
-    inTauri(WIN_UA);
-    expect(assetUrl("agent", "a1")).toBe("http://img.localhost/agent/a1");
-    expect(assetUrl("cardLarge", "c1")).toBe("http://img.localhost/cardLarge/c1");
-    expect(assetUrl("contentTier", "t1")).toBe("http://img.localhost/contentTier/t1");
+  it("uses the Windows (WebView2) base when the UA says Windows", async () => {
+    const url = await inTauri(WIN_UA);
+    expect(url("agent", "a1")).toBe("http://img.localhost/agent/a1");
+    expect(url("cardLarge", "c1")).toBe("http://img.localhost/cardLarge/c1");
+    expect(url("contentTier", "t1")).toBe("http://img.localhost/contentTier/t1");
   });
 
-  it("puts numeric tier ids in the path and encodes odd ids", () => {
-    inTauri(MAC_UA);
-    expect(assetUrl("tier", 21)).toBe("img://localhost/tier/21");
-    expect(assetUrl("agent", "a b/c")).toBe("img://localhost/agent/a%20b%2Fc");
+  it("puts numeric tier ids in the path and encodes odd ids", async () => {
+    const url = await inTauri(MAC_UA);
+    expect(url("tier", 21)).toBe("img://localhost/tier/21");
+    expect(url("agent", "a b/c")).toBe("img://localhost/agent/a%20b%2Fc");
+  });
+
+  it("reads the user agent once (the base is memoised)", async () => {
+    vi.resetModules();
+    vi.stubGlobal("isTauri", true);
+    let reads = 0;
+    vi.stubGlobal("navigator", {
+      get userAgent() {
+        reads++;
+        return WIN_UA;
+      },
+    });
+    const { assetUrl } = await import("./assets");
+    expect(reads).toBe(0); // lazy: nothing is read at import time
+    for (let i = 0; i < 5; i++) assetUrl("agent", `a${i}`);
+    expect(reads).toBe(1);
   });
 });
 

@@ -177,6 +177,31 @@ describe("tooltip engine (delegated mouseover, 450 ms)", () => {
     expect(tipState.tip).toBeNull();
   });
 
+  it("reads data-tip at fire time: text changed during the delay shows the new string (v8:525)", () => {
+    const attrs = { "data-tip": "2h" };
+    over(trigger(attrs, rect(400, 100, 100, 20)));
+    vi.advanceTimersByTime(200);
+    attrs["data-tip"] = "3h";
+    vi.advanceTimersByTime(250);
+    expect(tipState.tip?.text).toBe("3h");
+  });
+
+  it("skips the tip when data-tip went empty or malformed during the delay", () => {
+    const attrs = { "data-tip": "2h" };
+    over(trigger(attrs, rect(400, 100, 100, 20)));
+    vi.advanceTimersByTime(200);
+    attrs["data-tip"] = "";
+    vi.advanceTimersByTime(1000);
+    expect(tipState.tip).toBeNull();
+
+    const wl = { "data-tip": "wl:31:22:53" };
+    over(trigger(wl, rect(100, 100, 40, 20)));
+    vi.advanceTimersByTime(200);
+    wl["data-tip"] = "wl:oops";
+    vi.advanceTimersByTime(1000);
+    expect(tipState.tip).toBeNull();
+  });
+
   it("hideTip cancels a pending tip", () => {
     over(trigger({ "data-tip": "A" }, rect(100, 100, 40, 20)));
     vi.advanceTimersByTime(200);

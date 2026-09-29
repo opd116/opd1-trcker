@@ -9,8 +9,17 @@ function initial(): ThemeOptions {
 
 export const theme = $state<ThemeOptions>(initial());
 
-// Synchronously, so the variables exist before the first paint; then again on every change.
+// Synchronously, so the variables exist before the first paint; then again on every change. The effect's own
+// first run (same values, about 60 setProperty calls and a style recalc) is skipped: it only has to subscribe.
 applyTheme($state.snapshot(theme));
+let firstRun = true;
 $effect.root(() => {
-  $effect(() => applyTheme($state.snapshot(theme)));
+  $effect(() => {
+    const snapshot = $state.snapshot(theme); // reads every field, so all of them are tracked
+    if (firstRun) {
+      firstRun = false;
+      return;
+    }
+    applyTheme(snapshot);
+  });
 });

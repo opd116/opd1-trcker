@@ -59,6 +59,7 @@ describe("stores", () => {
 
     afterEach(() => {
       vi.useRealTimers();
+      vi.restoreAllMocks(); // the console.error spy from `underTauri`
       vi.doUnmock("@tauri-apps/api/core");
       vi.doUnmock("./api");
     });

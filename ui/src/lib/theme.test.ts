@@ -234,14 +234,25 @@ describe("party colours (spec §1.6)", () => {
   });
 
   it("unknown accent uses the fallback rule", () => {
+    const PAIR = ["#7fa6e8", "#b596e0"];
     // Far from every reserve colour: the fallback pair plus the first two reserve colours that pass.
     expect(partySet("#ff00ff")).toEqual(TABLE["#e3a54f"]);
+    // The design's fixed pair is party[0..1] for every non-listed accent (v8:554), even one within 30° of
+    // blue (218°) or lilac (265°): only party[2..3] react to the accent.
+    expect(partySet("#6d9bf0")).toEqual([...PAIR, "#b0c46c", "#db8fb4"]);
+    expect(partySet("#a98ae0")).toEqual([...PAIR, "#b0c46c", "#db8fb4"]);
+    expect(themeVars({ ...DEFAULT_THEME, accent: "#6d9bf0" })["--party-0"]).toBe("#7fa6e8");
     // A lime accent (hue 74°) rejects lime itself: the pair, rose, then the remaining reserve in order.
     const lime = partySet("#a6c94a");
-    expect(lime.slice(0, 3)).toEqual(["#7fa6e8", "#b596e0", "#db8fb4"]);
+    expect(lime.slice(0, 3)).toEqual([...PAIR, "#db8fb4"]);
     expect(lime[3]).toBe("#b0c46c");
+    // A rose accent (hue ~337°) rejects rose: the pair, lime, then rose from the fill.
+    expect(partySet("#e0709a")).toEqual([...PAIR, "#b0c46c", "#db8fb4"]);
+    for (const accent of ["#ff00ff", "#6d9bf0", "#a98ae0", "#a6c94a", "#e0709a", "#000000", "#ffffff", "#123456", "#f00"]) {
+      expect(partySet(accent).slice(0, 2)).toEqual(PAIR);
+    }
     // Always 4 distinct colours.
-    for (const accent of ["#000000", "#ffffff", "#123456", "#a6c94a", "#f00"]) {
+    for (const accent of ["#000000", "#ffffff", "#123456", "#a6c94a", "#f00", "#6d9bf0", "#a98ae0", "#e0709a"]) {
       const set = partySet(accent);
       expect(set).toHaveLength(4);
       expect(new Set(set).size).toBe(4);

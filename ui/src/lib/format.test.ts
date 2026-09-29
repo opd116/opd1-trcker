@@ -114,7 +114,6 @@ describe("pct0, kd2, count, score", () => {
 
   it("score joins two numbers with U+2013", () => {
     expect(score(13, 9)).toBe("13–9");
-    expect(score(13, 9)).toBe("13–9");
     expect(score(null, 9)).toBe(DASH);
     expect(score(13, null)).toBe(DASH);
   });

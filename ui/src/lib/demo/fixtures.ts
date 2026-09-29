@@ -13,9 +13,12 @@ export const opposite = (l: Letter): Letter => (l === "W" ? "L" : l === "L" ? "W
 export const LONGEST_NAME = "WWWWWWWWWWWWWWWW";
 export const LONGEST_TAG = "WWWWW";
 
-/** A card with the wire defaults filled in. Tri-state keys you leave out stay absent (loading). */
+/**
+ * A card with the wire defaults filled in. Tri-state keys you leave out stay absent (loading). Like the backend
+ * (`state.rs`: `r.is_self_party || is_self`), the user's own card is also `isSelfParty` unless you say otherwise.
+ */
 export function card(c: Pick<PlayerCard, "puuid" | "cardId"> & Partial<PlayerCard>): PlayerCard {
-  return { agentId: null, party: null, encounters: null, team: "ally", isSelfParty: false, isSelf: false, ...c };
+  return { agentId: null, party: null, encounters: null, team: "ally", isSelfParty: !!c.isSelf, isSelf: false, ...c };
 }
 
 /** Newest-first entries from letters like "WLWWL"; `startsMs[i]` and `rr(letter, i)` give the rest. */

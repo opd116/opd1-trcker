@@ -1,4 +1,9 @@
-<!-- The one shared hover bubble (spec §4.1), inside #app. The engine is lib/tooltip.svelte.ts. -->
+<!--
+  The one shared hover bubble (spec §4.1), inside #app. The engine is lib/tooltip.svelte.ts.
+  The `.tip` markup below is deliberately on ONE line: `.tip` is `white-space: pre-line`, so a newline or indent
+  between the tags (or right after `<div>` / before `</div>`) would print as a stray blank line inside the bubble.
+  Only the tip text's own `\n` may break a line. Do not let a formatter re-wrap it.
+-->
 <script lang="ts">
   import { parseWl, tipState, wlRow } from "../lib/tooltip.svelte";
 

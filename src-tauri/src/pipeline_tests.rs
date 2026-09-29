@@ -2000,6 +2000,60 @@ async fn self_loadout_kept_in_app_state() {
 }
 
 #[tokio::test]
+async fn own_loadout_prefers_the_matches_over_the_stored_copy() {
+    // R90 source order for the user's own Details: the current match's
+    // loadout first, else their own last read (the copy restored from
+    // `app_state` at start), else `null`. Here both exist and differ: the
+    // match's skin is the one named, and the stored one is never fetched.
+    let h = harness_with_db_file().await;
+    let (stored_raw, _) = fixture_loadout();
+    assert_ne!(
+        stored_raw.vandal.as_ref().unwrap().chroma_id,
+        REAVER_RED,
+        "the two loadouts must be distinguishable"
+    );
+    let stored = serde_json::to_string(&stored_raw).unwrap();
+    h.st.db(move |repo| repo.set_state("self_loadout", &stored))
+        .await
+        .unwrap();
+    lobby_with(&h, ME).await;
+    mount_skin(&h.assets_server, REAVER, REAVER_RED).await;
+
+    // A fresh app on the same DB, with no Riot session: the stored copy is
+    // the user's own read...
+    let rec = Arc::new(Recorder::default());
+    let repo = Repo::new(open_db(h.db_path.as_deref().unwrap()).unwrap());
+    let assets = AssetCache::with_base(h._dir.path().join("assets-restart"), h.assets_server.uri());
+    let restarted = Arc::new(AppState::new(
+        Box::new(Sink(rec.clone())),
+        repo,
+        assets,
+        h._dir.path().join("debug-restart"),
+        Some(ME.into()),
+    ));
+    assert_eq!(lock(&restarted.live).self_loadout, Some(stored_raw));
+    // ...and the current match's loadout for the user outranks it.
+    lock(&restarted.live)
+        .loadouts
+        .insert(ME.into(), reaver_loadout());
+
+    let details = crate::commands::player_details_for(&restarted, ME)
+        .await
+        .unwrap();
+    assert!(loadout_of(&details).get("vandal").is_none(), "resolving");
+    let event = details_event_after(&rec, 0, ME, |d| {
+        d["loadout"].get("vandal").is_some_and(|v| v.is_object())
+    })
+    .await;
+    assert_eq!(event["loadout"]["vandal"]["chromaId"], json!(REAVER_RED));
+    assert_eq!(
+        skin_requests(&h).await,
+        1,
+        "only the match's skin was looked up"
+    );
+}
+
+#[tokio::test]
 async fn resolve_skins_reports_whether_a_name_became_known() {
     // A failing fetch: nothing learned, still pending (retried next open).
     let h = harness().await;

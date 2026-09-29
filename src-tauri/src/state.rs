@@ -95,7 +95,9 @@ pub struct LiveModel {
     /// The user's own equipped skins, read once per connect from the pd
     /// personalization endpoint (R90) — so their Details shows skins
     /// outside a match too. Cleared when the account changes; also restored
-    /// at startup from the copy kept in `app_state` (Closed stage).
+    /// at startup from the copy kept in `app_state` (Closed stage), so this
+    /// field *is* the stored copy's in-memory form: `details` never reads
+    /// `app_state` itself (see `AppState::new`).
     pub self_loadout: Option<RawLoadout>,
     pub coregame_match_id: Option<String>,
     pub self_puuid: Option<String>,
@@ -538,6 +540,16 @@ impl AppState {
         // R90: the user's own last-known loadout, kept in `app_state` by
         // `sync::fetch_self_loadout`, so their Details shows their skins
         // while VALORANT is closed. A copy that doesn't parse is ignored.
+        //
+        // It is restored once, here, into `live.self_loadout` rather than
+        // read from `app_state` inside every `details::build` (Task 15
+        // review F1/F4): `details::skins_pending` and `resolve_skins` are
+        // synchronous over `&AppState` and need the `RawLoadout` *before*
+        // the build, to mark its skins "resolving" (R97) and fetch their
+        // names in the Closed stage, where nothing else supplies it. Memory
+        // and `app_state` never drift: a read writes both (the stored copy
+        // only on change) and an account switch blanks both, so the source
+        // order stays match loadout, then the user's own read, then null.
         let stored_loadout: Option<RawLoadout> = repo
             .get_state(SELF_LOADOUT_KEY)
             .ok()

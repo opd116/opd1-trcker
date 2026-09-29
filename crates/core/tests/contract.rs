@@ -521,7 +521,21 @@ fn player_details_value() -> Value {
         json["loadout"].get("sheriff").is_none(),
         "resolving = absent"
     );
-    assert_eq!(json["recent"][2]["kills"], Value::Null);
+    // R102: a match with no stats row sends `null` — never 0 — for the
+    // whole stat line, so spec §7.1 types `MatchSummary.kills`, `deaths`,
+    // `assists` and `kd` as `number | null`, like `acs` and `hsPct`. A
+    // match with stats sends numbers.
+    for key in ["kills", "deaths", "assists", "kd", "acs", "hsPct"] {
+        assert_eq!(
+            json["recent"][2][key],
+            Value::Null,
+            "no-stats row: `{key}` must be null, not a counted zero"
+        );
+        assert!(
+            json["recent"][0][key].is_number(),
+            "row with stats: `{key}` must be a number"
+        );
+    }
     assert_eq!(json["recent"][1]["tier"], Value::Null);
     assert!(json["encounters"][0].get("selfWon").is_none());
     assert!(!json.to_string().contains("/Game/"));

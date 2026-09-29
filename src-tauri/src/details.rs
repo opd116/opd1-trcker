@@ -64,7 +64,9 @@ pub fn teammate_name(
 /// from the current match's loadouts only (core-game In Game, pre-game for
 /// Agent Select allies), never from anywhere else. The user's are the
 /// match's first (the freshest), else their own last read (R90: once per
-/// connect, restored from `app_state` at startup).
+/// connect; `live.self_loadout` is also the copy restored from `app_state`
+/// at startup, so a Closed-stage build needs no `app_state` read of its own
+/// and `skins_pending` can stay synchronous).
 fn raw_loadout(live: &LiveModel, puuid: &str) -> Option<RawLoadout> {
     live.loadouts.get(puuid).cloned().or_else(|| {
         (live.self_puuid.as_deref() == Some(puuid))

@@ -8,11 +8,11 @@ Guide for coding agents other than Claude Code. The full project rules are in `C
 
 ## Name
 
-The name is `OPD1 TRCKER`, on purpose. Never "correct" the spelling. The Rust packages and repo are `opd1-core`, `opd1-riot`, `opd1-trcker` and `opd1-trcker-ui`.
+The name is `OPD1 TRCKER`, on purpose. Never "correct" the spelling. The Rust packages are `opd1-core`, `opd1-riot` and `opd1-trcker`; the npm workspace is `opd1-trcker-ui`; the repo is `opd1-trcker`.
 
 ## Build and test
 
-Lightness (RAM, CPU, bundle size, request count) is priority #1 and the tie-breaker for every decision. The UI's only runtime dependency is `@tauri-apps/api`; add no runtime dependency and no Rust crate.
+Lightness (RAM, CPU, bundle size, request count) is priority #1 and the tie-breaker for every decision. The UI's only runtime dependency is `@tauri-apps/api`. In Phase 2 add no runtime dependency and no Rust crate; later ones need the user's OK and must keep the app light.
 
 ```bash
 # Rust (needs ui/dist to exist, so build the UI first; a new checkout needs `npm ci` once)
@@ -61,4 +61,4 @@ Three checkouts run in parallel. Start every shell command in a worktree with an
 | `p2-backend` | `/home/project-1/.worktrees/p2-backend` | `crates/`, `src-tauri/` and CI (`.github/`) |
 | `ui-lane` | `/home/project-1/.worktrees/ui` | `ui/` |
 
-Write only the paths your lane owns. The lane branches are merged into `main` at the end of the phase (the release task).
+Write only the paths your lane owns. `p2-backend` lands on `main` at the end of Task 15 and again after Task 15b, before the release; `ui-lane` merges into `main` in Task 19 (the release task).

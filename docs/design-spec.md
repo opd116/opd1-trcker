@@ -14,7 +14,7 @@ Build target: one Live page (Lobby / Agent Select / In Game / Closed), Player De
 
 | Rule | Value |
 |---|---|
-| Global CSS | Only `html,body{margin:0;height:100%;background:var(--bg)}` and the `@font-face` rules. **No CSS reset**: no global `box-sizing`, no global `line-height`, no `img{display:block}`. The design relies on browser defaults. |
+| Global CSS | Only `html,body{margin:0;height:100%;background:var(--bg,#0e1013)}` (the fallback equals the Neutral `--bg`; it keeps the window dark until `main.ts` writes the theme variables, and is never used afterwards), the R106 keyboard-only ring `:focus-visible{outline:1px solid color-mix(in srgb,var(--accent) 60%,transparent);outline-offset:2px}` (no mouse-visible change), and the `@font-face` rules. **No CSS reset**: no global `box-sizing`, no global `line-height`, no `img{display:block}`. The design relies on browser defaults. |
 | box-sizing | `content-box` everywhere except the elements where this spec says `border-box` (it copies the design's own `box-sizing:border-box`). Consequence: the top bar is 48px + 1px border = **49px**. |
 | line-height | `normal` (font-dependent) unless this spec gives one. It is given only for stat labels (14px), stat values (24px card / 27px hero), the Match header score (32px) and tooltips (18px). |
 | Units | px only. Heights with `1fr`/`flex:1` resolve to fractions (for example card height 139.8px). Do not round them. |

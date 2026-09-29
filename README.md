@@ -73,7 +73,7 @@ Tauri 2 (system WebView2) · Rust core (all Riot and valorant-api HTTP, polling,
 
 ## Status and roadmap
 
-The current scope (v0.2.0): the Live page (Lobby, Agent Select, In Game), Player Details and Match Details, with the design options at their defaults. Next up: the My Stats page, the Match History page and a Settings page. The data for My Stats is already computed by the Rust core.
+The scope of v0.2.0: the Live page (Lobby, Agent Select, In Game), Player Details and Match Details, with the design options at their defaults. Later, when asked: the My Stats page, the Match History page and a Settings page. The data for My Stats is already computed by the Rust core.
 
 ## Privacy
 

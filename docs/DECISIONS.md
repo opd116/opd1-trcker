@@ -159,7 +159,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R108). Each
 - **What:** One controller ran two lanes: the backend lane on `main` (Tasks 3 to 9a) and the UI lane on branch `ui-lane` in `/home/project-1/.worktrees/ui`. They touch disjoint directories (`crates/`, `src-tauri/` versus `ui/`), and the controller merges `ui-lane` into `main`.
 - **Why:** There was no start_session tool, and parallel lanes are faster.
 - **Cost:** Merge friction on `types.ts` if the backend JSON drifts from the plan (reconciled at merge). R98 sets the Phase 2 lanes.
-- **Status:** active
+- **Status:** superseded by R98 (Phase 2 lanes)
 
 ### R23 — Tri-state card fields on the wire
 
@@ -383,7 +383,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R108). Each
 - **What:** Task 9 was split: 9a is the Rust half (`mystats.rs`, the `my_stats` command, tests), which landed on main; 9b (the UI half: Details and My Stats screens) waits for the approved design.
 - **Why:** The UI was blocked on the design gate, the Rust half was not.
 - **Cost:** None.
-- **Status:** active
+- **Status:** narrowed by R98 (Phase 2 plan: 9b is now Task 18, Player Details; the My Stats UI waits until the user asks)
 
 ### R55 — Task 6 implementer calls accepted
 
@@ -710,7 +710,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R108). Each
 ### R101 — Own-history backfill
 
 - **What:** User decision: on connect (and after each match), page the user's own match history (all queues) back to the anchor, which is the newest match of the last completed backfill run (`app_state` key `self_history_anchor`), then fetch match-details only for unknown ids. The anchor moves only when a run completes. Throttled, lowest priority behind live cards. The first run, with no anchor yet, stops at the current act start or 200 matches (Claude's lightness bound, not the user's).
-- **Why:** The user wants matches played while the app was closed never to be forgotten; the bounds keep it light. The anchor is not "the newest stored match id": the live sync stores the user's newest matches first, so that rule would stop on page 0 and miss the matches played while the app was closed (plan Task 15b, `plan.md:1338`).
+- **Why:** The user wants matches played while the app was closed never to be forgotten; the bounds keep it light. The anchor is not "the newest stored match id": the live sync stores the user's newest matches first, so that rule would stop on page 0 and miss the matches played while the app was closed (plan Task 15b, "Why an anchor and not the newest stored match").
 - **Cost:** Extra calls on the first run only.
 - **Status:** active
 
@@ -737,9 +737,9 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R108). Each
 
 ### R105 — Lane B branches from the fixed commit c9ad7f4
 
-- **What:** Lane B creates `p2-backend` from the fixed commit `c9ad7f4`, not the moving `main`.
+- **What:** Lane B creates `p2-backend` from the fixed commit `c9ad7f4`, not the moving `main`. Task 15 Step 0 merges `origin/main` into it once Task 13 has landed.
 - **Why:** Its review diff stays lane-B only.
-- **Cost:** Task 15 Step 0 merges `origin/main` anyway.
+- **Cost:** None.
 - **Status:** active
 
 ### R106 — Keyboard focus ring
@@ -771,12 +771,12 @@ Each row is a dated block of `docs/requirements-raw.md`, in file order. That fil
 |---|---|---|
 | 2026-09-27 | `متطلبات التراكر — نص المستخدم الأصلي (2026-09-27)` | The user's original text: fixed 1000×800 window; the player card fields; Details with Back, Recent Matches, Top 3 Teammates and Loadout; what differs per stage; hidden names hide only the Riot ID and tag; images by UUID from valorant-api. |
 | 2026-09-27 (undated heading) | `قرارات سابقة من المحادثة` | Tauri 2 + Rust + Svelte 5, no Python; Setup.exe (NSIS) built by GitHub Actions; no instalock, no dodge, no revealing hidden names during a match; the user tests on Windows. |
-| 2026-09-27 | `قرارات جولة الأسئلة 1` | Both teams' ranks in In Game and Agent Select is my team only; match end returns to Lobby; English UI, always on top; demo button is temporary; Peak shows time since its act ended; My Stats depth as an extra; the name `OPD1 TRCKER`; local storage; the In Game sketch. |
+| 2026-09-27 | `قرارات جولة الأسئلة 1` | Both teams' ranks In Game, and Agent Select shows my team only; match end returns to Lobby; English UI, always on top; demo button is temporary; Peak shows time since its act ended; My Stats depth as an extra; the name `OPD1 TRCKER`; local storage; the In Game sketch. |
 | 2026-09-27 | `قرارات جولة الأسئلة 2` | No status text or badges, skeleton loading; calm dark theme; close quits, no autostart; Live and My Stats tabs with auto-switch to Live; no scroll in In Game and Agent Select; the eight My Stats sections; smart permanent SQLite storage; automatic party detection (likely, then confirmed). |
-| 2026-09-27 | `قرارات جولة الأسئلة 3` | Closed game opens My Stats with saved data; party detection includes Deathmatch; the user's own party gets no marks; a hidden player's name may show if learned from a finished match the user played; Top 3 Teammates window. |
+| 2026-09-27 | `قرارات جولة الأسئلة 3` | Closed game opens My Stats with saved data (temporary until My Stats is built, see the marker); party detection includes Deathmatch; the user's own party gets no marks; a hidden player's name may show if learned from a finished match the user played; Top 3 Teammates window. |
 | 2026-09-27 | `قرارات جولة الأسئلة 4` | Private repo only, no auto-updater; the user sends Setup.exe by hand; the installer wipes program files, settings and image cache but never the DB, which migrates automatically. |
-| 2026-09-27 | `قرارات بعد الخطة` | The user tests on Windows only at the end (Task 11); subagent-driven execution; a shared `partyId` confirms a party from one match. |
+| 2026-09-27 | `قرارات بعد الخطة` | The user tests on Windows only at the end (Task 11; cancelled 2026-09-29, see the marker); subagent-driven execution; a shared `partyId` confirms a party from one match. |
 | 2026-09-27 to 2026-09-28 | `قرارات أثناء التنفيذ` | GitHub Actions works; the user must approve the design before the screens; Claude orchestrates and agents implement; the Peak tip shows the full act name and dates; design v1 rejected; last 5 shows W/L/draw only with RR and time on hover; design rounds 2 and 3 not liked; new direction "easy on the eye" (one system for type, numbers, spacing); party-detection details; a trial round on two screens; three refinement passes; obsolete files archived to `ارشيف/`. |
-| 2026-09-28 | `ملاحظات المستخدم على تصميم v7.1` | Nine points: the card is crowded, secondary text is too faint, each statistic's scope must be clear, long names truncate but the tag never does, one meaning per indicator, last 5 must be clearer, Peak names the tier, shared-match results read `Your result`, hidden means the name only. |
+| 2026-09-28 | `ملاحظات المستخدم على تصميم v7.1` | Nine points: the card is crowded, secondary text is too faint, each statistic's scope must be clear (shown without hovering: superseded, see the marker), long names truncate but the tag never does, one meaning per indicator, last 5 must be clearer, Peak names the tier, shared-match results read `Your result`, hidden means the name only. |
 | 2026-09-28 | `ملاحظات المستخدم على v8` | Remove the printed scope headings (tooltip only); numbers and last-5 results look off; the palette looks AI-made; the user said the design pleases them (to confirm). |
 | 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. |

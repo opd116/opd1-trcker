@@ -21,7 +21,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Before context gets long, or at the end of a phase, ask the user to run `/handoff` (it's user-invoked only) so nothing important is lost. Keep `docs/requirements-raw.md` updated with every new decision as it's made.
 - Anything the design file doesn't cover (Agent Select states, Lobby, Closed, Hidden Player, edge states) is Claude's call, built only from the design file's own parts and tokens. Don't ask the user about typography or spacing. Show them the result.
 - Every step is committed with a clear conventional message and pushed to the private GitHub repo right away (2026-09-29). Commit explicit paths only (`git commit -m "…" -- <paths>`); never commit `.superpowers/` or root `*.zip`.
-- Repo files: README.md, CHANGELOG.md (Keep a Changelog; the release section is filled at release from `git log`), docs/ARCHITECTURE.md, docs/DECISIONS.md, docs/design-spec.md, AGENTS.md, LICENSE (proprietary), THIRD-PARTY-NOTICES.md.
+- Repo files: README.md, CHANGELOG.md (Keep a Changelog; the release section is filled at release from `git log`), docs/ARCHITECTURE.md, docs/DECISIONS.md, docs/design-spec.md, AGENTS.md, LICENSE (proprietary), THIRD-PARTY-NOTICES.md, .editorconfig, .gitattributes.
 
 ## Stack (decided, don't revisit without the user)
 
@@ -128,14 +128,14 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - **Exception:** if the DB already knows that player's name from a finished match **the user personally played in** (where the name was shown after the match), show that name during live stages in the remembered-name style (Card indicators).
 - **Never request a hidden player's name** from any endpoint (name-service or otherwise). Never take names from other players' match histories.
 - After a match ends, show names as the client/match-details shows them.
-- Match Details: in every view, a player incognito on the live screen now shows as on their card: the remembered name when the user's own finished match knows it, else the agent name (R93). Otherwise, a match the user played shows names as match-details gives them; in a match the user did not play, a player with no stored name shows as the agent name (or the remembered name). Names from matches the user did not play are never stored as known names (R74 — match-details has no incognito flag; a check of the user's DB after the first real test confirms Riot hides those names, R94).
+- Match Details: in every view, a player incognito on the live screen now shows as on their card: the remembered name when the user's own finished match knows it, else the agent name (R93). Otherwise, a match the user played shows names as match-details gives them; in a match the user did not play, a player with no stored name shows as the agent name (or the remembered name). Names from matches the user did not play are never stored as known names (R74 — match-details has no incognito flag; a check of the user's DB after the first real test will confirm whether Riot hides those names, R94).
 
 ## Smart data (SQLite)
 
 - **Players are keyed by PUUID**, so they're recognized even after a name change.
 - **Match details are immutable:** fetch once, store forever, never refetch. Store extracted compact rows (~1–2KB per match), not raw JSON.
 - **Sync, don't refetch:** for a known player, fetch the history list (one cheap call), diff it against stored match IDs, and fetch only the new matches. No new comp match means rank is unchanged, so skip the MMR call.
-- **Own history backfill (R101, user 2026-09-29):** on connect and after each match, page the user's own match history (all queues) back to the last match a finished backfill confirmed, and fetch match-details only for unknown ids. Throttled, lowest priority, behind live cards. The first run stops at the current act start or 200 matches.
+- **Own history backfill (R101, user 2026-09-29):** on connect and after each match, page the user's own match history (all queues) back to the last match a finished backfill confirmed, and fetch match-details only for unknown ids. Throttled, lowest priority, behind live cards. The first run stops at the current act start or 200 matches (Claude's lightness bound, not the user's).
 - **Assets** (valorant-api JSON + images) are cached on disk after first download.
 - **Retention:** keep everything. The DB is the app's memory and survives reinstalls.
 

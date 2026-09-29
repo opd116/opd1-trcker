@@ -21,6 +21,7 @@ use serde_json::{json, Map, Value};
 use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow, Repo};
 use opd1_core::model::{match_summary, EncounterCount, MatchSummary, MyStats};
 use opd1_core::mystats::{self, MyStatsInput};
+use opd1_core::names::KnownName;
 use opd1_core::party::SharedRef;
 use opd1_core::stats::Act;
 use opd1_riot::endpoints::PlayerMmrResponse;
@@ -120,12 +121,19 @@ pub fn load_player(conn: &Connection, puuid: &str) -> Result<Option<StoredPlayer
 // MMR snapshot (trimmed)
 // ---------------------------------------------------------------------
 
+/// The shape version `trim_mmr` writes. Version 2 added
+/// `NumberOfWinsWithPlacements` (the act win rate counts placement wins);
+/// a snapshot without a `SnapshotVersion` is version 1 and is refetched
+/// once by [`mmr_refresh_needed`].
+pub const MMR_SNAPSHOT_VERSION: i64 = 2;
+
 /// The MMR snapshot stored in `mmr_snapshots.json`: Riot's own response
 /// shape (so it parses straight back as a `PlayerMmrResponse` and goes
 /// through the same `to_core` conversions as a live response), trimmed to
-/// the competitive queue and the six fields the card math uses. A full
-/// MMR response carries every queue and every field (tens of KB per
-/// player); every player ever seen gets a snapshot, so lightness wins.
+/// the competitive queue and the seven fields the card math uses, plus a
+/// `SnapshotVersion`. A full MMR response carries every queue and every
+/// field (tens of KB per player); every player ever seen gets a snapshot,
+/// so lightness wins.
 pub fn trim_mmr(resp: &PlayerMmrResponse) -> Value {
     let mut seasons = Map::new();
     if let Some(comp) = resp.queue_skills.get(COMPETITIVE) {
@@ -137,6 +145,7 @@ pub fn trim_mmr(resp: &PlayerMmrResponse) -> Value {
                     "CompetitiveTier": s.competitive_tier,
                     "RankedRating": s.ranked_rating,
                     "NumberOfWins": s.number_of_wins,
+                    "NumberOfWinsWithPlacements": s.number_of_wins_with_placements,
                     "NumberOfGames": s.number_of_games,
                     "WinsByTier": s.wins_by_tier,
                 }),
@@ -145,8 +154,33 @@ pub fn trim_mmr(resp: &PlayerMmrResponse) -> Value {
     }
     json!({
         "Subject": resp.subject,
+        "SnapshotVersion": MMR_SNAPSHOT_VERSION,
         "QueueSkills": { COMPETITIVE: { "SeasonalInfoBySeasonID": seasons } }
     })
+}
+
+/// Whether `puuid`'s MMR must be fetched again: a new competitive match
+/// landed since the snapshot (`Repo::needs_mmr_refresh`), or the stored
+/// snapshot predates [`MMR_SNAPSHOT_VERSION`] (an old shape is refetched
+/// once, even when no new match landed).
+pub fn mmr_refresh_needed(repo: &Repo, puuid: &str, latest_comp_match_id: &str) -> Result<bool> {
+    if repo.needs_mmr_refresh(puuid, latest_comp_match_id)? {
+        return Ok(true);
+    }
+    Ok(repo
+        .load_mmr_snapshot(puuid)?
+        .is_none_or(|snap| snapshot_version(&snap.json) < MMR_SNAPSHOT_VERSION))
+}
+
+/// The `SnapshotVersion` of a stored snapshot; 0 when it has none or
+/// doesn't parse (either way it's refetched).
+fn snapshot_version(json: &str) -> i64 {
+    #[derive(serde::Deserialize)]
+    struct Version {
+        #[serde(rename = "SnapshotVersion", default)]
+        version: i64,
+    }
+    serde_json::from_str::<Version>(json).map_or(0, |v| v.version)
 }
 
 /// A stored snapshot back into Riot's type; `None` if it doesn't parse
@@ -170,7 +204,9 @@ pub struct PlayerDb {
     pub row: Option<StoredPlayer>,
     /// Their name as shown in a finished match the user played in
     /// (`Repo::known_name`) — displayed only while they're incognito.
-    pub remembered: Option<(String, String)>,
+    /// `map_id` is the stored Riot path; it is converted to a uuid only
+    /// where a `DisplayName` is built (R84).
+    pub remembered: Option<KnownName>,
     /// Matches shared with the user; `None` when there are none (no ⟲
     /// badge for strangers, R52) and always for the user themself.
     pub encounters: Option<EncounterCount>,
@@ -466,6 +502,95 @@ mod tests {
     }
 
     #[test]
+    fn trim_mmr_keeps_wins_with_placements_and_version() {
+        let resp: PlayerMmrResponse = serde_json::from_value(json!({
+            "Subject": "p1",
+            "QueueSkills": {"competitive": {"SeasonalInfoBySeasonID": {
+                "act-1": {
+                    "SeasonID": "act-1", "CompetitiveTier": 15, "RankedRating": 42,
+                    "NumberOfWins": 34, "NumberOfWinsWithPlacements": 39,
+                    "NumberOfGames": 61, "WinsByTier": null
+                },
+                "act-0": {
+                    "SeasonID": "act-0", "CompetitiveTier": 12, "RankedRating": 7,
+                    "NumberOfWins": 5, "NumberOfGames": 9, "WinsByTier": null
+                }
+            }}}
+        }))
+        .unwrap();
+        let trimmed = trim_mmr(&resp);
+        assert_eq!(trimmed["SnapshotVersion"], json!(MMR_SNAPSHOT_VERSION));
+        assert_eq!(MMR_SNAPSHOT_VERSION, 2);
+
+        let back = parse_mmr_snapshot(&trimmed.to_string()).unwrap();
+        let seasons = &back.queue_skills["competitive"].seasonal_info_by_season_id;
+        assert_eq!(seasons["act-1"].number_of_wins, 34);
+        assert_eq!(seasons["act-1"].number_of_wins_with_placements, Some(39));
+        // A season Riot sent without the field keeps `None` (the card then
+        // falls back to `NumberOfWins`).
+        assert_eq!(seasons["act-0"].number_of_wins_with_placements, None);
+    }
+
+    #[test]
+    fn old_snapshot_forces_mmr_refresh() {
+        let r = repo();
+        let save = |json: String| {
+            r.save_mmr_snapshot(&MmrSnapshot {
+                puuid: "p1".into(),
+                json,
+                last_comp_match_id: Some("m1".into()),
+                fetched_ms: 1,
+            })
+            .unwrap();
+        };
+        assert!(mmr_refresh_needed(&r, "p1", "m1").unwrap(), "no snapshot");
+
+        // A snapshot from before `SnapshotVersion`: refetched once even
+        // though no new competitive match landed.
+        save(r#"{"Subject":"p1","QueueSkills":{}}"#.into());
+        assert!(mmr_refresh_needed(&r, "p1", "m1").unwrap());
+
+        // A current snapshot: only a new competitive match refreshes it.
+        let resp: PlayerMmrResponse =
+            serde_json::from_value(json!({"Subject": "p1", "QueueSkills": {}})).unwrap();
+        save(trim_mmr(&resp).to_string());
+        assert!(!mmr_refresh_needed(&r, "p1", "m1").unwrap());
+        assert!(mmr_refresh_needed(&r, "p1", "m2").unwrap());
+    }
+
+    #[test]
+    fn load_player_db_keeps_remembered_riot_path() {
+        let r = repo();
+        let m = Match {
+            match_id: "m1".into(),
+            map_id: "/Game/Maps/Bonsai/Bonsai".into(),
+            queue_id: "competitive".into(),
+            start_ms: 777,
+            winning_team: None,
+            is_ranked: true,
+            rounds_played: None,
+        };
+        r.upsert_match(
+            &m,
+            &[],
+            &[
+                mp("me", "Blue", "pa", Some(("Me", "1"))),
+                mp("h1", "Red", "pb", Some(("Seen", "AFTER"))),
+            ],
+        )
+        .unwrap();
+        let db = load_player_db(&r, Some("me"), "h1").unwrap();
+        let remembered = db.remembered.unwrap();
+        // The stored Riot path; the shell converts it to a uuid only when
+        // it builds a DisplayName (R84).
+        assert_eq!(
+            remembered.map_id.as_deref(),
+            Some("/Game/Maps/Bonsai/Bonsai")
+        );
+        assert_eq!(remembered.start_ms, Some(777));
+    }
+
+    #[test]
     fn load_player_db_reads_snapshot_last5_and_row() {
         let r = repo();
         r.save_mmr_snapshot(&MmrSnapshot {
@@ -572,7 +697,15 @@ mod tests {
         );
 
         let db = load_player_db(&r, Some("me"), "h1").unwrap();
-        assert_eq!(db.remembered, Some(("Seen".into(), "AFTER".into())));
+        assert_eq!(
+            db.remembered,
+            Some(KnownName {
+                name: "Seen".into(),
+                tag: "AFTER".into(),
+                map_id: Some("/Game/Maps/Ascent/Ascent".into()),
+                start_ms: Some(100),
+            })
+        );
         assert_eq!(
             db.encounters,
             Some(EncounterCount {

@@ -43,6 +43,29 @@ fn seasonal_map_from_mmr_reads_the_mmr_fixture() {
 }
 
 #[test]
+fn seasonal_map_counts_placement_wins() {
+    // `NumberOfWinsWithPlacements` (39) is what the act win rate counts:
+    // `NumberOfWins` (34) leaves the placement games out.
+    let resp: PlayerMmrResponse = serde_json::from_str(&fixture("mmr_placements.json")).unwrap();
+    let info = seasonal_map_from_mmr(&resp)
+        .remove(SEASON_ID)
+        .expect("season present");
+    assert_eq!(info.number_of_wins, 39);
+    assert_eq!(info.number_of_games, 61);
+}
+
+#[test]
+fn seasonal_map_falls_back_without_placements() {
+    // No `NumberOfWinsWithPlacements` key: `NumberOfWins` stands in.
+    let resp: PlayerMmrResponse = serde_json::from_str(&fixture("mmr_no_placements.json")).unwrap();
+    let info = seasonal_map_from_mmr(&resp)
+        .remove(SEASON_ID)
+        .expect("season present");
+    assert_eq!(info.number_of_wins, 34);
+    assert_eq!(info.number_of_games, 61);
+}
+
+#[test]
 fn seasonal_map_from_mmr_empty_when_no_competitive_queue() {
     let resp: PlayerMmrResponse =
         serde_json::from_str(&fixture("mmr_no_queue_skills.json")).unwrap();

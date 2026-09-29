@@ -12,6 +12,8 @@ use std::ops::Range;
 
 use rusqlite::{params, Connection, OptionalExtension, Result};
 
+use crate::names::KnownName;
+
 /// Wraps a [`Connection`] (from [`super::open_db`]) with the app's typed
 /// queries. Methods take `&self` — SQLite happily serves reads and writes
 /// through a shared connection, and `rusqlite::Connection`'s own methods
@@ -598,16 +600,18 @@ impl Repo {
         })
     }
 
-    /// The most recent non-empty `(game_name, tag_line)` `other` used in a
-    /// match `self_puuid` also has a row in. Never widen this to a match
+    /// The most recent non-empty name `other` used in a match `self_puuid`
+    /// also has a row in, with where and when that match was (the stored
+    /// Riot map path — the shell converts it when it builds a
+    /// `DisplayName` — and its start). Never widen this to a match
     /// `self_puuid` didn't play — this is the privacy boundary that lets
     /// a hidden player's name show once the user has legitimately learned
     /// it (CLAUDE.md's "Hidden names" exception), and it must never leak
     /// a name seen only in someone else's match history.
-    pub fn known_name(&self, self_puuid: &str, other: &str) -> Result<Option<(String, String)>> {
+    pub fn known_name(&self, self_puuid: &str, other: &str) -> Result<Option<KnownName>> {
         self.conn
             .query_row(
-                "SELECT mp_other.game_name, mp_other.tag_line
+                "SELECT mp_other.game_name, mp_other.tag_line, m.map_id, m.start_ms
                  FROM match_players mp_other
                  JOIN match_players mp_self
                    ON mp_self.match_id = mp_other.match_id AND mp_self.puuid = ?1
@@ -618,7 +622,15 @@ impl Repo {
                  ORDER BY m.start_ms DESC
                  LIMIT 1",
                 params![self_puuid, other],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| {
+                    let map_id: String = row.get(2)?;
+                    Ok(KnownName {
+                        name: row.get(0)?,
+                        tag: row.get(1)?,
+                        map_id: (!map_id.is_empty()).then_some(map_id),
+                        start_ms: Some(row.get(3)?),
+                    })
+                },
             )
             .optional()
     }

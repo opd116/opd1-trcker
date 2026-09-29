@@ -92,7 +92,12 @@ pub fn seasonal_map_from_mmr(resp: &PlayerMmrResponse) -> SeasonalMap {
                 SeasonInfo {
                     competitive_tier: clamp_u8(info.competitive_tier),
                     wins_by_tier,
-                    number_of_wins: clamp_u32(info.number_of_wins),
+                    // Placement wins count toward the act win rate; fall
+                    // back to `NumberOfWins` when Riot doesn't send them.
+                    number_of_wins: clamp_u32(
+                        info.number_of_wins_with_placements
+                            .unwrap_or(info.number_of_wins),
+                    ),
                     number_of_games: clamp_u32(info.number_of_games),
                 },
             )

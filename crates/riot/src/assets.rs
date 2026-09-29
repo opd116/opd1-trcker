@@ -13,7 +13,10 @@
 //!   response (~400 bytes of JSON) per chroma actually seen, cached
 //!   forever after that.
 //! - `playercards` (1016 entries) are likewise never bulk-fetched — only
-//!   `/v1/playercards/{uuid}` for cards actually seen in a roster.
+//!   `/v1/playercards/{uuid}` for cards actually seen in a roster. A
+//!   playercard json cached before `largeArt` was read has no
+//!   `large_art`; the first [`AssetKind::CardLarge`] request for such a
+//!   card refetches it once (R107).
 //! - Only the *latest* competitive-tier set is kept on disk (the full
 //!   `/v1/competitivetiers` response has one table per episode revision;
 //!   older ones are discarded after picking the last array entry, per the
@@ -28,8 +31,9 @@
 //!   task-5a-report.md): agent `displayIcon` (1024x1024, shown as a ≤64px
 //!   head icon) and map `splash` (1920x1080, shown ≤1000px wide). Rank
 //!   tier icons (256x256) are downscaled too, for the same reason at a
-//!   smaller scale. Every other kind is already close to its display size
-//!   and is cached as-is.
+//!   smaller scale, and so is the player card's `largeArt` (160px wide).
+//!   Every other kind is already close to its display size and is cached
+//!   as-is.
 //!
 //! **Fix-round 1 hardening** (see task-5a-report.md's fix-round section
 //! for the full findings this responds to):
@@ -165,6 +169,10 @@ pub enum AssetKind {
     CardSmall,
     /// `/v1/playercards/{uuid}`'s `wideArt`. `id` = player-card uuid.
     CardWide,
+    /// `/v1/playercards/{uuid}`'s `largeArt`, downscaled to 160px wide.
+    /// `id` = player-card uuid. A card without `largeArt` has no image of
+    /// this kind (`NotFound`): it never falls back to another kind.
+    CardLarge,
     /// The latest competitive-tier set's `tiers[].largeIcon` — chosen over
     /// `smallIcon` since both are the same 256x256 resolution today and
     /// `largeIcon` matches a prominent profile-card-style rank display
@@ -188,6 +196,7 @@ impl AssetKind {
             AssetKind::Agent => "agent",
             AssetKind::CardSmall => "cardSmall",
             AssetKind::CardWide => "cardWide",
+            AssetKind::CardLarge => "cardLarge",
             AssetKind::Tier => "tier",
             AssetKind::MapList => "mapList",
             AssetKind::MapSplash => "mapSplash",
@@ -202,6 +211,7 @@ impl AssetKind {
         match self {
             AssetKind::Agent => Some(128),      // 1024px source, shown <=64px
             AssetKind::Tier => Some(128),       // 256px source, shown small
+            AssetKind::CardLarge => Some(160),  // shown <=109px wide; 160 covers 150% DPI (R79)
             AssetKind::MapSplash => Some(1000), // 1920px source, shown <=1000px wide
             AssetKind::CardSmall | AssetKind::CardWide | AssetKind::MapList | AssetKind::Chroma => {
                 None
@@ -221,6 +231,7 @@ fn validate_id(kind: AssetKind, id: &str) -> Result<(), AssetError> {
         AssetKind::Agent
         | AssetKind::CardSmall
         | AssetKind::CardWide
+        | AssetKind::CardLarge
         | AssetKind::MapList
         | AssetKind::MapSplash
         | AssetKind::Chroma => is_valid_uuid(id),
@@ -320,6 +331,11 @@ struct Tables {
 struct PlayerCardEntry {
     small_art: String,
     wide_art: String,
+    /// `None` only in a json cached before `largeArt` was read (R107).
+    /// A freshly fetched entry always has it: `Some("")` records "the
+    /// card has no large art", so that isn't refetched on every request.
+    #[serde(default)]
+    large_art: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -736,6 +752,7 @@ impl AssetCache {
             }
             AssetKind::CardSmall => Ok(self.fetch_or_load_playercard(id).await?.small_art),
             AssetKind::CardWide => Ok(self.fetch_or_load_playercard(id).await?.wide_art),
+            AssetKind::CardLarge => self.large_art_url(id).await,
             AssetKind::Chroma => Ok(self.fetch_or_load_chroma(id).await?.full_render),
         }
     }
@@ -756,6 +773,12 @@ impl AssetCache {
         if let Some(entry) = cached {
             return Ok(entry);
         }
+        self.fetch_playercard(uuid).await
+    }
+
+    /// Always hits `/v1/playercards/{uuid}` and rewrites the cached json.
+    async fn fetch_playercard(&self, uuid: &str) -> Result<PlayerCardEntry, AssetError> {
+        let path = self.dir.join("playercards").join(format!("{uuid}.json"));
 
         let value = self
             .get_json(&format!("{}/v1/playercards/{uuid}", self.base))
@@ -768,6 +791,8 @@ impl AssetCache {
                 .ok_or_else(|| AssetError::Decode("missing smallArt".to_string()))?,
             wide_art: str_field(data, "wideArt")
                 .ok_or_else(|| AssetError::Decode("missing wideArt".to_string()))?,
+            // A card without `largeArt` must not break its small/wide art.
+            large_art: Some(str_field(data, "largeArt").unwrap_or_default()),
         };
 
         blocking({
@@ -777,6 +802,20 @@ impl AssetCache {
         })
         .await?;
         Ok(entry)
+    }
+
+    /// R107: the `largeArt` url. A cached entry that predates `largeArt`
+    /// is refetched once (which rewrites the cache, so it can't repeat);
+    /// a card that still has none is `NotFound` — never another image kind.
+    async fn large_art_url(&self, uuid: &str) -> Result<String, AssetError> {
+        let mut entry = self.fetch_or_load_playercard(uuid).await?;
+        if entry.large_art.is_none() {
+            entry = self.fetch_playercard(uuid).await?;
+        }
+        entry
+            .large_art
+            .filter(|url| !url.is_empty())
+            .ok_or(AssetError::NotFound)
     }
 
     /// `/v1/weapons/skinchromas/{uuid}` — the single-chroma endpoint, so
@@ -945,6 +984,7 @@ mod tests {
             AssetKind::Agent,
             AssetKind::CardSmall,
             AssetKind::CardWide,
+            AssetKind::CardLarge,
             AssetKind::Chroma,
             AssetKind::MapList,
             AssetKind::MapSplash,

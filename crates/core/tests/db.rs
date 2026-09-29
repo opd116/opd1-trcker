@@ -510,8 +510,8 @@ fn known_name_requires_shared_match() {
     )
     .unwrap();
 
-    let name = repo.known_name("self", "other").unwrap();
-    assert_eq!(name, Some(("Foo".to_string(), "123".to_string())));
+    let name = repo.known_name("self", "other").unwrap().unwrap();
+    assert_eq!((name.name.as_str(), name.tag.as_str()), ("Foo", "123"));
 }
 
 #[test]
@@ -525,6 +525,54 @@ fn known_name_none_when_never_shared() {
     .unwrap();
 
     assert_eq!(repo.known_name("self", "other").unwrap(), None);
+}
+
+#[test]
+fn known_name_returns_source_match() {
+    let repo = repo_in_memory();
+    let on = |id: &str, start_ms: i64, map: &str| Match {
+        map_id: map.to_string(),
+        ..sample_match(id, start_ms, None)
+    };
+
+    // Two shared matches: the older on Duality, the newer on Split. The
+    // name (and where it was seen) comes from the newer row.
+    repo.upsert_match(
+        &on("older", 1_000, "/Game/Maps/Duality/Duality"),
+        &[],
+        &[
+            sample_player("self", "Blue", "Self", "111"),
+            sample_player("other", "Red", "OldName", "OLD"),
+        ],
+    )
+    .unwrap();
+    repo.upsert_match(
+        &on("newer", 2_000, "/Game/Maps/Bonsai/Bonsai"),
+        &[],
+        &[
+            sample_player("self", "Blue", "Self", "111"),
+            sample_player("other", "Red", "NewName", "NEW"),
+        ],
+    )
+    .unwrap();
+
+    let known = repo.known_name("self", "other").unwrap().unwrap();
+    assert_eq!(
+        (known.name.as_str(), known.tag.as_str()),
+        ("NewName", "NEW")
+    );
+    // The stored Riot path, not a uuid: the shell converts it later (R84).
+    assert_eq!(known.map_id.as_deref(), Some("/Game/Maps/Bonsai/Bonsai"));
+    assert_eq!(known.start_ms, Some(2_000));
+
+    // A name seen only in a match the user did not play stays unknown.
+    repo.upsert_match(
+        &on("stranger-match", 3_000, "/Game/Maps/Ascent/Ascent"),
+        &[],
+        &[sample_player("loner", "Blue", "Hidden", "H1")],
+    )
+    .unwrap();
+    assert_eq!(repo.known_name("self", "loner").unwrap(), None);
 }
 
 // ---------------------------------------------------------------------

@@ -14,16 +14,17 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use opd1_core::db::open_db;
-use opd1_core::db::repo::{Match, MatchPlayer, Repo};
+use opd1_core::db::repo::{Match, MatchPlayer, MmrSnapshot, Repo};
 use opd1_core::model::{DisplayName, EncounterCount, Field, LiveState, PlayerDetails, Team};
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
 use opd1_riot::assets::AssetCache;
+use opd1_riot::endpoints::PlayerMmrResponse;
 use opd1_riot::session::{ConnectOverrides, RiotSession};
 
 use crate::roster::RosterPlayer;
 use crate::state::{lock, now_ms, AppState, EventSink, Slot};
-use crate::store::PlayerDb;
+use crate::store::{load_player_db, save_player, trim_mmr, PlayerDb, PlayerUpdate};
 use crate::sync::{fetch_self_name, run_worker, sync_player};
 
 const ME: &str = "aaaaaaaa-0000-0000-0000-000000000001";
@@ -33,6 +34,9 @@ const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
 /// from someone else's match.
 const STRANGER: &str = "dddddddd-0000-0000-0000-000000000004";
 const ACT: &str = "act-current";
+/// valorant-api's Split: the map the remembered-name tests play on.
+const SPLIT_PATH: &str = "/Game/Maps/Bonsai/Bonsai";
+const SPLIT_UUID: &str = "d960549e-485c-e861-8d71-aa9d1aed12a2";
 
 #[derive(Default)]
 struct Recorder {
@@ -220,6 +224,10 @@ fn write_client_files(dir: &Path, port: u16) {
 
 struct Harness {
     server: MockServer,
+    /// valorant-api. No routes are mounted until a test calls
+    /// [`mount_asset_tables`], so it answers 404: the asset tables stay
+    /// unloaded and every map id resolves to `None`.
+    assets_server: MockServer,
     _dir: tempfile::TempDir,
     session: Arc<RiotSession>,
     st: Arc<AppState>,
@@ -246,8 +254,10 @@ async fn harness() -> Harness {
 
     let rec = Arc::new(Recorder::default());
     let repo = Repo::new(open_db(Path::new(":memory:")).unwrap());
-    // valorant-api unreachable: map ids resolve to None, never to a path.
-    let assets = AssetCache::with_base(dir.path().join("assets"), "http://127.0.0.1:1".into());
+    // No asset tables until a test mounts them: map ids resolve to None,
+    // never to a path.
+    let assets_server = MockServer::start().await;
+    let assets = AssetCache::with_base(dir.path().join("assets"), assets_server.uri());
     let st = Arc::new(AppState::new(
         Box::new(Sink(rec.clone())),
         repo,
@@ -265,6 +275,7 @@ async fn harness() -> Harness {
     }]);
     Harness {
         server,
+        assets_server,
         _dir: dir,
         session: Arc::new(session),
         st,
@@ -280,6 +291,61 @@ async fn count(server: &MockServer, verb: &str, p: &str) -> usize {
         .iter()
         .filter(|r: &&Request| r.method.as_str() == verb && r.url.path() == p)
         .count()
+}
+
+/// Mounts minimal valorant-api tables (`crate::state::AppState::ensure_tables`
+/// then loads them): Split as the only map, one act (`ACT`) that spans every
+/// stored match, and one tier.
+async fn mount_asset_tables(server: &MockServer) {
+    get(
+        server,
+        "/v1/version",
+        json!({"status": 200, "data": {"version": "test-1"}}),
+    )
+    .await;
+    get(
+        server,
+        "/v1/agents",
+        json!({"status": 200, "data": [{
+            "uuid": "aaaa1111-0000-0000-0000-000000000001", "displayName": "Gekko",
+            "displayIcon": format!("{}/img/agent.png", server.uri())
+        }]}),
+    )
+    .await;
+    get(
+        server,
+        "/v1/maps",
+        json!({"status": 200, "data": [{
+            "uuid": SPLIT_UUID, "displayName": "Split", "mapUrl": SPLIT_PATH,
+            "listViewIcon": format!("{}/img/map-list.png", server.uri()),
+            "splash": format!("{}/img/map-splash.png", server.uri())
+        }]}),
+    )
+    .await;
+    get(
+        server,
+        "/v1/competitivetiers",
+        json!({"status": 200, "data": [{
+            "assetObjectName": "Episode1_CompetitiveTierDataTable",
+            "tiers": [{"tier": 15, "tierName": "PLATINUM 1", "color": "4f514fff",
+                       "largeIcon": format!("{}/img/tier.png", server.uri())}]
+        }]}),
+    )
+    .await;
+    get(
+        server,
+        "/v1/seasons",
+        json!({"status": 200, "data": [
+            {"uuid": "episode-1", "displayName": "EPISODE 1", "title": null, "type": null,
+             "startTime": "2020-01-01T00:00:00Z", "endTime": "2099-01-01T00:00:00Z",
+             "parentUuid": null},
+            {"uuid": ACT, "displayName": "ACT I", "title": null,
+             "type": "EAresSeasonType::Act",
+             "startTime": "2020-01-01T00:00:00Z", "endTime": "2099-01-01T00:00:00Z",
+             "parentUuid": "episode-1"}
+        ]}),
+    )
+    .await;
 }
 
 #[tokio::test]
@@ -491,7 +557,11 @@ async fn worker_names_only_visible_players_and_settles_failures() {
         hidden.name,
         Field::Value(DisplayName::Remembered {
             name: "SecretName".into(),
-            tag: "HID".into()
+            tag: "HID".into(),
+            // The newest shared match is m2; the asset tables aren't loaded,
+            // so its map has no uuid.
+            from_map_id: None,
+            from_start_ms: Some(2_000),
         })
     );
     assert_eq!(
@@ -570,9 +640,232 @@ async fn worker_names_only_visible_players_and_settles_failures() {
         d.top_teammates[0].name,
         DisplayName::Remembered {
             name: "SecretName".into(),
-            tag: "HID".into()
+            tag: "HID".into(),
+            from_map_id: None,
+            from_start_ms: Some(2_000),
         }
     );
     let json = serde_json::to_string(&d).unwrap();
     assert!(!json.contains("LeakedName") && !json.contains("LEAK"));
+}
+
+// ---------------------------------------------------------------------
+// Task 14: isSelf, remembered-name source, act wins/games
+// ---------------------------------------------------------------------
+
+fn player_row(puuid: &str, team: &str, name: &str, tag: &str) -> MatchPlayer {
+    MatchPlayer {
+        puuid: puuid.into(),
+        team_id: team.into(),
+        party_id: None,
+        agent_id: None,
+        kills: 0,
+        deaths: 0,
+        assists: 0,
+        score: 0,
+        rounds: None,
+        hs: 0,
+        bs: 0,
+        ls: 0,
+        game_name: Some(name.into()),
+        tag_line: Some(tag.into()),
+    }
+}
+
+/// ME and HIDDEN played a match on Split together (so HIDDEN's name as the
+/// match showed it is "remembered"); returns the match's start.
+async fn store_split_match(st: &AppState) -> i64 {
+    let start = now_ms() - 120_000;
+    let m = Match {
+        match_id: "m-split".into(),
+        map_id: SPLIT_PATH.into(),
+        queue_id: "unrated".into(),
+        start_ms: start,
+        winning_team: None,
+        is_ranked: false,
+        rounds_played: None,
+    };
+    let players = vec![
+        player_row(ME, "Blue", "Me", "TAG"),
+        player_row(HIDDEN, "Red", "SecretName", "HID"),
+    ];
+    st.db(move |repo| repo.upsert_match(&m, &[], &players))
+        .await
+        .unwrap();
+    start
+}
+
+/// `puuid`'s DB bundle, as the poll loop loads it for a slot.
+async fn slot_for(st: &AppState, puuid: &str, incognito: bool) -> Slot {
+    let p = puuid.to_string();
+    let db = st
+        .db(move |repo| load_player_db(repo, Some(ME), &p))
+        .await
+        .unwrap();
+    Slot {
+        roster: roster(puuid, incognito),
+        db,
+    }
+}
+
+fn card_json(st: &AppState, puuid: &str) -> Value {
+    let state = st.live_state();
+    let card = state
+        .players
+        .iter()
+        .find(|c| c.puuid == puuid)
+        .expect("card on screen");
+    serde_json::to_value(card).unwrap()
+}
+
+#[tokio::test]
+async fn self_card_is_self_and_others_not() {
+    let h = harness().await;
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.slots = vec![
+            Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            },
+            Slot {
+                roster: roster(OTHER, false),
+                db: PlayerDb::default(),
+            },
+            Slot {
+                roster: roster(HIDDEN, true),
+                db: PlayerDb::default(),
+            },
+        ];
+    }
+    h.st.publish();
+    assert_eq!(card_json(&h.st, ME)["isSelf"], json!(true));
+    assert_eq!(card_json(&h.st, OTHER)["isSelf"], json!(false));
+    assert_eq!(card_json(&h.st, HIDDEN)["isSelf"], json!(false));
+}
+
+#[tokio::test]
+async fn remembered_name_source_is_map_uuid() {
+    let h = harness().await;
+    let start = store_split_match(&h.st).await;
+    {
+        let slots = vec![
+            slot_for(&h.st, ME, false).await,
+            slot_for(&h.st, HIDDEN, true).await,
+        ];
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.slots = slots;
+    }
+
+    // The asset tables aren't loaded: the source map is unknown, and the
+    // Riot path never stands in for it.
+    h.st.publish();
+    let name = card_json(&h.st, HIDDEN)["name"].clone();
+    assert_eq!(name["kind"], "remembered");
+    assert_eq!(name["name"], "SecretName");
+    assert_eq!(name["fromMapId"], Value::Null);
+    assert_eq!(name["fromStartMs"], json!(start));
+    assert!(!serde_json::to_string(&h.st.live_state())
+        .unwrap()
+        .contains("/Game/"));
+
+    // With the tables: Split's valorant-api uuid.
+    mount_asset_tables(&h.assets_server).await;
+    h.st.ensure_tables(false).await.expect("tables load");
+    h.st.publish();
+    let name = card_json(&h.st, HIDDEN)["name"].clone();
+    assert_eq!(name["fromMapId"], SPLIT_UUID);
+    assert_eq!(name["fromStartMs"], json!(start));
+    assert!(!serde_json::to_string(&h.st.live_state())
+        .unwrap()
+        .contains("/Game/"));
+}
+
+#[tokio::test]
+async fn top3_remembered_source_is_map_uuid() {
+    let h = harness().await;
+    let start = store_split_match(&h.st).await;
+    // HIDDEN and STRANGER are teammates in a competitive match of the
+    // current act that ME did not play.
+    store_foreign_match(&h.st).await;
+    mount_asset_tables(&h.assets_server).await;
+    h.st.ensure_tables(false).await.expect("tables load");
+    {
+        let slots = vec![
+            slot_for(&h.st, ME, false).await,
+            slot_for(&h.st, HIDDEN, true).await,
+            slot_for(&h.st, STRANGER, false).await,
+        ];
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.slots = slots;
+    }
+    h.st.publish();
+
+    // STRANGER's Top 3: HIDDEN, hidden on screen and remembered from the
+    // user's own Split match.
+    let d = crate::details::build(&h.st, STRANGER).await.unwrap();
+    assert_eq!(d.top_teammates.len(), 1);
+    assert_eq!(d.top_teammates[0].puuid, HIDDEN);
+    assert_eq!(
+        d.top_teammates[0].name,
+        DisplayName::Remembered {
+            name: "SecretName".into(),
+            tag: "HID".into(),
+            from_map_id: Some(SPLIT_UUID.into()),
+            from_start_ms: Some(start),
+        }
+    );
+    let json = serde_json::to_string(&d).unwrap();
+    assert!(!json.contains("/Game/"), "no Riot map path in {json}");
+    assert!(!json.contains("LEAK"), "the foreign match's name stays out");
+}
+
+#[tokio::test]
+async fn player_details_card_carries_act_wins_games() {
+    let h = harness().await;
+    // OTHER is not on screen: a `players` row and a stored MMR snapshot are
+    // all the DB has. 34 wins without placements, 39 with them, in 61 games.
+    let resp: PlayerMmrResponse = serde_json::from_value(json!({
+        "Subject": OTHER,
+        "QueueSkills": {"competitive": {"SeasonalInfoBySeasonID": {ACT: {
+            "SeasonID": ACT, "CompetitiveTier": 15, "RankedRating": 42,
+            "NumberOfWins": 34, "NumberOfWinsWithPlacements": 39, "NumberOfGames": 61,
+            "WinsByTier": {"15": 20}
+        }}}}
+    }))
+    .unwrap();
+    let snapshot = MmrSnapshot {
+        puuid: OTHER.into(),
+        json: trim_mmr(&resp).to_string(),
+        last_comp_match_id: Some("m-old".into()),
+        fetched_ms: 1,
+    };
+    let now = now_ms();
+    h.st.db(move |repo| {
+        save_player(
+            repo.conn(),
+            &PlayerUpdate {
+                puuid: OTHER.into(),
+                name: Some(("Other".into(), "OTH".into())),
+                account_level: 55,
+                card_id: "card".into(),
+            },
+            now,
+        )?;
+        repo.save_mmr_snapshot(&snapshot)
+    })
+    .await
+    .unwrap();
+    assert!(lock(&h.st.live).slots.is_empty());
+
+    let d = crate::details::build(&h.st, OTHER).await.unwrap();
+    let card = serde_json::to_value(&d.card).unwrap();
+    assert_eq!(card["actWins"], json!(39));
+    assert_eq!(card["actGames"], json!(61));
+    let rate = card["actWinrate"].as_f64().unwrap();
+    assert!((rate - 39.0 / 61.0).abs() < 1e-3, "actWinrate {rate}");
+    assert_eq!(card["isSelf"], json!(false));
 }

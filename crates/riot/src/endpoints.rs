@@ -189,6 +189,11 @@ pub struct SeasonalInfo {
     pub ranked_rating: i64,
     #[serde(rename = "NumberOfWins")]
     pub number_of_wins: i64,
+    /// Wins including the placement games, which `NumberOfWins` leaves out
+    /// (the act win rate counts them). Absent on older responses and old
+    /// stored snapshots, so it is optional: `NumberOfWins` stands in.
+    #[serde(rename = "NumberOfWinsWithPlacements", default)]
+    pub number_of_wins_with_placements: Option<i64>,
     #[serde(rename = "NumberOfGames")]
     pub number_of_games: i64,
     #[serde(rename = "WinsByTier")]

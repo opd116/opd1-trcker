@@ -154,7 +154,14 @@ impl LiveModel {
     }
 
     /// Builds the full `LiveState` (pure; `now_ms` should be [`card_clock`]).
-    pub fn build(&self, acts: &[Act], now_ms: i64) -> LiveState {
+    /// `map_uuid` turns a stored Riot map path into a valorant-api uuid (for
+    /// a remembered name's source map).
+    pub fn build(
+        &self,
+        acts: &[Act],
+        now_ms: i64,
+        map_uuid: &dyn Fn(&str) -> Option<String>,
+    ) -> LiveState {
         let current_act_id = current_act(acts, now_ms)
             .map(|a| a.id.as_str())
             .unwrap_or("");
@@ -167,7 +174,7 @@ impl LiveModel {
                 .iter()
                 .map(|s| {
                     let party = marks.get(&s.roster.puuid).copied();
-                    self.card_for(s, acts, current_act_id, now_ms, party)
+                    self.card_for(s, acts, current_act_id, now_ms, party, map_uuid)
                 })
                 .collect(),
         }
@@ -211,7 +218,8 @@ impl LiveModel {
 
     /// One card. `party` is this player's mark from [`Self::party_marks`]
     /// (`None` off screen, e.g. Player Details for someone not in the
-    /// roster).
+    /// roster). `map_uuid` converts a remembered name's stored Riot map path
+    /// (`KnownName::with_map_uuid`, R95).
     pub fn card_for(
         &self,
         slot: &Slot,
@@ -219,6 +227,7 @@ impl LiveModel {
         current_act_id: &str,
         now_ms: i64,
         party: Option<PartyMark>,
+        map_uuid: &dyn Fn(&str) -> Option<String>,
     ) -> PlayerCard {
         let r = &slot.roster;
         let is_self = r.puuid == self.self_id();
@@ -273,7 +282,9 @@ impl LiveModel {
             identity: Identity {
                 puuid: r.puuid.clone(),
                 incognito,
-                hide_account_level: r.hide_account_level || r.account_level == 0,
+                // R100: a hidden level shows for the user's own card only;
+                // an unknown level (0) is `—` for everyone.
+                hide_account_level: (r.hide_account_level && !is_self) || r.account_level == 0,
                 account_level: r.account_level,
                 card_id: r.card_id.clone(),
                 character_id: r.character_id.clone(),
@@ -288,13 +299,17 @@ impl LiveModel {
             current_act_id,
             now_ms,
             team: r.team,
+            is_self,
             // CLAUDE.md: the user and their party get no stripe and no
             // encounter badge (build_card drops both for them).
             is_self_party: r.is_self_party || is_self,
             remembered: if is_self {
                 None
             } else {
-                slot.db.remembered.clone()
+                slot.db
+                    .remembered
+                    .clone()
+                    .map(|known| known.with_map_uuid(map_uuid))
             },
             party,
             encounters: slot.db.encounters,
@@ -419,6 +434,8 @@ pub fn settle_card(card: &mut PlayerCard, names_done: bool, data_done: bool) {
         settle(&mut card.kd);
         settle(&mut card.hs_pct);
         settle(&mut card.act_winrate);
+        settle(&mut card.act_wins);
+        settle(&mut card.act_games);
         settle(&mut card.last5);
     }
 }
@@ -635,7 +652,7 @@ impl AppState {
                 live.map_id = self.map_uuid(&path);
             }
         }
-        let state = live.build(&acts, card_clock(now_ms()));
+        let state = live.build(&acts, card_clock(now_ms()), &|p| self.map_uuid(p));
         let bytes = serde_json::to_vec(&state).unwrap_or_default();
         if bytes == live.last_bytes {
             return;
@@ -698,7 +715,9 @@ mod tests {
     use super::*;
     use opd1_core::db::repo::MatchPlayerRow;
     use opd1_core::model::{DisplayName, EncounterCount, PartyMark};
+    use opd1_core::names::KnownName;
     use opd1_core::party::SharedRef;
+    use serde_json::Value;
 
     fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
         RosterPlayer {
@@ -754,7 +773,7 @@ mod tests {
     #[test]
     fn unsynced_player_is_loading_then_missing_once_attempted() {
         let mut m = model(vec![slot("p1", false)]);
-        let card = &m.build(&[], 0).players[0];
+        let card = &m.build(&[], 0, &|_| None).players[0];
         assert!(card.rank.is_loading());
         assert!(card.last5.is_loading());
         assert!(card.name.is_loading());
@@ -762,7 +781,7 @@ mod tests {
         // The sync ran but every call failed / returned nothing.
         m.synced.insert("p1".into());
         m.names_attempted.insert("p1".into());
-        let card = &m.build(&[], 0).players[0];
+        let card = &m.build(&[], 0, &|_| None).players[0];
         assert_eq!(card.rank, Field::Missing);
         assert_eq!(card.last5, Field::Missing);
         assert_eq!(card.kd, Field::Missing);
@@ -774,7 +793,7 @@ mod tests {
         let mut s = slot("p1", false);
         s.db.last5 = vec![row("m1", 10)];
         let m = model(vec![s]);
-        let card = &m.build(&[], 0).players[0];
+        let card = &m.build(&[], 0, &|_| None).players[0];
         assert!(matches!(card.last5, Field::Value(ref v) if v.len() == 1));
         assert!(matches!(card.kd, Field::Value(_)));
         assert!(card.rank.is_loading(), "no MMR snapshot yet and not synced");
@@ -784,7 +803,7 @@ mod tests {
     fn closed_stage_never_shows_skeletons() {
         let mut m = model(vec![slot("me", false)]);
         m.stage = Stage::Closed;
-        let json = serde_json::to_value(&m.build(&[], 0).players[0]).unwrap();
+        let json = serde_json::to_value(&m.build(&[], 0, &|_| None).players[0]).unwrap();
         for key in [
             "name",
             "rank",
@@ -814,7 +833,7 @@ mod tests {
         let mut m = model(vec![s]);
         m.known_names
             .insert("h1".into(), ("Real".into(), "Name".into()));
-        let card = &m.build(&[], 0).players[0];
+        let card = &m.build(&[], 0, &|_| None).players[0];
         assert_eq!(
             card.name,
             Field::Value(DisplayName::HiddenAgent {
@@ -851,7 +870,7 @@ mod tests {
         m.known_names
             .insert("h1".into(), ("Real".into(), "Name".into()));
         m.synced.insert("h1".into());
-        let card = |m: &LiveModel| m.build(&[], 0).players[0].clone();
+        let card = |m: &LiveModel| m.build(&[], 0, &|_| None).players[0].clone();
         let leaks = |m: &LiveModel| serde_json::to_string(&card(m)).unwrap().contains("Real");
 
         // Before agent select: Hidden Player.
@@ -868,12 +887,19 @@ mod tests {
         assert!(!leaks(&m));
         // Remembered from a match the user played: that name, in its own
         // style — still never the players-row / name-service one.
-        m.slots[0].db.remembered = Some(("Seen".into(), "AFTER".into()));
+        m.slots[0].db.remembered = Some(KnownName {
+            name: "Seen".into(),
+            tag: "AFTER".into(),
+            map_id: None,
+            start_ms: None,
+        });
         assert_eq!(
             card(&m).name,
             Field::Value(DisplayName::Remembered {
                 name: "Seen".into(),
-                tag: "AFTER".into()
+                tag: "AFTER".into(),
+                from_map_id: None,
+                from_start_ms: None,
             })
         );
         assert!(!leaks(&m));
@@ -891,6 +917,80 @@ mod tests {
     }
 
     #[test]
+    fn card_for_maps_remembered_source() {
+        let mut s = slot("h1", true);
+        s.db.remembered = Some(KnownName {
+            name: "Seen".into(),
+            tag: "AFTER".into(),
+            // The stored Riot path (R84): converted only when the card is built.
+            map_id: Some("/Game/Maps/Bonsai/Bonsai".into()),
+            start_ms: Some(1_234),
+        });
+        let m = model(vec![s]);
+        let card_json = |lookup: &dyn Fn(&str) -> Option<String>| {
+            serde_json::to_value(&m.build(&[], 0, lookup).players[0]).unwrap()
+        };
+
+        let known =
+            card_json(&|p| (p == "/Game/Maps/Bonsai/Bonsai").then(|| "uuid-split".to_string()));
+        assert_eq!(known["name"]["kind"], "remembered");
+        assert_eq!(known["name"]["fromMapId"], "uuid-split");
+        assert_eq!(known["name"]["fromStartMs"], 1_234);
+        assert!(!known.to_string().contains("/Game/"));
+
+        // A map the tables don't know: no source map, and never the path.
+        let unknown = card_json(&|_| None);
+        assert_eq!(unknown["name"]["fromMapId"], Value::Null);
+        assert_eq!(unknown["name"]["fromStartMs"], 1_234);
+        assert!(!unknown.to_string().contains("/Game/"));
+    }
+
+    #[test]
+    fn hidden_players_ignore_hover() {
+        // R99: an incognito player who only hovers an agent has no agent
+        // yet, so Top Teammates shows them as Hidden Player, like the card.
+        let mut hover = slot("h1", true);
+        hover.roster.selection_state = "selected".into();
+        let mut locked = slot("h2", true);
+        locked.roster.selection_state = "locked".into();
+        let m = model(vec![hover, locked]);
+        assert_eq!(
+            m.hidden_players(),
+            HashMap::from([
+                ("h1".to_string(), None),
+                ("h2".to_string(), Some("agent".to_string())),
+            ])
+        );
+        let cards = m.build(&[], 0, &|_| None).players;
+        assert_eq!(cards[0].agent_id, None);
+        assert_eq!(cards[0].name, Field::Value(DisplayName::HiddenPlayer));
+        assert_eq!(cards[1].agent_id.as_deref(), Some("agent"));
+    }
+
+    #[test]
+    fn own_card_shows_level_even_when_hidden() {
+        // R100: `HideAccountLevel` hides the level for everyone but the user.
+        let hidden_level = |puuid: &str, level: u32| {
+            let mut s = slot(puuid, false);
+            s.roster.hide_account_level = true;
+            s.roster.account_level = level;
+            s
+        };
+        let m = model(vec![
+            hidden_level("me", 87),
+            hidden_level("p1", 87),
+            hidden_level("me", 0),
+        ]);
+        let cards = m.build(&[], 0, &|_| None).players;
+        assert_eq!(cards[0].level, Field::Value(87));
+        assert!(cards[0].is_self);
+        assert_eq!(cards[1].level, Field::Missing);
+        assert!(!cards[1].is_self);
+        // An unknown level (0) is `—` for everyone, the user included.
+        assert_eq!(cards[2].level, Field::Missing);
+    }
+
+    #[test]
     fn encounters_show_for_others_but_never_for_the_user_or_their_party() {
         let enc = Some(EncounterCount {
             with: 1,
@@ -905,7 +1005,9 @@ mod tests {
         let mut known = slot("known", false);
         known.db.encounters = enc;
         let stranger = slot("stranger", false);
-        let cards = model(vec![me, duo, known, stranger]).build(&[], 0).players;
+        let cards = model(vec![me, duo, known, stranger])
+            .build(&[], 0, &|_| None)
+            .players;
         let got: Vec<Option<EncounterCount>> = cards.iter().map(|c| c.encounters).collect();
         assert_eq!(got, vec![None, None, enc, None]);
     }
@@ -940,7 +1042,11 @@ mod tests {
         }
         let mut m = model(slots);
         let marks = |m: &LiveModel| -> Vec<Option<PartyMark>> {
-            m.build(&[], 0).players.iter().map(|c| c.party).collect()
+            m.build(&[], 0, &|_| None)
+                .players
+                .iter()
+                .map(|c| c.party)
+                .collect()
         };
         let likely = Some(PartyMark {
             group: 0,
@@ -978,14 +1084,14 @@ mod tests {
     fn the_users_own_name_comes_from_the_chat_session() {
         let mut m = model(vec![slot("me", true)]);
         // Unknown until the chat session was asked…
-        assert!(m.build(&[], 0).players[0].name.is_loading());
+        assert!(m.build(&[], 0, &|_| None).players[0].name.is_loading());
         m.self_name_attempted = true;
-        assert_eq!(m.build(&[], 0).players[0].name, Field::Missing);
+        assert_eq!(m.build(&[], 0, &|_| None).players[0].name, Field::Missing);
         // …then the local chat session's Riot ID, shown to the user even
         // with their own streamer-mode flag on.
         m.self_name = Some(("Shanky".into(), "OPD1".into()));
         assert_eq!(
-            m.build(&[], 0).players[0].name,
+            m.build(&[], 0, &|_| None).players[0].name,
             Field::Value(DisplayName::Visible {
                 name: "Shanky".into(),
                 tag: "OPD1".into()
@@ -995,7 +1101,7 @@ mod tests {
         // A stage reset (which clears names_attempted) keeps it settled.
         m.names_attempted.clear();
         m.self_name = None;
-        assert_eq!(m.build(&[], 0).players[0].name, Field::Missing);
+        assert_eq!(m.build(&[], 0, &|_| None).players[0].name, Field::Missing);
     }
 
     #[test]
@@ -1008,7 +1114,7 @@ mod tests {
             card_id: "c".into(),
         });
         let mut m = model(vec![s]);
-        let name = |m: &LiveModel| m.build(&[], 0).players[0].name.clone();
+        let name = |m: &LiveModel| m.build(&[], 0, &|_| None).players[0].name.clone();
         assert_eq!(
             name(&m),
             Field::Value(DisplayName::Visible {
@@ -1091,7 +1197,7 @@ mod tests {
     fn settle_only_touches_attempted_sources() {
         let mut m = model(vec![slot("p1", false)]);
         m.names_attempted.insert("p1".into());
-        let card = &m.build(&[], 0).players[0];
+        let card = &m.build(&[], 0, &|_| None).players[0];
         assert_eq!(card.name, Field::Missing);
         assert!(card.rank.is_loading(), "data not attempted yet");
     }
@@ -1101,7 +1207,7 @@ mod tests {
         let mut s = slot("p1", false);
         s.roster.hide_account_level = true;
         let m = model(vec![s]);
-        assert_eq!(m.build(&[], 0).players[0].level, Field::Missing);
+        assert_eq!(m.build(&[], 0, &|_| None).players[0].level, Field::Missing);
     }
 
     #[test]
@@ -1200,7 +1306,7 @@ mod tests {
             // The last event the UI received is the model's current state…
             assert_eq!(emitted.last(), Some(&current));
             // …and it matches a fresh build (nothing newer was suppressed).
-            let fresh = lock(&st.live).build(&[], card_clock(now_ms()));
+            let fresh = lock(&st.live).build(&[], card_clock(now_ms()), &|_| None);
             assert_eq!(current, fresh);
             // Events never go backwards: each has at least as many players
             // as the one before (slots only grow in this test).

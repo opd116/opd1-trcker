@@ -10,8 +10,9 @@
 //!    fetched once, stored forever as compact rows), up to
 //!    [`DETAILS_CONCURRENCY`] in flight (the session's token bucket still
 //!    paces the actual requests).
-//! 4. `mmr` only when `needs_mmr_refresh(latest comp match)` — no new
-//!    competitive match means the rank can't have changed.
+//! 4. `mmr` only when `mmr_refresh_needed(latest comp match)` — no new
+//!    competitive match means the rank can't have changed, unless the stored
+//!    snapshot predates the current snapshot version (refetched once).
 //!
 //! Any failure other than `ClientGone` is logged and skipped: the fields
 //! it would have filled become Missing (`—`) through the card builder's
@@ -33,7 +34,7 @@ use opd1_riot::{RiotError, RiotSession, VisiblePuuid};
 use crate::logbuf::short;
 use crate::roster::extract_loadouts;
 use crate::state::{lock, now_ms, AppState, Job};
-use crate::store::{save_player, trim_mmr, PlayerUpdate};
+use crate::store::{mmr_refresh_needed, save_player, trim_mmr, PlayerUpdate};
 
 /// Match-details requests in flight at once. They're large responses
 /// (hundreds of KB each); a small window overlaps latency without holding
@@ -226,14 +227,15 @@ pub async fn sync_player(
 
     fetch_missing_details(st, session, ids).await?;
 
-    // MMR only when a new competitive match appeared since the snapshot.
+    // MMR only when a new competitive match appeared since the snapshot (or
+    // the snapshot is from an older shape).
     // Skipped entirely when comp_updates failed (it shares the mmr rate
     // bucket; the stored snapshot, if any, keeps showing).
     if let Some(rows) = comp {
         let latest = latest_comp_match(&rows);
         let (p, l) = (puuid.to_string(), latest.clone());
         let needs = st
-            .db(move |repo| repo.needs_mmr_refresh(&p, &l))
+            .db(move |repo| mmr_refresh_needed(repo, &p, &l))
             .await
             .unwrap_or(true);
         if needs {

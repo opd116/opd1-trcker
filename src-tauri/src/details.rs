@@ -10,7 +10,7 @@ use opd1_core::db::repo::TeammateRow;
 use opd1_core::model::{
     DisplayName, EncounterDetailRow, PlayerCard, PlayerDetails, TeammateSummary,
 };
-use opd1_core::names::display_name;
+use opd1_core::names::{display_name, KnownName};
 
 use crate::roster::RosterPlayer;
 use crate::state::{card_clock, closed_self_slot, lock, now_ms, AppState, Slot};
@@ -27,18 +27,23 @@ const TOP_TEAMMATES: usize = 3;
 /// agent, else Hidden Player — never with the name in the details
 /// player's own match history. Anyone else: the name from their most
 /// recent shared row; a row without a full name (never resolved) is
-/// hidden too.
+/// hidden too. A remembered name's source map arrives as the stored Riot
+/// path and is converted here with `map_uuid` (`KnownName::with_map_uuid`).
 pub fn teammate_name(
     row: &TeammateRow,
     hidden_now: &HashMap<String, Option<String>>,
-    remembered: &HashMap<String, (String, String)>,
+    remembered: &HashMap<String, KnownName>,
+    map_uuid: &dyn Fn(&str) -> Option<String>,
 ) -> DisplayName {
     match hidden_now.get(&row.puuid) {
         Some(agent) => display_name(
             true,
             None,
             agent.as_deref(),
-            remembered.get(&row.puuid).cloned(),
+            remembered
+                .get(&row.puuid)
+                .cloned()
+                .map(|known| known.with_map_uuid(map_uuid)),
         ),
         None => display_name(
             false,
@@ -64,7 +69,7 @@ fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Opt
     let act_id = crate::roster::current_act(&acts, now)
         .map(|a| a.id.clone())
         .unwrap_or_default();
-    let mut card = live.card_for(&slot, &acts, &act_id, now, None);
+    let mut card = live.card_for(&slot, &acts, &act_id, now, None, &|p| st.map_uuid(p));
     // Nothing is being fetched for it right now: unknown means `—`.
     crate::state::settle_card(&mut card, true, true);
     Some(card)
@@ -152,7 +157,7 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
             .iter()
             .map(|t| TeammateSummary {
                 puuid: t.puuid.clone(),
-                name: teammate_name(t, &hidden_now, &remembered),
+                name: teammate_name(t, &hidden_now, &remembered, &|p| st.map_uuid(p)),
                 count: t.count,
             })
             .collect(),
@@ -174,8 +179,22 @@ mod tests {
         }
     }
 
-    fn none() -> HashMap<String, (String, String)> {
+    fn none() -> HashMap<String, KnownName> {
         HashMap::new()
+    }
+
+    fn known(name: &str, tag: &str, map_id: Option<&str>, start_ms: Option<i64>) -> KnownName {
+        KnownName {
+            name: name.into(),
+            tag: tag.into(),
+            map_id: map_id.map(str::to_string),
+            start_ms,
+        }
+    }
+
+    /// No map is known to the lookup: every converted source loses its map.
+    fn no_maps(_: &str) -> Option<String> {
+        None
     }
 
     #[test]
@@ -184,13 +203,23 @@ mod tests {
         // player who is incognito on screen right now (R18).
         let before_pick: HashMap<String, Option<String>> = [("duo".to_string(), None)].into();
         assert_eq!(
-            teammate_name(&row("duo", Some("RealName")), &before_pick, &none()),
+            teammate_name(
+                &row("duo", Some("RealName")),
+                &before_pick,
+                &none(),
+                &no_maps
+            ),
             DisplayName::HiddenPlayer
         );
         let after_pick: HashMap<String, Option<String>> =
             [("duo".to_string(), Some("agent-jett".to_string()))].into();
         assert_eq!(
-            teammate_name(&row("duo", Some("RealName")), &after_pick, &none()),
+            teammate_name(
+                &row("duo", Some("RealName")),
+                &after_pick,
+                &none(),
+                &no_maps
+            ),
             DisplayName::HiddenAgent {
                 agent_id: "agent-jett".into()
             }
@@ -201,18 +230,30 @@ mod tests {
     fn hidden_teammate_shows_the_name_remembered_from_the_users_own_match() {
         let hidden: HashMap<String, Option<String>> =
             [("duo".to_string(), Some("agent-jett".to_string()))].into();
-        let remembered: HashMap<String, (String, String)> =
-            [("duo".to_string(), ("Seen".to_string(), "AFTER".to_string()))].into();
+        let remembered: HashMap<String, KnownName> =
+            [("duo".to_string(), known("Seen", "AFTER", None, None))].into();
         assert_eq!(
-            teammate_name(&row("duo", Some("RealName")), &hidden, &remembered),
+            teammate_name(
+                &row("duo", Some("RealName")),
+                &hidden,
+                &remembered,
+                &no_maps
+            ),
             DisplayName::Remembered {
                 name: "Seen".into(),
-                tag: "AFTER".into()
+                tag: "AFTER".into(),
+                from_map_id: None,
+                from_start_ms: None,
             }
         );
         // A remembered name only matters for a hidden teammate.
         assert_eq!(
-            teammate_name(&row("duo", Some("Name")), &HashMap::new(), &remembered),
+            teammate_name(
+                &row("duo", Some("Name")),
+                &HashMap::new(),
+                &remembered,
+                &no_maps
+            ),
             DisplayName::Visible {
                 name: "Name".into(),
                 tag: "TAG".into()
@@ -221,9 +262,44 @@ mod tests {
     }
 
     #[test]
+    fn teammate_name_maps_remembered_source() {
+        let hidden: HashMap<String, Option<String>> = [("duo".to_string(), None)].into();
+        // The DB hands over the stored Riot path (R84).
+        let remembered: HashMap<String, KnownName> = [(
+            "duo".to_string(),
+            known("Seen", "AFTER", Some("/Game/Maps/Bonsai/Bonsai"), Some(99)),
+        )]
+        .into();
+        let name_with = |lookup: &dyn Fn(&str) -> Option<String>| {
+            teammate_name(&row("duo", Some("RealName")), &hidden, &remembered, lookup)
+        };
+
+        let split = |p: &str| (p == "/Game/Maps/Bonsai/Bonsai").then(|| "uuid-split".to_string());
+        assert_eq!(
+            name_with(&split),
+            DisplayName::Remembered {
+                name: "Seen".into(),
+                tag: "AFTER".into(),
+                from_map_id: Some("uuid-split".into()),
+                from_start_ms: Some(99),
+            }
+        );
+        // A map the tables don't know: no source map, never the path.
+        assert_eq!(
+            name_with(&no_maps),
+            DisplayName::Remembered {
+                name: "Seen".into(),
+                tag: "AFTER".into(),
+                from_map_id: None,
+                from_start_ms: Some(99),
+            }
+        );
+    }
+
+    #[test]
     fn visible_teammate_keeps_the_stored_name() {
         assert_eq!(
-            teammate_name(&row("x", Some("Name")), &HashMap::new(), &none()),
+            teammate_name(&row("x", Some("Name")), &HashMap::new(), &none(), &no_maps),
             DisplayName::Visible {
                 name: "Name".into(),
                 tag: "TAG".into()
@@ -234,13 +310,13 @@ mod tests {
     #[test]
     fn teammate_without_a_stored_name_is_hidden() {
         assert_eq!(
-            teammate_name(&row("x", None), &HashMap::new(), &none()),
+            teammate_name(&row("x", None), &HashMap::new(), &none(), &no_maps),
             DisplayName::HiddenPlayer
         );
         let mut empty = row("x", Some(""));
         empty.tag_line = Some(String::new());
         assert_eq!(
-            teammate_name(&empty, &HashMap::new(), &none()),
+            teammate_name(&empty, &HashMap::new(), &none(), &no_maps),
             DisplayName::HiddenPlayer
         );
     }

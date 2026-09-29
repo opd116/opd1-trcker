@@ -2,6 +2,10 @@
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { defineConfig } from "vite";
 
+// The date formatters read local time. Pin the zone so their tests (and every
+// vitest worker, which inherits this) give the same answer on any machine.
+process.env.TZ = "UTC";
+
 // Tauri sets this when running `tauri dev` against a LAN host (mobile
 // testing). Unused on desktop, harmless to read.
 const host = process.env.TAURI_DEV_HOST;

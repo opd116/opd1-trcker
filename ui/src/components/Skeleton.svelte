@@ -1,15 +1,15 @@
-<!-- Neutral loading shape. Never contains text. -->
+<!-- Neutral loading shape (spec §5.4). Never contains text. Static, as in the design. -->
 <script lang="ts">
   interface Props {
-    /** CSS width, e.g. "3em" or "36px". */
+    /** CSS width, e.g. "120px". */
     w: string;
     /** CSS height. */
     h: string;
-    /** CSS border radius. */
+    /** CSS border radius; bars are 3px unless the spec says otherwise. */
     r?: string;
   }
 
-  let { w, h, r = "var(--r-xs)" }: Props = $props();
+  let { w, h, r = "3px" }: Props = $props();
 </script>
 
 <span class="sk" aria-hidden="true" style:width={w} style:height={h} style:border-radius={r}></span>
@@ -19,13 +19,6 @@
     display: inline-block;
     flex: none;
     vertical-align: middle;
-    background: var(--skeleton);
-    animation: sk-pulse 1.8s ease-in-out infinite;
-  }
-
-  @keyframes sk-pulse {
-    50% {
-      opacity: 0.5;
-    }
+    background: var(--skel);
   }
 </style>

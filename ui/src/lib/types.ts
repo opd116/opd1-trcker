@@ -1,5 +1,6 @@
-// Mirror of the Rust → UI JSON contract (crates/core/src/model.rs, serde camelCase).
-// Rulings: R5 (rates are 0..1 fractions), R10 (enum shapes), R23 (tri-state fields).
+// Provisional (Task 16a): written from spec §7.1. Task 16b syncs it with crates/core/tests/fixtures/contract/*.json.
+// Mirror of the Rust → UI JSON contract (serde camelCase). Rulings: R5 (rates are 0..1 fractions),
+// R10 (enum shapes), R23 (tri-state fields), R97 (per-weapon tri-state), R99 (agent set only on lock).
 //
 // Tri-state convention for loadable fields:
 //   key absent (undefined) → still loading → skeleton
@@ -8,11 +9,13 @@
 
 export type Stage = "closed" | "menus" | "pregame" | "ingame";
 
+export type Result = "win" | "loss" | "draw";
+
 export type Team = "ally" | "enemy";
 
 export type DisplayName =
   | { kind: "visible"; name: string; tag: string }
-  | { kind: "remembered"; name: string; tag: string }
+  | { kind: "remembered"; name: string; tag: string; fromMapId: string | null; fromStartMs: number | null }
   | { kind: "hiddenPlayer" }
   | { kind: "hiddenAgent"; agentId: string };
 
@@ -35,8 +38,9 @@ export interface Peak {
 }
 
 export interface Last5Entry {
-  win: boolean;
-  rrEarned: number;
+  result: Result;
+  /** null when Riot gave no RR change for that match. */
+  rrEarned: number | null;
   startMs: number;
 }
 
@@ -45,16 +49,18 @@ export interface PartyMark {
   confirmed: boolean;
 }
 
-export interface Encounters {
+export interface EncounterCount {
   with: number;
   against: number;
 }
 
 export interface PlayerCard {
   puuid: string;
-  name: DisplayName;
-  level: number | null;
+  name?: DisplayName | null;
+  /** null when the player hides it (HideAccountLevel), except on the user's own card (R100). */
+  level?: number | null;
   cardId: string;
+  /** Set only after the lock (R99); a hover leaves it null. */
   agentId: string | null;
   rank?: Rank | null;
   prevActTier?: number | null;
@@ -64,18 +70,127 @@ export interface PlayerCard {
   hsPct?: number | null;
   /** Fraction 0..1. */
   actWinrate?: number | null;
+  actWins?: number | null;
+  /** Losses = games − wins. */
+  actGames?: number | null;
   /** Newest first. */
   last5?: Last5Entry[] | null;
-  party?: PartyMark | null;
-  encounters?: Encounters | null;
+  party: PartyMark | null;
+  encounters: EncounterCount | null;
   team: Team;
   isSelfParty: boolean;
+  isSelf: boolean;
 }
 
 export interface LiveState {
   stage: Stage;
   mapId: string | null;
   players: PlayerCard[];
+}
+
+/** One row of `PlayerDetails.recent`. */
+export interface MatchSummary {
+  matchId: string;
+  mapId: string;
+  startMs: number;
+  result: Result;
+  roundsWon: number | null;
+  roundsLost: number | null;
+  agentId: string | null;
+  kills: number;
+  deaths: number;
+  assists: number;
+  kd: number;
+  acs: number | null;
+  hsPct: number | null;
+  rrEarned: number | null;
+  /** The player's rank during that match (R81: one rule for recent rows, encounters and the scoreboard). */
+  tier: number | null;
+}
+
+export interface WeaponSkin {
+  chromaId: string;
+  skinName: string;
+  /** The text inside "(Variant N …)", or null for the base chroma. */
+  chromaName: string | null;
+  tierId: string | null;
+}
+
+/** Tri-state per weapon (R97): absent = the name is still resolving, null = none or unknown. */
+export interface Loadout {
+  vandal?: WeaponSkin | null;
+  phantom?: WeaponSkin | null;
+  operator?: WeaponSkin | null;
+  sheriff?: WeaponSkin | null;
+}
+
+export interface EncounterDetailRow {
+  matchId: string;
+  mapId: string;
+  startMs: number;
+  with: boolean;
+  /** The user's side. */
+  result: Result;
+  roundsWon: number | null;
+  roundsLost: number | null;
+  durationMs: number | null;
+  themAgentId: string | null;
+  themTier: number | null;
+  selfAgentId: string | null;
+  selfTier: number | null;
+}
+
+export interface TeammateSummary {
+  puuid: string;
+  name: DisplayName;
+  count: number;
+}
+
+export interface PlayerDetails {
+  card: PlayerCard;
+  /** At most 8, newest first. */
+  recent: MatchSummary[];
+  topTeammates: TeammateSummary[];
+  loadout: Loadout;
+  /** Newest first. */
+  encounters: EncounterDetailRow[];
+}
+
+export interface ScoreRow {
+  puuid: string;
+  name: DisplayName;
+  agentId: string | null;
+  tier: number | null;
+  kills: number;
+  deaths: number;
+  assists: number;
+  acs: number | null;
+  adr: number | null;
+  hsPct: number | null;
+  isSelf: boolean;
+  isFocus: boolean;
+}
+
+export interface MatchTeamView {
+  teamId: string;
+  result: Result | null;
+  roundsWon: number | null;
+  /** Rounds 1–12 won. */
+  firstHalf: number | null;
+  /** Sorted by ACS descending. */
+  players: ScoreRow[];
+}
+
+/** `invoke("match_details", { matchId, focusPuuid })`. */
+export interface MatchDetailsView {
+  matchId: string;
+  mapId: string;
+  queueId: string;
+  startMs: number;
+  durationMs: number | null;
+  perspective: "self" | "focus";
+  /** [0] = the perspective team; one entry for no-team modes. */
+  teams: MatchTeamView[];
 }
 
 /** `invoke("meta")` in Tauri; a static valorant-api snapshot in the DEV browser (R21). */

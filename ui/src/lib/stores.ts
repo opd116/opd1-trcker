@@ -1,16 +1,18 @@
-import { invoke, isTauri } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { isTauri } from "@tauri-apps/api/core";
 import { readable, writable } from "svelte/store";
-import { EMPTY_META } from "./meta";
-import type { LiveState, Meta } from "./types";
+import { tauriBridge } from "./api";
+import { applyDetailsEvent, startLive } from "./boot";
+import { onStage } from "./router.svelte";
+import type { LiveState, Meta, PlayerDetails, Stage } from "./types";
 
-export const EMPTY_LIVE: LiveState = { stage: "closed", mapId: null, players: [] };
+/** Live stage + roster. Pushed by Rust (`emit("live")`); the UI never polls Riot. null = nothing received yet. */
+export const live = writable<LiveState | null>(null);
 
-/** Live stage + roster. Pushed by Rust (`emit("live")`); the UI never polls Riot. */
-export const live = writable<LiveState>(EMPTY_LIVE);
+/** Names and colors for agents, maps and tiers (`invoke("meta")`). null = still pending (spec §5.8). */
+export const meta = writable<Meta | null>(null);
 
-/** Names and colors for agents, maps and tiers (`invoke("meta")`). */
-export const meta = writable<Meta>(EMPTY_META);
+/** The Player Details currently open (set by the Details screen; a `details` event replaces it in place). */
+export const openDetails = writable<PlayerDetails | null>(null);
 
 /** Wall clock for "time since" labels; one tick every 30s is plenty. */
 export const now = readable(Date.now(), (set) => {
@@ -18,9 +20,22 @@ export const now = readable(Date.now(), (set) => {
   return () => clearInterval(id);
 });
 
+let prevStage: Stage | null = null;
+
+/** Every LiveState goes through here so entering Agent Select can switch the route to Live. */
+export function applyLive(s: LiveState | null): void {
+  if (s) {
+    onStage(prevStage, s.stage);
+    prevStage = s.stage;
+  } else {
+    prevStage = null;
+  }
+  live.set(s);
+}
+
 let started = false;
 
-/** Connect the stores to their source. Call once at startup. */
+/** Connect the stores to their source. Call once at startup (spec §2.4). */
 export async function startFeeds(): Promise<void> {
   if (started) return;
   started = true;
@@ -28,14 +43,19 @@ export async function startFeeds(): Promise<void> {
   // DEV in a plain browser: the demo feed (dynamic import → compiled out of `vite build`).
   if (import.meta.env.DEV && !isTauri()) {
     const { startDemo } = await import("./demo/feed");
-    startDemo(live, meta);
+    startDemo(applyLive, meta);
     return;
   }
 
-  await listen<LiveState>("live", (event) => live.set(event.payload));
-  try {
-    meta.set(await invoke<Meta>("meta"));
-  } catch (err) {
-    console.error("meta() failed", err);
-  }
+  const failed = (what: string) => (err: unknown) => console.error(`${what} failed`, err);
+  await Promise.all([
+    startLive(tauriBridge, applyLive).catch(failed("live feed")),
+    tauriBridge
+      .invoke<Meta>("meta")
+      .then((m) => meta.set(m))
+      .catch(failed("meta()")),
+    tauriBridge
+      .listen<PlayerDetails>("details", (e) => openDetails.update((open) => applyDetailsEvent(open, e.payload)))
+      .catch(failed("details listener")),
+  ]);
 }

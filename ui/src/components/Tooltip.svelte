@@ -1,66 +1,57 @@
-<!-- The one shared hover bubble. Mounted on <body> by the `tip` attachment on first use. -->
+<!-- The one shared hover bubble (spec §4.1), inside #app. The engine is lib/tooltip.svelte.ts. -->
 <script lang="ts">
-  import type { Attachment } from "svelte/attachments";
-  import { hideTip, tipState } from "../lib/tooltip.svelte";
+  import { parseWl, tipState, wlRow } from "../lib/tooltip.svelte";
 
-  const GAP = 6;
-  const EDGE = 8;
-
-  /** Centre above the anchor, flip below near the top, clamp to the window. */
-  const place: Attachment<HTMLElement> = (el) => {
-    const anchor = tipState.rect;
-    void tipState.lines.length; // re-place when the text changes
-    if (!anchor) return;
-    const b = el.getBoundingClientRect();
-    const maxX = window.innerWidth - b.width - EDGE;
-    const x = Math.max(EDGE, Math.min(maxX, anchor.left + anchor.width / 2 - b.width / 2));
-    let y = anchor.top - b.height - GAP;
-    if (y < EDGE) y = anchor.bottom + GAP;
-    el.style.transform = `translate(${Math.round(x)}px, ${Math.round(y)}px)`;
-    el.style.visibility = "visible";
-  };
+  const view = $derived(tipState.tip);
+  const wl = $derived(view ? parseWl(view.text) : null);
 </script>
 
-<!-- Escape dismisses the bubble without moving the pointer (WCAG 1.4.13). -->
-<svelte:window
-  onkeydown={(e) => {
-    if (e.key === "Escape" && tipState.rect) hideTip();
-  }}
-/>
-
-{#if tipState.rect && tipState.lines.length > 0}
-  <div class="tip" role="tooltip" {@attach place}>
-    {#each tipState.lines as line, i (i)}
-      <div class={i === 0 ? "title" : "line"}>{line}</div>
-    {/each}
-  </div>
+{#if view}
+  <div class="tip" role="tooltip" style:left="{view.x}px" style:top="{view.top}px" style:transform={view.transform}>{#if wl}{@const [w, d1, l, d2, g] = wlRow(wl)}<span class="wl"><span class="w">{w}</span><span class="dot">{d1}</span><span class="l">{l}</span><span class="dot">{d2}</span><span>{g}</span></span><div class="scope">This act</div>{:else}{view.text}{/if}</div>
 {/if}
 
 <style>
   .tip {
-    position: fixed;
-    left: 0;
-    top: 0;
-    z-index: 1000;
-    visibility: hidden;
-    max-width: 280px;
-    padding: 7px 10px 8px;
-    background: var(--surface-3);
-    border: 1px solid var(--line-strong);
-    border-radius: var(--r-sm);
-    box-shadow: 0 8px 24px rgb(5 8 12 / 0.45);
+    position: absolute;
+    z-index: 50;
+    width: max-content;
+    max-width: 260px;
+    padding: 7px 10px;
+    background: var(--tip-bg);
+    border: 1px solid var(--line2);
+    border-radius: 6px;
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    font-size: 13px;
+    line-height: 18px;
+    font-weight: 500;
+    color: var(--text);
+    white-space: pre-line;
     pointer-events: none;
-    font-size: var(--fs-sm);
-    line-height: var(--lh-body);
+  }
+
+  .wl {
+    display: flex;
+    gap: 6px;
+    align-items: baseline;
+    white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
 
-  .title {
-    color: var(--text-1);
-    font-weight: var(--fw-strong);
+  .w {
+    color: var(--win);
+    font-weight: 600;
   }
 
-  .line {
-    color: var(--text-2);
+  .l {
+    color: var(--loss);
+    font-weight: 600;
+  }
+
+  .dot {
+    color: var(--text3);
+  }
+
+  .scope {
+    color: var(--text2);
   }
 </style>

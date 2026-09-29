@@ -164,6 +164,12 @@ pub struct CompMatchRow {
     pub rounds_lost: Option<i64>,
     /// The player's own `comp_updates` row for the match, if stored.
     pub rr_earned: Option<i64>,
+    /// That same row's Riot `SeasonID` — which act the match counted for
+    /// (`None` without a row).
+    pub season_id: Option<String>,
+    /// That same row's tiers; below 3 is unranked (placements).
+    pub tier_before: Option<i64>,
+    pub tier_after: Option<i64>,
 }
 
 impl Repo {
@@ -325,7 +331,7 @@ impl Repo {
                     (SELECT CASE WHEN COUNT(*) = 1 THEN MAX(t.rounds_won) END
                        FROM match_teams t
                       WHERE t.match_id = m.match_id AND t.team_id != mp.team_id),
-                    cu.rr_earned
+                    cu.rr_earned, cu.season_id, cu.tier_before, cu.tier_after
              FROM match_players mp
              JOIN matches m ON m.match_id = mp.match_id
              LEFT JOIN comp_updates cu ON cu.puuid = mp.puuid AND cu.match_id = mp.match_id
@@ -353,6 +359,9 @@ impl Repo {
                 rounds_won: row.get(14)?,
                 rounds_lost: row.get(15)?,
                 rr_earned: row.get(16)?,
+                season_id: row.get(17)?,
+                tier_before: row.get(18)?,
+                tier_after: row.get(19)?,
             })
         })?;
         rows.collect()

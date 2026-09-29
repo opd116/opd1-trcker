@@ -281,10 +281,12 @@ pub struct MatchSummary {
     pub kills: i64,
     pub deaths: i64,
     pub assists: i64,
-    /// `stats::kd` (zero deaths -> the kill count, ruling R5).
-    pub kd: f32,
+    /// `stats::kd` (zero deaths -> the kill count, ruling R5). `None`
+    /// exactly when `acs` is: no stats for the player (the stored 0/0/0
+    /// is no counted zero).
+    pub kd: Option<f32>,
     /// Average combat score: score / rounds played. `None` when the
-    /// match-details had no stats for the player.
+    /// match-details had no stats for the player (no rounds played).
     pub acs: Option<f32>,
     /// Headshot fraction 0..1 (R5); `None` when no shot landed.
     pub hs_pct: Option<f32>,
@@ -295,6 +297,9 @@ pub struct MatchSummary {
 /// Details' "Recent" and My Stats' "Last 5". `row.map_id` must already be
 /// a valorant-api uuid (`""` when unknown).
 pub fn match_summary(row: &CompMatchRow) -> MatchSummary {
+    // `match_from_details` stores no round count when the player's stats
+    // were missing.
+    let rounds = row.rounds.filter(|&r| r > 0);
     MatchSummary {
         match_id: row.match_id.clone(),
         map_id: row.map_id.clone(),
@@ -306,11 +311,8 @@ pub fn match_summary(row: &CompMatchRow) -> MatchSummary {
         kills: row.kills,
         deaths: row.deaths,
         assists: row.assists,
-        kd: stats::kd(row.kills, row.deaths),
-        acs: row
-            .rounds
-            .filter(|&r| r > 0)
-            .map(|r| row.score as f32 / r as f32),
+        kd: rounds.map(|_| stats::kd(row.kills, row.deaths)),
+        acs: rounds.map(|r| row.score as f32 / r as f32),
         hs_pct: stats::hs_pct(row.hs, row.bs, row.ls),
         rr_earned: row.rr_earned.map(|v| v as i32),
     }
@@ -374,8 +376,9 @@ pub struct MyStats {
     /// The RR chart, oldest first (one point per ranked competitive
     /// update).
     pub rr_series: Vec<RrPoint>,
-    /// The latest session (a 6h gap with no competitive match starts a
-    /// new one); `None` when the act has no stored match.
+    /// The current session (a 6h gap with no competitive match starts a
+    /// new one); `None` when the act's newest stored match started more
+    /// than 6h ago (that session is over) or there is none.
     pub session: Option<SessionSummary>,
     /// The act's newest 5 competitive matches, newest first.
     pub last5: Vec<MatchSummary>,
@@ -406,8 +409,8 @@ pub struct RankSummary {
     pub rr_to_next: Option<u16>,
     /// Sum of the act's stored RR changes.
     pub net_rr: Option<i32>,
-    /// Mean RR change over wins / losses with a known RR change
-    /// (`avgLoss` is negative).
+    /// Mean RR change over ranked wins / losses with a known RR change —
+    /// placement games (0 RR) and draws left out (`avgLoss` is negative).
     pub avg_win: Option<f32>,
     pub avg_loss: Option<f32>,
     /// The latest tier changes, newest first (at most 5).

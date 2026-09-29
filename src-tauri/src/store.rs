@@ -240,28 +240,51 @@ pub fn recent_refs(conn: &Connection, puuid: &str) -> Result<[Option<SharedRef>;
     Ok(out)
 }
 
+/// The `comp_updates` columns [`comp_update_row`] reads, in its order.
+const COMP_UPDATE_COLUMNS: &str =
+    "match_id, season_id, tier_after, tier_before, rr_after, rr_earned, map_id, start_ms";
+
+fn comp_update_row(row: &rusqlite::Row) -> Result<CompUpdateRow> {
+    Ok(CompUpdateRow {
+        match_id: row.get(0)?,
+        season_id: row.get(1)?,
+        tier_after: row.get(2)?,
+        tier_before: row.get(3)?,
+        rr_after: row.get(4)?,
+        rr_earned: row.get(5)?,
+        map_id: row.get(6)?,
+        start_ms: row.get(7)?,
+    })
+}
+
 /// A player's newest `limit` `comp_updates` rows, any season.
 pub fn recent_comp_updates(
     conn: &Connection,
     puuid: &str,
     limit: u32,
 ) -> Result<Vec<CompUpdateRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT match_id, season_id, tier_after, tier_before, rr_after, rr_earned, map_id, start_ms
-         FROM comp_updates WHERE puuid = ?1 ORDER BY start_ms DESC LIMIT ?2",
-    )?;
-    let rows = stmt.query_map(params![puuid, limit], |row| {
-        Ok(CompUpdateRow {
-            match_id: row.get(0)?,
-            season_id: row.get(1)?,
-            tier_after: row.get(2)?,
-            tier_before: row.get(3)?,
-            rr_after: row.get(4)?,
-            rr_earned: row.get(5)?,
-            map_id: row.get(6)?,
-            start_ms: row.get(7)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COMP_UPDATE_COLUMNS} FROM comp_updates
+         WHERE puuid = ?1 ORDER BY start_ms DESC LIMIT ?2"
+    ))?;
+    let rows = stmt.query_map(params![puuid, limit], comp_update_row)?;
+    rows.collect()
+}
+
+/// A player's `comp_updates` rows of `season_id` plus those of any season
+/// from `since_ms` on, newest first.
+fn season_or_recent_comp_updates(
+    conn: &Connection,
+    puuid: &str,
+    season_id: &str,
+    since_ms: i64,
+) -> Result<Vec<CompUpdateRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COMP_UPDATE_COLUMNS} FROM comp_updates
+         WHERE puuid = ?1 AND (season_id = ?2 OR start_ms >= ?3)
+         ORDER BY start_ms DESC"
+    ))?;
+    let rows = stmt.query_map(params![puuid, season_id, since_ms], comp_update_row)?;
     rows.collect()
 }
 
@@ -328,7 +351,9 @@ pub fn recent_matches(
 // ---------------------------------------------------------------------
 
 /// My Stats for the user (`me`) over `act`, from the DB only: the act's
-/// competitive matches and RR rows plus the stored MMR snapshot's rank.
+/// competitive matches (read a day past its dates; `mystats::build` picks
+/// the act's by Riot season), its RR rows plus any from the last 7 days,
+/// and the stored MMR snapshot's rank.
 /// `map_names` is valorant-api map uuid -> name (insight text);
 /// `utc_offset_ms` gives the local offset at an instant (weekday and
 /// time-of-day buckets).
@@ -341,9 +366,15 @@ pub fn load_my_stats(
     map_names: &HashMap<String, String>,
     utc_offset_ms: &dyn Fn(i64) -> i64,
 ) -> Result<MyStats> {
-    let mut matches = repo.comp_matches(me, act.start_ms..act.end_ms, u32::MAX)?;
+    // `build` decides act membership by each RR row's Riot season, which
+    // can differ from valorant-api's dates by the rollout's hours.
+    let dates = act.start_ms.saturating_sub(mystats::ACT_EDGE_MS)
+        ..act.end_ms.saturating_add(mystats::ACT_EDGE_MS);
+    let mut matches = repo.comp_matches(me, dates, u32::MAX)?;
     to_map_uuids(&mut matches, map_uuid);
-    let comp_updates = repo.comp_updates_for_season(me, &act.id)?;
+    // The act's RR rows, plus any season's for "last 7 days".
+    let comp_updates =
+        season_or_recent_comp_updates(repo.conn(), me, &act.id, now_ms - mystats::LAST_7_DAYS_MS)?;
     let current_rank = repo
         .load_mmr_snapshot(me)?
         .and_then(|snap| parse_mmr_snapshot(&snap.json))
@@ -649,7 +680,7 @@ mod tests {
         assert_eq!((s.rounds_won, s.rounds_lost), (Some(13), Some(10)));
         assert_eq!(s.rr_earned, Some(21));
         assert_eq!((s.kills, s.deaths, s.assists), (20, 10, 4));
-        assert_eq!(s.kd, 2.0);
+        assert_eq!(s.kd, Some(2.0));
         assert_eq!(s.acs, Some(5000.0 / 23.0));
         assert_eq!(s.hs_pct, Some(1.0 / 6.0));
 
@@ -823,6 +854,85 @@ mod tests {
         assert_eq!(v["maps"][0]["id"], json!("uuid-ascent"));
         assert_eq!(v["maps"][0]["games"], json!(2));
         assert_eq!(v["rrSeries"].as_array().unwrap().len(), 2);
+    }
+
+    /// 9a math review M2: act membership follows each RR row's Riot
+    /// season, so the matches Riot counted for the act on either side of
+    /// valorant-api's dates must reach `mystats::build`.
+    #[test]
+    fn my_stats_reads_matches_riot_counted_for_the_act_past_its_dates() {
+        let r = repo();
+        let (day, hour) = (86_400_000, 3_600_000);
+        let act = Act {
+            id: "act-cur".into(),
+            name: "ACT V".into(),
+            episode_name: "V26".into(),
+            start_ms: 100 * day,
+            end_ms: 160 * day,
+        };
+        // Riot rolled this act out 2h before valorant-api's start …
+        played(&r, "eve", "competitive", 100 * day - 2 * hour, true);
+        // … while here the previous act was still on 3h after it.
+        played(&r, "late-prev", "competitive", 100 * day + 3 * hour, true);
+        played(&r, "cur", "competitive", 102 * day, false);
+        // No RR row: valorant-api's dates decide.
+        played(&r, "no-rr", "competitive", 100 * day - hour, true);
+        r.upsert_comp_updates(
+            "me",
+            &[
+                rr_row("eve", "act-cur", 100 * day - 2 * hour, 10),
+                rr_row("late-prev", "act-prev", 100 * day + 3 * hour, 28),
+                rr_row("cur", "act-cur", 102 * day, -17),
+            ],
+        )
+        .unwrap();
+        let none = |_: &str| None;
+        let utc = |_: i64| 0;
+        let stats = load_my_stats(&r, "me", &act, 110 * day, &none, &HashMap::new(), &utc).unwrap();
+        let ids: Vec<&str> = stats.last5.iter().map(|m| m.match_id.as_str()).collect();
+        assert_eq!(ids, ["cur", "eve"]);
+        assert_eq!((stats.rank.wins, stats.rank.losses), (Some(1), Some(1)));
+        assert_eq!(stats.rank.net_rr, Some(10 - 17));
+        assert_eq!(stats.rr_series.len(), 2);
+    }
+
+    /// 9a math review m4: "last 7 days" reads the RR rows of the last 7
+    /// days in any season, not only the act's.
+    #[test]
+    fn my_stats_last_7_days_reads_the_previous_acts_recent_rr_rows() {
+        let r = repo();
+        let (day, hour) = (86_400_000, 3_600_000);
+        let act = Act {
+            id: "act-cur".into(),
+            name: "ACT V".into(),
+            episode_name: "V26".into(),
+            start_ms: 100 * day,
+            end_ms: 160 * day,
+        };
+        r.upsert_comp_updates(
+            "me",
+            &[
+                rr_row("c1", "act-cur", 100 * day + hour, 10),
+                rr_row("c2", "act-cur", 100 * day + 2 * hour, 10),
+                rr_row("c3", "act-cur", 101 * day, 10),
+                rr_row("p1", "act-prev", 99 * day, -20),
+                rr_row("p2", "act-prev", 97 * day, -20),
+                rr_row("p3", "act-prev", 96 * day, -20),
+                // Older than 7 days.
+                rr_row("p4", "act-prev", 94 * day, -20),
+            ],
+        )
+        .unwrap();
+        let none = |_: &str| None;
+        let utc = |_: i64| 0;
+        let stats = load_my_stats(&r, "me", &act, 102 * day, &none, &HashMap::new(), &utc).unwrap();
+        let v = serde_json::to_value(&stats).unwrap();
+        assert_eq!(
+            v["insights"],
+            json!([{"kind": "last7Days", "text": "-30 RR over 6 games in the last 7 days.",
+                    "matches": 6, "positive": false}])
+        );
+        assert_eq!(v["rank"]["netRr"], json!(30), "the act's rows only");
     }
 
     #[test]

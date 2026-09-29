@@ -1,15 +1,17 @@
 //! My Stats aggregation (CLAUDE.md "My Stats"): one pure function over
 //! the user's stored rows — no DB, no I/O, no clock, no time-zone
-//! database. The caller reads the rows (`Repo::comp_matches`,
-//! `Repo::comp_updates_for_season`), converts map paths to valorant-api
-//! uuids and supplies the local UTC offset.
+//! database. The caller reads the rows (`Repo::comp_matches` and the
+//! user's `comp_updates`, see [`MyStatsInput`]), converts map paths to
+//! valorant-api uuids and supplies the local UTC offset.
 //!
-//! Everything covers the current act only, and each number has one
-//! source:
+//! Everything covers the current act only — decided one way for matches
+//! and RR rows alike: by Riot's `SeasonID` on the RR row, falling back to
+//! valorant-api's act dates only for a match without one (`in_act`) —
+//! except "last 7 days", a time window. Each number has one source:
 //! - results, maps, agents, K/D, ACS, the session and the weekday /
 //!   time-of-day buckets: the act's stored matches;
-//! - net RR, the RR chart, rank changes and "last 7 days": the act's
-//!   stored competitive updates;
+//! - net RR, the RR chart and rank changes: the act's stored competitive
+//!   updates; "last 7 days": the stored updates of the last 7 days;
 //! - tier and RR: the stored MMR snapshot (as on the live card).
 
 use std::collections::HashMap;
@@ -30,11 +32,18 @@ const LAST5: usize = 5;
 const RANK_CHANGES: usize = 5;
 const HOUR_MS: i64 = 3_600_000;
 const DAY_MS: i64 = 24 * HOUR_MS;
-const WEEK_MS: i64 = 7 * DAY_MS;
+/// The "last 7 days" insight's window — a time window, across act
+/// boundaries.
+pub const LAST_7_DAYS_MS: i64 = 7 * DAY_MS;
 /// Tiers 0–2 are unranked / unused.
 const FIRST_RANKED_TIER: u8 = 3;
 /// From Immortal 1 up, RR accumulates instead of resetting every 100.
 const IMMORTAL_1: u8 = 24;
+/// How far past each end of the act's valorant-api dates the caller reads
+/// matches: Riot switches acts at each region's patch rollout, hours
+/// from valorant-api's midnight-UTC dates, and `in_act` then decides by
+/// the RR row's season.
+pub const ACT_EDGE_MS: i64 = DAY_MS;
 /// Saturday and Sunday (weekday index 0 = Monday).
 const WEEKEND: [usize; 2] = [5, 6];
 /// In `MyStats::by_daypart` order; lowercase for insight text.
@@ -42,11 +51,15 @@ const DAYPARTS: [&str; 4] = ["morning", "afternoon", "evening", "night"];
 
 pub struct MyStatsInput<'a> {
     pub act: &'a Act,
-    /// The user's competitive matches, any order; rows outside `act` are
-    /// ignored. `map_id` must already be a valorant-api uuid (`""` when
-    /// unknown — such a match is left out of the Maps table only).
+    /// The user's competitive matches, any order — at least those dated
+    /// within [`ACT_EDGE_MS`] of the act; rows outside `act` (see
+    /// `in_act`) are ignored. `map_id` must already be a valorant-api
+    /// uuid (`""` when unknown — such a match is left out of the Maps
+    /// table only).
     pub matches: &'a [CompMatchRow],
-    /// The user's competitive updates; other seasons are ignored.
+    /// The user's competitive updates: at least the act's season and the
+    /// last [`LAST_7_DAYS_MS`] of any season. Only "last 7 days" reads
+    /// other seasons' rows.
     pub comp_updates: &'a [CompUpdateRow],
     /// The current act's rank from the MMR snapshot.
     pub current_rank: Option<CurrentRank>,
@@ -83,12 +96,13 @@ pub fn build(input: MyStatsInput) -> MyStats {
 
     let mut played: Vec<Played> = matches
         .iter()
-        .filter(|m| (act.start_ms..act.end_ms).contains(&m.start_ms))
+        .filter(|m| in_act(act, m))
         .map(|row| {
             let (weekday, hour) = local_weekday_hour(row.start_ms + utc_offset_ms(row.start_ms));
             Played {
                 row,
                 result: match_result(&row.team_id, row.winning_team.as_deref()),
+                placement: is_placement(row),
                 weekday,
                 daypart: daypart(hour),
             }
@@ -117,7 +131,7 @@ pub fn build(input: MyStatsInput) -> MyStats {
     insights.extend(time_of_day(&by_daypart));
     insights.extend(weekday_vs_weekend(&by_weekday));
     insights.extend(rr_economy(&played));
-    insights.extend(last_7_days(&updates, now_ms));
+    insights.extend(last_7_days(comp_updates, now_ms));
 
     MyStats {
         rank: rank_summary(current_rank, &played, &updates),
@@ -131,7 +145,7 @@ pub fn build(input: MyStatsInput) -> MyStats {
                 })
             })
             .collect(),
-        session: latest_session(&played),
+        session: current_session(&played, now_ms),
         last5: played
             .iter()
             .rev()
@@ -150,10 +164,33 @@ pub fn build(input: MyStatsInput) -> MyStats {
 // per-match view + running totals
 // ---------------------------------------------------------------------
 
+/// Whether a match counted for `act`: by its RR row's Riot season — the
+/// same test the RR rows get — and only without an RR row by valorant-api's
+/// act dates. So a game played between valorant-api's act start and
+/// Riot's rollout counts for the act Riot counted it for, everywhere.
+fn in_act(act: &Act, row: &CompMatchRow) -> bool {
+    match &row.season_id {
+        Some(season) => *season == act.id,
+        None => (act.start_ms..act.end_ms).contains(&row.start_ms),
+    }
+}
+
+/// A placement game: its RR row has an unranked tier (< 3) on either
+/// side — Riot sends tier 0 before and after each placement game until
+/// the last one places the player. Its RR change (0) is no ranked win or
+/// loss.
+fn is_placement(row: &CompMatchRow) -> bool {
+    [row.tier_before, row.tier_after]
+        .into_iter()
+        .flatten()
+        .any(|tier| ranked_tier(tier).is_none())
+}
+
 /// One of the act's matches with what every section needs precomputed.
 struct Played<'a> {
     row: &'a CompMatchRow,
     result: MatchResultKind,
+    placement: bool,
     /// Local weekday, 0 = Monday.
     weekday: usize,
     /// Index into [`DAYPARTS`].
@@ -243,11 +280,12 @@ fn absolute_rr(tier: u8, rr: i64) -> i64 {
     i64::from(tier.min(IMMORTAL_1)) * 100 + rr
 }
 
-/// The stored RR changes of the matches that ended in `kind`.
+/// The stored RR changes of the ranked (not placement) matches that
+/// ended in `kind`.
 fn rr_of(played: &[Played], kind: MatchResultKind) -> Vec<i64> {
     played
         .iter()
-        .filter(|p| p.result == kind)
+        .filter(|p| p.result == kind && !p.placement)
         .filter_map(|p| p.row.rr_earned)
         .collect()
 }
@@ -316,9 +354,17 @@ fn rank_summary(
     }
 }
 
-/// The session holding the newest match (CLAUDE.md: "A new session
-/// starts after a 6h gap with no comp match"). `played` is oldest first.
-fn latest_session(played: &[Played]) -> Option<SessionSummary> {
+/// The session still going at `now_ms`: the one holding the newest match
+/// (CLAUDE.md: "A new session starts after a 6h gap with no comp match"),
+/// unless that match started more than 6h before `now_ms` — then the next
+/// match will start a new session, and there's none now (`None`). Gaps
+/// are measured start to start, as between matches. `played` is oldest
+/// first.
+fn current_session(played: &[Played], now_ms: i64) -> Option<SessionSummary> {
+    let newest = played.last()?.row.start_ms;
+    if now_ms - newest > DEFAULT_SESSION_GAP_MS {
+        return None;
+    }
     let starts: Vec<i64> = played.iter().map(|p| p.row.start_ms).collect();
     let games = &played[stats::split_sessions(&starts, DEFAULT_SESSION_GAP_MS).pop()?];
     let mut tally = Tally::default();
@@ -464,30 +510,30 @@ fn weekday_vs_weekend(by_weekday: &[Tally; 7]) -> Option<Insight> {
     })
 }
 
+/// Average RR per ranked win and loss — [`MIN_GAMES`]+ on each side.
 fn rr_economy(played: &[Played]) -> Option<Insight> {
     let wins = rr_of(played, MatchResultKind::Win);
     let losses = rr_of(played, MatchResultKind::Loss);
-    let matches = (wins.len() + losses.len()) as u32;
-    if matches < MIN_GAMES {
+    if wins.len().min(losses.len()) < MIN_GAMES as usize {
         return None;
     }
-    let (avg_win, avg_loss) = (mean(&wins)?, mean(&losses)?);
+    let matches = (wins.len() + losses.len()) as u32;
+    // Rounded as the text shows them, and judged on those.
+    let avg_win = mean(&wins)?.round() as i32;
+    let avg_loss = mean(&losses)?.round() as i32;
     Some(Insight {
         kind: InsightKind::RrEconomy,
-        text: format!(
-            "Average {:+} RR on wins and {:+} RR on losses.",
-            avg_win.round() as i32,
-            avg_loss.round() as i32
-        ),
+        text: format!("Average {avg_win:+} RR on wins and {avg_loss:+} RR on losses."),
         matches,
-        positive: avg_win + avg_loss >= 0.0,
+        positive: avg_win + avg_loss >= 0,
     })
 }
 
-fn last_7_days(updates: &[&CompUpdateRow], now_ms: i64) -> Option<Insight> {
+/// Every stored RR change of the last 7 days, whichever act it was in.
+fn last_7_days(updates: &[CompUpdateRow], now_ms: i64) -> Option<Insight> {
     let recent: Vec<i64> = updates
         .iter()
-        .filter(|u| u.start_ms >= now_ms - WEEK_MS)
+        .filter(|u| u.start_ms >= now_ms - LAST_7_DAYS_MS)
         .map(|u| u.rr_earned)
         .collect();
     let matches = recent.len() as u32;

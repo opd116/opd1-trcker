@@ -321,7 +321,7 @@ fn comp_matches_join_round_score_and_rr_within_range() {
             match_id: "m1".into(),
             season_id: "act".into(),
             tier_after: 15,
-            tier_before: Some(15),
+            tier_before: Some(14),
             rr_after: 40,
             rr_earned: 21,
             map_id: None,
@@ -363,6 +363,21 @@ fn comp_matches_join_round_score_and_rr_within_range() {
             [Some(5), None, None],
             [None, None, None],
             [Some(13), Some(9), Some(21)],
+        ]
+    );
+    // The same RR row's Riot season and tiers ride along (My Stats decides
+    // act membership by season and spots placements by tier); no RR row
+    // -> all `None`.
+    let season_tiers: Vec<(Option<&str>, Option<i64>, Option<i64>)> = rows
+        .iter()
+        .map(|r| (r.season_id.as_deref(), r.tier_before, r.tier_after))
+        .collect();
+    assert_eq!(
+        season_tiers,
+        [
+            (None, None, None),
+            (None, None, None),
+            (Some("act"), Some(14), Some(15)),
         ]
     );
     let m1 = &rows[2];

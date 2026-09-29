@@ -17,6 +17,7 @@ const DAY: i64 = 24 * HOUR;
 const ACT_START: i64 = 20_318 * DAY;
 const ACT: &str = "act-cur";
 const PREV: &str = "act-prev";
+const NEXT: &str = "act-next";
 
 fn act() -> Act {
     Act {
@@ -35,9 +36,22 @@ enum R {
     D,
 }
 
+/// The Riot season of an RR row dated `start_ms` when Riot's rollout
+/// matches valorant-api's act dates exactly.
+fn season_at(start_ms: i64) -> &'static str {
+    if start_ms < ACT_START {
+        PREV
+    } else if start_ms < ACT_START + 60 * DAY {
+        ACT
+    } else {
+        NEXT
+    }
+}
+
 /// A stored competitive match of the user: 20/10/5, 4000 score over 20
 /// rounds (ACS 200), 10/30/10 shots (HS 20%); +20 RR on a win, -15 on a
-/// loss, 0 on a draw.
+/// loss, 0 on a draw, from an RR row in Plat 1 (tier 15) of the season
+/// its date falls in.
 fn row(id: &str, start_ms: i64, r: R) -> CompMatchRow {
     let (winning_team, won, lost, rr) = match r {
         R::W => (Some("Blue"), 13, 7, 20),
@@ -62,7 +76,26 @@ fn row(id: &str, start_ms: i64, r: R) -> CompMatchRow {
         rounds_won: Some(won),
         rounds_lost: Some(lost),
         rr_earned: Some(rr),
+        season_id: Some(season_at(start_ms).into()),
+        tier_before: Some(15),
+        tier_after: Some(15),
     }
+}
+
+/// `r` with its RR row replaced by one from `season`, `tiers` and `rr`.
+fn with_rr(mut r: CompMatchRow, season: &str, tiers: (i64, i64), rr: i64) -> CompMatchRow {
+    r.season_id = Some(season.into());
+    (r.tier_before, r.tier_after) = (Some(tiers.0), Some(tiers.1));
+    r.rr_earned = Some(rr);
+    r
+}
+
+/// `r` without a stored RR row.
+fn no_rr(mut r: CompMatchRow) -> CompMatchRow {
+    r.rr_earned = None;
+    r.season_id = None;
+    (r.tier_before, r.tier_after) = (None, None);
+    r
 }
 
 fn on_map(mut r: CompMatchRow, map: &str) -> CompMatchRow {
@@ -149,7 +182,10 @@ fn mystats_current_act_only() {
         update("cur-1", ACT, ACT_START + DAY, (16, 15), 85, -15),
         update("cur-2", ACT, ACT_START + 2 * DAY, (15, 16), 5, 20),
     ];
-    let s = build(input(&a, &matches, &updates, &n));
+    let s = build(MyStatsInput {
+        now_ms: ACT_START + 2 * DAY + HOUR,
+        ..input(&a, &matches, &updates, &n)
+    });
 
     let last5: Vec<&str> = s.last5.iter().map(|m| m.match_id.as_str()).collect();
     assert_eq!(last5, ["cur-2", "cur-1"]);
@@ -293,7 +329,10 @@ fn session_uses_6h_gap() {
     ];
     let a = act();
     let n = names();
-    let s = build(input(&a, &matches, &[], &n));
+    let s = build(MyStatsInput {
+        now_ms: c + gap + 3 * HOUR,
+        ..input(&a, &matches, &[], &n)
+    });
     let session = s.session.expect("a session");
     assert_eq!(session.started_ms, c);
     assert_eq!((session.wins, session.losses), (1, 1));
@@ -312,8 +351,7 @@ fn session_uses_6h_gap() {
 #[test]
 fn rank_card_counts_averages_and_recent_changes() {
     let d = |i: i64| ACT_START + i * DAY;
-    let mut no_rr = row("w3", d(6), R::W);
-    no_rr.rr_earned = None;
+    let no_rr = no_rr(row("w3", d(6), R::W));
     let matches = vec![
         {
             let mut w = row("w1", d(1), R::W);
@@ -430,7 +468,7 @@ fn maps_and_agents_tables() {
     let mut bind = on_map(row("m4", d(4), R::D), "map-bind");
     bind.agent_id = Some("agent-sova".into());
     bind.rounds = None;
-    bind.rr_earned = None;
+    let bind = no_rr(bind);
     let mut unknown = on_map(row("m5", d(5), R::W), "");
     unknown.agent_id = None;
     let matches = vec![
@@ -478,7 +516,7 @@ fn last5_newest_first_with_match_stats() {
     assert_eq!(m.result, MatchResultKind::Win);
     assert_eq!((m.rounds_won, m.rounds_lost), (Some(13), Some(7)));
     assert_eq!((m.kills, m.deaths, m.assists), (20, 10, 5));
-    assert_eq!(m.kd, 2.0);
+    assert_eq!(m.kd, Some(2.0));
     assert_eq!(m.acs, Some(200.0));
     assert_eq!(m.hs_pct, Some(0.2));
     assert_eq!(m.rr_earned, Some(20));
@@ -650,7 +688,11 @@ fn json_is_camel_case_with_nulls_for_unknowns() {
 
     let matches = vec![row("m1", ACT_START + DAY, R::W)];
     let updates = vec![update("m1", ACT, ACT_START + DAY, (12, 13), 5, 20)];
-    let full = serde_json::to_value(build(input(&a, &matches, &updates, &n))).unwrap();
+    let full = serde_json::to_value(build(MyStatsInput {
+        now_ms: ACT_START + DAY + HOUR,
+        ..input(&a, &matches, &updates, &n)
+    }))
+    .unwrap();
     assert_eq!(full["session"]["streak"], json!(["W"]));
     assert_eq!(full["session"]["startedMs"], json!(ACT_START + DAY));
     assert_eq!(
@@ -686,4 +728,264 @@ fn json_is_camel_case_with_nulls_for_unknowns() {
     ] {
         assert!(map.get(key).is_some(), "map row lacks {key}: {map}");
     }
+}
+
+// ---------------------------------------------------------------------
+// 9a math review fixes
+// ---------------------------------------------------------------------
+
+fn rr_economy(s: &opd1_core::model::MyStats) -> Option<(&str, u32, bool)> {
+    s.insights
+        .iter()
+        .find(|i| i.kind == InsightKind::RrEconomy)
+        .map(|i| (i.text.as_str(), i.matches, i.positive))
+}
+
+/// M1: placement games (unranked tiers, 0 RR) stay out of the average
+/// win/loss RR and the RR-economy insight; a ranked draw is neither.
+#[test]
+fn placement_games_stay_out_of_rr_averages() {
+    let a = act();
+    let n = names();
+    let d = |i: i64| ACT_START + i * DAY;
+    let placement = |id: &str, i: i64, r: R, tiers| with_rr(row(id, d(i), r), ACT, tiers, 0);
+    let ranked = |id: &str, i: i64, r: R, rr| with_rr(row(id, d(i), r), ACT, (12, 12), rr);
+    // The review's counterexample.
+    let matches = vec![
+        placement("p1", 1, R::W, (0, 0)),
+        placement("p2", 2, R::W, (0, 0)),
+        // The last placement game: ranked only afterwards.
+        placement("p3", 3, R::L, (0, 12)),
+        ranked("w1", 4, R::W, 20),
+        ranked("w2", 5, R::W, 24),
+        ranked("l1", 6, R::L, -16),
+        ranked("l2", 7, R::L, -18),
+        ranked("x1", 8, R::D, 0),
+    ];
+    let s = build(input(&a, &matches, &[], &n));
+    // Placement games are still real wins and losses.
+    assert_eq!((s.rank.wins, s.rank.losses), (Some(4), Some(3)));
+    assert_eq!(s.rank.avg_win, Some(22.0));
+    assert_eq!(s.rank.avg_loss, Some(-17.0));
+    // Two ranked games a side is too few for the insight.
+    assert_eq!(rr_economy(&s), None);
+
+    // With enough ranked games the insight shows their averages only.
+    let mut matches: Vec<CompMatchRow> = matches[..3].to_vec();
+    for (i, rr) in [20, 24, 22, 21, 23].into_iter().enumerate() {
+        matches.push(ranked(&format!("w{i}"), 4 + i as i64, R::W, rr));
+    }
+    for (i, rr) in [-16, -18, -17, -15, -19].into_iter().enumerate() {
+        matches.push(ranked(&format!("l{i}"), 9 + i as i64, R::L, rr));
+    }
+    let s = build(input(&a, &matches, &[], &n));
+    assert_eq!((s.rank.avg_win, s.rank.avg_loss), (Some(22.0), Some(-17.0)));
+    assert_eq!(
+        rr_economy(&s),
+        Some(("Average +22 RR on wins and -17 RR on losses.", 10, true))
+    );
+}
+
+/// M2: a match belongs to the act its RR row's Riot season says, exactly
+/// like the RR rows themselves; only a match without an RR row falls
+/// back to valorant-api's act dates.
+#[test]
+fn act_membership_follows_riots_season_for_matches_and_rr_rows() {
+    let a = act();
+    let n = names();
+    // The review's counterexample: Riot rolled the act out 3h+ after
+    // valorant-api's midnight start.
+    let early = ACT_START + 3 * HOUR;
+    let later = ACT_START + 2 * DAY;
+    let matches = vec![
+        with_rr(row("early", early, R::W), PREV, (15, 15), 28),
+        with_rr(row("later", later, R::W), ACT, (15, 15), 18),
+    ];
+    let updates = vec![
+        update("early", PREV, early, (15, 15), 78, 28),
+        update("later", ACT, later, (15, 15), 68, 18),
+    ];
+    let s = build(MyStatsInput {
+        now_ms: later + HOUR,
+        ..input(&a, &matches, &updates, &n)
+    });
+    assert_eq!((s.rank.wins, s.rank.losses), (Some(1), Some(0)));
+    assert_eq!(s.rank.net_rr, Some(18));
+    assert_eq!(s.rank.avg_win, Some(18.0));
+    let last5: Vec<&str> = s.last5.iter().map(|m| m.match_id.as_str()).collect();
+    assert_eq!(last5, ["later"]);
+    assert_eq!(s.rr_series.len(), 1);
+    assert_eq!(s.maps.iter().map(|r| r.games).sum::<u32>(), 1);
+    assert_eq!(s.agents.iter().map(|r| r.games).sum::<u32>(), 1);
+    assert_eq!(s.by_weekday.iter().map(|c| c.games).sum::<u32>(), 1);
+    assert_eq!(s.by_daypart.iter().map(|c| c.games).sum::<u32>(), 1);
+    assert_eq!(s.session.map(|x| x.wins), Some(1));
+
+    // The reverse (Riot rolled out before midnight), and the date
+    // fallback for matches without an RR row.
+    let eve = ACT_START - 2 * HOUR;
+    let matches = vec![
+        with_rr(row("eve", eve, R::W), ACT, (15, 15), 10),
+        no_rr(row("no-rr-before", ACT_START - HOUR, R::W)),
+        no_rr(row("no-rr-inside", ACT_START + HOUR, R::L)),
+    ];
+    let updates = vec![update("eve", ACT, eve, (15, 15), 60, 10)];
+    let s = build(input(&a, &matches, &updates, &n));
+    let last5: Vec<&str> = s.last5.iter().map(|m| m.match_id.as_str()).collect();
+    assert_eq!(last5, ["no-rr-inside", "eve"]);
+    assert_eq!((s.rank.wins, s.rank.losses), (Some(1), Some(1)));
+    assert_eq!(s.rank.net_rr, Some(10));
+    assert_eq!(s.rr_series.len(), 1);
+}
+
+/// m2: once the newest comp match started more than 6h before `now`, its
+/// session is over — no current session (`None`, shown as `—`).
+#[test]
+fn no_current_session_6h_after_the_last_match() {
+    let a = act();
+    let n = names();
+    let last = ACT_START + 20 * DAY;
+    // The review's counterexample: the last two games were 5 days ago.
+    let matches = vec![row("a", last - HOUR, R::L), row("b", last, R::L)];
+    let session_at = |now_ms| {
+        build(MyStatsInput {
+            now_ms,
+            ..input(&a, &matches, &[], &n)
+        })
+        .session
+    };
+    assert_eq!(session_at(last + 5 * DAY), None);
+    // The same rule as between matches: exactly 6h still continues it.
+    let current = session_at(last + 6 * HOUR).expect("still the current session");
+    assert_eq!(current.streak, [StreakMark::Loss, StreakMark::Loss]);
+    assert_eq!(current.net_rr, Some(-30));
+    assert_eq!(session_at(last + 6 * HOUR + 1), None);
+}
+
+/// m4: "last 7 days" is a time window — it counts the previous act's
+/// games inside it too; everything else stays on the current act.
+#[test]
+fn last_7_days_crosses_the_act_start() {
+    let a = act();
+    let n = names();
+    // The review's counterexample: two days into the act, 5 of its games
+    // at +10, and 6 of the previous act's 3–6 days ago at -20.
+    let now = ACT_START + 2 * DAY;
+    let mut updates: Vec<CompUpdateRow> = (1..=5)
+        .map(|i| {
+            update(
+                &format!("c{i}"),
+                ACT,
+                ACT_START + i * HOUR,
+                (15, 15),
+                50,
+                10,
+            )
+        })
+        .collect();
+    for (i, days_ago) in [3, 3, 4, 5, 5, 6].into_iter().enumerate() {
+        let start = now - days_ago * DAY - i as i64 * HOUR;
+        updates.push(update(&format!("p{i}"), PREV, start, (15, 15), 50, -20));
+    }
+    // Older than 7 days: outside the window.
+    updates.push(update("old", PREV, now - 8 * DAY, (15, 15), 50, -20));
+
+    let s = build(MyStatsInput {
+        now_ms: now,
+        ..input(&a, &[], &updates, &n)
+    });
+    let last7: Vec<(&str, u32, bool)> = s
+        .insights
+        .iter()
+        .filter(|i| i.kind == InsightKind::Last7Days)
+        .map(|i| (i.text.as_str(), i.matches, i.positive))
+        .collect();
+    assert_eq!(
+        last7,
+        [("-70 RR over 11 games in the last 7 days.", 11, false)]
+    );
+    // The act's own numbers still leave the previous act out.
+    assert_eq!(s.rank.net_rr, Some(50));
+    assert_eq!(s.rr_series.len(), 5);
+    assert!(s.rank.changes.is_empty());
+}
+
+/// m7: a match whose details had no stats for the user (stored 0/0/0,
+/// no rounds) has an unknown K/D — like its ACS — not a counted 0.
+#[test]
+fn match_without_player_stats_has_unknown_kd() {
+    let a = act();
+    let n = names();
+    let mut blank = row("blank", ACT_START + DAY, R::W);
+    (blank.kills, blank.deaths, blank.assists, blank.score) = (0, 0, 0, 0);
+    (blank.hs, blank.bs, blank.ls) = (0, 0, 0);
+    blank.rounds = None;
+    let matches = vec![blank, row("full", ACT_START + 2 * DAY, R::W)];
+    let v = serde_json::to_value(build(input(&a, &matches, &[], &n))).unwrap();
+    let kd_acs: Vec<(&str, &serde_json::Value, &serde_json::Value)> = v["last5"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| (m["matchId"].as_str().unwrap(), &m["kd"], &m["acs"]))
+        .collect();
+    assert_eq!(
+        kd_acs,
+        [
+            ("full", &json!(2.0), &json!(200.0)),
+            ("blank", &json!(null), &json!(null)),
+        ]
+    );
+}
+
+/// m8: the RR-economy insight needs 5 ranked games on each side, and its
+/// good/bad flag follows the rounded numbers its text shows.
+#[test]
+fn rr_economy_needs_5_games_a_side_and_flags_what_it_shows() {
+    let a = act();
+    let n = names();
+    let games = |wins: &[i64], losses: &[i64]| -> Vec<CompMatchRow> {
+        let results = wins.iter().map(|&rr| (R::W, rr));
+        let results = results.chain(losses.iter().map(|&rr| (R::L, rr)));
+        results
+            .enumerate()
+            .map(|(i, (r, rr))| {
+                let start = ACT_START + (1 + i as i64) * DAY;
+                with_rr(row(&format!("m{i}"), start, r), ACT, (12, 12), rr)
+            })
+            .collect()
+    };
+    let economy = |matches: &[CompMatchRow]| {
+        let s = build(input(&a, matches, &[], &n));
+        rr_economy(&s).map(|(text, games, positive)| (text.to_string(), games, positive))
+    };
+    // The review's case: 5 games, but the loss average is one game.
+    assert_eq!(economy(&games(&[20; 4], &[-15])), None);
+    assert_eq!(economy(&games(&[20; 5], &[-15; 4])), None);
+    assert_eq!(
+        economy(&games(&[20; 5], &[-15; 5])),
+        Some((
+            "Average +20 RR on wins and -15 RR on losses.".into(),
+            10,
+            true
+        ))
+    );
+    // +19.6 and -19.7 show as +20 / -20: even, so not a weak spot.
+    let losses = [-20, -20, -20, -20, -20, -20, -20, -19, -19, -19];
+    assert_eq!(
+        economy(&games(&[20, 20, 20, 20, 18], &losses)),
+        Some((
+            "Average +20 RR on wins and -20 RR on losses.".into(),
+            15,
+            true
+        ))
+    );
+    // +18 / -20 is.
+    assert_eq!(
+        economy(&games(&[18; 5], &[-20; 5])),
+        Some((
+            "Average +18 RR on wins and -20 RR on losses.".into(),
+            10,
+            false
+        ))
+    );
 }

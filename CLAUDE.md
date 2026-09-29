@@ -89,6 +89,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - **Top 3 Teammates** for the current act, with full names and shared match count. Computed from the last 20 current-act comp matches plus any older matches already in the DB.
 - **Loadout:** Vandal, Phantom, Operator, and Sheriff skins, in the equipped chroma.
 - Encounter history with the user (see Smart data).
+- Hero stats: Win%, Games, W / L for the current act; K/D and HS% from the last ≤20 current-act competitive matches (tooltip `Last N competitive · this act`) (R116, user 2026-09-29).
 - Clicking a recent match or an encounter row opens **Match Details** (the design's scoreboard: ACS, K/D/A, +/−, ADR, HS%, half scores, rank per player). Hidden-name rules apply inside it (see Hidden names).
 
 **My Stats** (the user's own account; **scrolling allowed**; period is the current act):

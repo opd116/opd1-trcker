@@ -434,7 +434,8 @@ Shown only when `card.party && !card.isSelf && !card.isSelfParty`. `col = --part
 | ⟲ badge | card, hero | `{with} with · {against} against` |
 | Party hit area + tab | card | `Party · confirmed` / `Party · likely` |
 | Peak group (icon + name + when) | card, hero | past act: `{actTitle}\n{actDates}`; current act: `{actLabel} · Current act\n{actDates}`. Examples: `VALORANT 2026 · Act 4\nJun 24 – Aug 25, 2026`, `V26 A5 · Current act\nAug 26 – Oct 20, 2026`. The design shows the dates only; the act name is added. |
-| K/D block, HS% block | card, hero | `Last 5 competitive` |
+| K/D block, HS% block | card | `Last 5 competitive` |
+| K/D block, HS% block | hero | `Last {N} competitive · this act`, `N = details.heroMatches` (R116) |
 | Win% block | card, hero | `wl:{actWins}:{actGames−actWins}:{actGames}` rendered structured (§4.1). No tip if `actGames` is null. |
 | Games block, W / L block | hero | `This act` **[bound]** (the design's `tipGames`; `tipWL` would repeat Games, so it uses the scope word too) |
 | Last-5 tile (real) | card, hero | `{rrDelta} RR · {span}`, e.g. `+18 RR · 45m`, `−15 RR · 2h`, `0 RR · 4h`. `rrEarned === null` → `{Win|Loss|Draw} · {span}` (the design's unused `WORD` map). |
@@ -592,11 +593,12 @@ Map names, agent names (hidden-agent cards, Details `shortName`, Top-3 and toolt
   - Cells 1–5: cell 1 `padding:12px 16px 14px 0`; cells 2–5 `padding:12px 16px 14px 18px; border-left:1px solid var(--line)`.
   - Each cell is a column: label 12px/14px 500 `--text2`; value 22px/27px 600 `tab`.
   - Order:
-    1. `K/D` (`kd2`);
-    2. `HS%` (`pct0`);
+    1. `K/D` (`kd2`), from `details.heroKd` (R116);
+    2. `HS%` (`pct0`), from `details.heroHs` (R116);
     3. `Win%` (`pct0 actWinrate`);
     4. `Games` (`actGames`);
     5. `W / L`: `<W in --win>` + `<' / ' --text3 weight 500>` + `<L in --loss>`, `nowrap`.
+  - Sources (R116, user 2026-09-29): `Win%`, `Games` and `W / L` stay act-wide, taken from the MMR data (`card.actWinrate`, `card.actWins`, `card.actGames`). `K/D` and `HS%` are the player's most recent up to 20 competitive matches of the current act, the same match set Top 3 Teammates fetches (zero extra requests). `details.heroMatches` is the number of act matches used. With no current-act competitive match, `heroKd` and `heroHs` are `null` and both cells show `—`. The Live card is unchanged: its K/D and HS% stay on the last 5 competitive (§3.7).
   - Tooltips per §4.2. Absent values → a 44×27 bar, radius 3, `--skel`, under the label.
 - Last-5 cell: `display:flex; align-items:center; padding:12px 20px 14px 20px; border-left:1px solid var(--line)`.
   - Same component as §3.8 at hero size: tiles 26×26, radius 4, 13px/700; tile gap 6; column gap 4; underline `left/right:6px; bottom:-6px`; the arrow row is unchanged (7px).
@@ -843,6 +845,9 @@ interface PlayerDetails {
   card: PlayerCard; recent: MatchSummary[] /* ≤8 newest first */;
   topTeammates: { puuid: string; name: DisplayName; count: number }[];
   loadout: Loadout; encounters: EncounterDetailRow[] /* newest first */;
+  heroKd: number | null;                // (R116) K/D over the most recent ≤20 current-act competitive matches; null when there are none
+  heroHs: number | null;                // (R116) HS% (0..1) over the same set; null when there are none
+  heroMatches: number;                  // (R116) how many act matches heroKd / heroHs use (0..20); feeds the hero tooltip
 }
 
 interface MatchDetailsView {            // NEW — invoke('match_details', { matchId, focusPuuid })

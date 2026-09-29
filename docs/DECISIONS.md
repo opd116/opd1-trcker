@@ -1,9 +1,9 @@
 # Decisions
 
-Every ruling made while building OPD1 TRCKER, in number order (R1 to R108). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
+Every ruling made while building OPD1 TRCKER, in number order (R1 to R108, then R116). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.
-- Rulings come from the working ledger (R1 to R73 and R87 to R108) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
+- Rulings come from the working ledger (R1 to R73, R87 to R108 and R116) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
 - Precedence when rules disagree (R92): `docs/requirements-raw.md` (newest dated block) > the design file > older `CLAUDE.md` visual rules. `docs/design-spec.md` outranks the design file only for the R74 to R86 gap-fills.
 - The user's own words are in `docs/requirements-raw.md`; the [user decisions index](#user-decisions-index) at the end maps each dated block to a summary.
 
@@ -763,6 +763,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R108). Each
 - **Cost:** None.
 - **Status:** active
 
+### R116 — Player Details hero K/D and HS% use the current act
+
+- **What:** User decision (2026-09-29). In Player Details, the hero stat strip (K/D, HS%, Win%, Games, W / L) takes its sources as follows. `Win%`, `Games` and `W / L` stay act-wide, from the MMR data (the design already works this way). `K/D` and `HS%` switch from the last 5 competitive matches to the player's most recent up to 20 competitive matches of the current act, the same match set Top 3 Teammates already fetches. The hero tooltip becomes `Last {N} competitive · this act`, with N the number of act matches used. With no current-act competitive match, both values show `—`. The Live card is unchanged: K/D and HS% from the last 5 competitive, tooltip `Last 5 competitive`. Backend (Task 15): `PlayerDetails` gains `heroKd` (number|null), `heroHs` (number|null) and `heroMatches` (number).
+- **Why:** The user wants the hero to describe the act, like Win%, Games and W / L beside it. It costs zero extra requests because Top 3 Teammates already fetches those matches.
+- **Cost:** The hero K/D and HS% can differ from the same player's card values, because the sets differ (up to 20 act matches vs. the last 5). Three new fields in Task 15.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.
@@ -779,4 +786,4 @@ Each row is a dated block of `docs/requirements-raw.md`, in file order. That fil
 | 2026-09-27 to 2026-09-28 | `قرارات أثناء التنفيذ` | GitHub Actions works; the user must approve the design before the screens; Claude orchestrates and agents implement; the Peak tip shows the full act name and dates; design v1 rejected; last 5 shows W/L/draw only with RR and time on hover; design rounds 2 and 3 not liked; new direction "easy on the eye" (one system for type, numbers, spacing); party-detection details; a trial round on two screens; three refinement passes; obsolete files archived to `ارشيف/`. |
 | 2026-09-28 | `ملاحظات المستخدم على تصميم v7.1` | Nine points: the card is crowded, secondary text is too faint, each statistic's scope must be clear (shown without hovering: superseded, see the marker), long names truncate but the tag never does, one meaning per indicator, last 5 must be clearer, Peak names the tier, shared-match results read `Your result`, hidden means the name only. |
 | 2026-09-28 | `ملاحظات المستخدم على v8` | Remove the printed scope headings (tooltip only); numbers and last-5 results look off; the palette looks AI-made; the user said the design pleases them (to confirm). |
-| 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. |
+| 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. Later 2026-09-29 line: Player Details hero K/D and HS% from the last 20 act matches (R116). |

@@ -53,6 +53,16 @@ pub const TEAMMATE_WINDOW: u32 = 20;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Gone;
 
+/// What a per-player sync learned beyond the DB writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncOutcome {
+    /// The player's match-history call answered. Party detection reads the
+    /// stored history, so a player whose history failed this cycle must not
+    /// take part: the stored one may be from an earlier session (a false
+    /// stripe).
+    pub history_ok: bool,
+}
+
 /// `ClientGone` -> [`Gone`]; anything else is logged and swallowed.
 fn check(err: RiotError, what: &str, puuid: &str) -> Result<(), Gone> {
     match err {
@@ -207,7 +217,7 @@ pub async fn sync_player(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
     puuid: &str,
-) -> Result<(), Gone> {
+) -> Result<SyncOutcome, Gone> {
     let mut ids = Vec::new();
 
     let comp = sync_comp_updates(st, session, puuid, 5).await?;
@@ -215,15 +225,19 @@ pub async fn sync_player(
         ids.extend(rows.iter().map(|r| r.match_id.clone()));
     }
 
-    match session.match_history(puuid, Some(0), Some(2), None).await {
+    let history_ok = match session.match_history(puuid, Some(0), Some(2), None).await {
         Ok(resp) => {
             let entries = history_entries(&resp);
             ids.extend(entries.iter().map(|e| e.match_id.clone()));
             let p = puuid.to_string();
             st.db(move |repo| repo.index_history(&p, &entries)).await;
+            true
         }
-        Err(e) => check(e, "match history", puuid)?,
-    }
+        Err(e) => {
+            check(e, "match history", puuid)?;
+            false
+        }
+    };
 
     fetch_missing_details(st, session, ids).await?;
 
@@ -253,7 +267,7 @@ pub async fn sync_player(
             }
         }
     }
-    Ok(())
+    Ok(SyncOutcome { history_ok })
 }
 
 /// Player Details' deeper sync: the last [`TEAMMATE_WINDOW`] competitive
@@ -319,7 +333,7 @@ async fn sync_step(
     session: &Arc<RiotSession>,
     puuid: String,
 ) -> Result<(), Gone> {
-    sync_player(st, session, &puuid).await?;
+    let outcome = sync_player(st, session, &puuid).await?;
     let (p, me) = (puuid.clone(), session.self_puuid().to_string());
     // A failed read keeps the bundle already on screen.
     let db = st
@@ -328,6 +342,9 @@ async fn sync_step(
     {
         let mut live = lock(&st.live);
         live.synced.insert(puuid.clone());
+        if outcome.history_ok {
+            live.party_ready.insert(puuid.clone());
+        }
         if let (Some(db), Some(slot)) =
             (db, live.slots.iter_mut().find(|s| s.roster.puuid == puuid))
         {

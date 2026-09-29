@@ -222,6 +222,7 @@ impl Poller {
                 // A different account: nothing learned about the previous
                 // one's session applies.
                 live.synced.clear();
+                live.party_ready.clear();
                 live.names_attempted.clear();
                 live.self_roster = None;
                 live.self_name = None;
@@ -453,6 +454,7 @@ impl Poller {
             live.loadouts.clear();
             if t.reset_synced {
                 live.synced.clear();
+                live.party_ready.clear();
                 live.names_attempted.clear();
             }
             ended
@@ -816,6 +818,7 @@ impl Poller {
                 .collect();
             for p in party {
                 live.synced.remove(&p);
+                live.party_ready.remove(&p);
             }
         }
         self.ensure_worker(session);

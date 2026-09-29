@@ -14,7 +14,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 use opd1_core::db::open_db;
-use opd1_core::db::repo::{Match, MatchPlayer, MmrSnapshot, Repo};
+use opd1_core::db::repo::{HistoryEntry, Match, MatchPlayer, MmrSnapshot, Repo};
 use opd1_core::model::{DisplayName, EncounterCount, Field, LiveState, PlayerDetails, Team};
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
@@ -33,6 +33,8 @@ const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
 /// Incognito, and never in a match with ME: their name is only in the DB
 /// from someone else's match.
 const STRANGER: &str = "dddddddd-0000-0000-0000-000000000004";
+/// OTHER's teammate in the party-mark tests.
+const MATE: &str = "eeeeeeee-0000-0000-0000-000000000005";
 const ACT: &str = "act-current";
 /// valorant-api's Split: the map the remembered-name tests play on.
 const SPLIT_PATH: &str = "/Game/Maps/Bonsai/Bonsai";
@@ -868,4 +870,116 @@ async fn player_details_card_carries_act_wins_games() {
     let rate = card["actWinrate"].as_f64().unwrap();
     assert!((rate - 39.0 / 61.0).abs() < 1e-3, "actWinrate {rate}");
     assert_eq!(card["isSelf"], json!(false));
+}
+
+// ---------------------------------------------------------------------
+// Task 14: a failed match history never feeds party marks
+// ---------------------------------------------------------------------
+
+/// OTHER and MATE played their last two matches together in an earlier
+/// session: both are in the DB with the same team, and both histories are
+/// indexed. Party detection reads exactly this.
+async fn store_earlier_shared_matches(st: &AppState) {
+    let matches = [("s1", 5_000), ("s2", 6_000)];
+    st.db(move |repo| {
+        for (id, start_ms) in matches {
+            let m = Match {
+                match_id: id.into(),
+                map_id: "/Game/Maps/Ascent/Ascent".into(),
+                queue_id: "unrated".into(),
+                start_ms,
+                winning_team: None,
+                is_ranked: false,
+                rounds_played: None,
+            };
+            let players = [
+                player_row(OTHER, "Red", "Other", "OTH"),
+                player_row(MATE, "Red", "Mate", "MAT"),
+            ];
+            repo.upsert_match(&m, &[], &players)?;
+            for puuid in [OTHER, MATE] {
+                repo.index_history(
+                    puuid,
+                    &[HistoryEntry {
+                        match_id: id.into(),
+                        queue_id: "unrated".into(),
+                        start_ms,
+                    }],
+                )?;
+            }
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+fn history_of(puuid: &str) -> Value {
+    json!({"Subject": puuid, "History": [
+        {"MatchID": "s2", "GameStartTime": 6_000, "QueueID": "unrated"},
+        {"MatchID": "s1", "GameStartTime": 5_000, "QueueID": "unrated"}
+    ]})
+}
+
+/// Syncs ME, OTHER and MATE in an In Game roster where OTHER and MATE
+/// shared their last two matches. MATE's history always answers; OTHER's
+/// answers only when `other_history_ok` (otherwise it stays the harness's 500).
+async fn run_party_scenario(other_history_ok: bool) -> Harness {
+    let h = harness().await;
+    store_earlier_shared_matches(&h.st).await;
+    get(
+        &h.server,
+        &format!("/match-history/v1/history/{MATE}"),
+        history_of(MATE),
+    )
+    .await;
+    if other_history_ok {
+        // Beats the harness's 500 for OTHER's history (lower number = first).
+        Mock::given(method("GET"))
+            .and(path(format!("/match-history/v1/history/{OTHER}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(history_of(OTHER)))
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+    }
+    {
+        let slots = vec![
+            slot_for(&h.st, ME, false).await,
+            slot_for(&h.st, OTHER, false).await,
+            slot_for(&h.st, MATE, false).await,
+        ];
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.slots = slots;
+    }
+    fetch_self_name(&h.st, &h.session).await.unwrap();
+    let id = lock(&h.st.live).try_start_worker().expect("work pending");
+    run_worker(h.st.clone(), h.session.clone(), id).await;
+    h
+}
+
+#[tokio::test]
+async fn failed_history_never_feeds_party_marks() {
+    // OTHER's match history fails (500): the history stored from an earlier
+    // session must not link OTHER to MATE, so neither card gets a stripe.
+    let h = run_party_scenario(false).await;
+    {
+        let live = lock(&h.st.live);
+        assert!(live.synced.contains(OTHER), "the sync itself ran");
+        assert!(live.synced.contains(MATE));
+        assert!(!live.party_ready.contains(OTHER), "no history, no party");
+        assert!(live.party_ready.contains(MATE));
+    }
+    assert_eq!(card_json(&h.st, OTHER)["party"], Value::Null);
+    assert_eq!(card_json(&h.st, MATE)["party"], Value::Null);
+
+    // Control: with the history answering, the same DB links the two.
+    let h = run_party_scenario(true).await;
+    assert!(lock(&h.st.live).party_ready.contains(OTHER));
+    let (other, mate) = (
+        card_json(&h.st, OTHER)["party"].clone(),
+        card_json(&h.st, MATE)["party"].clone(),
+    );
+    assert!(other.is_object(), "OTHER is in a party: {other}");
+    assert_eq!(other["group"], mate["group"], "same party");
 }

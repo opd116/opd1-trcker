@@ -111,6 +111,11 @@ pub struct LiveModel {
     /// Players whose per-player sync ran (since the last reset): a field
     /// still unknown after that is Missing, not Loading.
     pub synced: HashSet<String>,
+    /// The subset of `synced` whose match-history call answered this cycle:
+    /// only these take part in party detection (a failed history leaves the
+    /// stored one from an earlier session, which would draw a false
+    /// stripe). Cleared and pruned together with `synced`.
+    pub party_ready: HashSet<String>,
     /// The worker currently entitled to run (R45). Set and cleared only
     /// under this model's lock, together with the "is there work?" check,
     /// so no roster change can fall between a worker deciding to exit and
@@ -138,6 +143,7 @@ impl LiveModel {
             known_names: HashMap::new(),
             names_attempted: HashSet::new(),
             synced: HashSet::new(),
+            party_ready: HashSet::new(),
             worker_id: None,
             next_worker_id: 0,
             current: LiveState {
@@ -186,9 +192,11 @@ impl LiveModel {
     /// every build: it's a few comparisons over at most 10 players, all
     /// from the slots' DB bundles (no request, no query).
     ///
-    /// Only players whose sync ran this cycle take part (R53): a cached
-    /// history from an earlier session could link players who no longer
-    /// play together. Their mark appears on the publish after their sync.
+    /// Only players whose history was synced this cycle take part (R53):
+    /// a cached history from an earlier session could link players who no
+    /// longer play together — and so could the stored one of a player whose
+    /// history call failed now (`party_ready`, not just `synced`). Their
+    /// mark appears on the publish after their sync.
     pub fn party_marks(&self) -> HashMap<String, PartyMark> {
         if !matches!(self.stage, Stage::Pregame | Stage::Ingame) {
             return HashMap::new();
@@ -197,7 +205,7 @@ impl LiveModel {
         let synced: Vec<&Slot> = self
             .slots
             .iter()
-            .filter(|s| self.synced.contains(&s.roster.puuid))
+            .filter(|s| self.party_ready.contains(&s.roster.puuid))
             .collect();
         let players: Vec<(String, Team)> = synced
             .iter()
@@ -1024,7 +1032,7 @@ mod tests {
     }
 
     #[test]
-    fn party_marks_come_from_synced_players_only_in_agent_select_and_in_game() {
+    fn party_marks_come_from_players_with_a_synced_history_only_in_agent_select_and_in_game() {
         let mut slots = Vec::new();
         for (p, self_party, team) in [
             ("me", true, Team::Ally),
@@ -1055,10 +1063,17 @@ mod tests {
 
         // Cached history isn't trusted before this cycle's sync (R53).
         assert_eq!(marks(&m), vec![None; 5]);
-        m.synced.extend(["me", "duo", "e1", "e2"].map(String::from));
+        for p in ["me", "duo", "e1", "e2"] {
+            m.synced.insert(p.into());
+            m.party_ready.insert(p.into());
+        }
         // e3 not synced yet: no link yet. The user's party: never.
         assert_eq!(marks(&m), vec![None, None, likely, likely, None]);
+        // Synced, but its history call failed (not `party_ready`): still no
+        // link, whatever the stored history says.
         m.synced.insert("e3".into());
+        assert_eq!(marks(&m), vec![None, None, likely, likely, None]);
+        m.party_ready.insert("e3".into());
         assert_eq!(marks(&m), vec![None, None, likely, likely, likely]);
 
         m.stage = Stage::Pregame;

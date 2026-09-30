@@ -26,6 +26,11 @@
 //! it would have filled become Missing (`—`) through the card builder's
 //! "attempted" rule, never a stuck skeleton. `ClientGone` aborts the whole
 //! run — the poll loop notices the client is gone on its own next tick.
+//!
+//! A failed rank part (`comp_updates` or `mmr`) is retried, bounded (R155,
+//! `crate::rank_retry`): the worker syncs the player again 20 s after the
+//! failure and 60 s after that, while they are on the live roster, behind the
+//! first-pass syncs and ahead of the names fill and the backfill.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -121,7 +126,7 @@ pub const BACKFILL_MAX_FAILURES: u32 = 3;
 /// for good (the gap R101 forbids).
 pub fn counts_toward_skip(e: &RiotError) -> bool {
     match e {
-        RiotError::Status(code) => !matches!(code, 401 | 403 | 404 | 429),
+        RiotError::Status(code, _) => !matches!(code, 401 | 403 | 404 | 429),
         RiotError::Decode(_) => true,
         RiotError::ClientGone
         | RiotError::ShardsUnavailable
@@ -143,6 +148,21 @@ pub struct SyncOutcome {
     /// history failed this cycle (the call or the write) must not take part:
     /// the stored one may be from an earlier session (a false stripe).
     pub history_ok: bool,
+    /// The rank part failed: the `comp_updates` call (which also skips the
+    /// `mmr` call), or the `mmr` call. Any error but `ClientGone`, which
+    /// aborts the sync instead. R155: such a player is synced again later
+    /// (`LiveModel::note_rank_sync`).
+    pub rank_failed: bool,
+}
+
+/// The warn line a failed call leaves in the log (R158): what failed, for
+/// whom — the short puuid only — and why: the HTTP status with Riot's own
+/// answer (its `errorCode`), `rate-limited`, the kind of transport failure, or
+/// that the body did not parse. All of it is the error's own text, which the
+/// riot crate keeps free of URLs, tokens and full puuids; this only adds the
+/// short puuid.
+fn failure_line(what: &str, puuid: &str, err: &RiotError) -> String {
+    format!("{what} for {} failed: {err}", short(puuid))
 }
 
 /// `ClientGone` -> [`Gone`]; anything else is logged and swallowed.
@@ -150,7 +170,7 @@ fn check(err: RiotError, what: &str, puuid: &str) -> Result<(), Gone> {
     match err {
         RiotError::ClientGone => Err(Gone),
         other => {
-            log::warn!("{what} for {} failed: {other}", short(puuid));
+            log::warn!("{}", failure_line(what, puuid, &other));
             Ok(())
         }
     }
@@ -355,10 +375,13 @@ pub async fn sync_player(
     puuid: &str,
 ) -> Result<SyncOutcome, Gone> {
     let mut ids = Vec::new();
+    // R155: set when the rank part fails, for the retry.
+    let mut rank_failed = false;
 
     let comp = sync_comp_updates(st, session, puuid, 5).await?;
-    if let Some(rows) = &comp {
-        ids.extend(rows.iter().map(|r| r.match_id.clone()));
+    match &comp {
+        Some(rows) => ids.extend(rows.iter().map(|r| r.match_id.clone())),
+        None => rank_failed = true,
     }
 
     let history_ok = match session.match_history(puuid, Some(0), Some(2), None).await {
@@ -401,11 +424,17 @@ pub async fn sync_player(
                     };
                     st.db(move |repo| repo.save_mmr_snapshot(&snap)).await;
                 }
-                Err(e) => check(e, "mmr", puuid)?,
+                Err(e) => {
+                    check(e, "mmr", puuid)?;
+                    rank_failed = true;
+                }
             }
         }
     }
-    Ok(SyncOutcome { history_ok })
+    Ok(SyncOutcome {
+        history_ok,
+        rank_failed,
+    })
 }
 
 /// Player Details' deeper sync: the last [`TEAMMATE_WINDOW`] competitive
@@ -877,7 +906,7 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
                 end_run(st, me);
                 return Err(Gone);
             }
-            Err(e @ RiotError::Status(404)) => {
+            Err(e @ RiotError::Status(404, _)) => {
                 log::warn!("backfill: match {} skipped: {e}", short(&id));
                 pop(st);
             }
@@ -919,8 +948,9 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
 
 /// The live roster's background worker (worker `id`, claimed via
 /// `LiveModel::try_start_worker`). Each job — one `names()` call for the
-/// visible players still unnamed, one player's sync in display order, or,
-/// last of all, one step of the own-history backfill — is chosen by
+/// visible players still unnamed, one player's sync in display order, a due
+/// rank retry (R155), one names-fill request, or, last of all, one step of the
+/// own-history backfill — is chosen by
 /// `LiveModel::next_job` under the model's lock, which also
 /// releases the claim when nothing is left (R45: no roster change can
 /// slip between "nothing to do" and the task ending). Roster changes
@@ -931,7 +961,8 @@ pub async fn run_worker(st: Arc<AppState>, session: Arc<RiotSession>, id: u64) {
         let outcome = match job {
             None => return,
             Some(Job::Names(needed)) => names_step(&st, &session, needed).await,
-            Some(Job::Sync(puuid)) => sync_step(&st, &session, puuid).await,
+            Some(Job::Sync(puuid)) => sync_step(&st, &session, puuid, false).await,
+            Some(Job::RankRetry(puuid)) => sync_step(&st, &session, puuid, true).await,
             Some(Job::FillNames) => fill_names_step(&st, &session).await,
             Some(Job::Backfill) => backfill_step(&st, &session).await,
         };
@@ -946,6 +977,7 @@ async fn sync_step(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
     puuid: String,
+    retry: bool,
 ) -> Result<(), Gone> {
     let outcome = sync_player(st, session, &puuid).await?;
     let (p, me) = (puuid.clone(), session.self_puuid().to_string());
@@ -962,6 +994,8 @@ async fn sync_step(
         if outcome.history_ok && db.is_some() {
             live.party_ready.insert(puuid.clone());
         }
+        // R155: a failed rank part is synced again later, bounded.
+        live.note_rank_sync(&puuid, outcome.rank_failed, retry);
         if let (Some(db), Some(slot)) =
             (db, live.slots.iter_mut().find(|s| s.roster.puuid == puuid))
         {
@@ -1327,27 +1361,72 @@ mod tests {
         // that doesn't decode. Rate-limit, network and auth errors say
         // nothing about the id: they end the run uncounted.
         for counted in [
-            RiotError::Status(500),
-            RiotError::Status(502),
-            RiotError::Status(400),
+            RiotError::Status(500, String::new()),
+            RiotError::Status(502, String::new()),
+            RiotError::Status(400, String::new()),
             RiotError::Decode("missing field".into()),
         ] {
             assert!(counts_toward_skip(&counted), "{counted:?} counts");
         }
         for uncounted in [
-            RiotError::Status(404),
-            RiotError::Status(429),
+            RiotError::Status(404, String::new()),
+            RiotError::Status(429, String::new()),
             RiotError::RateLimited,
             RiotError::Http("operation timed out".into()),
             RiotError::AuthFailed("no token".into()),
-            RiotError::Status(401),
-            RiotError::Status(403),
+            RiotError::Status(401, String::new()),
+            RiotError::Status(403, String::new()),
             RiotError::ShardsUnavailable,
             RiotError::ClientGone,
         ] {
             assert!(
                 !counts_toward_skip(&uncounted),
                 "{uncounted:?} is not counted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_line_says_what_failed_for_whom_and_why_and_nothing_more() {
+        const PUUID: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+        let status = RiotError::Status(
+            500,
+            r#"{"errorCode":"INTERNAL_SERVER_ERROR","httpStatus":500}"#.into(),
+        );
+        let line = failure_line("mmr", PUUID, &status);
+        assert_eq!(
+            line,
+            "mmr for aaaaaaaa failed: unexpected HTTP status 500 from Riot: \
+             {\"errorCode\":\"INTERNAL_SERVER_ERROR\",\"httpStatus\":500}"
+        );
+        assert_eq!(
+            failure_line(
+                "comp updates",
+                PUUID,
+                &RiotError::Status(429, String::new())
+            ),
+            "comp updates for aaaaaaaa failed: unexpected HTTP status 429 from Riot"
+        );
+        // The other kinds: rate limit, decode, and the transport failure kind.
+        for (err, needle) in [
+            (RiotError::RateLimited, "rate-limited"),
+            (RiotError::Decode("missing field `Matches`".into()), "parse"),
+            (
+                RiotError::Http("timeout: error sending request".into()),
+                "timeout",
+            ),
+            (
+                RiotError::Http("connect: error sending request".into()),
+                "connect",
+            ),
+        ] {
+            let line = failure_line("mmr", PUUID, &err);
+            assert!(line.starts_with("mmr for aaaaaaaa failed: "), "{line}");
+            assert!(line.contains(needle), "{line}");
+            assert!(!line.contains(PUUID), "no full puuid: {line}");
+            assert!(
+                !line.contains("http://") && !line.contains("https://"),
+                "{line}"
             );
         }
     }

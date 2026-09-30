@@ -102,6 +102,10 @@ pub(crate) struct Poller {
     /// The user's own loadout was asked for under this session (R90: once
     /// per connect, at the first presence that shows VALORANT running).
     self_loadout_asked: bool,
+    /// The client version came from the user's VALORANT presence under this
+    /// session (R159: re-resolved at the first presence that has one, once per
+    /// connect — no extra request).
+    version_from_presence_done: bool,
     /// The presence `queueId` while in a match — decides the post-match
     /// check for the match that just ended (R48).
     match_queue: Option<String>,
@@ -141,6 +145,7 @@ impl Poller {
             presence_stage: Stage::Closed,
             game: GameWatch::default(),
             self_loadout_asked: false,
+            version_from_presence_done: false,
             match_queue: None,
             presence_errors: 0,
             party_key: None,
@@ -249,6 +254,8 @@ impl Poller {
                 // (their hidden players were just forgotten above).
                 live.name_fill.clear();
                 live.match_end_ms = None;
+                // R155: nor are its pending rank retries.
+                live.rank_retries.clear();
             }
             live.self_puuid = Some(me.clone());
             live.self_name_attempted = false;
@@ -272,6 +279,8 @@ impl Poller {
         self.game = GameWatch::default();
         // R90: asked at this session's first presence showing VALORANT.
         self.self_loadout_asked = false;
+        // R159: so is the client version, from that same presence.
+        self.version_from_presence_done = false;
         self.presence_errors = 0;
         self.next_presence = Instant::now();
         // R43: the user's own Riot ID, from the local chat session.
@@ -372,6 +381,12 @@ impl Poller {
         if self.st.take_worker_kick() && self.stage != Stage::Closed {
             self.ensure_worker(session);
         }
+        // R155: a rank retry came due. The worker exits when nothing else is
+        // queued and never waits for one, so this tick (every 2 s while
+        // VALORANT runs) is what wakes it; a running worker takes it itself.
+        if self.stage != Stage::Closed && lock(&self.st.live).due_rank_retry().is_some() {
+            self.ensure_worker(session);
+        }
         Ok(())
     }
 
@@ -416,7 +431,10 @@ impl Poller {
         let decoded = private.as_deref().and_then(decode_presence);
 
         match self.game.on_presence(decoded.is_some()) {
-            GameVerdict::Present => self.read_self_loadout_once(session),
+            GameVerdict::Present => {
+                self.read_self_loadout_once(session);
+                self.client_version_from_presence_once(session, private.as_deref());
+            }
             // The session was built (or has lived) while VALORANT wasn't
             // running: stale shards / fallback client version. Rebuild it
             // now that the game is up — first launch or relaunch (R46).
@@ -505,6 +523,31 @@ impl Poller {
         tauri::async_runtime::spawn(async move {
             let _ = crate::sync::fetch_self_loadout(&st, &s).await;
         });
+    }
+
+    /// R159: the first time this session sees the user's VALORANT presence
+    /// *with a usable version*, its `partyClientVersion` (already in hand: the
+    /// tick read the presences) replaces a client version the session took
+    /// from a lower source when it was built before the game's presence
+    /// existed. No request; the header value of the next remote call changes
+    /// if the version did. A presence without one changes nothing and does not
+    /// use up the turn (a tiny base64 + JSON read per tick until one has it),
+    /// or a session would keep the lower value for its whole life.
+    fn client_version_from_presence_once(
+        &mut self,
+        session: &Arc<RiotSession>,
+        private: Option<&str>,
+    ) {
+        if self.version_from_presence_done {
+            return;
+        }
+        if let Some(private) = private {
+            session.note_presence_version(private);
+            // The presence has spoken (now or at connect) exactly when it is
+            // the source in use.
+            self.version_from_presence_done =
+                session.client_version_source() == opd1_riot::session::VersionSource::Presence;
+        }
     }
 
     pub(crate) fn stop_worker(&mut self) {
@@ -919,6 +962,8 @@ impl Poller {
             live.map_path = map_path;
             live.slots = slots;
             live.note_hidden();
+            // R155: a player the new roster no longer shows is not retried.
+            live.prune_rank_retries();
         }
         self.st.publish();
         // An open Details of someone on this roster follows it (a lock-in,
@@ -953,6 +998,7 @@ impl Poller {
             live.map_path = None;
             live.map_id = None;
             live.slots = slot.into_iter().collect();
+            live.prune_rank_retries();
         }
         self.st.publish();
         self.ensure_worker(session);
@@ -984,6 +1030,8 @@ impl Poller {
             live.coregame_match_id = None;
             live.loadouts.clear();
             live.slots = slot.into_iter().collect();
+            // R155: nothing is retried while VALORANT is closed.
+            live.prune_rank_retries();
         }
         self.st.publish();
     }
@@ -1664,6 +1712,262 @@ mod tests {
                 .any(|r| r.method.as_str() == "PUT"),
             "the tick started a worker that asked name-service"
         );
+        poller.stop_worker();
+    }
+
+    /// Like [`mock_presence`], the private blob also carrying
+    /// `partyClientVersion` (nested, as the game sends it).
+    async fn mock_presence_with_version(h: &Harness, state: &str, version: &str, times: u64) {
+        let private = BASE64.encode(
+            json!({
+                "sessionLoopState": state, "queueId": "competitive", "partyId": "party-1",
+                "partyPresenceData": {"partyClientVersion": version},
+            })
+            .to_string(),
+        );
+        Mock::given(method("GET"))
+            .and(path("/chat/v4/presences"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "presences": [{"puuid": ME, "product": "valorant", "private": private}]
+            })))
+            .up_to_n_times(times)
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+    }
+
+    /// The `X-Riot-ClientVersion` of the newest request to `p`.
+    async fn last_version_header(h: &Harness, p: &str) -> String {
+        let reqs = requests(&h.server).await;
+        let r = reqs
+            .iter()
+            .rev()
+            .find(|r| r.url.path() == p)
+            .expect("asked");
+        r.headers
+            .get("x-riot-clientversion")
+            .expect("header")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn the_first_valorant_presence_re_resolves_the_client_version_once() {
+        // R159: the session was built before the game's presence existed (the
+        // harness's own sources are all empty: the literal fallback). The
+        // first presence with a `partyClientVersion` — read by the tick, no
+        // request of ours — puts the game's own value on the next request.
+        let h = harness().await;
+        assert_eq!(
+            h.session.client_version_source(),
+            opd1_riot::session::VersionSource::Fallback
+        );
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.presence_stage = Stage::Menus;
+        poller.party_key = mocked_party_key();
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        synced_lobby(&h);
+        mock_presence_with_version(&h, "MENUS", "release-13.06-shipping-18-5590001", 1).await;
+
+        let asked_before = requests(&h.server).await.len();
+        poller.presence_tick(&h.session).await.unwrap();
+        assert_eq!(
+            requests(&h.server)
+                .await
+                .iter()
+                .skip(asked_before)
+                .filter(|r| r.url.path() != "/chat/v4/presences")
+                .count(),
+            0,
+            "the tick's own presence read is the only request it makes"
+        );
+        assert_eq!(
+            h.session.client_version(),
+            "release-13.06-shipping-18-5590001"
+        );
+        assert_eq!(
+            h.session.client_version_source(),
+            opd1_riot::session::VersionSource::Presence
+        );
+        h.session.mmr(ME).await.ok();
+        assert_eq!(
+            last_version_header(&h, &mmr_of(ME)).await,
+            "release-13.06-shipping-18-5590001",
+            "the next remote request carries it"
+        );
+
+        // Once per session: a later presence with another value changes nothing.
+        mock_presence_with_version(&h, "MENUS", "release-other-0", 10).await;
+        poller.presence_tick(&h.session).await.unwrap();
+        assert_eq!(
+            h.session.client_version(),
+            "release-13.06-shipping-18-5590001"
+        );
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_first_presence_without_a_version_does_not_use_up_the_re_resolve() {
+        // R159 review: the turn is only spent by a presence that had a usable
+        // `partyClientVersion`; otherwise the session would keep the lower
+        // source's value for its whole life.
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.presence_stage = Stage::Menus;
+        poller.party_key = mocked_party_key();
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        synced_lobby(&h);
+        // The first presences carry a blank version; the third has the real one.
+        mock_presence_with_version(&h, "MENUS", "  ", 2).await;
+        mock_presence_with_version(&h, "MENUS", "release-13.06-shipping-18-5590001", 1).await;
+        mock_presence_with_version(&h, "MENUS", "release-other-0", 10).await;
+        let before = h.session.client_version();
+
+        for _ in 0..2 {
+            poller.presence_tick(&h.session).await.unwrap();
+            assert_eq!(h.session.client_version(), before, "nothing usable yet");
+            assert!(!poller.version_from_presence_done);
+        }
+        poller.presence_tick(&h.session).await.unwrap();
+        assert_eq!(
+            h.session.client_version(),
+            "release-13.06-shipping-18-5590001"
+        );
+        assert!(poller.version_from_presence_done);
+        h.session.mmr(ME).await.ok();
+        assert_eq!(
+            last_version_header(&h, &mmr_of(ME)).await,
+            "release-13.06-shipping-18-5590001",
+            "the request after the second presence carries it"
+        );
+        // And now it is done: a later value changes nothing.
+        poller.presence_tick(&h.session).await.unwrap();
+        assert_eq!(
+            h.session.client_version(),
+            "release-13.06-shipping-18-5590001"
+        );
+        poller.stop_worker();
+    }
+
+    /// The mmr path of `puuid`.
+    fn mmr_of(puuid: &str) -> String {
+        format!("/mmr/v1/players/{puuid}")
+    }
+
+    /// `ME`'s `mmr` request always fails (a 500).
+    async fn mmr_fails(h: &Harness) {
+        Mock::given(method("GET"))
+            .and(path(mmr_of(ME).as_str()))
+            .respond_with(ResponseTemplate::new(500))
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+    }
+
+    /// How often `ME`'s mmr has been asked so far.
+    async fn mmr_requests(h: &Harness) -> usize {
+        requests(&h.server)
+            .await
+            .iter()
+            .filter(|r| r.url.path() == mmr_of(ME))
+            .count()
+    }
+
+    /// Waits (up to ~5s) until `ME`'s mmr has been asked `n` times.
+    async fn wait_for_mmr_requests(h: &Harness, n: usize) -> usize {
+        let mut seen = 0;
+        for _ in 0..250 {
+            seen = mmr_requests(h).await;
+            if seen >= n {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn a_due_rank_retry_gets_a_worker_at_the_next_tick() {
+        // R155: the worker exits when nothing else is queued and never waits
+        // for a retry: the poll loop's tick is what starts one when it is due.
+        let h = harness().await;
+        mmr_fails(&h).await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Menus;
+            live.slots = vec![Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            }];
+        }
+        // The first pass (the tick's roster-install path is not under test).
+        let id = lock(&h.st.live).try_start_worker().expect("first pass");
+        crate::sync::run_worker(h.st.clone(), h.session.clone(), id).await;
+        assert_eq!(mmr_requests(&h).await, 1);
+
+        // Not due: the tick starts nothing.
+        poller.connected_tick(&h.session).await.unwrap();
+        assert!(!lock(&h.st.live).worker_running());
+        lock(&h.st.live).advance_clock(Duration::from_secs(19));
+        poller.connected_tick(&h.session).await.unwrap();
+        assert!(!lock(&h.st.live).worker_running(), "19 s: not yet");
+
+        // Due, with nothing else queued: the next tick starts a worker.
+        lock(&h.st.live).advance_clock(Duration::from_secs(1));
+        poller.connected_tick(&h.session).await.unwrap();
+        assert_eq!(wait_for_mmr_requests(&h, 2).await, 2, "the retry ran");
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn no_tick_starts_a_retry_while_closed_and_closing_drops_it() {
+        let h = harness().await;
+        mmr_fails(&h).await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Menus;
+            live.slots = vec![Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            }];
+        }
+        let id = lock(&h.st.live).try_start_worker().expect("first pass");
+        crate::sync::run_worker(h.st.clone(), h.session.clone(), id).await;
+        assert_eq!(mmr_requests(&h).await, 1);
+        assert!(!lock(&h.st.live).rank_retries.is_empty());
+
+        // VALORANT closes: the retry is dropped with the session's roster.
+        poller.enter_closed().await;
+        assert!(lock(&h.st.live).rank_retries.is_empty());
+        lock(&h.st.live).advance_clock(Duration::from_secs(1_000));
+        poller.stage = Stage::Closed;
+        poller.connected_tick(&h.session).await.unwrap();
+        assert!(!lock(&h.st.live).worker_running());
+        sleep(Duration::from_millis(200)).await;
+        assert_eq!(mmr_requests(&h).await, 1, "no retry ran");
+    }
+
+    #[tokio::test]
+    async fn an_account_switch_drops_the_pending_retries() {
+        let h = harness().await;
+        {
+            let mut live = lock(&h.st.live);
+            live.self_puuid = Some("previous-account".into());
+            live.rank_retries
+                .first_pass("someone", true, std::time::Instant::now());
+        }
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        assert!(lock(&h.st.live).rank_retries.is_empty());
         poller.stop_worker();
     }
 

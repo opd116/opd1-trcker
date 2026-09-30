@@ -17,7 +17,8 @@
 //! - `my_stats()` — the user's My Stats for the current act, from the DB
 //!   only (no Riot call); `null` while the user or the act is unknown.
 //! - `copy_log()` — the last 500 log lines (R30; the UI copies them).
-//! - `dump_raw()` — redacted raw responses to `app_data/debug/*.json`.
+//! - `dump_raw()` — redacted raw responses (the last 2xx and the last error
+//!   of each endpoint) and the log to `app_data/debug/`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -291,27 +292,85 @@ fn file_stem(key: &str) -> String {
     }
 }
 
+/// What the debug dump writes, as `(file name, contents)` (R158):
+/// - `<key>.json`: the last 2xx body of each endpoint, redacted;
+/// - `<key>.error.json` / `<key>.error.txt`: the last non-2xx answer of each
+///   endpoint (status and Riot's `errorCode`), redacted and at most 4 KB;
+/// - `log.txt`: exactly the lines `copy_log` returns — written even with
+///   nothing captured, since the log is what explains why there is nothing.
+fn dump_files(
+    captures: Vec<(String, String)>,
+    errors: Vec<opd1_riot::raw_capture::ErrorDump>,
+    log: String,
+) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = captures
+        .into_iter()
+        .map(|(key, body)| (format!("{}.json", file_stem(&key)), body))
+        .collect();
+    files.extend(
+        errors
+            .into_iter()
+            .map(|e| (format!("{}.error.{}", file_stem(&e.key), e.ext), e.contents)),
+    );
+    files.push(("log.txt".to_string(), log));
+    files
+}
+
+/// Whether `name` is an error file of an earlier dump (`<key>.error.json` /
+/// `<key>.error.txt`).
+fn is_error_dump_name(name: &str) -> bool {
+    name.ends_with(".error.json") || name.ends_with(".error.txt")
+}
+
+/// Writes `files` into `dir` (created if needed); how many were written. The
+/// error files of an earlier dump are removed first (only those, only in
+/// `dir`): an error file carries no time, so one from an earlier run left
+/// beside a fresh dump would blame an endpoint that works now.
+fn write_dump(dir: &std::path::Path, files: &[(String, String)]) -> std::io::Result<u32> {
+    std::fs::create_dir_all(dir)?;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let is_stale_error = entry.file_type().is_ok_and(|t| t.is_file())
+            && entry.file_name().to_str().is_some_and(is_error_dump_name);
+        if is_stale_error {
+            // Best effort: a file that cannot be removed is overwritten below
+            // when its endpoint failed again, and otherwise stays.
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    let mut n = 0;
+    for (name, contents) in files {
+        std::fs::write(dir.join(name), contents)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 #[tauri::command]
 pub async fn dump_raw(state: AppStateRef<'_>) -> Result<DumpResult, String> {
-    let Some(session) = state.session() else {
-        return Err("VALORANT is not connected".into());
-    };
+    dump_raw_for(state.inner()).await
+}
+
+/// `dump_raw` without the Tauri wrapper. With no session (VALORANT closed, or
+/// a connect that keeps failing) there are no captures, and the log is still
+/// written — it is the part that says why.
+pub(crate) async fn dump_raw_for(st: &Arc<AppState>) -> Result<DumpResult, String> {
+    dump_raw_with(st, crate::logbuf::snapshot()).await
+}
+
+/// [`dump_raw_for`] with the log text given (what `copy_log` returns).
+pub(crate) async fn dump_raw_with(st: &Arc<AppState>, log: String) -> Result<DumpResult, String> {
     // Already redacted by opd1-riot (tokens/JWTs/passwords).
-    let captures = session.raw_captures();
-    let dir = state.debug_dir.clone();
+    let (captures, errors) = match st.session() {
+        Some(session) => (session.raw_captures(), session.raw_error_captures()),
+        None => (Vec::new(), Vec::new()),
+    };
+    let files = dump_files(captures, errors, log);
+    let dir = st.debug_dir.clone();
     let shown = dir.display().to_string();
-    let files = tauri::async_runtime::spawn_blocking(move || -> std::io::Result<u32> {
-        std::fs::create_dir_all(&dir)?;
-        let mut n = 0;
-        for (key, body) in captures {
-            std::fs::write(dir.join(format!("{}.json", file_stem(&key))), body)?;
-            n += 1;
-        }
-        Ok(n)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    let files = tauri::async_runtime::spawn_blocking(move || write_dump(&dir, &files))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     log::info!("dump_raw: wrote {files} files");
     Ok(DumpResult { dir: shown, files })
 }
@@ -494,6 +553,104 @@ mod tests {
             check_match_args("", "../x"),
             Err("invalid match id".to_string())
         );
+    }
+
+    #[test]
+    fn the_dump_is_the_captures_the_errors_and_the_log() {
+        use opd1_riot::raw_capture::ErrorDump;
+        let files = dump_files(
+            vec![("mmr".into(), "{}".into()), ("a/../b".into(), "x".into())],
+            vec![ErrorDump {
+                key: "mmr".into(),
+                ext: "json",
+                contents: r#"{"status":500}"#.into(),
+            }],
+            "line one\nline two".into(),
+        );
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["mmr.json", "a____b.json", "mmr.error.json", "log.txt"]
+        );
+        assert_eq!(files.last().unwrap().1, "line one\nline two");
+        // Nothing captured at all: the log alone.
+        let files = dump_files(Vec::new(), Vec::new(), String::new());
+        assert_eq!(files, [("log.txt".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn writing_the_dump_counts_the_log_and_works_with_no_captures() {
+        let dir = tempfile::tempdir().unwrap();
+        let debug = dir.path().join("debug");
+        let files = dump_files(Vec::new(), Vec::new(), "the log".into());
+        assert_eq!(write_dump(&debug, &files).unwrap(), 1);
+        assert_eq!(
+            std::fs::read_to_string(debug.join("log.txt")).unwrap(),
+            "the log"
+        );
+
+        let files = dump_files(
+            vec![("mmr".into(), "{}".into())],
+            Vec::new(),
+            "the log".into(),
+        );
+        assert_eq!(write_dump(&debug, &files).unwrap(), 2, "the log counts");
+        assert!(debug.join("mmr.json").exists());
+    }
+
+    #[test]
+    fn a_new_dump_removes_the_error_files_of_an_earlier_one() {
+        // An error file has no time on it: one left from an earlier run would
+        // blame an endpoint that works now.
+        let dir = tempfile::tempdir().unwrap();
+        let debug = dir.path().join("debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        for stale in ["mmr.error.json", "comp_updates.error.txt"] {
+            std::fs::write(debug.join(stale), "old").unwrap();
+        }
+        // Not error files: left alone (a 2xx capture is overwritten only when
+        // written again; anything else in the directory is not ours to touch).
+        std::fs::write(debug.join("notes.txt"), "keep").unwrap();
+        std::fs::write(debug.join("errors.json"), "keep").unwrap();
+        std::fs::write(debug.join("match_details.json"), "old capture").unwrap();
+        std::fs::create_dir_all(debug.join("sub.error.json")).unwrap();
+        // A file outside the debug directory is never looked at.
+        std::fs::write(dir.path().join("outside.error.json"), "keep").unwrap();
+
+        let files = dump_files(
+            vec![("mmr".into(), "{}".into())],
+            vec![opd1_riot::raw_capture::ErrorDump {
+                key: "match_details".into(),
+                ext: "txt",
+                contents: "HTTP 502\nbad gateway".into(),
+            }],
+            "log".into(),
+        );
+        assert_eq!(write_dump(&debug, &files).unwrap(), 3);
+
+        assert!(!debug.join("mmr.error.json").exists(), "stale: gone");
+        assert!(
+            !debug.join("comp_updates.error.txt").exists(),
+            "stale: gone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(debug.join("match_details.error.txt")).unwrap(),
+            "HTTP 502\nbad gateway",
+            "the fresh error file is written"
+        );
+        for kept in ["notes.txt", "errors.json", "match_details.json"] {
+            assert!(debug.join(kept).exists(), "{kept}");
+        }
+        assert!(
+            debug.join("sub.error.json").is_dir(),
+            "a directory is not a file of ours"
+        );
+        assert!(dir.path().join("outside.error.json").exists());
+
+        // A dump with no errors at all leaves no error file behind.
+        let files = dump_files(Vec::new(), Vec::new(), "log".into());
+        write_dump(&debug, &files).unwrap();
+        assert!(!debug.join("match_details.error.txt").exists());
     }
 
     #[test]

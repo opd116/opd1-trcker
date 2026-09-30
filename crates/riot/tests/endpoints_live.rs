@@ -12,8 +12,7 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use opd1_riot::endpoints::VisiblePuuid;
 use support::{
-    connect_against, mount_entitlements, mount_sessions_with_version, write_lockfile,
-    write_shooter_log, TempDir, SELF_PUUID,
+    connect_against, mount_entitlements, write_lockfile, write_shooter_log, TempDir, SELF_PUUID,
 };
 
 const OTHER_PUUID: &str = "bbbbbbbb-0000-0000-0000-000000000001";
@@ -26,7 +25,6 @@ async fn setup() -> (TempDir, MockServer, opd1_riot::session::RiotSession) {
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
     let session = connect_against(tmp.path(), &server).await;
     (tmp, server, session)
 }

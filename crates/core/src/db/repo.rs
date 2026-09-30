@@ -385,6 +385,53 @@ impl Repo {
     }
 }
 
+/// R154: what a stored competitive match says about a player's rank when
+/// MMR has no answer — see [`Repo::newest_ranked_match_tier`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredTier {
+    /// When the match the tier was read from started (epoch ms).
+    pub start_ms: i64,
+    /// The player's rank in that match (Riot's `competitiveTier`, `3..=255`).
+    pub tier: u8,
+}
+
+/// [`Repo::newest_ranked_match_tier`]'s query (`?1` the player): the newest
+/// competitive match in which the player's stored `competitive_tier` (the
+/// tier Match Details shows) is a ranked one, i.e. at least 3 (0 is unranked,
+/// 1 and 2 are unused / placements, `NULL` is a match stored before
+/// migration 2). One index seek on `match_players(puuid)` and one primary-key
+/// read of `matches` per stored match of the player — no scan. Public so a
+/// test can `EXPLAIN QUERY PLAN` exactly this text.
+pub const NEWEST_RANKED_MATCH_TIER_SQL: &str = "\
+SELECT m.start_ms, mp.competitive_tier
+FROM match_players mp
+JOIN matches m ON m.match_id = mp.match_id
+WHERE mp.puuid = ?1 AND m.queue_id = 'competitive' AND mp.competitive_tier >= 3
+ORDER BY m.start_ms DESC
+LIMIT 1";
+
+impl Repo {
+    /// R154, path (b): the newest competitive match of `puuid` that carries a
+    /// ranked tier for them (see [`NEWEST_RANKED_MATCH_TIER_SQL`]), whatever
+    /// act it was played in — the caller decides whether it is in the current
+    /// act, so nothing here depends on the act tables. `None` when there is no
+    /// such match (or its tier is not a tier at all: above 255).
+    pub fn newest_ranked_match_tier(&self, puuid: &str) -> Result<Option<StoredTier>> {
+        let row: Option<(i64, i64)> = self
+            .conn
+            .query_row(NEWEST_RANKED_MATCH_TIER_SQL, params![puuid], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .optional()?;
+        Ok(row.and_then(|(start_ms, tier)| {
+            Some(StoredTier {
+                start_ms,
+                tier: u8::try_from(tier).ok()?,
+            })
+        }))
+    }
+}
+
 /// The query behind [`Repo::comp_matches`]; parameters `?1` puuid, `?2`
 /// range start, `?3` range end (exclusive), `?4` limit.
 ///

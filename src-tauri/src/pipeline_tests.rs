@@ -138,12 +138,6 @@ async fn mock_riot(server: &MockServer) {
         })))
         .mount(server)
         .await;
-    get(
-        server,
-        "/product-session/v1/external-sessions",
-        json!({"s": {"productId": "valorant", "version": "release-test"}}),
-    )
-    .await;
 
     let comp = format!("/mmr/v1/players/{ME}/competitiveupdates");
     // The first two syncs see one competitive match…
@@ -598,7 +592,7 @@ async fn worker_names_only_visible_players_and_settles_failures() {
             tag: "TAG".into()
         })
     );
-    assert!(matches!(me.rank, Field::Value(r) if r.tier == 15 && r.rr == 42));
+    assert!(matches!(me.rank, Field::Value(r) if r.tier == 15 && r.rr == Some(42)));
     assert_eq!((me.party, me.encounters), (None, None));
     assert!(matches!(me.last5, Field::Value(ref v) if v.len() == 1));
     assert_eq!(me.kd, Field::Value(2.0));
@@ -1201,3 +1195,13 @@ pub(crate) mod backfill;
 /// R150's names-fill tests (their own file; same harness).
 #[cfg(test)]
 mod names_fill;
+
+/// R154's and R155's rank tests: the rank without an MMR answer, and the
+/// bounded retry of a failed rank sync (their own file; same harness).
+#[cfg(test)]
+mod rank;
+
+/// R158's diagnostics tests: the failed-call warn line and `dump_raw` (their
+/// own file; same harness).
+#[cfg(test)]
+mod diagnostics;

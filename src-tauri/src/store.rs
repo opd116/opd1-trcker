@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde_json::{json, Map, Value};
 
-use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow, Repo};
+use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow, Repo, StoredTier};
 use opd1_core::model::{
     hero_stats, match_summary, EncounterCount, HeroStats, MatchSummary, MyStats,
 };
@@ -227,6 +227,11 @@ pub struct PlayerDb {
     pub encounters: Option<EncounterCount>,
     /// Their last two matches (any mode), newest first — party detection.
     pub recent: [Option<SharedRef>; 2],
+    /// R154, path (b): the newest stored competitive match in which their
+    /// tier is a ranked one. Read only for a player with no MMR snapshot
+    /// (`None` otherwise, whatever is stored): it is the rank's last resort
+    /// when MMR has no answer and no current-act RR row names one.
+    pub stored_tier: Option<StoredTier>,
 }
 
 /// `self_puuid` is the user (`None` before the app ever learned it): the
@@ -247,6 +252,11 @@ pub fn load_player_db(repo: &Repo, self_puuid: Option<&str>, puuid: &str) -> Res
         }
         _ => (None, None),
     };
+    // One indexed query, only for a player MMR has no snapshot of.
+    let stored_tier = match mmr {
+        Some(_) => None,
+        None => repo.newest_ranked_match_tier(puuid)?,
+    };
     Ok(PlayerDb {
         mmr,
         last5: repo.last_n_comp(puuid, 5)?,
@@ -255,6 +265,7 @@ pub fn load_player_db(repo: &Repo, self_puuid: Option<&str>, puuid: &str) -> Res
         remembered,
         encounters,
         recent: recent_refs(repo.conn(), puuid)?,
+        stored_tier,
     })
 }
 
@@ -734,6 +745,48 @@ mod tests {
             })
             .collect();
         r.index_history(puuid, &entries).unwrap();
+    }
+
+    #[test]
+    fn load_player_db_reads_the_stored_tier_only_for_a_player_without_a_snapshot() {
+        // R154 (b): the newest competitive match with a ranked tier for the
+        // player — asked only when MMR has no snapshot of them.
+        let r = repo();
+        let ranked = |tier| MatchPlayer {
+            competitive_tier: Some(tier),
+            ..mp("h1", "Blue", "pa", None)
+        };
+        stored_match(&r, "old", "competitive", 100, &[ranked(12)]);
+        stored_match(&r, "new", "competitive", 200, &[ranked(14)]);
+        stored_match(&r, "unrated", "unrated", 300, &[ranked(20)]);
+
+        let db = load_player_db(&r, Some("me"), "h1").unwrap();
+        assert_eq!(
+            db.stored_tier,
+            Some(StoredTier {
+                start_ms: 200,
+                tier: 14
+            })
+        );
+        // Somebody with no stored match has none.
+        assert_eq!(
+            load_player_db(&r, Some("me"), "nobody")
+                .unwrap()
+                .stored_tier,
+            None
+        );
+
+        // With a snapshot MMR is the authority: nothing is looked up.
+        r.save_mmr_snapshot(&MmrSnapshot {
+            puuid: "h1".into(),
+            json: r#"{"Subject":"h1","QueueSkills":{}}"#.into(),
+            last_comp_match_id: Some("new".into()),
+            fetched_ms: 1,
+        })
+        .unwrap();
+        let db = load_player_db(&r, Some("me"), "h1").unwrap();
+        assert!(db.mmr.is_some());
+        assert_eq!(db.stored_tier, None);
     }
 
     #[test]

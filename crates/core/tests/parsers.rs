@@ -6,7 +6,7 @@ use base64::Engine as _;
 
 use opd1_core::lockfile::parse_lockfile;
 use opd1_core::presence::{decode_presence, Stage};
-use opd1_core::shards::parse_shards;
+use opd1_core::shards::{parse_client_version, parse_shards};
 
 // ---------------------------------------------------------------------
 // lockfile
@@ -183,4 +183,37 @@ fn stage_serializes_as_lower_camel_case_for_the_ui() {
         "\"pregame\""
     );
     assert_eq!(serde_json::to_string(&Stage::Ingame).unwrap(), "\"ingame\"");
+}
+
+// ---------------------------------------------------------------------
+// client version (R159): the `CI server version:` line of the same log
+// ---------------------------------------------------------------------
+
+#[test]
+fn client_version_is_the_rest_of_the_ci_server_version_line_trimmed() {
+    let log = "[2026.09.30-08.00.00:000][  0]LogInit: Build: something\n\
+               [2026.09.30-08.00.01:000][  0]LogShooterGame: CI server version:   release-13.06-shipping-18-5590001  \r\n\
+               [2026.09.30-08.00.02:000][  0]LogPlatform: https://pd.eu.a.pvp.net/account-xp/v1/players/abc\n";
+    assert_eq!(
+        parse_client_version(log).as_deref(),
+        Some("release-13.06-shipping-18-5590001")
+    );
+}
+
+#[test]
+fn client_version_needs_the_colon_but_not_the_space() {
+    assert_eq!(
+        parse_client_version("CI server version:release-1").as_deref(),
+        Some("release-1")
+    );
+    assert_eq!(parse_client_version("CI server version release-1"), None);
+    assert_eq!(parse_client_version(""), None);
+    assert_eq!(parse_client_version("LogInit: nothing about it"), None);
+}
+
+#[test]
+fn a_blank_ci_line_is_skipped_and_the_first_usable_one_wins() {
+    let log = "CI server version:   \nCI server version: release-a\nCI server version: release-b\n";
+    assert_eq!(parse_client_version(log).as_deref(), Some("release-a"));
+    assert_eq!(parse_client_version("CI server version: \n"), None);
 }

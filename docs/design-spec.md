@@ -216,7 +216,7 @@ Rule for the added colours:
 - **Average Party Rank [C]** (built from the card's label/value pattern and the rank block):
   - Content, gap 12: label `Avg party rank` 12px/500 `--text2`, then a group with gap 8: `<img tier>` 32×32, tier name 14px/600 `--text`.
   - Value: `round(mean(tier))` over party cards whose `rank.tier ≥ 3`, with .5 rounding up. Name = `tierLabel(meta, tier)`.
-  - Tooltip on the whole group: `Average party rank\nFrom {count(n, 'ranked player')}` (`n` = ranked members counted; `From 1 ranked player`, `From 3 ranked players`, §4.3).
+  - Tooltip on the whole group: `Average party rank\nFrom {count(n, 'ranked player')}` (`n` = ranked members counted; `From 1 ranked player`, `From 3 ranked players`, §4.3). **(R129)** No tooltip while the group is loading (there is no count to explain yet). With 2+ players present and none ranked, the tip reads `Average party rank\nFrom 0 ranked players` (the formula applied literally; it explains the empty box and `—`).
   - Loading: if any member's `rank` is still absent AND no member is ranked yet, show the label, then a 32×32 circle `--skel`, then a 52×12 bar radius 3 `--skel`.
   - ≥2 players but 0 ranked: label, empty 32×32 box, then `—` 14px/600 `--text2`.
 
@@ -282,19 +282,19 @@ Grid children, in DOM order:
 | 5 | r3 c1 | stat trio (§3.7) |
 | 6 | r3 c2 | last 5 (§3.8) |
 
-After the grid come the party stripe and tab (§3.9), then the self outline (§3.10), with z-order as given.
+The party stripe and tab (§3.9) come **before** the grid in the markup, as in the design (v8:44-49); their `z-index` 2 and 3 paint them above the grid (a hit test at the tab and the stripe finds them, not the grid). The self outline (§3.10) is the last child, after the grid.
 
 ### 3.3 Agent + name block (v8:52-79)
 
 - Wrapper: `display:flex; align-items:center; gap:10px; min-width:0`.
 - Agent: 40×40, `flex:none; border-radius:6px; background:var(--raised)`.
   - `agentId` set → `<img assetUrl('agent', agentId)>` (displayIcon).
-  - `agentId` null → the same box as an empty `<div>`. Never a placeholder agent.
+  - `agentId` null → the same box as an empty `<div>`. Never a placeholder agent. **(R127)** This empty box is one look in every stage: Agent Select before a lock, Lobby and Closed (where no agent can exist) all keep it, because the card is identical everywhere and R99 names it the empty agent slot. It is not the skeleton shape (`.sk`; a loading card is all grey blocks with no text, this card has a name, rank and stats beside the box), and it is not made transparent in any stage (that would leave a 40px hole beside the name).
 - Name column: `flex:1; min-width:0; display:flex; flex-direction:column; gap:2px`.
   - Line 1: `display:flex; align-items:center; min-width:0`.
     - Name wrapper (the tooltip trigger): `flex:1; min-width:0; display:flex; align-items:baseline; gap:5px`. Variants per §3.4.
-    - Encounter slot: `min-width:36px; flex:none; display:flex; justify-content:flex-end` (§3.5). The slot is always rendered, even empty. **[C]** The design has `width:36px`; `min-width` renders identically for counts up to 2 digits and lets a 3+ digit count widen the slot leftwards (measured: `123` is 36px in Barlow, 39px in IBM Plex Sans and Archivo), so the name ellipsizes earlier and the count never overlaps the tag. No `99+` cap (it is as wide as 3 digits).
-  - Line 2: `align-self:flex-start; font-size:12px; font-weight:500; color:var(--text2)`. Text: `Lv ` + `<span style="color:var(--text)" tab>{level}</span>`. `level === null` → `—`.
+    - Encounter slot: `min-width:36px; flex:none; display:flex; justify-content:flex-end` (§3.5). The slot is always rendered, even empty. **[C]** The design has `width:36px`; `min-width` renders identically for counts up to 2 digits and lets a 3+ digit count widen the slot leftwards (measured: `123` is 36px in Barlow, 39px in IBM Plex Sans and Archivo), so the name ellipsizes earlier and the count never overlaps the tag. No `99+` cap (it is as wide as 3 digits). **[C] (R129)** The card's ⟲ badge itself has `margin-left:5px` (the name–tag gap, §3.5). The slot is right-aligned, so for 1–2 digit counts the margin is absorbed inside the design's 36px slot (geometry unchanged, in all 3 fonts); it only takes effect once the count has 3 or more digits, where it keeps a 5px gap so the tag never touches the icon. (The widths above were measured before this margin.)
+  - Line 2: `align-self:flex-start; font-size:12px; font-weight:500; color:var(--text2)`. Text: `Lv ` + `<span style="color:var(--text)" tab>{level}</span>`. `level === null` (Riot withholds it, HideAccountLevel, R100; never on the user's own card) → `Lv —`. **(R129)** `level` absent (still loading, R23) → the skeleton card's level bar drawn inline in the Lv line: an inline-block 48×10 bar, radius 3, `--skel`, `vertical-align:middle` (§5.4), replacing the whole `Lv …` text. The line box keeps its height, so the name column does not move.
 - Name wrapper width = 241 − 40 − 10 − 36 = 155px (less when a 3+ digit count widens the slot).
 
 ### 3.4 Name variants (card 16px; hero 22px §6.2; row 14px §6.7/§6.10)
@@ -302,12 +302,13 @@ After the grid come the party stripe and tab (§3.9), then the self outline (§3
 | Variant (`card.name.kind`) | Nodes inside the wrapper | Tooltip |
 |---|---|---|
 | `visible` (includes self) | name: `min-width:0; font-size:16px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis`. Tag: `flex:none; font-size:13px; font-weight:500; color:var(--text2); nowrap`. Tag text = `'#' + tag`. | `{name}#{tag}`, overflow-only |
-| `remembered` | eye-off 14×14 (`flex:none; align-self:center; color:var(--text2)`), name as `visible` plus `text-decoration:underline dotted var(--text2); text-underline-offset:4px`, then the tag | `Hidden name · known from your match\n{Map} · {Mon D, YYYY}`, always |
+| `remembered` | eye-off 14×14 (`flex:none; align-self:center; color:var(--text2)`), name as `visible` plus `text-decoration:underline dotted var(--text2); text-underline-offset:4px` (hero 5px), then the tag. **[C] (R128)** The name span uses `overflow:clip; overflow-clip-margin:6px` instead of `overflow:hidden`, so the underline is not clipped (see below) | `Hidden name · known from your match\n{Map} · {Mon D, YYYY}`, always |
 | `hiddenAgent` | eye-off 14, then the agent name (`meta.agents[agentId].name`): `min-width:0; font-size:16px; font-weight:500; font-style:italic; color:var(--text-soft); nowrap; overflow:hidden; text-overflow:ellipsis`. No tag. | `Hidden name`, always |
 | `hiddenPlayer` (Agent Select before the lock, R99) | eye-off 14, then `Hidden Player` in the `hiddenAgent` style | `Hidden name`, always |
 | name `null` (missing) | `—` 16px/600 `--text2` | none |
 | name absent (loading) | an inline-block 120×13 bar, radius 3, `--skel`, `vertical-align:middle`. The line box stays. No tag. | none |
 
+- **The remembered underline needs clip room (R128).** The dotted underline is painted 2–4px below the name's box (font and size dependent; fully outside at the card, hero and row sizes in Barlow and Archivo, half outside at card size in IBM Plex Sans). The name span clips for its ellipsis, and `overflow:hidden` would cut the underline away (the design's own mock does, by accident). So the remembered-name span uses `overflow:clip; overflow-clip-margin:6px` (covers the worst measured case, 4px): it only widens what is painted, adds no layout or scrollable overflow (§8.3 check 2 stays clean) and the ellipsis still applies. Same rule at the card (16px), hero (22px, offset 5px) and row (14px) sizes. CLAUDE.md "Card indicators" defines the style as including the underline (R92, R128). Covered by a pixel probe in `fit-live.spec.ts`.
 - The remembered tooltip's second line is dropped when `fromMapId` and `fromStartMs` are both null. If one is null, only the other part is shown.
 - Eye-off SVG (v8:62): `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/><path d="M2.5 13.5l11-11"/></svg>`.
 
@@ -317,6 +318,7 @@ After the grid come the party stripe and tab (§3.9), then the self outline (§3
 - Content: `display:flex; align-items:center; gap:3px; font-size:13px; font-weight:600; color:var(--text2); tab`. It holds the icon, then the count `with+against`. Tooltip `{with} with · {against} against`.
 - The U+27F2 glyph (Segoe UI Symbol) is replaced by an inline SVG of the same visual size: 12×12 in the card, 13×13 in the hero. It is `flex:none` and uses `currentColor`:
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>` (anticlockwise arrow, ISC-licensed Lucide `rotate-ccw` geometry; its ISC copyright and permission notice lives in `THIRD-PARTY-NOTICES.md`, plan Task 13).
+- **[C] (R129)** The card's badge has `margin-left:5px`, and only 3+ digit counts show it (1–2 digits keep the design's 36px slot, §3.3). The hero badge (§6.2) has no such margin.
 - 3+ digit counts: see the slot's `min-width` in §3.3. `ingame-longnames` carries a `123` count (§8.2).
 
 ### 3.6 Rank blocks
@@ -327,7 +329,7 @@ After the grid come the party stripe and tab (§3.9), then the self outline (§3
 - Text column: `flex-direction:column; gap:2px; min-width:0`.
   - Tier name 15px/600 `nowrap`.
   - Line 2: 12px/500 `--text2` `nowrap`: `<span 13px/600 --text tab>{rr}</span> RR`.
-- `rank === null` **[C]**: an empty 40×40 box (layout kept), then `—` 15px/600 `--text2`, with no line 2.
+- `rank === null` **[C]**, or `rank.tier < 3` (Unrated and the unused tiers 1–2; **R129**): an empty 40×40 box (layout kept), then `—` 15px/600 `--text2`, with no line 2. A tier below 3 renders exactly like `null`, the same rule as the Prev row.
 - The tier name's right edge must stay ≤ x 463 in card coordinates, because the party tab occupies x 464–485, y 22–42.
 
 **Peak** (r2 c1, v8:89-94).
@@ -346,8 +348,8 @@ After the grid come the party stripe and tab (§3.9), then the self outline (§3
 - Row style as Peak, minus the 50px label: `display:flex; align-items:center; min-width:0; white-space:nowrap; font-size:12px; font-weight:500; color:var(--text2)`.
 - Icon column: `width:40px; flex:none; display:flex; justify-content:center`. That is the width of the current-rank icon above it (§3.6 Current), so the two icons share one centre line.
   - `<img tier prevActTier>` 18×18 `flex:none; filter:grayscale(0.7); opacity:0.75` (unchanged), centred in the column: 11px + 18px + 11px.
-- Label: `Prev` 12px/500 `--text2` `flex:none; margin-right:6px`.
-- Name: tier name 13px/500 `--text2` `min-width:0; overflow:hidden; text-overflow:ellipsis`, in the rank-name column. The ellipsis is a safety net only. The widest row (`Prev` + `Ascendant 3`) must still fit the 158px column unclipped in all three fonts (§8.3 check 5).
+- Label: `Prev` 12px/500 `--text2` `flex:none; margin-right:6px`. **(R126)** It starts right after the 40px icon column (x = 40 in the row), not at the rank-name column's x = 50: at x = 50 the widest `Prev` + `Ascendant 3` overflows the 158px column in the wider fonts.
+- Name: tier name 13px/500 `--text2` `min-width:0; overflow:hidden; text-overflow:ellipsis`, right after the label. The ellipsis is a safety net only. The widest row (`Prev` + `Ascendant 3`) must still fit the 158px column unclipped in all three fonts (§8.3 check 5).
 - `prevActTier === null` (or < 3) → the icon column stays, empty (40px, layout kept), then `Prev`, then `—` 13px (weight 500 and `--text2` inherited). The label is never hidden (§5.5).
 
 ### 3.7 Stat trio (r3 c1, v8:107-120)
@@ -495,6 +497,7 @@ Shown only when `card.party && !card.isSelf && !card.isSelfParty`. `col = --part
 - Self-party members have no stripe, no ⟲ and no outline. Only self has the outline.
 - Average Party Rank in the top bar when n ≥ 2 (§2.3).
 - Queueing changes nothing.
+- **(R127)** No card has an agent here (none can exist in the Lobby): every card keeps the empty 40×40 `--raised` agent box that Agent Select draws before a lock (§5.1, §3.3). It is the same box in every stage, not a placeholder agent, and not the skeleton shape.
 - Deathmatch or FFA in progress: the backend reports `menus` (R41), so the Lobby view shows.
 
 ### 5.3 Closed (`stage: 'closed'`)
@@ -502,6 +505,7 @@ Shown only when `card.party && !card.isSelf && !card.isSelfParty`. `col = --part
 - The route opens on `live` (R71: until My Stats exists).
 - Only the user's own card, in slot 1 of the left column. Its values come from the DB; unknown values show `—`. It has the self outline.
 - The top-bar right side is empty. Nothing else is on screen.
+- **(R127)** The user's card keeps the empty 40×40 `--raised` agent box, as in Agent Select before a lock and in the Lobby (§3.3, §5.2): no agent exists while VALORANT is closed.
 - Before the first `LiveState` arrives, slot 1 shows one skeleton card.
 - **[C]** `closed` with `players: []` (first launch with VALORANT closed, before the user's PUUID was ever learned; the backend publishes no card): no card and **no skeleton**, both columns empty. A skeleton here would never resolve (plan Review Focus 2). The user's card appears once the client connects.
 
@@ -522,6 +526,7 @@ Shown only when `card.party && !card.isSelf && !card.isSelfParty`. `col = --part
   - `menus` with `players.length===0` → 1 in slot 1.
   - Before the first LiveState → 1 in slot 1.
 - **Per-field skeletons** (a real card with absent keys, R23): absent name, level, rank, stats and last5 as described in §3.3–3.8.
+  - Absent `level` (R129) → a 48×10 bar (the skeleton card's level bar, radius 3, `--skel`) inline in the Lv line, replacing the whole `Lv …` text; the name column keeps its height (§3.3). A withheld level (`null`, Riot's HideAccountLevel, not the user's own card) is not loading: it shows `Lv —` (R100, §5.5).
   - Absent `peak` → the whole Peak row becomes a 176×10 bar, including the label, as in the design's skeleton.
   - Absent `prevActTier` → the whole Prev row becomes a 124×10 bar.
   - The encounter slot and party stripe are not tri-state; they simply appear later.
@@ -972,7 +977,7 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
 ### 8.3 Global assertions (every scene)
 
 1. `#app` bounding box = 0,0,1000,800. `document.scrollingElement.scrollWidth ≤ 1000` and `scrollHeight ≤ 800`.
-2. **Live scenes:** no element inside the Live grid has `scrollHeight > clientHeight + 1` or `scrollWidth > clientWidth + 1`, except name spans. No scrollbar anywhere.
+2. **Live scenes:** no element inside the Live grid has `scrollHeight > clientHeight + 1` or `scrollWidth > clientWidth + 1`, except name spans and, **(R129)**, the Underline option's bar `.uline`, which the design hangs 6px below the newest tile (v8:125; §3.8), so it overflows its tile by construction. It is decoration inside the card and is never clipped: the geometry test `geometry: ingame [Underline]` (§8.4) asserts the bar's bottom stays inside the card. No scrollbar anywhere.
 3. **Details / Match:** the scroll container's `scrollWidth ≤ clientWidth` (vertical scroll allowed).
 4. Every rendered text node has computed `font-size ≥ 12px`.
 5. Clipping: every text element has `scrollWidth ≤ clientWidth`, except the allowed ellipsis spans (each tagged `data-ellipsis` in the markup so the check can find them):
@@ -1000,7 +1005,7 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
 | Prev icon (R125) | 18×18 (absent when there is no prev tier), centre x 333 (313 + 20), the same centre line as the rank icon |
 | Stat trio | bottom at 127.8, blocks 76px wide starting x 56 |
 | Last-5 tiles (Arrow) | 5 × 22×22, x 313…443, y 95.8…117.8; arrow row y 120.8…127.8 |
-| Last-5 tiles (Underline) | y 105.8…127.8, underline under the rightmost tile only |
+| Last-5 tiles (Underline) | y 105.8…127.8, underline under the rightmost tile only; the bar is 2px tall, its top at tile bottom + 4 (`bottom:-6px`), and its bottom edge stays inside the card (R129) |
 | ⟲ slot | x 261…297 |
 | Party tab | x 464…485, y 22…42; stripe x 482…485 |
 | Tier name right edge | ≤ 463 for `Ascendant 3` in Barlow, IBM Plex Sans and Archivo |

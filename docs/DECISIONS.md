@@ -1,9 +1,9 @@
 # Decisions
 
-Every ruling made while building OPD1 TRCKER, in number order (R1 to R125). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
+Every ruling made while building OPD1 TRCKER, in number order (R1 to R130). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.
-- Rulings come from the working ledger (R1 to R73 and R87 to R125) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
+- Rulings come from the working ledger (R1 to R73 and R87 to R130) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
 - Precedence when rules disagree (R92): `docs/requirements-raw.md` (newest dated block) > the design file > older `CLAUDE.md` visual rules. `docs/design-spec.md` outranks the design file only for the R74 to R86 gap-fills.
 - The user's own words are in `docs/requirements-raw.md`; the [user decisions index](#user-decisions-index) at the end maps each dated block to a summary.
 
@@ -880,6 +880,41 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R125). Each
 - **What:** The user delegated the call to Claude (choose what is best for the user experience), so this is a user-delegated change to the design (R92). The card's Prev row becomes icon · `Prev` · name (variant V4 in `.superpowers/sdd/plan/shots-prev/`): the greyed 18px prev icon is centred in the 40px rank-icon column, then comes the 12px `Prev` label, then the tier name in the rank-name column. With no prev tier: an empty icon column, then `Prev —`. The Peak row is unchanged (50px label), and so is the hero Prev row. Applied on `ui-lane` after the Task 17 review loop; the design-ref visual test accepts the Prev row as an approved deviation. Spec §3.6 (Prev) and the §8.4 geometry table record it.
 - **Why:** The user found the 50px label gap untidy. V4 mirrors the rank block above it (icon column, then text column), puts the word next to its value, and matches the design's own Details hero Prev order (icon · Prev · name, v8:214-218).
 - **Cost:** One CSS change.
+- **Status:** active
+
+### R126 — The Prev label starts right after the 40px icon column
+
+- **What:** The R125 Prev label starts right after the 40px icon column (x = 40 in the row, as spec §3.6 says), not at the rank-name column's x = 50. The ui-lane change verifies it with the fit specs in all 3 fonts.
+- **Why:** At x = 50 the widest `Prev` + `Ascendant 3` overflows the 158px column in the wider fonts, and the Prev row must never clip.
+- **Cost:** A 10px nudge.
+- **Status:** active
+
+### R127 — The empty agent box stays in every stage
+
+- **What:** The empty 40×40 `--raised` agent box stays in every stage: Agent Select before a lock, Lobby and Closed. It is never a placeholder agent and never the skeleton shape. Spec §3.3, §5.2 and §5.3 say so.
+- **Why:** The card is identical everywhere, R99 names it the empty agent slot, and a transparent slot would leave a hole beside the name. The user saw the Lobby and Closed screenshots and objected only to Prev.
+- **Cost:** One CSS rule.
+- **Status:** active
+
+### R128 — The remembered name's dotted underline gets clip room
+
+- **What:** Accept the remembered-name underline fix: the name span (`Name.svelte` `.rem`) uses `overflow:clip; overflow-clip-margin:6px`, so the dotted underline (offset 4px, hero 5px) is not clipped at the card, hero and row sizes. Spec §3.4 says so.
+- **Why:** CLAUDE.md "Card indicators" requires the dotted underline and the design's CSS asks for it; `overflow:hidden` (needed for the ellipsis) cut it away. The user delegated decisions.
+- **Cost:** Revert one block.
+- **Status:** active
+
+### R129 — Spec text catch-up for Task 17's calls
+
+- **What:** The spec text on `main` catches up with Task 17's calls: §3.3 and §3.5, the card ⟲ badge gets `margin-left:5px`, which only shows for 3+ digit counts (a new [C]); §8.3 check 2 exempts the Underline option's bar `.uline`, with the geometry test that keeps it inside the card; §3.3 and §5.4, an absent level is a 48×10 bar and a withheld level is `Lv —`; §2.3, the Avg party rank tooltip is none while loading and `From 0 ranked players` when 2+ players are present and none is ranked; §3.2, the party stripe and tab come before the grid in the markup; §3.6, a current rank with tier < 3 renders like `null`; §5.2 and §5.3, the R127 agent box; §3.4, the R128 underline clip margin.
+- **Why:** The code on `ui-lane` already behaves this way (Task 17 review, fix rounds 1 and 2), and the spec must stay in step with the code.
+- **Cost:** Not recorded in the ledger.
+- **Status:** active
+
+### R130 — Task 17 follow-up batch on ui-lane
+
+- **What:** One Opus (visual) batch on `ui-lane`: the R125/R126 Prev row; Last5 keyed by index (a duplicate `startMs` would drop tiles); `live.ts` Closed shows self only; loading K/D and HS% carry no tooltip; check 9 covers meta-pending hidden names; `varRgb` deduplicated; dead test code removed; the clock pause is relative; the card-click test asserts the right player; a map skeleton assertion; the design gate tightened (threshold near the measured baseline, ⟲ unmasked where stable); check 5 adds a vertical and underline ink probe; the AgentBox test regex; the fit-live deep-equal covers shadow, opacity and border. The tests tsconfig moves to Task 16b.
+- **Why:** The Task 17 review left 10 spec-review Minors and 4 design-review Minors outside fix rounds 1 and 2, and R125/R126 still had to land in code.
+- **Cost:** Not recorded in the ledger.
 - **Status:** active
 
 ## User decisions index

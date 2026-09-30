@@ -35,6 +35,20 @@ export async function closeDetails(): Promise<void> {
   await invoke("close_details");
 }
 
+/**
+ * `invoke('close_match')` (R150): the Match Details page was left, so Rust forgets the open match and never rebuilds or
+ * emits it. No arguments, idempotent. A page that replaces it (another match) sends its `match_details` after this
+ * call, and that call opens the new match again. In the DEV browser there is no Rust: the demo module only counts it.
+ */
+export async function closeMatch(): Promise<void> {
+  if (import.meta.env.DEV && !isTauri()) {
+    const { noteMatchClosed } = await import("./demo/scenes");
+    noteMatchClosed();
+    return;
+  }
+  await invoke("close_match");
+}
+
 /** `invoke('match_details', { matchId, focusPuuid })`. */
 export async function getMatchDetails(matchId: string, focusPuuid: string): Promise<MatchDetailsView> {
   if (import.meta.env.DEV && !isTauri()) {

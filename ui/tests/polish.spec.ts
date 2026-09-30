@@ -168,6 +168,27 @@ test.describe("close_details", () => {
   });
 });
 
+// R150: the Match page tells Rust when it is left (`close_match`). In the DEV browser the demo module counts each one in
+// `data-match-closed` (close-match.spec.ts checks the commands themselves, in order, behind a fake Tauri door).
+test.describe("close_match (DEV counter)", () => {
+  const closed = (page: Page) => page.evaluate(() => Number(document.documentElement.dataset.matchClosed ?? 0));
+
+  test("Back from Match and the Live tab from Match each close it once; opening the match, and Back to it, do not", async ({ page }) => {
+    await openScene(page, "match");
+    expect(await closed(page)).toBe(0);
+    await page.locator(".match .back").click(); // Back → Details
+    await waitPage(page, "loaded");
+    await expect.poll(() => closed(page)).toBe(1);
+    await page.locator(".details .recent .rrow").first().click(); // → Match again: nothing to close
+    await waitPage(page, "loaded");
+    await page.waitForTimeout(300);
+    expect(await closed(page)).toBe(1);
+    await page.locator("header.bar .tab.on").click(); // the Live tab, from Match
+    await expect(page.locator(".live")).toHaveCount(1);
+    await expect.poll(() => closed(page)).toBe(2);
+  });
+});
+
 // Card click → Details. The second click of a double-click lands where the top-left card was: Back's spot.
 test.describe("double-click guard", () => {
   /** Centre of Back on the Details page, which sits inside the first card on the Live page. */

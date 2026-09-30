@@ -552,7 +552,21 @@ describe("matchSlot (R150: the open Match Details, refreshed by the `match` even
     expect(now(slot)).toBeNull(); // never the old payload while the new answer is on its way
   });
 
-  it("opening another match clears the old one at once, and the old answer never lands", async () => {
+  it("opening another match clears the old one at once (the skeleton), before the new answer comes", async () => {
+    const slot = matchSlot();
+    await slot.open("m1", async () => view("m1", "a")); // m1 is on screen, completely loaded
+    expect(now(slot)?.marker).toBe("a");
+    const f2 = deferred();
+    const second = slot.open("m2", f2.fetch); // m2's answer is still pending
+    expect(now(slot)).toBeNull();
+    slot.event(view("m1", "old match")); // an event for the match that was left changes nothing
+    expect(now(slot)).toBeNull();
+    f2.answer(view("m2", "b"));
+    await second;
+    expect(now(slot)?.marker).toBe("b");
+  });
+
+  it("an answer still in flight for the match that was left never lands over the new one", async () => {
     const slot = matchSlot();
     const f1 = deferred();
     const first = slot.open("m1", f1.fetch);

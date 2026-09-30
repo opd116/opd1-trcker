@@ -434,6 +434,12 @@ export function noteDetailsClosed(): void {
   d.detailsClosed = String(Number(d.detailsClosed ?? 0) + 1);
 }
 
+/** DEV: `close_match` has no Rust side in the browser; the count is `data-match-closed` on <html> (Playwright reads it). */
+export function noteMatchClosed(): void {
+  const d = document.documentElement.dataset;
+  d.matchClosed = String(Number(d.matchClosed ?? 0) + 1);
+}
+
 /** How many more calls of each command the URL says must fail (`?fail=details:2,match:1`), counted down as they do. */
 const failsLeft = new Map<string, number>();
 

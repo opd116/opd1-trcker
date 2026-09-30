@@ -78,6 +78,16 @@ async function checkVertical(page: Page): Promise<string[]> {
   return page.evaluate(() => {
     const out: string[] = [];
     const app = document.getElementById("app")!;
+    /**
+     * A scroll container (`overflow-y: auto | scroll`, the Details/Match `.scroll`) does not clip its content: what lies
+     * past its edge is reached by scrolling. Its ancestors clip the container's own box, never that content, so the
+     * walk up from a text stops there (task 17 re-review: `auto` used to count as a clip, and every text below the
+     * fold of a Details page was reported as cut by `.scroll`, then by `#app`).
+     */
+    const scrolls = (el: HTMLElement) => {
+      const y = getComputedStyle(el).overflowY;
+      return y === "auto" || y === "scroll";
+    };
     /** Where `el` stops painting its content, or null when it does not clip in y. */
     const clipBox = (el: HTMLElement): { top: number; bottom: number } | null => {
       const s = getComputedStyle(el);
@@ -95,6 +105,7 @@ async function checkVertical(page: Page): Promise<string[]> {
       const g = range.getBoundingClientRect();
       if (g.height === 0) continue;
       for (let el = n.parentElement; el && el !== app.parentElement; el = el.parentElement) {
+        if (scrolls(el)) break;
         const c = clipBox(el);
         if (c && (g.top < c.top - 0.5 || g.bottom > c.bottom + 0.5)) {
           out.push(`"${n.textContent.trim()}" is cut vertically by ${el.tagName.toLowerCase()}.${[...el.classList].filter((k) => !/^s(velte)?-/.test(k)).join(".")}`);
@@ -173,6 +184,13 @@ async function checkHorizontal(page: Page): Promise<string[]> {
  */
 export async function decorationInk(page: Page, sel: string): Promise<{ ink: number; unclipped: number; width: number }> {
   const loc = page.locator(sel).first();
+  // Details and Match scroll: bring the element (and the 10px band under it) into the viewport first, since a
+  // screenshot clip can't reach past it. Only when it is outside: a Live page never scrolls, and Playwright's own
+  // scrollIntoViewIfNeeded made this probe flaky there (under 8 workers: 1 failure in 24 runs; with this guard 0 in 72).
+  await loc.evaluate((el) => {
+    const r = el.getBoundingClientRect();
+    if (r.top < 0 || r.bottom + 12 > window.innerHeight) el.scrollIntoView({ block: "center" });
+  });
   const r = await loc.boundingBox();
   if (!r) throw new Error(`no box for ${sel}`);
   const clip = { x: Math.floor(r.x) - 1, y: Math.floor(r.y) - 2, width: Math.ceil(r.width) + 2, height: Math.ceil(r.height) + 12 };
@@ -311,6 +329,22 @@ export async function checkHiddenIntegrity(page: Page, real: string[]): Promise<
       if (/#[A-Za-z0-9]/.test(card.textContent ?? "")) out.push("a hidden card shows a #tag");
       for (const n of names) if (html.includes(n)) out.push(`a hidden card contains "${n}"`);
     }
+    // Details and Match (R93, R18): every name drawn in a hidden style (eye-off, no tag) shows no tag and no real name
+    // in its own unit: the hero, a Top 3 row, a scoreboard row. A player hidden on the live screen is hidden on every
+    // page, so the whole Details or Match DOM (attributes included) must not carry any of `real`.
+    const page = document.querySelector("#app .details, #app .match");
+    if (page) {
+      const what = page.classList.contains("details") ? "Details" : "Match";
+      for (const nm of page.querySelectorAll(".nm")) {
+        if (!nm.querySelector("svg") || nm.querySelector(".t")) continue;
+        const unit = nm.closest(".hero, .mate, .srow") ?? nm;
+        const label = `a hidden ${unit === nm ? "name" : (unit.classList[0] ?? "unit")} in ${what}`;
+        const own = unit.classList.contains("hero") ? nm : unit; // the hero also holds the rank and stats
+        if (/#[A-Za-z0-9]/.test(own.textContent ?? "")) out.push(`${label} shows a #tag`);
+        for (const n of names) if (unit.outerHTML.includes(n)) out.push(`${label} contains "${n}"`);
+      }
+      for (const n of names) if (page.outerHTML.includes(n)) out.push(`the ${what} page contains "${n}"`);
+    }
     return out;
   }, real);
 }
@@ -318,6 +352,47 @@ export async function checkHiddenIntegrity(page: Page, real: string[]): Promise<
 /** The fixture names hidden per scene (spec §8.2): Agent Select hides Nova#3341 until she locks. */
 export function hiddenRealNames(scene: string): string[] {
   return scene.startsWith("pregame") ? ["Nova", "3341"] : [];
+}
+
+/**
+ * 3. Details / Match: the one scroll container scrolls vertically only. Its scrollWidth fits its width, and nothing
+ * inside it is a scroll container of its own (no nested scrollbar, in either axis).
+ */
+export async function checkScrollX(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const out: string[] = [];
+    const sc = document.querySelectorAll<HTMLElement>("#app .scroll");
+    if (sc.length !== 1) return [`${sc.length} scroll containers, want 1`];
+    const el = sc[0]!;
+    // overflow-y:auto makes overflow-x compute to auto too: fine as long as nothing is wider than the container.
+    if (el.scrollWidth > el.clientWidth) out.push(`.scroll scrollWidth ${el.scrollWidth} > ${el.clientWidth}`);
+    for (const d of el.querySelectorAll<HTMLElement>("*")) {
+      const s = getComputedStyle(d);
+      const can = (v: string) => v === "auto" || v === "scroll";
+      if ((can(s.overflowY) && d.scrollHeight > d.clientHeight) || (can(s.overflowX) && d.scrollWidth > d.clientWidth)) {
+        out.push(`${d.tagName.toLowerCase()}.${[...d.classList].filter((c) => !/^s(velte)?-/.test(c)).join(".")} scrolls inside .scroll`);
+      }
+    }
+    return out;
+  });
+}
+
+/** Checks 1, 3, 4, 5, 7, 8, 9 (the Details / Match set; spec §8.3, check 9 a regression check only, R96). */
+export async function detailsChecks(page: Page, scene: string, family: string): Promise<string[]> {
+  const scroller = page.locator("#app .scroll");
+  const top = await scroller.evaluate((el) => el.scrollTop);
+  const out = [
+    ...(await checkAppBox(page)).map((p) => `1: ${p}`),
+    ...(await checkScrollX(page)).map((p) => `3: ${p}`),
+    ...(await checkFontFloor(page)).map((p) => `4: ${p}`),
+    ...(await checkClipping(page)).map((p) => `5: ${p}`),
+    ...(await checkNoStatusText(page)).map((p) => `7: ${p}`),
+    ...(await checkFont(page, family)).map((p) => `8: ${p}`),
+    ...(await checkHiddenIntegrity(page, hiddenRealNames(scene))).map((p) => `9: ${p}`),
+  ];
+  // The decoration probe scrolls its target into view; leave the page where it was.
+  await scroller.evaluate((el, t) => (el.scrollTop = t), top);
+  return out;
 }
 
 /** Checks 1, 2, 4, 5, 6, 7, 8, 9 (the Live set). */

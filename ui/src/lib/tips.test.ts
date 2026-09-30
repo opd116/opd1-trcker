@@ -1,7 +1,7 @@
 // The catalogue's exact strings are in tooltip.test.ts. This file checks the rules
 // every entry must obey: hidden names never leak, and no missing part prints as text.
 import { describe, expect, it } from "vitest";
-import { aprTip, encounterTip, last5Tip, nameTip, partyTip, peakTip, winTip } from "./tips";
+import { aprTip, encounterMapTip, encounterTip, heroStatTip, last5Tip, liveTip, loadoutTip, nameTip, partyTip, peakTip, rankTip, winTip } from "./tips";
 import type { DisplayName, Meta, PlayerCard } from "./types";
 
 const meta: Meta = { agents: { a1: { name: "Jett" } }, maps: { m1: { name: "Haven" } }, tiers: {} };
@@ -44,6 +44,14 @@ describe("other entries stay clean", () => {
       last5Tip({ result: "draw", rrEarned: 0, startMs: NOW + 5 * 60_000 }, NOW),
       winTip({ actWins: 0, actGames: 0 } as PlayerCard),
       peakTip({ tier: 3, actLabel: "X", actName: "unparseable", sinceActEndMs: 1, actStartMs: 0, actEndMs: 86_400_000 }),
+      heroStatTip(null, 0),
+      heroStatTip(1, 0),
+      rankTip(null, 21),
+      rankTip(meta, 21),
+      encounterMapTip({ startMs: NOW, durationMs: null }, NOW),
+      liveTip(null, null),
+      liveTip(meta, "gone"),
+      loadoutTip(null),
     ];
     for (const s of out) expect(s).not.toMatch(/undefined|null|NaN/);
   });

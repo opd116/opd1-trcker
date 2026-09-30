@@ -108,7 +108,13 @@
     display: block;
   }
 
-  /* Hero (spec §6.2): 26px tiles, 13px letters, 6px gaps. */
+  /* Hero (spec §6.2): 26px tiles, 13px letters, 6px gaps, centred in its flex cell (the card's end/start alignment is
+     for the card grid). */
+  .l5.size-hero {
+    align-self: auto;
+    justify-self: auto;
+  }
+
   .size-hero .l5col {
     gap: 4px;
   }

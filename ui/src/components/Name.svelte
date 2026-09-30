@@ -1,7 +1,8 @@
 <!--
   A player's display name (spec §3.4): visible, remembered, hidden agent, Hidden Player, missing (—) or loading.
-  Sizes: card 16px (§3.4), hero 22px (§6.2), row 14px (§6.10). Only the name part of a Riot ID truncates; the tag
-  never does. A hidden player's name never reaches the DOM: the backend never sends it (R18, R96).
+  Sizes: card 16px (§3.4), hero 22px (§6.2), row 14px (§6.7, §6.10). Only the name part of a Riot ID truncates; the
+  tag never does. `wrap` (Top 3, §6.7): full names wrap and never truncate. A hidden player's name never reaches the
+  DOM: the backend never sends it (R18, R96).
 -->
 <script lang="ts">
   import { agentName } from "../lib/meta";
@@ -17,9 +18,11 @@
     size: "card" | "hero" | "row";
     /** `card`: the §4.2 name tooltips (visible: only when truncated). `none`: no tooltip (Top 3, scoreboard). */
     tipMode?: "card" | "none";
+    /** Top 3 (spec §6.7): the block takes the row's free width and a long name wraps (anywhere) instead of truncating. */
+    wrap?: boolean;
   }
 
-  let { name, size, tipMode = "card" }: Props = $props();
+  let { name, size, tipMode = "card", wrap = false }: Props = $props();
 
   /** The hidden-style text: `Hidden Player`, or the agent name (undefined while meta is pending, spec §5.8). */
   const hidden = $derived(
@@ -33,17 +36,22 @@
   });
 
   const eye = $derived(size === "hero" ? 16 : 14);
+  // Loading: the skeleton's own name bar. The hero's is the Details skeleton's 160×18 (spec §6.9), so a hero whose
+  // name is still absent looks like the skeleton hero; card and row keep the §3.4 120×13.
+  const bar = $derived(size === "hero" ? { w: 160, h: 18 } : { w: 120, h: 13 });
+  // Only a truncating name is an allowed ellipsis span (spec §8.3 check 5); a wrapping one never clips.
+  const ellipsis = $derived(wrap ? undefined : true);
 </script>
 
-<div class={["nm", `size-${size}`]} use:tip={tipArg}>
+<div class={["nm", `size-${size}`, wrap && "wrap"]} use:tip={tipArg}>
   {#if name === undefined}
-    <span class="line"><Skel w={120} h={13} /></span>
+    <span class="line"><Skel w={bar.w} h={bar.h} /></span>
   {:else if name === null}
     <span class="dash">—</span>
   {:else if name.kind === "visible"}
-    <span class="n" data-ellipsis>{name.name}</span><span class="t">#{name.tag}</span>
+    <span class="n" data-ellipsis={ellipsis}>{name.name}</span><span class="t">#{name.tag}</span>
   {:else if name.kind === "remembered"}
-    <EyeOff size={eye} /><span class="n rem" data-ellipsis>{name.name}</span><span class="t">#{name.tag}</span>
+    <EyeOff size={eye} /><span class="n rem" data-ellipsis={ellipsis}>{name.name}</span><span class="t">#{name.tag}</span>
   {:else}
     <EyeOff size={eye} />
     {#if hidden === undefined}
@@ -144,5 +152,30 @@
   .size-row .dash,
   .size-row .line {
     font-size: 14px;
+  }
+
+  /* The design's row-size hidden name (scoreboard, v8:407) does not clip: an italic's last glyph overhangs its box,
+     and a clip would shave it. An agent name or `Hidden Player` never needs the ellipsis at 14px. */
+  .size-row .hid {
+    overflow: visible;
+  }
+
+  /* Top 3 (spec §6.7, v8:321-323): the block fills the row beside the live icons and the count, and wraps. [C] A
+     16-character name has no break point, so it may break anywhere rather than overflow under the icons. */
+  .wrap {
+    flex: 1;
+    flex-wrap: wrap;
+  }
+
+  .wrap .n {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+  }
+
+  /* A wrapping name has no clip box for the underline to escape. */
+  .wrap .rem {
+    overflow: visible;
   }
 </style>

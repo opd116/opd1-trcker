@@ -30,9 +30,9 @@
   <!-- One scroll container for Details and Match (spec §6.1); `go` resets it to the top. -->
   <div class="scroll" use:scrollHost>
     {#if router.route.name === "details"}
-      <Details />
+      <Details puuid={router.route.puuid} more={router.route.more} />
     {:else}
-      <Match />
+      <Match matchId={router.route.matchId} focusPuuid={router.route.focusPuuid} from={router.route.from} />
     {/if}
   </div>
 {/if}

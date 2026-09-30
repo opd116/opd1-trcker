@@ -129,8 +129,35 @@ export async function openScene(
   else await page.clock.setFixedTime(NOW);
   await page.goto(sceneUrl(scene, params));
   await page.waitForFunction(() => document.documentElement.dataset.feed === "demo-feed");
+  const route = params.route ?? (scene.startsWith("details") ? "details" : scene.startsWith("match") ? "match" : "live");
+  if (route === "details" || route === "match") await waitPage(page, scene.endsWith("-loading") ? "loading" : "loaded");
   await settle(page);
   if (opts.clock === "manual") await pauseHere(page);
+}
+
+/**
+ * Details and Match fetch their data after the route opens: wait until the page shows it (`aria-busy="false"`), or
+ * for a `-loading` scene until its skeleton is up (`aria-busy="true"`, the answer never comes).
+ */
+export async function waitPage(page: Page, state: "loaded" | "loading"): Promise<void> {
+  await page.locator(`#app :is(.details, .match)[aria-busy="${state === "loading"}"]`).waitFor();
+}
+
+/**
+ * Screenshot a Details or Match page at its full scroll height (spec §8.1 shots): the scroll container is let out to
+ * its content height for the shot (`overflow-y: hidden` keeps its stable scrollbar gutter, so nothing reflows
+ * sideways), then put back. A Live page is shot as is.
+ */
+export async function shotFull(page: Page, name: string): Promise<void> {
+  mkdirSync(SHOTS_DIR, { recursive: true });
+  const path = join(SHOTS_DIR, `${name}.png`);
+  if ((await page.locator("#app .scroll").count()) === 0) {
+    await page.screenshot({ path });
+    return;
+  }
+  const tall = await page.addStyleTag({ content: "#app{height:auto!important;min-height:800px} #app .scroll{flex:none!important;overflow-y:hidden!important}" });
+  await page.screenshot({ path, fullPage: true });
+  await tall.evaluate((el) => (el as Element).remove());
 }
 
 /**

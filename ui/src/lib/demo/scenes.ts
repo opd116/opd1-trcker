@@ -3,16 +3,19 @@
 // (it is reached only through a DEV-guarded dynamic import).
 import type { Route } from "../router.svelte";
 import type {
+  EncounterDetailRow,
   LiveState,
   MatchDetailsView,
   Meta,
   PlayerCard,
   PlayerDetails,
+  ScoreRow,
   Stage,
   WeaponSkin,
 } from "../types";
 import {
   ACT,
+  AG,
   deathmatch,
   detailsFor,
   emptyDetails,
@@ -32,7 +35,8 @@ export type SceneName =
   | "pregame" | "pregame-nomap" | "pregame-loading" | "ingame" | "ingame-longnames" | "ingame-parties4" | "ingame-partial" | "ingame-unranked"
   | "ingame-loading" | "ingame-nometa"
   | "details" | "details-more" | "details-self" | "details-hidden" | "details-empty" | "details-loading" | "details-longnames" | "details-partial"
-  | "match" | "match-enc" | "match-hidden" | "match-dm" | "match-loading" | "match-longnames";
+  | "details-nostats"
+  | "match" | "match-enc" | "match-hidden" | "match-dm" | "match-loading" | "match-longnames" | "match-nostats";
 
 export type Scene = {
   /** null: no LiveState has arrived yet (`boot`). */
@@ -211,6 +215,86 @@ function matchLongnames(): MatchDetailsView {
 
 const unrankedLive = state("ingame", MAPS.Haven, unrankedRoster());
 
+// ── R133: every `—` cell of Details and Match ───────────────────────────────────
+/** Zephyr in `ingame-unranked`: level, rank, peak, prev and every stat null, `last5: []`. */
+const ZEPHYR = PUUID.zephyr!;
+const NOSTATS_MATCH = recentMatchId("zephyr", 0);
+const NOSTATS_ENCOUNTERS = [encounterMatchId("zephyr", 0), encounterMatchId("zephyr", 1)];
+
+/**
+ * Details where every value that can be unknown is (R102, R124, R133): the hero's cells, the recent stat lines (one row
+ * also with no map, score, agent or rank), the encounter ranks, scores, agents and durations, an empty Top 3 and a
+ * loadout of nothing. No counted act match, so the hero K/D and HS% are null too (R116).
+ */
+function detailsNostats(): Record<string, PlayerDetails> {
+  const live = unrankedLive.players;
+  const d = detailsFor("zephyr", live.find((c) => c.puuid === ZEPHYR), live);
+  const none = { kills: null, deaths: null, assists: null, kd: null, acs: null, hsPct: null, rrEarned: null } as const;
+  d.recent = d.recent.slice(0, 4).map((m, i) => ({
+    ...m,
+    ...none,
+    ...(i === 1 ? { mapId: "", roundsWon: null, roundsLost: null, agentId: null, tier: null } : {}),
+    ...(i === 2 ? { tier: 0 } : {}), // unranked in that match: the empty box, like null
+  }));
+  const enc = (i: number, e: Omit<EncounterDetailRow, "matchId">): EncounterDetailRow => ({ matchId: NOSTATS_ENCOUNTERS[i]!, ...e });
+  d.encounters = [
+    enc(0, {
+      mapId: "", startMs: Date.UTC(2026, 8, 12, 23, 18), with: false, result: "draw", roundsWon: null, roundsLost: null,
+      durationMs: null, themAgentId: null, themTier: null, selfAgentId: null, selfTier: null,
+    }),
+    enc(1, {
+      mapId: MAPS.Split, startMs: Date.UTC(2026, 7, 30, 22, 31), with: true, result: "win", roundsWon: 13, roundsLost: 10,
+      durationMs: null, themAgentId: AG.Viper, themTier: 0, selfAgentId: AG.Jett, selfTier: null,
+    }),
+  ];
+  d.topTeammates = [];
+  d.loadout = { vandal: null, phantom: null, operator: null, sheriff: null };
+  d.heroKd = null;
+  d.heroHs = null;
+  d.heroMatches = 0;
+  return { [ZEPHYR]: d };
+}
+
+const byAcsDesc = (x: ScoreRow, y: ScoreRow) => (y.acs ?? -1) - (x.acs ?? -1);
+
+/**
+ * Zephyr's recent match with every scoreboard `—` (R124, R133): no duration, no rounds and no halves, and rows with no
+ * stats row whose rank still shows (R81), one with no rank and no agent either, one that lost only its damage (ADR).
+ * `self`: the user played it (the encounter rows), so team 0 holds the user's own row.
+ */
+function matchNostats(matchId: string, perspective: "focus" | "self"): MatchDetailsView {
+  const m = matchFor(NOSTATS_MATCH, unrankedLive.players);
+  m.matchId = matchId;
+  m.durationMs = null;
+  for (const t of m.teams) {
+    t.roundsWon = null;
+    t.firstHalf = null;
+  }
+  const none = { kills: null, deaths: null, assists: null, acs: null, adr: null, hsPct: null } as const;
+  const [a, b] = m.teams as [MatchDetailsView["teams"][0], MatchDetailsView["teams"][0]];
+  // By position (this file names no roster player, so a leaked scene bundle is still caught by the dist grep).
+  const [mate0, mate1, mate2] = a.players.filter((p) => !p.isFocus);
+  Object.assign(a.players.find((p) => p.isFocus)!, none); // Zephyr: no stats row, rank kept
+  Object.assign(mate1!, none, { tier: null, agentId: null });
+  Object.assign(mate2!, { adr: null }); // only the damage is unknown
+  Object.assign(b.players.find((p) => p.name.kind === "hiddenAgent")!, none);
+  Object.assign(b.players.find((p) => p.name.kind === "visible")!, none, { tier: 0 });
+  if (perspective === "self") {
+    m.perspective = "self";
+    const self = roster().find((c) => c.isSelf)!;
+    Object.assign(mate0!, { puuid: self.puuid, name: structuredClone(self.name!), isSelf: true });
+  }
+  for (const t of m.teams) t.players.sort(byAcsDesc);
+  return m;
+}
+
+function nostatsMatches(): Record<string, MatchDetailsView> {
+  return {
+    [NOSTATS_MATCH]: matchNostats(NOSTATS_MATCH, "focus"),
+    ...Object.fromEntries(NOSTATS_ENCOUNTERS.map((id) => [id, matchNostats(id, "self")])),
+  };
+}
+
 export const SCENES: Record<SceneName, Scene> = {
   boot: { live: null, route: LIVE_ROUTE },
 
@@ -261,6 +345,7 @@ export const SCENES: Record<SceneName, Scene> = {
   "details-loading": { live: ingame(), route: details(MARA), details: { [MARA]: "pending" } },
   "details-longnames": { live: ingame(longnames()), route: details(MARA), details: detailsLongnames() },
   "details-partial": { live: ingame(), route: details(MARA), details: detailsPartial() },
+  "details-nostats": { live: unrankedLive, route: details(ZEPHYR), details: detailsNostats(), matches: nostatsMatches() },
 
   match: {
     live: ingame(),
@@ -292,6 +377,7 @@ export const SCENES: Record<SceneName, Scene> = {
     route: matchRoute(MARA_RECENT, MARA, "recent"),
     matches: { [MARA_RECENT]: matchLongnames() },
   },
+  "match-nostats": { live: unrankedLive, route: matchRoute(NOSTATS_MATCH, ZEPHYR, "recent"), matches: nostatsMatches() },
 };
 
 // ── the DEV `api.ts` answers ────────────────────────────────────────────────────

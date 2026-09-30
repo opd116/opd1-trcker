@@ -1,6 +1,25 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hideTip, parseWl, tip, tipOver, tipPosition, tipState, wlRow } from "./tooltip.svelte";
-import { aprTip, encounterTip, last5Tip, nameTip, partyTip, peakTip, winTip } from "./tips";
+import {
+  ACS_TIP,
+  ADR_TIP,
+  actScopeTip,
+  aprTip,
+  encounterMapTip,
+  encounterTip,
+  HALVES_TIP,
+  heroStatTip,
+  last5Tip,
+  liveTip,
+  loadoutTip,
+  nameTip,
+  partyTip,
+  peakTip,
+  PM_TIP,
+  rankTip,
+  recentTimeTip,
+  winTip,
+} from "./tips";
 import type { Meta, Peak, PlayerCard } from "./types";
 
 const rect = (left: number, top: number, width: number, height: number): DOMRectReadOnly =>
@@ -329,5 +348,66 @@ describe("encounterTip, partyTip, winTip, aprTip", () => {
     expect(aprTip(1)).toBe("Average party rank\nFrom 1 ranked player");
     expect(aprTip(3).endsWith("From 3 ranked players")).toBe(true);
     expect(aprTip(2)).toBe("Average party rank\nFrom 2 ranked players");
+  });
+});
+
+// ── Player Details and Match Details (spec §4.2, Task 18) ────────────────────────
+describe("Details and Match tips", () => {
+  const BREACH = "5f8d3a7f-467b-97f3-062c-13acf203c006";
+  const dm: Meta = { agents: { [BREACH]: { name: "Breach" } }, maps: {}, tiers: { "21": { name: "ASCENDANT 1", color: "2a9d8fff" } } };
+
+  it("hero K/D and HS%: `Last {N} competitive · this act` (R116); none for a null value (no counted match)", () => {
+    expect(heroStatTip(1.52, 20)).toBe("Last 20 competitive · this act");
+    expect(heroStatTip(0.29, 1)).toBe("Last 1 competitive · this act");
+    expect(heroStatTip(null, 0)).toBe("");
+    // HS% may be null with counted matches (no shot landed): still no tip, the — has nothing to explain.
+    expect(heroStatTip(null, 12)).toBe("");
+  });
+
+  it("hero Games and W / L: `This act`; none while the value is still loading", () => {
+    expect(actScopeTip(65)).toBe("This act");
+    expect(actScopeTip(null)).toBe("This act");
+    expect(actScopeTip(undefined)).toBe("");
+  });
+
+  it("recent row time text: `9:14 PM`", () => {
+    expect(recentTimeTip(Date.UTC(2026, 8, 29, 21, 14))).toBe("9:14 PM");
+    expect(recentTimeTip(Date.UTC(2026, 8, 29, 0, 5))).toBe("12:05 AM");
+  });
+
+  it("rank icon: the tier name; no tip while meta is pending, for a miss or below tier 3 (spec §5.8)", () => {
+    expect(rankTip(dm, 21)).toBe("Ascendant 1");
+    expect(rankTip(null, 21)).toBe("");
+    expect(rankTip(dm, 22)).toBe("");
+    expect(rankTip(dm, 0)).toBe("");
+    expect(rankTip(dm, null)).toBe("");
+  });
+
+  it("encounter map cell: `Sep 12 · 11:18 PM · 41 min`, a year when not this year, no duration when unknown", () => {
+    const sep12 = Date.UTC(2026, 8, 12, 23, 18);
+    expect(encounterMapTip({ startMs: sep12, durationMs: 41 * 60_000 }, NOW)).toBe("Sep 12 · 11:18 PM · 41 min");
+    expect(encounterMapTip({ startMs: sep12, durationMs: null }, NOW)).toBe("Sep 12 · 11:18 PM");
+    expect(encounterMapTip({ startMs: Date.UTC(2025, 11, 30, 20, 5), durationMs: 36 * 60_000 }, NOW)).toBe("Dec 30, 2025 · 8:05 PM · 36 min");
+  });
+
+  it("Top 3 live icons: `In this match · Breach`; the agent part is dropped when unknown (spec §5.8)", () => {
+    expect(liveTip(dm, BREACH)).toBe("In this match · Breach");
+    expect(liveTip(dm, null)).toBe("In this match");
+    expect(liveTip(null, BREACH)).toBe("In this match");
+    expect(liveTip(dm, "not-in-meta")).toBe("In this match");
+  });
+
+  it("loadout well: `{Tier} Edition`; none for a default skin or an unknown tier", () => {
+    expect(loadoutTip("60bca009-4182-7998-dee7-b8a2558dc369")).toBe("Premium Edition");
+    expect(loadoutTip("411e4a55-4e59-7757-41f0-86a53f101bb5")).toBe("Ultra Edition");
+    expect(loadoutTip(null)).toBe("");
+    expect(loadoutTip("00000000-0000-0000-0000-000000000000")).toBe("");
+  });
+
+  it("match header and scoreboard: halves, ACS, +/−, ADR", () => {
+    expect(HALVES_TIP).toBe("First half · Second half");
+    expect(ACS_TIP).toBe("Average combat score");
+    expect(PM_TIP).toBe("Kills minus deaths");
+    expect(ADR_TIP).toBe("Average damage per round");
   });
 });

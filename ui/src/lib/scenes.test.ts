@@ -14,8 +14,8 @@ const NAMES: SceneName[] = [
   "pregame", "pregame-nomap", "pregame-loading", "ingame", "ingame-longnames", "ingame-parties4", "ingame-partial",
   "ingame-unranked", "ingame-loading", "ingame-nometa",
   "details", "details-more", "details-self", "details-hidden", "details-empty", "details-loading", "details-longnames",
-  "details-partial",
-  "match", "match-enc", "match-hidden", "match-dm", "match-loading", "match-longnames",
+  "details-partial", "details-nostats",
+  "match", "match-enc", "match-hidden", "match-dm", "match-loading", "match-longnames", "match-nostats",
 ];
 
 const meta = demoMeta as Meta;
@@ -82,9 +82,10 @@ describe("registry", () => {
       for (const d of Object.values(s.details ?? {})) {
         if (d === "pending") continue;
         card(d.card);
-        d.recent.forEach((r) => (maps.add(r.mapId), r.agentId && agents.add(r.agentId)));
+        // "" is the wire's unknown map (R133 details-nostats), not an id: it renders as —, never looked up.
+        d.recent.forEach((r) => (r.mapId && maps.add(r.mapId), r.agentId && agents.add(r.agentId)));
         d.encounters.forEach((e) => {
-          maps.add(e.mapId);
+          if (e.mapId) maps.add(e.mapId);
           if (e.themAgentId) agents.add(e.themAgentId);
           if (e.selfAgentId) agents.add(e.selfAgentId);
         });
@@ -366,6 +367,24 @@ describe("details scenes", () => {
     expect(weapons.filter((w) => d.loadout[w] === null)).toHaveLength(1);
   });
 
+  it("details-nostats (R133): every hero value null, null stat lines, unknown map/score/agent/rank, empty Top 3 and loadout", () => {
+    const r = routeOf("details-nostats", "details");
+    const d = detailsOf("details-nostats", r.puuid);
+    const c = d.card;
+    for (const k of ["level", "rank", "prevActTier", "peak", "kd", "hsPct", "actWinrate", "actWins", "actGames"] as const) expect(c[k], k).toBeNull();
+    expect(c.last5).toEqual([]);
+    expect([d.heroKd, d.heroHs, d.heroMatches]).toEqual([null, null, 0]);
+    expect(d.recent.length).toBe(4); // Show more is there, and every row's stat line is null (R102)
+    for (const m of d.recent) expect([m.kills, m.deaths, m.assists, m.kd, m.acs, m.hsPct]).toEqual([null, null, null, null, null, null]);
+    expect(d.recent.some((m) => m.mapId === "" && m.roundsWon === null && m.agentId === null && m.tier === null)).toBe(true);
+    expect(d.encounters.some((e) => e.mapId === "" && e.roundsWon === null && e.themTier === null && e.selfTier === null && e.themAgentId === null)).toBe(true);
+    expect(d.encounters.every((e) => e.durationMs === null)).toBe(true);
+    expect(d.topTeammates).toEqual([]);
+    expect(d.loadout).toEqual({ vandal: null, phantom: null, operator: null, sheriff: null });
+    // Every row opens a match the scene can serve.
+    for (const id of [d.recent[0]!.matchId, ...d.encounters.map((e) => e.matchId)]) expect(SCENES["details-nostats"].matches?.[id]).toBeDefined();
+  });
+
   it("loadout skins carry chroma, name and tier", () => {
     const d = detailsOf("details", routeOf("details", "details").puuid);
     expect(d.loadout.vandal).toEqual({
@@ -434,6 +453,24 @@ describe("match scenes", () => {
     expect(m.teams[0]).toMatchObject({ result: null, roundsWon: null, firstHalf: null });
     expect(m.teams[0]!.players.length).toBeGreaterThan(5);
     acsDesc(m);
+  });
+
+  it("match-nostats (R133): no duration, rounds or halves; no-stats rows keep their rank (R81); one lost only its ADR", () => {
+    const m = matchOf("match-nostats");
+    expect(m.durationMs).toBeNull();
+    for (const t of m.teams) expect([t.roundsWon, t.firstHalf]).toEqual([null, null]);
+    const rows = m.teams.flatMap((t) => t.players);
+    const bare = rows.filter((p) => p.kills === null);
+    expect(bare.length).toBeGreaterThanOrEqual(4);
+    expect(bare.some((p) => p.tier !== null && p.tier >= 3)).toBe(true); // R81
+    expect(bare.some((p) => p.tier === null && p.agentId === null)).toBe(true);
+    expect(rows.some((p) => p.kills !== null && p.adr === null)).toBe(true);
+    expect(m.teams[0]!.players.find((p) => p.isFocus)!.kills).toBeNull();
+    // The encounter rows' matches are the user's own: self perspective with the user's row in team 0.
+    const enc = SCENES["match-nostats"].matches!;
+    const selfViews = Object.values(enc).filter((v): v is MatchDetailsView => v !== "pending" && v.perspective === "self");
+    expect(selfViews).toHaveLength(2);
+    for (const v of selfViews) expect(v.teams[0]!.players.some((p) => p.isSelf)).toBe(true);
   });
 
   it("match-loading never resolves", () => {

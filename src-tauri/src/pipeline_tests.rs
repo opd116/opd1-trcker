@@ -18,7 +18,8 @@ use opd1_core::db::repo::{
     CompUpdateRow, HistoryEntry, Match, MatchPlayer, MatchTeam, MmrSnapshot, Repo,
 };
 use opd1_core::model::{
-    DisplayName, EncounterCount, Field, LiveState, PlayerDetails, RememberedSource, Team,
+    DisplayName, EncounterCount, Field, LiveState, MatchDetailsView, PlayerDetails,
+    RememberedSource, Team,
 };
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
@@ -53,6 +54,7 @@ const TIER_PREMIUM: &str = "60bca009-4182-7998-dee7-b8a2558dc369";
 struct Recorder {
     live: Mutex<Vec<LiveState>>,
     details: Mutex<Vec<PlayerDetails>>,
+    matches: Mutex<Vec<MatchDetailsView>>,
 }
 
 struct Sink(Arc<Recorder>);
@@ -63,6 +65,9 @@ impl EventSink for Sink {
     }
     fn details(&self, details: &PlayerDetails) {
         self.0.details.lock().unwrap().push(details.clone());
+    }
+    fn match_view(&self, view: &MatchDetailsView) {
+        self.0.matches.lock().unwrap().push(view.clone());
     }
 }
 
@@ -1190,3 +1195,7 @@ mod details_loadouts;
 /// harness).
 #[cfg(test)]
 pub(crate) mod backfill;
+
+/// R150's names-fill tests (their own file; same harness).
+#[cfg(test)]
+mod names_fill;

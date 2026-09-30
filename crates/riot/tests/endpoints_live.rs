@@ -205,6 +205,59 @@ async fn presences_hits_local_not_pd_or_glz() {
 }
 
 #[tokio::test]
+async fn names_honors_a_429_retry_after_like_every_pd_call() {
+    // R150: the names fill goes through the session's throttle, so a 429 on
+    // the PUT holds the bucket for the Retry-After, then the call succeeds.
+    let (_tmp, server, session) = setup().await;
+    Mock::given(method("PUT"))
+        .and(path("/name-service/v2/players"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.3"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/name-service/v2/players"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "DisplayName": "", "Subject": OTHER_PUUID, "GameName": "Rival", "TagLine": "ENEMY" },
+        ])))
+        .mount(&server)
+        .await;
+
+    let visible = vec![VisiblePuuid::new(OTHER_PUUID.to_string(), false).unwrap()];
+    let start = std::time::Instant::now();
+    let result = session.names(&visible).await.expect("retried and answered");
+    assert_eq!(result[0].game_name, "Rival");
+    assert!(
+        start.elapsed() >= std::time::Duration::from_millis(250),
+        "the Retry-After was honored: {:?}",
+        start.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn names_sends_a_hundred_puuids_in_one_request() {
+    // Riot's limit is 100 per request; the names fill sends full batches.
+    let (_tmp, server, session) = setup().await;
+    let ids: Vec<String> = (0..100)
+        .map(|i| format!("{i:08x}-0000-0000-0000-000000000000"))
+        .collect();
+    Mock::given(method("PUT"))
+        .and(path("/name-service/v2/players"))
+        .and(body_json(json!(ids)))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let visible: Vec<VisiblePuuid> = ids
+        .iter()
+        .map(|i| VisiblePuuid::new(i.clone(), false).unwrap())
+        .collect();
+    let result = session.names(&visible).await.unwrap();
+    assert!(result.is_empty(), "a blank answer is an empty list too");
+}
+
+#[tokio::test]
 async fn names_puts_the_puuid_list_and_hits_pd() {
     let (_tmp, server, session) = setup().await;
     Mock::given(method("PUT"))

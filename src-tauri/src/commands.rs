@@ -23,7 +23,8 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::State;
 
-use opd1_core::model::{LiveState, MatchDetailsView, MyStats, PlayerDetails};
+use opd1_core::db::repo::NameAsk;
+use opd1_core::model::{DisplayName, Field, LiveState, MatchDetailsView, MyStats, PlayerDetails};
 use opd1_riot::assets::Meta;
 
 use crate::state::{lock, now_ms, AppState};
@@ -103,6 +104,8 @@ pub(crate) async fn player_details_for(
     // The open view: every later rebuild of it (the jobs below, and the
     // worker's sync of this player, R23) is emitted only when it changed.
     st.set_open_details(&details);
+    // R150: the names this page shows as missing, asked between matches.
+    st.queue_name_fill(details_asks(&details));
 
     if let Some(guard) = resolving {
         // The mark ends before the rebuild, so a name still unknown is `null`.
@@ -127,6 +130,28 @@ pub(crate) async fn player_details_for(
         }
     }
     Ok(details)
+}
+
+/// R150: the names a Player Details page lacks: the hero's own (a card with
+/// no name at all) and the Top 3 teammates shown as Hidden Player (no name in
+/// any stored match or `players` row). On demand — only puuids never asked
+/// before. Players hidden on the live screen are dropped when queued
+/// (`LiveModel::queue_name_fill`).
+fn details_asks(details: &PlayerDetails) -> Vec<NameAsk> {
+    let hero = (details.card.name == Field::Missing && !details.card.is_self)
+        .then(|| details.card.puuid.clone());
+    let mates = details
+        .top_teammates
+        .iter()
+        .filter(|t| t.name == DisplayName::HiddenPlayer)
+        .map(|t| t.puuid.clone());
+    hero.into_iter()
+        .chain(mates)
+        .map(|puuid| NameAsk {
+            puuid,
+            match_start_ms: None,
+        })
+        .collect()
 }
 
 /// The UI left the Player Details page (Back, or another page): nothing is
@@ -277,6 +302,7 @@ mod tests {
     impl EventSink for NoEvents {
         fn live(&self, _: &LiveState) {}
         fn details(&self, _: &PlayerDetails) {}
+        fn match_view(&self, _: &MatchDetailsView) {}
     }
 
     /// An app with an empty in-memory DB and asset tables that can't load

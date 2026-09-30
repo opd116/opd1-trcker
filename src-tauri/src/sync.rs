@@ -15,7 +15,11 @@
 //!    snapshot predates the current snapshot version (refetched once).
 //!
 //! Behind all of that, at the lowest priority, the worker also runs the
-//! user's own-history backfill ([`backfill_step`], R101).
+//! user's own-history backfill ([`backfill_step`], R101) and, ahead of it,
+//! the names fill ([`fill_names_step`], R150): between matches only, one
+//! batched name-service request for the players of a match that just ended,
+//! of a Details page, or of the matches the backfill stored — never for a
+//! player shown hidden on the live screen.
 //!
 //! Any failure other than `ClientGone` is logged and skipped: the fields
 //! it would have filled become Missing (`—`) through the card builder's
@@ -29,7 +33,7 @@ use serde::{Deserialize, Serialize};
 
 use tokio::task::JoinSet;
 
-use opd1_core::db::repo::{CompUpdateRow, HistoryEntry, MmrSnapshot};
+use opd1_core::db::repo::{CompUpdateRow, HistoryEntry, MmrSnapshot, NameAsk};
 use opd1_riot::endpoints::{MatchDetailsResponse, MatchHistoryResponse};
 use opd1_riot::to_core::{comp_update_rows_from_response, match_from_details};
 use opd1_riot::{RiotError, RiotSession, VisiblePuuid};
@@ -37,8 +41,8 @@ use opd1_riot::{RiotError, RiotSession, VisiblePuuid};
 use crate::logbuf::short;
 use crate::roster::{extract_loadouts, extract_player_loadout};
 use crate::state::{
-    lock, now_ms, wait_for_details_fetch, AppState, BackfillRun, DetailsClaim, DetailsFetchGuard,
-    Job,
+    lock, now_ms, unnamed_others, wait_for_details_fetch, AppState, BackfillRun, DetailsClaim,
+    DetailsFetchGuard, Job,
 };
 use crate::store::{mmr_refresh_needed, save_player, trim_mmr, PlayerUpdate, SELF_LOADOUT_KEY};
 
@@ -66,6 +70,12 @@ pub const BACKFILL_PAGE: u32 = 20;
 /// R101: the first run's cap on history entries looked at, when the current
 /// act's start doesn't stop it sooner (Claude's lightness bound).
 pub const BACKFILL_FIRST_RUN_MAX: u32 = 200;
+
+/// R150: the most puuids one backfill run asks name-service about, whatever
+/// it stored (Claude's lightness bound): two requests. The newest matches'
+/// players come first; older players are asked at their next match end or
+/// when a Details page needs them.
+pub const BACKFILL_FILL_MAX: usize = 200;
 
 /// The `app_state` key prefix of the backfill anchors (see [`anchor_key`]).
 const ANCHOR_KEY_PREFIX: &str = "self_history_anchor";
@@ -226,13 +236,30 @@ async fn sync_comp_updates(
 
 /// A match-details response -> the compact rows stored in SQLite (~1-2 KB;
 /// the large body is dropped before the write). `None`: the write failed
-/// (`AppState::db` already logged it). Shared by the live sync
-/// ([`fetch_missing_details`]) and the own-history backfill.
-pub async fn store_details(st: &Arc<AppState>, details: MatchDetailsResponse) -> Option<()> {
+/// (`AppState::db` already logged it); otherwise the match's start and the
+/// puuids of its players other than the user whose names match-details left
+/// blank, for the own-history backfill's names fill. Shared by the live sync
+/// ([`fetch_missing_details`]) and the backfill.
+///
+/// R150: when the stored match is the one that just ended
+/// ([`AppState::match_end_asks`]), its players are queued for the names fill
+/// right here, once the rows are stored — whichever path fetched it.
+pub async fn store_details(
+    st: &Arc<AppState>,
+    details: MatchDetailsResponse,
+) -> Option<(i64, Vec<String>)> {
     let (m, teams, players) = match_from_details(&details);
     drop(details);
+    let asks = st.match_end_asks(&m, &players);
+    let start_ms = m.start_ms;
+    let others: Vec<String> = {
+        let me = lock(&st.live).self_puuid.clone().unwrap_or_default();
+        unnamed_others(&players, &me).collect()
+    };
     st.db(move |repo| repo.upsert_match(&m, &teams, &players))
-        .await
+        .await?;
+    st.queue_name_fill(asks);
+    Some((start_ms, others))
 }
 
 /// Fetches match-details for every id the DB doesn't have yet and stores
@@ -582,12 +609,21 @@ fn with_run<R>(st: &AppState, me: &str, f: impl FnOnce(&mut BackfillRun) -> R) -
 }
 
 /// Drops `me`'s run without touching the anchor (the next trigger starts
-/// over from it).
+/// over from it). R150: the players of the matches it stored go to the names
+/// fill, however the run ended — they are stored, and nothing else will ask
+/// about them.
 fn end_run(st: &AppState, me: &str) {
-    let mut live = lock(&st.live);
-    if live.self_puuid.as_deref() == Some(me) {
-        live.backfill = None;
-    }
+    let asks = {
+        let mut live = lock(&st.live);
+        if live.self_puuid.as_deref() != Some(me) {
+            return;
+        }
+        live.backfill
+            .take()
+            .map(|run| run.participants)
+            .unwrap_or_default()
+    };
+    st.queue_name_fill(asks);
 }
 
 /// One history page into the run. `Ok(false)`: the run ended (a Riot or
@@ -790,10 +826,12 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
 
     loop {
         {
-            // Yield at every id: to a live job, and to a match that started
-            // meanwhile (R137; a free-for-all one never changes the view).
+            // Yield at every id: to a live job, to a names fill (R150: the
+            // match end's, right after its details were stored), and to a
+            // match that started meanwhile (R137; a free-for-all one never
+            // changes the view).
             let live = lock(&st.live);
-            if live.live_job_pending() || !live.backfill_ready() {
+            if live.live_job_pending() || live.fill_ready() || !live.backfill_ready() {
                 return Ok(());
             }
         }
@@ -827,10 +865,11 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
         };
         match session.match_details(&id).await {
             Ok(details) => {
-                if store_details(st, details).await.is_none() {
+                let Some((start_ms, others)) = store_details(st, details).await else {
                     end_run(st, me);
                     return Ok(());
-                }
+                };
+                with_run(st, me, |run| run.add_participants(start_ms, others));
                 pop(st);
             }
             Err(RiotError::ClientGone) => {
@@ -892,6 +931,7 @@ pub async fn run_worker(st: Arc<AppState>, session: Arc<RiotSession>, id: u64) {
             None => return,
             Some(Job::Names(needed)) => names_step(&st, &session, needed).await,
             Some(Job::Sync(puuid)) => sync_step(&st, &session, puuid).await,
+            Some(Job::FillNames) => fill_names_step(&st, &session).await,
             Some(Job::Backfill) => backfill_step(&st, &session).await,
         };
         if outcome.is_err() {
@@ -983,6 +1023,97 @@ async fn names_step(
     // R23: an open Details of one of them shows the name (or `—`) too.
     if let Some(open) = asked.iter().find(|p| st.details_open_for(p)) {
         crate::details::refresh(st, open).await;
+    }
+    Ok(())
+}
+
+/// R150: Riot's limit on one name-service request.
+pub const NAME_BATCH_MAX: usize = 100;
+
+/// R150: one names-fill request. Takes queued asks (oldest first), drops
+/// those the fill may not ask ([`LiveModel::take_fill`]: the user, anyone
+/// shown hidden on the live screen now or earlier this run) and those the DB
+/// says aren't worth asking ([`Repo::names_to_ask`]: a name is already known
+/// somewhere, or a blank answer already covers this ask), until 100 are
+/// left or the queue is empty — then sends **one** `PUT` for them. Every
+/// non-empty answer is stored in `players` (its `Seen` kind, R145); the rest
+/// are marked, each with the start of the match that asked, so that match
+/// (or an older one) never asks twice and the next, newer match asks again.
+///
+/// Between matches only: it does nothing in Agent Select, In Game or a
+/// free-for-all match (the asks wait in the queue), checked again right
+/// before the request. The request goes through the session's throttle like
+/// every pd call. A failed request stores nothing: an error is not an answer,
+/// and the asks are not kept — a later trigger asks again.
+pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Result<(), Gone> {
+    if !lock(&st.live).between_matches() {
+        return Ok(());
+    }
+    let mut asks: Vec<NameAsk> = Vec::new();
+    while asks.len() < NAME_BATCH_MAX {
+        let batch = lock(&st.live).take_fill(NAME_BATCH_MAX - asks.len());
+        if batch.is_empty() {
+            break;
+        }
+        // A SQLite failure (`None`, already logged) drops the batch.
+        if let Some(worth) = st.db(move |repo| repo.names_to_ask(&batch)).await {
+            asks.extend(worth);
+        }
+    }
+
+    // The last look, under the lock the `VisiblePuuid`s are built under: a
+    // match may have started, or a player turned hidden, while the DB was
+    // read.
+    let visible: Vec<VisiblePuuid> = {
+        let mut live = lock(&st.live);
+        if !live.between_matches() {
+            live.queue_name_fill(asks);
+            return Ok(());
+        }
+        asks.retain(|a| live.fill_allowed(&a.puuid));
+        asks.iter()
+            .filter_map(|a| VisiblePuuid::new(a.puuid.clone(), false))
+            .collect()
+    };
+    if visible.is_empty() {
+        return Ok(());
+    }
+
+    let entries = match session.names(&visible).await {
+        Ok(entries) => entries,
+        Err(RiotError::ClientGone) => return Err(Gone),
+        Err(e) => {
+            log::warn!("names fill for {} players failed: {e}", visible.len());
+            return Ok(());
+        }
+    };
+    let asked: HashSet<&str> = asks.iter().map(|a| a.puuid.as_str()).collect();
+    let learned: Vec<(String, String, String)> = entries
+        .into_iter()
+        .filter(|e| asked.contains(e.subject.as_str()))
+        .filter(|e| !e.game_name.is_empty() && !e.tag_line.is_empty())
+        .map(|e| (e.subject, e.game_name, e.tag_line))
+        .collect();
+    let named: HashSet<&str> = learned.iter().map(|(p, _, _)| p.as_str()).collect();
+    let blank: Vec<NameAsk> = asks
+        .iter()
+        .filter(|a| !named.contains(a.puuid.as_str()))
+        .cloned()
+        .collect();
+    log::debug!(
+        "names fill: {} of {} asked answered with a name",
+        learned.len(),
+        asks.len()
+    );
+    let now = now_ms();
+    let learned_any = !learned.is_empty();
+    let stored = st
+        .db(move |repo| repo.record_name_answers(&learned, &blank, now))
+        .await;
+    if stored.is_some() && learned_any {
+        // The open Player Details and Match Details show the new names.
+        crate::details::refresh_open(st).await;
+        crate::match_details::refresh_open(st).await;
     }
     Ok(())
 }

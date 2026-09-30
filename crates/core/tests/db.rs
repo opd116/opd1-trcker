@@ -62,7 +62,7 @@ fn migrations_idempotent() {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 2);
+        assert_eq!(version, 3);
     }
 
     // Reopening an already-migrated file must succeed, not re-run schema
@@ -71,7 +71,7 @@ fn migrations_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 2);
+    assert_eq!(version, 3);
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM players", [], |r| r.get(0))
@@ -105,9 +105,9 @@ fn user_version(conn: &rusqlite::Connection) -> i64 {
 }
 
 #[test]
-fn fresh_db_has_phase2_columns_at_user_version_2() {
+fn fresh_db_has_the_phase2_columns() {
     let conn = open_db(Path::new(":memory:")).unwrap();
-    assert_eq!(user_version(&conn), 2);
+    assert_eq!(user_version(&conn), 3);
     for (table, column) in [
         ("matches", "game_length_ms"),
         ("match_teams", "rounds_won_h1"),
@@ -122,7 +122,7 @@ fn fresh_db_has_phase2_columns_at_user_version_2() {
 }
 
 #[test]
-fn v1_db_upgrades_to_user_version_2() {
+fn v1_db_upgrades_through_migrations_2_and_3() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     {
         // A DB as an earlier build left it: migration 1 only, one match.
@@ -142,8 +142,8 @@ fn v1_db_upgrades_to_user_version_2() {
         }
     }
 
-    let conn = open_db(tmp.path()).expect("upgrade runs migration 2 only");
-    assert_eq!(user_version(&conn), 2);
+    let conn = open_db(tmp.path()).expect("upgrade runs migrations 2 and 3");
+    assert_eq!(user_version(&conn), 3);
     let old: [Option<i64>; 4] = conn
         .query_row(
             "SELECT m.game_length_ms, t.rounds_won_h1, p.competitive_tier, p.damage
@@ -175,7 +175,7 @@ fn v1_db_upgrades_to_user_version_2() {
 
     // A second open runs no migration: `ADD COLUMN` twice would fail.
     let conn = open_db(tmp.path()).expect("reopen is a no-op");
-    assert_eq!(user_version(&conn), 2);
+    assert_eq!(user_version(&conn), 3);
     let stored: i64 = conn
         .query_row("SELECT COUNT(*) FROM matches", [], |r| r.get(0))
         .unwrap();
@@ -1544,4 +1544,294 @@ fn match_rows_returns_teams_players_with_tiers() {
     assert_eq!(a.game_name.as_deref(), Some("A"));
 
     assert_eq!(repo.match_rows("nope").unwrap(), None);
+}
+
+// ---------------------------------------------------------------------
+// R150: asking name-service outside live stages (migration 3, names cache)
+// ---------------------------------------------------------------------
+
+use opd1_core::db::repo::NameAsk;
+
+/// A question raised by a finished match that started at `match_start_ms`
+/// (`Some`), or on demand (`None`).
+fn ask(puuid: &str, match_start_ms: Option<i64>) -> NameAsk {
+    NameAsk {
+        puuid: puuid.to_string(),
+        match_start_ms,
+    }
+}
+
+fn puuids(asks: &[NameAsk]) -> Vec<&str> {
+    asks.iter().map(|a| a.puuid.as_str()).collect()
+}
+
+#[test]
+fn v2_db_upgrades_to_user_version_3_with_the_name_asked_column() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    {
+        // A DB as v0.2.0 left it: migrations 1 and 2, one stored player.
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(include_str!("fixtures/schema_v1.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../src/db/migration2.sql"))
+            .unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version = 2;
+             INSERT INTO players VALUES ('old', 'Old', 'TAG', 40, 'card', 7);",
+        )
+        .unwrap();
+        assert!(!column_names(&conn, "players")
+            .iter()
+            .any(|c| c == "name_asked_ms"));
+    }
+
+    let conn = open_db(tmp.path()).expect("upgrade runs migration 3 only");
+    assert_eq!(user_version(&conn), 3);
+    assert!(column_names(&conn, "players")
+        .iter()
+        .any(|c| c == "name_asked_ms"));
+    let old: (String, Option<i64>) = conn
+        .query_row(
+            "SELECT game_name, name_asked_ms FROM players WHERE puuid = 'old'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(old, ("Old".to_string(), None), "old rows: never asked");
+
+    // A second open runs no migration: `ADD COLUMN` twice would fail.
+    drop(conn);
+    let conn = open_db(tmp.path()).expect("reopen is a no-op");
+    assert_eq!(user_version(&conn), 3);
+}
+
+#[test]
+fn names_to_ask_keeps_only_puuids_with_no_known_name() {
+    let repo = repo_in_memory();
+    // A full `players` name, a full name in a stored match, and a `players`
+    // row with no name (a roster sighting of a hidden player): only the
+    // last and a puuid the DB has never seen are asked.
+    repo.upsert_player(&seen_row("in-players", "Vis", "IBLE", 5_000))
+        .unwrap();
+    repo.upsert_player(&seen_row("nameless", "", "", 5_000))
+        .unwrap();
+    repo.upsert_match(
+        &sample_match("m", 1_000, None),
+        &[],
+        &[
+            sample_player("in-match", "Blue", "InMatch", "M"),
+            sample_player("blank-in-match", "Blue", "", ""),
+        ],
+    )
+    .unwrap();
+
+    let asks = [
+        ask("in-players", Some(1_000)),
+        ask("in-match", Some(1_000)),
+        ask("nameless", Some(1_000)),
+        ask("blank-in-match", None),
+        ask("never-seen", Some(1_000)),
+    ];
+    let to_ask = repo.names_to_ask(&asks).unwrap();
+    assert_eq!(
+        puuids(&to_ask),
+        ["nameless", "blank-in-match", "never-seen"],
+        "input order, known names dropped"
+    );
+    assert_eq!(to_ask[1], asks[3], "each keeps the match that raised it");
+    assert!(repo.names_to_ask(&[]).unwrap().is_empty());
+}
+
+#[test]
+fn a_half_name_is_not_a_known_name() {
+    let repo = repo_in_memory();
+    repo.upsert_player(&seen_row("half", "OnlyName", "", 5_000))
+        .unwrap();
+    repo.upsert_match(
+        &sample_match("m", 1_000, None),
+        &[],
+        &[sample_player("half-in-match", "Blue", "OnlyName", "")],
+    )
+    .unwrap();
+    let asks = [ask("half", None), ask("half-in-match", None)];
+    assert_eq!(repo.names_to_ask(&asks).unwrap(), asks);
+}
+
+#[test]
+fn a_blank_answer_is_asked_again_only_for_a_newer_match() {
+    let repo = repo_in_memory();
+    // One blank answer for a puuid the DB has no row for, one for a row a
+    // roster sighting made (its level and card must survive the marker).
+    repo.upsert_player(&seen_row("sighted", "", "", 500))
+        .unwrap();
+    repo.record_name_answers(
+        &[],
+        &[ask("fresh", Some(2_000)), ask("sighted", Some(2_000))],
+        9_000,
+    )
+    .unwrap();
+    let both = |start| [ask("fresh", start), ask("sighted", start)];
+
+    // The same match again (a backfill storing what the match end already
+    // asked about), and an older one: nothing changed since, not asked.
+    assert!(repo.names_to_ask(&both(Some(2_000))).unwrap().is_empty());
+    assert!(repo.names_to_ask(&both(Some(1_500))).unwrap().is_empty());
+    // The next finished match the puuid is in: asked again, no timer.
+    assert_eq!(
+        puuids(&repo.names_to_ask(&both(Some(2_001))).unwrap()),
+        ["fresh", "sighted"]
+    );
+    // On demand (Details, Match Details, Top 3): only puuids never asked
+    // before, however the earlier blank came about.
+    assert_eq!(
+        puuids(
+            &repo
+                .names_to_ask(&[ask("fresh", None), ask("sighted", None), ask("other", None)])
+                .unwrap()
+        ),
+        ["other"]
+    );
+
+    // The marker is not a name, and it never touches the sighting's fields.
+    assert_eq!(repo.seen_name("fresh").unwrap(), None);
+    assert!(repo.known_name("me", "fresh").unwrap().is_none());
+    let (level, card, updated, marker): (i64, String, i64, Option<i64>) = repo
+        .conn()
+        .query_row(
+            "SELECT account_level, card_id, updated_ms, name_asked_ms
+             FROM players WHERE puuid = 'sighted'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (level, card.as_str(), updated, marker),
+        (10, "card", 500, Some(2_000))
+    );
+}
+
+#[test]
+fn the_marker_only_goes_up() {
+    let repo = repo_in_memory();
+    let marker = |repo: &Repo| -> Option<i64> {
+        repo.conn()
+            .query_row(
+                "SELECT name_asked_ms FROM players WHERE puuid = 'x'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    repo.record_name_answers(&[], &[ask("x", Some(5_000))], 1)
+        .unwrap();
+    // An older match answering blank later (a stored match older than the
+    // last one asked) or an on-demand blank never lowers it.
+    repo.record_name_answers(&[], &[ask("x", Some(3_000))], 2)
+        .unwrap();
+    repo.record_name_answers(&[], &[ask("x", None)], 3).unwrap();
+    assert_eq!(marker(&repo), Some(5_000));
+    repo.record_name_answers(&[], &[ask("x", Some(6_000))], 4)
+        .unwrap();
+    assert_eq!(marker(&repo), Some(6_000));
+}
+
+#[test]
+fn an_on_demand_blank_is_a_marker_a_match_end_can_still_ask_past() {
+    let repo = repo_in_memory();
+    repo.record_name_answers(&[], &[ask("x", None)], 9_000)
+        .unwrap();
+    assert!(
+        repo.names_to_ask(&[ask("x", None)]).unwrap().is_empty(),
+        "never asked again on demand"
+    );
+    assert_eq!(
+        puuids(&repo.names_to_ask(&[ask("x", Some(1_000))]).unwrap()),
+        ["x"],
+        "but the next finished match asks again"
+    );
+}
+
+#[test]
+fn a_learned_name_is_a_seen_name_with_its_timestamp() {
+    let repo = repo_in_memory();
+    repo.upsert_player(&seen_row("sighted", "", "", 500))
+        .unwrap();
+    repo.record_name_answers(
+        &[
+            ("sighted".to_string(), "Vis".to_string(), "IBLE".to_string()),
+            ("fresh".to_string(), "New".to_string(), "TAG".to_string()),
+        ],
+        &[ask("blank", Some(1_000))],
+        9_000,
+    )
+    .unwrap();
+
+    assert_eq!(
+        repo.seen_name("sighted").unwrap(),
+        Some(("Vis".to_string(), "IBLE".to_string()))
+    );
+    let known = repo.known_name("me", "fresh").unwrap().expect("known");
+    assert_eq!(
+        (known.name.as_str(), known.tag.as_str(), known.start_ms),
+        ("New", "TAG", Some(9_000)),
+        "updated_ms is when the name was learned"
+    );
+    assert_eq!(known.source, RememberedSource::Seen);
+    assert!(
+        repo.names_to_ask(&[ask("sighted", Some(2_000)), ask("fresh", Some(2_000))])
+            .unwrap()
+            .is_empty(),
+        "a named puuid is never asked"
+    );
+    // The sighting's level and card survive the learned name.
+    let (level, card): (i64, String) = repo
+        .conn()
+        .query_row(
+            "SELECT account_level, card_id FROM players WHERE puuid = 'sighted'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((level, card.as_str()), (10, "card"));
+}
+
+#[test]
+fn a_blank_answer_never_erases_a_name() {
+    let repo = repo_in_memory();
+    repo.upsert_player(&seen_row("named", "Keep", "ME", 500))
+        .unwrap();
+    repo.record_name_answers(&[], &[ask("named", Some(1_000))], 9_000)
+        .unwrap();
+    assert_eq!(
+        repo.seen_name("named").unwrap(),
+        Some(("Keep".to_string(), "ME".to_string()))
+    );
+    let updated: i64 = repo
+        .conn()
+        .query_row(
+            "SELECT updated_ms FROM players WHERE puuid = 'named'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(updated, 500, "updated_ms moves only with a name");
+}
+
+#[test]
+fn names_to_ask_is_index_backed() {
+    // Up to 200 candidates are checked per fill: each check must be a key
+    // seek (players' primary key, match_players' puuid index), never a scan.
+    let repo = repo_in_memory();
+    let mut stmt = repo
+        .conn()
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", repo::NAMES_TO_ASK_SQL))
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map(rusqlite::params!["p"], |r| r.get::<_, String>(3))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let joined = plan.join("\n");
+    assert!(!joined.contains("SCAN players"), "plan:\n{joined}");
+    assert!(!joined.contains("SCAN match_players"), "plan:\n{joined}");
 }

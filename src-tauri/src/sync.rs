@@ -14,6 +14,9 @@
 //!    competitive match means the rank can't have changed, unless the stored
 //!    snapshot predates the current snapshot version (refetched once).
 //!
+//! Behind all of that, at the lowest priority, the worker also runs the
+//! user's own-history backfill ([`backfill_step`], R101).
+//!
 //! Any failure other than `ClientGone` is logged and skipped: the fields
 //! it would have filled become Missing (`—`) through the card builder's
 //! "attempted" rule, never a stuck skeleton. `ClientGone` aborts the whole
@@ -22,7 +25,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use tokio::task::JoinSet;
 
@@ -33,8 +36,10 @@ use opd1_riot::{RiotError, RiotSession, VisiblePuuid};
 
 use crate::logbuf::short;
 use crate::roster::{extract_loadouts, extract_player_loadout};
-use crate::state::{lock, now_ms, AppState, Job};
-use crate::store::{mmr_refresh_needed, save_player, trim_mmr, PlayerUpdate, SELF_LOADOUT_KEY};
+use crate::state::{lock, now_ms, AppState, BackfillRun, Job};
+use crate::store::{
+    mmr_refresh_needed, save_player, trim_mmr, PlayerUpdate, SELF_LOADOUT_KEY, SELF_PUUID_KEY,
+};
 
 /// Match-details requests in flight at once. They're large responses
 /// (hundreds of KB each); a small window overlaps latency without holding
@@ -48,6 +53,19 @@ pub const RECENT_COUNT: u32 = 8;
 /// Player Details: how many competitive updates to scan for the current
 /// act's teammates (CLAUDE.md: "the last 20 current-act comp matches").
 pub const TEAMMATE_WINDOW: u32 = 20;
+
+/// R101: match-history's default page (techchrism `MatchHistory.ts`:
+/// `endIndex` defaults to 20); the backfill walks the history in pages of
+/// this size.
+pub const BACKFILL_PAGE: u32 = 20;
+
+/// R101: the first run's cap on history entries looked at, when the current
+/// act's start doesn't stop it sooner (Claude's lightness bound).
+pub const BACKFILL_FIRST_RUN_MAX: u32 = 200;
+
+/// The `app_state` key holding the backfill anchor: the newest match the
+/// last *finished* run saw, JSON `{"matchId": "…", "startMs": N}`.
+pub const BACKFILL_ANCHOR_KEY: &str = "self_history_anchor";
 
 /// The Riot client went away mid-sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -321,10 +339,331 @@ pub async fn sync_details(
     Ok(())
 }
 
+// ---------------------------------------------------------------------
+// own-history backfill (R101)
+// ---------------------------------------------------------------------
+
+/// The stored anchor's JSON shape.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredAnchor {
+    match_id: String,
+    start_ms: i64,
+}
+
+pub fn anchor_json(anchor: &(String, i64)) -> String {
+    serde_json::to_string(&StoredAnchor {
+        match_id: anchor.0.clone(),
+        start_ms: anchor.1,
+    })
+    .unwrap_or_default()
+}
+
+/// `None` for anything that isn't a stored anchor (bad JSON, an empty id):
+/// the run is then a first run again.
+pub fn parse_anchor(raw: &str) -> Option<(String, i64)> {
+    let a: StoredAnchor = serde_json::from_str(raw).ok()?;
+    (!a.match_id.is_empty()).then_some((a.match_id, a.start_ms))
+}
+
+/// What one history page contributes to a backfill run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillTake {
+    /// The entries to look at (still to be checked against the DB), newest
+    /// first.
+    pub entries: Vec<HistoryEntry>,
+    /// A stop was hit (or the history ended): no further page is needed.
+    pub done: bool,
+}
+
+/// Pure: which entries of `page` (newest first) a backfill run takes.
+/// Takes entries until, exclusive:
+/// - with an anchor: the anchor's match id, or the first entry older than
+///   the anchor's start (the anchor match may have left the history);
+/// - without one (first run): the first entry older than `act_start_ms`, or
+///   once `scanned` + taken reaches [`BACKFILL_FIRST_RUN_MAX`].
+///
+/// `done` when one of those stops was hit, or the page is shorter than
+/// [`BACKFILL_PAGE`] (the history ended).
+pub fn backfill_take(
+    page: &[HistoryEntry],
+    anchor: Option<&(String, i64)>,
+    act_start_ms: Option<i64>,
+    scanned: u32,
+) -> BackfillTake {
+    let cap = BACKFILL_FIRST_RUN_MAX as usize;
+    let mut entries = Vec::new();
+    let mut done = false;
+    for e in page {
+        let stop = match anchor {
+            Some((id, start)) => e.match_id == *id || e.start_ms < *start,
+            None => {
+                act_start_ms.is_some_and(|act| e.start_ms < act)
+                    || scanned as usize + entries.len() >= cap
+            }
+        };
+        if stop {
+            done = true;
+            break;
+        }
+        entries.push(e.clone());
+    }
+    // The cap landed exactly on the end of the page: no empty extra page.
+    if anchor.is_none() && scanned as usize + entries.len() >= cap {
+        done = true;
+    }
+    if page.len() < BACKFILL_PAGE as usize {
+        done = true;
+    }
+    BackfillTake { entries, done }
+}
+
+/// R101: starts a backfill run from the stored anchor (a no-op while a run
+/// is active). The poll loop calls it on connect and when a match ends, then
+/// makes sure a worker is running.
+pub async fn start_backfill_run(st: &Arc<AppState>) {
+    // A SQLite failure (`None`, already logged) skips the run: a run without
+    // its anchor would be a first run again.
+    let Some(stored) = st.db(|repo| repo.get_state(BACKFILL_ANCHOR_KEY)).await else {
+        return;
+    };
+    let anchor = stored.as_deref().and_then(parse_anchor);
+    log::debug!(
+        "own history backfill: {}",
+        match &anchor {
+            Some((id, _)) => format!("from anchor {}", short(id)),
+            None => "first run".to_string(),
+        }
+    );
+    // The act's start only bounds the first run.
+    let act_start_ms = if anchor.is_none() {
+        st.current_act().map(|a| a.start_ms)
+    } else {
+        None
+    };
+    lock(&st.live).start_backfill(anchor, act_start_ms);
+}
+
+/// Runs `f` on the active run — only while it is still `me`'s: after an
+/// account switch the model holds another user's run (or none), and a step
+/// of the old session must not touch it.
+fn with_run<R>(st: &AppState, me: &str, f: impl FnOnce(&mut BackfillRun) -> R) -> Option<R> {
+    let mut live = lock(&st.live);
+    if live.self_puuid.as_deref() != Some(me) {
+        return None;
+    }
+    live.backfill.as_mut().map(f)
+}
+
+/// Drops `me`'s run without touching the anchor (the next trigger starts
+/// over from it).
+fn end_run(st: &AppState, me: &str) {
+    let mut live = lock(&st.live);
+    if live.self_puuid.as_deref() == Some(me) {
+        live.backfill = None;
+    }
+}
+
+/// One history page into the run. `Ok(false)`: the run ended (a Riot or
+/// SQLite error, or it is no longer this account's).
+async fn backfill_page(
+    st: &Arc<AppState>,
+    session: &RiotSession,
+    me: &str,
+    index: u32,
+) -> Result<bool, Gone> {
+    let resp = match session
+        .match_history(me, Some(index), Some(index + BACKFILL_PAGE), None)
+        .await
+    {
+        Ok(resp) => resp,
+        Err(RiotError::ClientGone) => {
+            end_run(st, me);
+            return Err(Gone);
+        }
+        Err(e) => {
+            log::warn!("own history page {index} failed: {e}; the backfill stops");
+            end_run(st, me);
+            return Ok(false);
+        }
+    };
+    let page = history_entries(&resp);
+    let Some((anchor, act_start_ms, scanned)) =
+        with_run(st, me, |r| (r.anchor.clone(), r.act_start_ms, r.scanned))
+    else {
+        return Ok(false);
+    };
+    // The asset tables may have loaded since the run started (a fresh
+    // install downloads them beside the connect): the first run's act bound
+    // is looked up again until it is known.
+    let act_start_ms = match act_start_ms {
+        None if anchor.is_none() => st.current_act().map(|a| a.start_ms),
+        known => known,
+    };
+    let take = backfill_take(&page, anchor.as_ref(), act_start_ms, scanned);
+
+    let (p, taken) = (me.to_string(), take.entries.clone());
+    let unknown = st
+        .db(move |repo| {
+            repo.index_history(&p, &taken)?;
+            let ids: Vec<String> = taken.iter().map(|e| e.match_id.clone()).collect();
+            repo.new_match_ids(&ids)
+        })
+        .await;
+    let Some(unknown) = unknown else {
+        end_run(st, me);
+        return Ok(false);
+    };
+
+    let applied = with_run(st, me, |run| {
+        if run.next_index != index {
+            return false; // a different run replaced this one meanwhile
+        }
+        if index == 0 {
+            run.newest = page.first().map(|e| (e.match_id.clone(), e.start_ms));
+        }
+        run.scanned += take.entries.len() as u32;
+        run.next_index = index + BACKFILL_PAGE;
+        run.pending = unknown.into();
+        run.done = take.done;
+        true
+    });
+    Ok(applied == Some(true))
+}
+
+/// The run is done and everything it found is stored: writes the anchor (the
+/// newest entry page 0 showed) and drops the run.
+async fn finish_backfill(st: &Arc<AppState>, me: &str) {
+    let Some((anchor, newest, scanned)) =
+        with_run(st, me, |r| (r.anchor.clone(), r.newest.clone(), r.scanned))
+    else {
+        return;
+    };
+    if let Some(newest) = newest.filter(|n| Some(n) != anchor.as_ref()) {
+        let (raw, owner) = (anchor_json(&newest), me.to_string());
+        let written = st
+            .db(move |repo| {
+                // An account switch replaces the stored puuid (and deletes
+                // the anchor) in one DB call: a write from the previous
+                // account's run that lands after it is refused here.
+                let switched = repo
+                    .get_state(SELF_PUUID_KEY)?
+                    .is_some_and(|stored| stored != owner);
+                if !switched {
+                    repo.set_state(BACKFILL_ANCHOR_KEY, &raw)?;
+                }
+                Ok(!switched)
+            })
+            .await;
+        if written == Some(true) {
+            log::info!(
+                "own history backfill finished: {scanned} matches looked at, anchor {}",
+                short(&newest.0)
+            );
+        }
+    } else {
+        log::debug!("own history backfill finished: nothing new ({scanned} looked at)");
+    }
+    // Written first, cleared second: an abort in between just finishes the
+    // same run again.
+    end_run(st, me);
+}
+
+/// One step of the own-history backfill (R101): fetch the next history page
+/// if the last one is used up, then match-details for the page's unknown
+/// ids, one at a time (through the session's throttle), yielding as soon as
+/// a live `Names`/`Sync` job exists — the cursor stays in the run. When the
+/// run is done and nothing is pending, the anchor moves and the run ends.
+///
+/// Every failure other than `ClientGone` ends the run without moving the
+/// anchor (the gap is retried from it next time), except a match Riot no
+/// longer has (404) or one that doesn't decode: retrying those can never
+/// succeed, and the anchor would be stuck behind them.
+///
+/// `Err(Gone)`: the client went away, or `session` belongs to an account
+/// that is no longer the current one.
+pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Result<(), Gone> {
+    let me = session.self_puuid();
+    if lock(&st.live).self_puuid.as_deref() != Some(me) {
+        return Err(Gone);
+    }
+    let Some(page_at) = with_run(st, me, |run| {
+        (run.pending.is_empty() && !run.done).then_some(run.next_index)
+    }) else {
+        return Ok(());
+    };
+    if let Some(index) = page_at {
+        if !backfill_page(st, session, me, index).await? {
+            return Ok(());
+        }
+    }
+
+    loop {
+        if lock(&st.live).live_job_pending() {
+            return Ok(());
+        }
+        let Some(next) = with_run(st, me, |run| run.pending.front().cloned()) else {
+            return Ok(());
+        };
+        let Some(id) = next else { break };
+        let pop = |st: &AppState| {
+            with_run(st, me, |run| {
+                if run.pending.front() == Some(&id) {
+                    run.pending.pop_front();
+                }
+            });
+        };
+
+        // The live sync may have stored it since the page was read.
+        let check = id.clone();
+        let unknown = st.db(move |repo| repo.new_match_ids(&[check])).await;
+        if unknown.is_some_and(|u| u.is_empty()) {
+            pop(st);
+            continue;
+        }
+        match session.match_details(&id).await {
+            Ok(details) => {
+                let (m, teams, players) = match_from_details(&details);
+                drop(details);
+                let stored = st
+                    .db(move |repo| repo.upsert_match(&m, &teams, &players))
+                    .await;
+                if stored.is_none() {
+                    end_run(st, me);
+                    return Ok(());
+                }
+                pop(st);
+            }
+            Err(RiotError::ClientGone) => {
+                end_run(st, me);
+                return Err(Gone);
+            }
+            Err(e @ (RiotError::Status(404) | RiotError::Decode(_))) => {
+                log::warn!("backfill: match {} skipped: {e}", short(&id));
+                pop(st);
+            }
+            Err(e) => {
+                log::warn!(
+                    "backfill: match {} failed: {e}; the backfill stops",
+                    short(&id)
+                );
+                end_run(st, me);
+                return Ok(());
+            }
+        }
+    }
+
+    if with_run(st, me, |run| run.done && run.pending.is_empty()) == Some(true) {
+        finish_backfill(st, me).await;
+    }
+    Ok(())
+}
+
 /// The live roster's background worker (worker `id`, claimed via
 /// `LiveModel::try_start_worker`). Each job — one `names()` call for the
-/// visible players still unnamed, or one player's sync in display order —
-/// is chosen by `LiveModel::next_job` under the model's lock, which also
+/// visible players still unnamed, one player's sync in display order, or,
+/// last of all, one step of the own-history backfill — is chosen by
+/// `LiveModel::next_job` under the model's lock, which also
 /// releases the claim when nothing is left (R45: no roster change can
 /// slip between "nothing to do" and the task ending). Roster changes
 /// mid-run are simply picked up by the next job.
@@ -335,6 +674,7 @@ pub async fn run_worker(st: Arc<AppState>, session: Arc<RiotSession>, id: u64) {
             None => return,
             Some(Job::Names(needed)) => names_step(&st, &session, needed).await,
             Some(Job::Sync(puuid)) => sync_step(&st, &session, puuid).await,
+            Some(Job::Backfill) => backfill_step(&st, &session).await,
         };
         if outcome.is_err() {
             lock(&st.live).release_worker(id);
@@ -580,5 +920,108 @@ mod tests {
 
         // Unknown current act: just the recent ones.
         assert_eq!(details_targets(&rows, None).len(), 3);
+    }
+
+    /// `n` history entries, newest first, one minute apart: entry 0 starts
+    /// at `BASE`, entry `i` at `BASE - i * 60_000`. Ids are `e{offset + i}`.
+    const BASE: i64 = 10_000_000;
+    fn entries(n: usize) -> Vec<HistoryEntry> {
+        entries_from(0, n)
+    }
+    fn entries_from(offset: usize, n: usize) -> Vec<HistoryEntry> {
+        (0..n)
+            .map(|i| HistoryEntry {
+                match_id: format!("e{}", offset + i),
+                queue_id: "unrated".into(),
+                start_ms: BASE - (offset + i) as i64 * 60_000,
+            })
+            .collect()
+    }
+    fn ids(t: &BackfillTake) -> Vec<&str> {
+        t.entries.iter().map(|e| e.match_id.as_str()).collect()
+    }
+
+    #[test]
+    fn backfill_take_stops_at_anchor_id() {
+        let page = entries(20);
+        let anchor = ("e12".to_string(), BASE - 12 * 60_000);
+        let t = backfill_take(&page, Some(&anchor), None, 0);
+        assert_eq!(t.entries.len(), 12, "entries 0..12, the anchor excluded");
+        assert_eq!(t.entries[11].match_id, "e11");
+        assert!(t.done);
+    }
+
+    #[test]
+    fn backfill_take_stops_older_than_anchor() {
+        // The anchor match left the history (its id is not on the page);
+        // entries 15+ are older than its start.
+        let page = entries(20);
+        let anchor = ("gone".to_string(), BASE - 15 * 60_000 + 1);
+        let t = backfill_take(&page, Some(&anchor), None, 0);
+        assert_eq!(t.entries.len(), 15);
+        assert_eq!(t.entries[14].match_id, "e14");
+        assert!(t.done);
+    }
+
+    #[test]
+    fn backfill_take_first_run_stops_at_act_start() {
+        // The act starts between entries 7 and 8: entry 7 is in, 8 is older.
+        let page = entries(20);
+        let act_start = BASE - 7 * 60_000 - 30_000;
+        let t = backfill_take(&page, None, Some(act_start), 0);
+        assert_eq!(t.entries.len(), 8);
+        assert_eq!(t.entries[7].match_id, "e7");
+        assert!(t.done);
+    }
+
+    #[test]
+    fn backfill_take_first_run_caps_at_200() {
+        let page = entries_from(190, 20);
+        let act_start = BASE - 10_000 * 60_000; // far back: all inside
+        let t = backfill_take(&page, None, Some(act_start), 190);
+        assert_eq!(t.entries.len(), 10, "190 scanned + 10 = the cap");
+        assert!(t.done);
+        // A full page that lands exactly on the cap is done at once — no
+        // 11th history request for an empty page.
+        let page = entries_from(180, 20);
+        let t = backfill_take(&page, None, Some(act_start), 180);
+        assert_eq!(t.entries.len(), 20);
+        assert!(t.done);
+        // Below the cap, a full page in the act just continues.
+        let t = backfill_take(&entries(20), None, Some(act_start), 0);
+        assert_eq!(t.entries.len(), 20);
+        assert!(!t.done);
+        // No act tables: the cap alone bounds the first run.
+        let t = backfill_take(&entries(20), None, None, 0);
+        assert!(!t.done);
+        let t = backfill_take(&entries(20), None, None, 190);
+        assert_eq!(t.entries.len(), 10);
+        assert!(t.done);
+    }
+
+    #[test]
+    fn backfill_take_short_page_is_done() {
+        let page = entries(6);
+        let anchor = ("e99".to_string(), BASE - 99 * 60_000);
+        let t = backfill_take(&page, Some(&anchor), None, 0);
+        assert_eq!(ids(&t), ["e0", "e1", "e2", "e3", "e4", "e5"]);
+        assert!(t.done, "the history ended");
+        // A full page with no stop hit is not done; an empty one is.
+        assert!(!backfill_take(&entries(20), Some(&anchor), None, 0).done);
+        assert!(backfill_take(&[], Some(&anchor), None, 0).done);
+    }
+
+    #[test]
+    fn anchor_json_roundtrips_and_bad_json_is_no_anchor() {
+        let a = ("m1".to_string(), 1_234);
+        assert_eq!(
+            anchor_json(&a),
+            r#"{"matchId":"m1","startMs":1234}"#,
+            "the stored shape"
+        );
+        assert_eq!(parse_anchor(&anchor_json(&a)), Some(a));
+        assert_eq!(parse_anchor("not json"), None);
+        assert_eq!(parse_anchor(r#"{"matchId":"","startMs":1}"#), None);
+        assert_eq!(parse_anchor(r#"{"matchId":"x"}"#), None);
     }
 }

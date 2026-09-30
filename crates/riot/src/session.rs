@@ -341,6 +341,15 @@ impl RiotSession {
         })
     }
 
+    /// Replaces the global remote bucket's burst and refill rate, so a test
+    /// that fires hundreds of requests at a mock server doesn't wait out the
+    /// production 10 rps. Not meant for production use.
+    #[doc(hidden)]
+    pub fn with_global_rate(mut self, rps: f64) -> Self {
+        self.global_throttle = Throttle::new(rps, rps);
+        self
+    }
+
     /// The local player's PUUID, from the entitlements token fetched at
     /// `connect()` time.
     pub fn self_puuid(&self) -> &str {

@@ -2344,6 +2344,7 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "image",
+ "log",
  "opd1-core",
  "reqwest",
  "rustls",

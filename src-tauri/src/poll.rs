@@ -17,7 +17,8 @@
 //!   │                               ally skins until a valid answer, R83)
 //!   │     INGAME  → both teams + loadouts
 //!   │     PREGAME/INGAME in a free-for-all queue → stays MENUS (R41)
-//!   │     INGAME→MENUS = match end: back to Lobby + post-match follow-up
+//!   │     INGAME→MENUS = match end: back to Lobby + post-match follow-up,
+//!   │        and the own-history backfill starts (R101; also on connect)
 //!   └─ roster → cached-first cards (DB) → emit → worker syncs
 //!      self → party → allies → enemies, re-emitting after each player
 //! ```
@@ -47,6 +48,7 @@ use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
 use crate::store::{
     load_player_db, match_landed, save_player, PlayerDb, SELF_LOADOUT_KEY, SELF_PUUID_KEY,
 };
+use crate::sync::BACKFILL_ANCHOR_KEY;
 
 /// Closed: how often the lockfile's existence is checked.
 const CLOSED_CHECK: Duration = Duration::from_secs(5);
@@ -235,6 +237,9 @@ impl Poller {
                 live.self_roster = None;
                 live.self_name = None;
                 live.self_loadout = None;
+                // R101: the previous account's run (and its cursor) is not
+                // this account's.
+                live.backfill = None;
             }
             live.self_puuid = Some(me.clone());
             live.self_name_attempted = false;
@@ -246,8 +251,11 @@ impl Poller {
                 repo.set_state(SELF_PUUID_KEY, &key_value)?;
                 if switched {
                     // The previous account's loadout copy must not show for
-                    // this one: no key is no stored loadout.
+                    // this one: no key is no stored loadout. Same for the
+                    // backfill anchor: another account's history can't
+                    // bound this one's (no anchor is a first run).
                     repo.delete_state(SELF_LOADOUT_KEY)?;
+                    repo.delete_state(BACKFILL_ANCHOR_KEY)?;
                 }
                 Ok(())
             })
@@ -277,10 +285,23 @@ impl Poller {
         // The user's own card, from the DB, while the first presence
         // arrives (closed-stage card if the game isn't up).
         self.enter_closed().await;
+        // R101: catch up on the matches played while the app was closed.
+        self.begin_backfill(&session).await;
+    }
+
+    /// R101: starts the own-history backfill from the stored anchor (a run
+    /// already in progress keeps going) and makes sure a worker will run it
+    /// — behind any live card work, which `LiveModel::next_job` puts first.
+    async fn begin_backfill(&mut self, session: &Arc<RiotSession>) {
+        crate::sync::start_backfill_run(&self.st).await;
+        self.ensure_worker(session);
     }
 
     async fn drop_session(&mut self) {
         self.stop_worker();
+        // R101: an interrupted run is dropped; the next connect starts over
+        // from the stored anchor, which only a finished run moves.
+        lock(&self.st.live).backfill = None;
         self.session = None;
         self.st.set_session(None);
         self.stage = Stage::Closed;
@@ -398,6 +419,10 @@ impl Poller {
         if presence.stage == Stage::Ingame {
             self.match_queue = presence.queue_id.clone();
         }
+        // R101: a match just ended. The raw presence, not the shown stage:
+        // a free-for-all keeps the Lobby view through the whole match, but
+        // its history entry is just as new.
+        let match_ended = self.presence_stage == Stage::Ingame && presence.stage == Stage::Menus;
         let view = view_stage(presence.stage, presence.queue_id.as_deref());
         if presence.stage != self.presence_stage {
             if view != presence.stage {
@@ -418,6 +443,11 @@ impl Poller {
                 // flags; the roster itself doesn't change mid-match.
                 self.refresh_self_party(session).await?;
             }
+        }
+        if match_ended {
+            // After the stage change above: the Lobby's roster is installed
+            // (and its worker running) before the backfill is queued.
+            self.begin_backfill(session).await;
         }
         Ok(())
     }
@@ -921,9 +951,213 @@ fn lockfile_path(local_app_data: &Path) -> PathBuf {
 mod tests {
     use serde_json::json;
 
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
     use super::*;
-    use crate::pipeline_tests::{card_json, harness, roster, ME};
+    use crate::pipeline_tests::backfill::{
+        history_path, mount_feed, requests, run_active, store_anchor, stored_anchor, Feed,
+    };
+    use crate::pipeline_tests::{card_json, harness, roster, Harness, ME};
     use crate::store::{save_player, PlayerUpdate};
+    use crate::sync::{anchor_json, BACKFILL_ANCHOR_KEY};
+
+    /// Waits (up to ~5s) for a finished backfill run's anchor.
+    async fn wait_for_anchor(st: &AppState) -> Option<(String, i64)> {
+        for _ in 0..250 {
+            if let Some(a) = stored_anchor(st).await {
+                return Some(a);
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        None
+    }
+
+    /// Answers `/chat/v4/presences` with the user's VALORANT presence in
+    /// `state` (`MENUS` / `PREGAME` / `INGAME`) and `queue`.
+    async fn mock_presence(h: &Harness, state: &str, queue: &str) {
+        let private = BASE64.encode(
+            json!({"sessionLoopState": state, "queueId": queue, "partyId": "party-1"}).to_string(),
+        );
+        Mock::given(method("GET"))
+            .and(path("/chat/v4/presences"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "presences": [{"puuid": ME, "product": "valorant", "private": private}]
+            })))
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+    }
+
+    /// The `page` requests the backfill made (`endIndex=20`; a per-player
+    /// sync asks for `0..2`).
+    async fn backfill_pages(h: &Harness) -> usize {
+        requests(&h.server)
+            .await
+            .iter()
+            .filter(|r| r.url.path() == history_path())
+            .filter(|r| {
+                r.url
+                    .query_pairs()
+                    .any(|(k, v)| k == "endIndex" && v == "20")
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn on_connected_starts_a_backfill_run_and_a_worker_finishes_it() {
+        let h = harness().await;
+        mount_feed(&h.server, Feed::new(5)).await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+
+        // A first run (no anchor yet): it ends at the oldest entry and the
+        // anchor is the newest.
+        let anchor = wait_for_anchor(&h.st).await.expect("the run finished");
+        assert_eq!(anchor.0, crate::pipeline_tests::backfill::entry_id(0));
+        assert_eq!(backfill_pages(&h).await, 1);
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_match_end_starts_a_backfill_run() {
+        // INGAME -> MENUS: the match ended; the backfill runs from the stored
+        // anchor (entry 3 of 5): entries 0..3 are fetched, then it moves.
+        let h = harness().await;
+        let base = crate::pipeline_tests::backfill::base_ms();
+        mount_feed(&h.server, Feed::new(5)).await;
+        store_anchor(&h.st, 3, base).await;
+        mock_presence(&h, "MENUS", "unrated").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Ingame;
+        poller.presence_stage = Stage::Ingame;
+        lock(&h.st.live).stage = Stage::Ingame;
+
+        poller.presence_tick(&h.session).await.unwrap();
+
+        for _ in 0..250 {
+            if stored_anchor(&h.st).await.map(|a| a.0)
+                == Some(crate::pipeline_tests::backfill::entry_id(0))
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            stored_anchor(&h.st).await.map(|a| a.0),
+            Some(crate::pipeline_tests::backfill::entry_id(0)),
+            "the anchor moved to the newest entry"
+        );
+        assert_eq!(poller.stage, Stage::Menus);
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_deathmatch_end_starts_a_backfill_run_too() {
+        // A free-for-all keeps the Lobby view (`stage` stays Menus through
+        // the whole match), but the raw presence still goes INGAME -> MENUS.
+        let h = harness().await;
+        mount_feed(&h.server, Feed::new(5)).await;
+        mock_presence(&h, "MENUS", "deathmatch").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.presence_stage = Stage::Ingame;
+        lock(&h.st.live).stage = Stage::Menus;
+
+        poller.presence_tick(&h.session).await.unwrap();
+
+        assert!(wait_for_anchor(&h.st).await.is_some(), "the run finished");
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn other_stage_changes_do_not_start_a_backfill_run() {
+        let h = harness().await;
+        mount_feed(&h.server, Feed::new(5)).await;
+        mock_presence(&h, "PREGAME", "unrated").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.presence_stage = Stage::Menus;
+
+        poller.presence_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(backfill_pages(&h).await, 0);
+        assert!(!run_active(&h.st));
+        assert_eq!(stored_anchor(&h.st).await, None);
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn an_account_switch_clears_the_run_and_the_anchor() {
+        let h = harness().await;
+        // Slow answers: the new account's run cannot finish before we look.
+        let mut feed = Feed::new(50);
+        feed.details_delay = Some(Duration::from_millis(100));
+        mount_feed(&h.server, feed).await;
+        // The previous account's stale run and anchor.
+        lock(&h.st.live).self_puuid = Some("previous-account".into());
+        lock(&h.st.live).start_backfill(Some(("stale".into(), 1)), None);
+        let stale = anchor_json(&("stale".to_string(), 1));
+        h.st.db(move |repo| repo.set_state(BACKFILL_ANCHOR_KEY, &stale))
+            .await
+            .unwrap();
+
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+
+        assert_eq!(
+            stored_anchor(&h.st).await,
+            None,
+            "the previous account's anchor must not steer the new account's run"
+        );
+        {
+            let live = lock(&h.st.live);
+            let run = live.backfill.as_ref().expect("the new account's own run");
+            assert_eq!(run.anchor, None, "a first run, not the stale one");
+        }
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn reconnecting_the_same_account_keeps_its_anchor() {
+        let h = harness().await;
+        let mut feed = Feed::new(50);
+        feed.details_delay = Some(Duration::from_millis(100));
+        mount_feed(&h.server, feed).await;
+        let base = crate::pipeline_tests::backfill::base_ms();
+        lock(&h.st.live).self_puuid = Some(ME.into());
+        store_anchor(&h.st, 40, base).await;
+
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+
+        assert_eq!(
+            stored_anchor(&h.st).await.map(|a| a.0),
+            Some(crate::pipeline_tests::backfill::entry_id(40))
+        );
+        let run_anchor = lock(&h.st.live)
+            .backfill
+            .as_ref()
+            .and_then(|r| r.anchor.clone());
+        assert_eq!(
+            run_anchor.map(|a| a.0),
+            Some(crate::pipeline_tests::backfill::entry_id(40))
+        );
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn dropping_the_session_ends_the_run() {
+        let h = harness().await;
+        lock(&h.st.live).start_backfill(None, None);
+        let mut poller = Poller::new(h.st.clone());
+        poller.session = Some(h.session.clone());
+        poller.drop_session().await;
+        assert!(!run_active(&h.st), "the next connect starts over");
+    }
 
     /// R100 through the real `apply_roster`: the user already has a `players`
     /// row (level 0: it was created before their level was known) and the

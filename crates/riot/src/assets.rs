@@ -602,9 +602,13 @@ impl AssetCache {
             // A failed fetch keeps the four tables (no content-tier icons
             // yet, like the offline fallback): the session isn't left
             // without tables, and the file stays missing for the next try.
-            let Ok(content_tiers) = self.fetch_content_tiers().await else {
-                *self.tables.write().unwrap() = tables;
-                return Ok(false);
+            let content_tiers = match self.fetch_content_tiers().await {
+                Ok(content_tiers) => content_tiers,
+                Err(e) => {
+                    log::warn!("content tiers fetch failed, keeping the cached tables: {e}");
+                    *self.tables.write().unwrap() = tables;
+                    return Ok(false);
+                }
             };
             blocking({
                 let dir = self.dir.clone();

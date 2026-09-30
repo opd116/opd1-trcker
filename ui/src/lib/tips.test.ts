@@ -9,9 +9,12 @@ const NOW = Date.parse("2026-09-29T21:59:00Z");
 
 const NAMES: DisplayName[] = [
   { kind: "visible", name: "Fahad", tag: "OPD1" },
-  { kind: "remembered", name: "Rook", tag: "4413", fromMapId: "m1", fromStartMs: NOW },
-  { kind: "remembered", name: "Rook", tag: "4413", fromMapId: "gone", fromStartMs: NOW },
-  { kind: "remembered", name: "Rook", tag: "4413", fromMapId: null, fromStartMs: null },
+  { kind: "remembered", name: "Rook", tag: "4413", source: "ownMatch", fromMapId: "m1", fromStartMs: NOW },
+  { kind: "remembered", name: "Rook", tag: "4413", source: "otherMatch", fromMapId: "gone", fromStartMs: NOW },
+  { kind: "remembered", name: "Rook", tag: "4413", source: "otherMatch", fromMapId: "m1", fromStartMs: null },
+  { kind: "remembered", name: "Rook", tag: "4413", source: "seen", fromMapId: null, fromStartMs: NOW },
+  { kind: "remembered", name: "Rook", tag: "4413", source: "seen", fromMapId: null, fromStartMs: null },
+  { kind: "remembered", name: "Rook", tag: "4413", source: "ownMatch", fromMapId: null, fromStartMs: null },
   { kind: "hiddenPlayer" },
   { kind: "hiddenAgent", agentId: "a1" },
   { kind: "hiddenAgent", agentId: "gone" },

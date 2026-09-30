@@ -321,8 +321,8 @@ describe("nameTip", () => {
     expect(nameTip({ kind: "hiddenAgent", agentId: "x" }, null)).toBe("Hidden name");
   });
 
-  it("remembered with map and date, one of them, or none", () => {
-    const base = { kind: "remembered", name: "Rook", tag: "4413" } as const;
+  it("remembered from your own match (ownMatch): map and date, one of them, or none", () => {
+    const base = { kind: "remembered", name: "Rook", tag: "4413", source: "ownMatch" } as const;
     const head = "Hidden name · known from your match";
     expect(nameTip({ ...base, fromMapId: SPLIT, fromStartMs: FROM }, meta)).toBe(`${head}\nSplit · Aug 30, 2026`);
     expect(nameTip({ ...base, fromMapId: SPLIT, fromStartMs: null }, meta)).toBe(`${head}\nSplit`);
@@ -330,15 +330,38 @@ describe("nameTip", () => {
     expect(nameTip({ ...base, fromMapId: null, fromStartMs: null }, meta)).toBe(head);
   });
 
-  it("meta misses and pending meta drop only the map (spec §5.8)", () => {
-    const head = "Hidden name · known from your match";
-    const r = { kind: "remembered", name: "Rook", tag: "4413", fromMapId: "not-in-meta", fromStartMs: FROM } as const;
-    expect(nameTip(r, meta)).toBe(`${head}\nAug 30, 2026`);
-    expect(nameTip({ ...r, fromMapId: SPLIT }, null)).toBe(`${head}\nAug 30, 2026`);
-    expect(nameTip({ ...r, fromStartMs: null }, meta)).toBe(head);
-    for (const m of [null, meta]) {
-      for (const s of [nameTip(r, m), nameTip({ ...r, fromStartMs: null }, m), nameTip({ ...r, fromMapId: null }, m)]) {
-        expect(s).not.toMatch(/undefined|null/);
+  it("remembered from someone else's match (otherMatch, R145): `known from a past match`, then map · date", () => {
+    const base = { kind: "remembered", name: "Rook", tag: "4413", source: "otherMatch" } as const;
+    const head = "Hidden name · known from a past match";
+    expect(nameTip({ ...base, fromMapId: SPLIT, fromStartMs: FROM }, meta)).toBe(`${head}\nSplit · Aug 30, 2026`);
+    expect(nameTip({ ...base, fromMapId: SPLIT, fromStartMs: null }, meta)).toBe(`${head}\nSplit`);
+    expect(nameTip({ ...base, fromMapId: null, fromStartMs: FROM }, meta)).toBe(`${head}\nAug 30, 2026`);
+    expect(nameTip({ ...base, fromMapId: null, fromStartMs: null }, meta)).toBe(head);
+  });
+
+  it("remembered from a name-service answer (seen, R145): `seen before`, then the date only (there is no map)", () => {
+    const base = { kind: "remembered", name: "Rook", tag: "4413", source: "seen" } as const;
+    const head = "Hidden name · seen before";
+    expect(nameTip({ ...base, fromMapId: null, fromStartMs: FROM }, meta)).toBe(`${head}\nAug 30, 2026`);
+    expect(nameTip({ ...base, fromMapId: null, fromStartMs: null }, meta)).toBe(head);
+    // Even if a map id ever came with it, `seen` never prints a map.
+    expect(nameTip({ ...base, fromMapId: SPLIT, fromStartMs: FROM }, meta)).toBe(`${head}\nAug 30, 2026`);
+    expect(nameTip({ ...base, fromMapId: SPLIT, fromStartMs: null }, meta)).toBe(head);
+  });
+
+  it("meta misses and pending meta drop only the map (spec §5.8), for every source", () => {
+    for (const [source, head] of [
+      ["ownMatch", "Hidden name · known from your match"],
+      ["otherMatch", "Hidden name · known from a past match"],
+    ] as const) {
+      const r = { kind: "remembered", name: "Rook", tag: "4413", source, fromMapId: "not-in-meta", fromStartMs: FROM } as const;
+      expect(nameTip(r, meta)).toBe(`${head}\nAug 30, 2026`);
+      expect(nameTip({ ...r, fromMapId: SPLIT }, null)).toBe(`${head}\nAug 30, 2026`);
+      expect(nameTip({ ...r, fromStartMs: null }, meta)).toBe(head);
+      for (const m of [null, meta]) {
+        for (const s of [nameTip(r, m), nameTip({ ...r, fromStartMs: null }, m), nameTip({ ...r, fromMapId: null }, m)]) {
+          expect(s).not.toMatch(/undefined|null/);
+        }
       }
     }
   });

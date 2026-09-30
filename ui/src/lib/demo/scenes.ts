@@ -34,7 +34,7 @@ import { LONGEST_NAME, LONGEST_TAG, peak } from "./fixtures";
 export type SceneName =
   | "boot" | "closed" | "closed-empty" | "lobby1" | "lobby2" | "lobby2-loading" | "lobby2-unranked" | "lobby3" | "lobby4" | "lobby5"
   | "pregame" | "pregame-nomap" | "pregame-loading" | "ingame" | "ingame-longnames" | "ingame-parties4" | "ingame-partial" | "ingame-unranked"
-  | "ingame-loading" | "ingame-nometa"
+  | "ingame-loading" | "ingame-nometa" | "ingame-remembered"
   | "details" | "details-more" | "details-self" | "details-hidden" | "details-empty" | "details-loading" | "details-longnames" | "details-partial"
   | "details-nostats"
   | "match" | "match-enc" | "match-hidden" | "match-dm" | "match-loading" | "match-longnames" | "match-nostats";
@@ -101,6 +101,18 @@ function longnames(): PlayerCard[] {
   return p;
 }
 
+/**
+ * R145: one remembered card of each source, in the design's roster otherwise. Rook is the design's own (a finished
+ * match the user played, `ownMatch`); Nyx (Cypher's slot) was in someone else's stored match (`otherMatch`); Kilo's
+ * name came from a name-service answer while he was visible (`seen`: no map, the date it was last confirmed).
+ */
+function rememberedSources(): PlayerCard[] {
+  const p = roster();
+  p[9]!.name = { kind: "remembered", name: "Nyx", tag: "0420", ...REMEMBERED, source: "otherMatch" };
+  p[6]!.name = { kind: "remembered", name: "Kilo", tag: "2210", source: "seen", fromMapId: null, fromStartMs: Date.UTC(2026, 8, 20, 18, 5) };
+  return p;
+}
+
 function parties4(): PlayerCard[] {
   const p = roster();
   const mark = (i: number, group: number, confirmed: boolean) => (p[i]!.party = { group, confirmed });
@@ -163,7 +175,7 @@ const MARA_RECENT = recentMatchId("mara", 0);
 const MARA_ENCOUNTER = encounterMatchId("mara", 0);
 const MARA_DM = "mdemo:mara:dm";
 
-const REMEMBERED = { fromMapId: MAPS.Lotus, fromStartMs: Date.UTC(2026, 8, 5, 20, 10) };
+const REMEMBERED = { source: "ownMatch", fromMapId: MAPS.Lotus, fromStartMs: Date.UTC(2026, 8, 5, 20, 10) } as const;
 
 function detailsLongnames(): Record<string, PlayerDetails> {
   const mara = longnames()[5]!;
@@ -350,6 +362,7 @@ export const SCENES: Record<SceneName, Scene> = {
   "ingame-unranked": { live: unrankedLive, route: LIVE_ROUTE },
   "ingame-loading": { live: state("ingame", null, []), route: LIVE_ROUTE },
   "ingame-nometa": { live: ingame(), route: LIVE_ROUTE, meta: "pending" },
+  "ingame-remembered": { live: ingame(rememberedSources()), route: LIVE_ROUTE },
 
   details: { live: ingame(), route: details(MARA), details: rosterDetails() },
   "details-more": { live: ingame(), route: details(MARA, true), details: rosterDetails() },
@@ -403,6 +416,12 @@ const sceneOf = (scene: string | null): Scene | undefined =>
   scene !== null && Object.hasOwn(SCENES, scene) ? SCENES[scene as SceneName] : undefined;
 
 const never = <T>() => new Promise<T>(() => {});
+
+/** DEV: `close_details` has no Rust side in the browser; the count is `data-details-closed` on <html> (Playwright reads it). */
+export function noteDetailsClosed(): void {
+  const d = document.documentElement.dataset;
+  d.detailsClosed = String(Number(d.detailsClosed ?? 0) + 1);
+}
 
 /** How many more calls of each command the URL says must fail (`?fail=details:2,match:1`), counted down as they do. */
 const failsLeft = new Map<string, number>();

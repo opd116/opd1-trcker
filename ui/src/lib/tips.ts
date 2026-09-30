@@ -9,16 +9,29 @@ import { actDates, actTitle, count, dateLong, dateShort, durationMin, rrDelta, s
 import { agentName, mapName, tierLabel } from "./meta";
 import type { DisplayName, EncounterCount, Last5Entry, Meta, PartyMark, Peak, PlayerCard } from "./types";
 
-/** Name wrapper. `visible` is used with overflow-only triggers (shown only when the name is cut). */
+/** The first line of a remembered name's tip, by where the name came from (R145). */
+const REMEMBERED_HEAD = {
+  ownMatch: "Hidden name · known from your match",
+  otherMatch: "Hidden name · known from a past match",
+  seen: "Hidden name · seen before",
+} as const;
+
+/**
+ * Name wrapper. `visible` is used with overflow-only triggers (shown only when the name is cut). A remembered name
+ * is worded by its source (R145): `known from your match` / `known from a past match` with the map and date, or
+ * `seen before` with the date alone (a name-service answer has no map). A part that is unknown is dropped (spec §5.8).
+ */
 export function nameTip(n: DisplayName, meta: Meta | null): string {
   switch (n.kind) {
     case "visible":
       return `${n.name}#${n.tag}`;
     case "remembered": {
-      const where = [mapName(meta, n.fromMapId), n.fromStartMs === null ? null : dateLong(n.fromStartMs)]
+      const map = n.source === "seen" ? null : mapName(meta, n.fromMapId);
+      const where = [map, n.fromStartMs === null ? null : dateLong(n.fromStartMs)]
         .filter((p): p is string => typeof p === "string")
         .join(" · ");
-      return where ? `Hidden name · known from your match\n${where}` : "Hidden name · known from your match";
+      const head = REMEMBERED_HEAD[n.source];
+      return where ? `${head}\n${where}` : head;
     }
     case "hiddenPlayer":
     case "hiddenAgent":

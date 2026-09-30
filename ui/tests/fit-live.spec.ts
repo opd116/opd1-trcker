@@ -20,7 +20,7 @@ import { ACCENTS, FONTS, fontSlug, openScene, pointerAway, SHOTS_DIR, TIER_LABEL
 const LIVE_SCENES = [
   "closed", "closed-empty", "boot", "lobby1", "lobby2", "lobby3", "lobby4", "lobby5", "lobby2-loading", "lobby2-unranked",
   "pregame", "pregame-nomap", "pregame-loading", "ingame", "ingame-longnames", "ingame-parties4", "ingame-partial",
-  "ingame-unranked", "ingame-loading", "ingame-nometa",
+  "ingame-unranked", "ingame-loading", "ingame-nometa", "ingame-remembered",
 ];
 
 mkdirSync(SHOTS_DIR, { recursive: true });

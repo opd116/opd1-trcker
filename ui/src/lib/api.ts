@@ -22,6 +22,19 @@ export async function getPlayerDetails(puuid: string): Promise<PlayerDetails> {
   return invoke<PlayerDetails>("player_details", { puuid });
 }
 
+/**
+ * `invoke('close_details')` (R145): the Player Details page was left, so Rust forgets it and never rebuilds or emits
+ * for it. In the DEV browser there is no Rust: the demo module only counts the call.
+ */
+export async function closeDetails(): Promise<void> {
+  if (import.meta.env.DEV && !isTauri()) {
+    const { noteDetailsClosed } = await import("./demo/scenes");
+    noteDetailsClosed();
+    return;
+  }
+  await invoke("close_details");
+}
+
 /** `invoke('match_details', { matchId, focusPuuid })`. */
 export async function getMatchDetails(matchId: string, focusPuuid: string): Promise<MatchDetailsView> {
   if (import.meta.env.DEV && !isTauri()) {

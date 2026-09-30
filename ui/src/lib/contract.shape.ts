@@ -37,6 +37,7 @@ export const enums = {
   result: ["win", "loss", "draw"],
   team: ["ally", "enemy"],
   perspective: ["self", "focus"],
+  rememberedSource: ["ownMatch", "otherMatch", "seen"],
 } as const satisfies Record<string, readonly string[]>;
 
 export type Desc = {
@@ -211,6 +212,7 @@ export const displayNameShapes = {
     kind: { kinds: ["string"] },
     name: str,
     tag: str,
+    source: { kinds: ["string"], enum: "rememberedSource" },
     fromMapId: strOrNull,
     fromStartMs: numOrNull,
   } satisfies ShapeOf<Extract<DisplayName, { kind: "remembered" }>>,

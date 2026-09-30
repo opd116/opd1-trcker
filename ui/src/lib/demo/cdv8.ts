@@ -164,7 +164,7 @@ const RMAPS: MapName[] = ["Lotus", "Sunset", "Split", "Haven", "Icebox", "Bind",
 // ── cards ──────────────────────────────────────────────────────────────────────
 function displayName(r: Raw): DisplayName {
   if (!r.hidden) return { kind: "visible", name: r.name!, tag: r.tag! };
-  if (r.known) return { kind: "remembered", name: r.name!, tag: r.tag!, fromMapId: MAPS.Split, fromStartMs: REMEMBERED_AT };
+  if (r.known) return { kind: "remembered", name: r.name!, tag: r.tag!, source: "ownMatch", fromMapId: MAPS.Split, fromStartMs: REMEMBERED_AT };
   return { kind: "hiddenAgent", agentId: AG[r.agent] };
 }
 

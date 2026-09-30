@@ -56,7 +56,7 @@ describe("recentShown (spec §6.4, §6.5)", () => {
 
 describe("shortName (spec §6.6, §5.8, R95)", () => {
   const visible: DisplayName = { kind: "visible", name: "Mara", tag: "7788" };
-  const remembered: DisplayName = { kind: "remembered", name: "Rook", tag: "4413", fromMapId: null, fromStartMs: null };
+  const remembered: DisplayName = { kind: "remembered", name: "Rook", tag: "4413", source: "ownMatch", fromMapId: null, fromStartMs: null };
 
   it("shortName per variant", () => {
     expect(shortName(visible, meta)).toBe("Mara");
@@ -109,7 +109,7 @@ describe("liveTeammate (spec §6.7)", () => {
     mapId: null,
     players: [
       card("vis", { kind: "visible", name: "Kilo", tag: "2210" }),
-      card("rem", { kind: "remembered", name: "Rook", tag: "4413", fromMapId: null, fromStartMs: null }),
+      card("rem", { kind: "remembered", name: "Rook", tag: "4413", source: "ownMatch", fromMapId: null, fromStartMs: null }),
       card("agent", { kind: "hiddenAgent", agentId: JETT }),
       card("hp", { kind: "hiddenPlayer" }, { agentId: null }),
       card("self", undefined, { isSelf: true, isSelfParty: true }),

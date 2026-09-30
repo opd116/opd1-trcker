@@ -17,6 +17,7 @@ import type {
   PlayerCard,
   PlayerDetails,
   Rank,
+  RememberedSource,
   Result,
   ScoreRow,
   Stage,
@@ -142,6 +143,7 @@ test("the closed string sets are the TS unions", () => {
   expectTypeOf<(typeof enums.result)[number]>().toEqualTypeOf<Result>();
   expectTypeOf<(typeof enums.team)[number]>().toEqualTypeOf<Team>();
   expectTypeOf<(typeof enums.perspective)[number]>().toEqualTypeOf<MatchDetailsView["perspective"]>();
+  expectTypeOf<(typeof enums.rememberedSource)[number]>().toEqualTypeOf<RememberedSource>();
 });
 
 test("the guard can fail: a descriptor missing a key, or with an extra one, does not compile", () => {

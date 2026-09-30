@@ -2,7 +2,7 @@
 // double-click guard. DEV browser against the demo feed; `?fail=details:N` / `?fail=match:N` (demo/scenes.ts) makes the
 // first N calls reject.
 import { expect, test, type Page } from "@playwright/test";
-import { openScene, routeMedia, sceneUrl, settle, NOW } from "./harness";
+import { openScene, routeMedia, sceneUrl, settle, waitPage, NOW } from "./harness";
 
 const NO_STATUS_TEXT = /error|fail|retry|try again|unavailable|offline|saved|updated|loading/i;
 
@@ -129,6 +129,43 @@ test("an unknown stage renders an empty grid instead of crashing", async ({ page
   await expect(page.locator(".live")).toHaveCount(1);
   await expect(page.locator(".live .card, .live .skcard, .live .dashed")).toHaveCount(0);
   await expect(page.locator(".blank")).toHaveCount(0);
+});
+
+// R145: the Player Details page tells Rust when it is left, so nothing is rebuilt or emitted for a page nobody sees.
+// The DEV browser has no Rust: the demo module counts each `close_details` in `data-details-closed` on <html>.
+test.describe("close_details", () => {
+  const closed = (page: Page) => page.evaluate(() => Number(document.documentElement.dataset.detailsClosed ?? 0));
+
+  test("Back from Details, the Live tab, and a recent row to Match each close it once; Back from Match (a remount) does not", async ({ page }) => {
+    await openScene(page, "details");
+    expect(await closed(page)).toBe(0); // opening closes nothing
+
+    await page.locator(".details .back").click(); // Back → Live
+    await expect(page.locator(".live")).toHaveCount(1);
+    await expect.poll(() => closed(page)).toBe(1);
+
+    await page.waitForTimeout(450); // past the double-click guard
+    await page.locator(".live .card").nth(5).click({ position: { x: 20, y: 70 } });
+    await waitPage(page, "loaded");
+    expect(await closed(page)).toBe(1);
+    await page.waitForTimeout(450);
+    await page.locator(".tab.on").click(); // the Live tab, from Details
+    await expect(page.locator(".live")).toHaveCount(1);
+    await expect.poll(() => closed(page)).toBe(2);
+
+    await page.waitForTimeout(450);
+    await page.locator(".live .card").nth(5).click({ position: { x: 20, y: 70 } });
+    await waitPage(page, "loaded");
+    await page.waitForTimeout(450);
+    await page.locator(".details .recent .rrow").first().click(); // a row → Match: Details unmounts
+    await expect(page.locator(".match")).toHaveCount(1);
+    await expect.poll(() => closed(page)).toBe(3);
+
+    await page.locator(".match .back").click(); // Back from Match → Details mounts again: nothing to close
+    await waitPage(page, "loaded");
+    await page.waitForTimeout(300);
+    expect(await closed(page)).toBe(3);
+  });
 });
 
 // Card click → Details. The second click of a double-click lands where the top-left card was: Back's spot.

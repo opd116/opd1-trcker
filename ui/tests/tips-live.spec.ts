@@ -104,6 +104,24 @@ test("tips: ingame-longnames", async ({ page }) => {
   ]);
 });
 
+// R145: a remembered name is worded by where it came from. Rook is the design's own (a match the user played), Nyx was in
+// someone else's stored match, Kilo's name is a name-service answer (no map, only when it was last confirmed).
+test("tips: ingame-remembered", async ({ page }) => {
+  await openScene(page, "ingame-remembered", {}, { clock: "manual" });
+  await runItems(page, [
+    { what: "remembered, own match", trigger: (p) => card(p, "Rook").locator(".nm"), text: "Hidden name · known from your match\nSplit · Aug 30, 2026" },
+    { what: "remembered, someone else's match", trigger: (p) => card(p, "Nyx").locator(".nm"), text: "Hidden name · known from a past match\nLotus · Sep 5, 2026" },
+    { what: "remembered, seen before", trigger: (p) => card(p, "Kilo").locator(".nm"), text: "Hidden name · seen before\nSep 20, 2026" },
+  ]);
+  // All three are drawn in the one remembered style: eye-off, dotted underline, the tag.
+  for (const who of ["Rook", "Nyx", "Kilo"]) {
+    const nm = card(page, who).locator(".nm");
+    await expect(nm.locator("svg"), who).toHaveCount(1);
+    await expect(nm.locator(".rem"), who).toHaveCount(1);
+    await expect(nm.locator(".t"), who).toHaveCount(1);
+  }
+});
+
 const card0 = (p: Page) => p.locator(".live .card").first();
 
 test("tips: lobby3", async ({ page }) => {

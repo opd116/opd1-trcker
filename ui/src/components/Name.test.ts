@@ -27,7 +27,7 @@ describe("Name dir=auto", () => {
   });
 
   it("a remembered name span has dir=auto (card and wrapping Top 3)", () => {
-    const n: DisplayName = { kind: "remembered", name: "שלום", tag: "OPD1", fromMapId: null, fromStartMs: null };
+    const n: DisplayName = { kind: "remembered", name: "שלום", tag: "OPD1", source: "ownMatch", fromMapId: null, fromStartMs: null };
     for (const wrap of [false, true]) {
       const t = tags(html(n, "card", wrap), "n");
       expect(t, `wrap ${wrap}`).toHaveLength(1);

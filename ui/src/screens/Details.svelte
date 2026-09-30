@@ -5,6 +5,7 @@
   the same player replaces it in place (spec §2.4), keeping `more` and the scroll position; an event always wins over
   an answer still in flight, and leaving for Live forgets the payload. A rejected call is retried once after 1s; when
   that fails too the page settles on its empty state (`settledDetails`: `—` values, no text) and stops being busy.
+  Leaving the page tells Rust (`close_details`, R145).
 -->
 <script lang="ts">
   import BackButton from "../components/details/BackButton.svelte";
@@ -14,7 +15,7 @@
   import RecentMatches from "../components/details/RecentMatches.svelte";
   import TopTeammates from "../components/details/TopTeammates.svelte";
   import { get } from "svelte/store";
-  import { getPlayerDetails } from "../lib/api";
+  import { closeDetails, getPlayerDetails } from "../lib/api";
   import { DETAILS_RETRY_MS } from "../lib/boot";
   import { recentShown, settledDetails, type MatchFrom } from "../lib/details";
   import { go } from "../lib/router.svelte";
@@ -36,6 +37,13 @@
         settle: (p) => settledDetails(p, get(live)?.players.find((c) => c.puuid === p)),
       })
       .catch((err: unknown) => console.error("player_details failed", err));
+  });
+
+  // Leaving the page (Back, the Live tab, a match row, Agent Select's switch to Live) unmounts it: Rust forgets the open
+  // Details, so nothing is rebuilt or emitted for a page nobody sees. No dependency, so this runs on unmount only; a
+  // player change on the same page never closes (the next `player_details` replaces the open Details itself).
+  $effect(() => () => {
+    closeDetails().catch((err: unknown) => console.error("close_details failed", err));
   });
 
   const openMatch = (from: MatchFrom) => (matchId: string) =>

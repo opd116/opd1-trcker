@@ -14,7 +14,7 @@ import type { DisplayName, LiveState, MatchDetailsView, Meta, PlayerCard, Player
 const NAMES: SceneName[] = [
   "boot", "closed", "closed-empty", "lobby1", "lobby2", "lobby2-loading", "lobby2-unranked", "lobby3", "lobby4", "lobby5",
   "pregame", "pregame-nomap", "pregame-loading", "ingame", "ingame-longnames", "ingame-parties4", "ingame-partial",
-  "ingame-unranked", "ingame-loading", "ingame-nometa",
+  "ingame-unranked", "ingame-loading", "ingame-nometa", "ingame-remembered",
   "details", "details-more", "details-self", "details-hidden", "details-empty", "details-loading", "details-longnames",
   "details-partial", "details-nostats",
   "match", "match-enc", "match-hidden", "match-dm", "match-loading", "match-longnames", "match-nostats",
@@ -154,6 +154,23 @@ describe("live scenes", () => {
     expect(enc.map((c) => (c.name && "name" in c.name ? c.name.name : "?")).sort()).toEqual(["Kilo", "Mara", "Rook", "VesperUnbreakabl"]);
     // The backend marks the user's own card `isSelfParty` too (state.rs `r.is_self_party || is_self`): only Fahad here.
     expect(players("ingame").filter((c) => c.isSelfParty).map((c) => c.puuid)).toEqual([players("ingame")[0]!.puuid]);
+  });
+
+  it("ingame-remembered (R145): one remembered card of each source, all hidden on the live screen", () => {
+    const rem = players("ingame-remembered").flatMap((c) => (c.name?.kind === "remembered" ? [c.name] : []));
+    expect(rem.map((n) => n.source).sort()).toEqual(["otherMatch", "ownMatch", "seen"]);
+    for (const n of rem) {
+      if (n.source === "seen") {
+        expect(n.fromMapId, "a name-service answer has no map").toBeNull();
+        expect(n.fromStartMs, "seen carries when it was last confirmed").not.toBeNull();
+      } else {
+        expect(n.fromMapId, n.source).not.toBeNull();
+        expect(n.fromStartMs, n.source).not.toBeNull();
+      }
+    }
+    // The design's roster is untouched elsewhere: `ingame` keeps exactly Rook (own match) as its one remembered card.
+    const inGame = players("ingame").flatMap((c) => (c.name?.kind === "remembered" ? [c.name] : []));
+    expect(inGame.map((n) => [n.name, n.source])).toEqual([["Rook", "ownMatch"]]);
   });
 
   it("wire invariant in every scene: the self card is isSelfParty, and own-party cards carry no party or encounters", () => {
@@ -577,7 +594,7 @@ describe("resolvers (DEV api)", () => {
     const focus = dm.teams[0]!.players.find((p) => p.isFocus)!;
     expect(focus.name).toEqual({ kind: "hiddenAgent", agentId: focus.agentId });
     // A remembered live name stays remembered in the match row.
-    live.find((c) => c.puuid === kilo)!.name = { kind: "remembered", name: "Kilo", tag: "2210", fromMapId: null, fromStartMs: null };
+    live.find((c) => c.puuid === kilo)!.name = { kind: "remembered", name: "Kilo", tag: "2210", source: "ownMatch", fromMapId: null, fromStartMs: null };
     expect(matchFor(recentMatchId("mara", 0), live).teams.flatMap((t) => t.players).find((p) => p.puuid === kilo)?.name).toMatchObject({ kind: "remembered" });
     // Without live cards the rows are the roster's own.
     expect(detailsFor("mara").topTeammates[0]!.name).toMatchObject({ kind: "visible", name: "Kilo" });

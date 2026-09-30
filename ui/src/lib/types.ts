@@ -16,9 +16,25 @@ export type Result = "win" | "loss" | "draw";
 
 export type Team = "ally" | "enemy";
 
+/**
+ * R145: where a remembered name came from. `ownMatch`: a finished match the user played in showed it. `otherMatch`: a
+ * stored match the user did not play in carried it. `seen`: a name-service answer from a time the player was visible.
+ * Not a privacy tier: every source is drawn in the remembered style; only the tooltip's wording differs.
+ */
+export type RememberedSource = "ownMatch" | "otherMatch" | "seen";
+
 export type DisplayName =
   | { kind: "visible"; name: string; tag: string }
-  | { kind: "remembered"; name: string; tag: string; fromMapId: string | null; fromStartMs: number | null }
+  | {
+      kind: "remembered";
+      name: string;
+      tag: string;
+      source: RememberedSource;
+      /** null for `seen` (a name-service answer has no map), and when unknown. */
+      fromMapId: string | null;
+      /** When the source match started; for `seen`, when the name was last confirmed. */
+      fromStartMs: number | null;
+    }
   | { kind: "hiddenPlayer" }
   | { kind: "hiddenAgent"; agentId: string };
 

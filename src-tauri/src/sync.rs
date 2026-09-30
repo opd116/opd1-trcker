@@ -25,6 +25,11 @@
 //! it would have filled become Missing (`—`) through the card builder's
 //! "attempted" rule, never a stuck skeleton. `ClientGone` aborts the whole
 //! run — the poll loop notices the client is gone on its own next tick.
+//!
+//! A failed rank part (`comp_updates` or `mmr`) is retried, bounded (R155,
+//! `crate::rank_retry`): the worker syncs the player again 20 s after the
+//! failure and 60 s after that, while they are on the live roster, behind the
+//! first-pass syncs and ahead of the names fill and the backfill.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -142,6 +147,11 @@ pub struct SyncOutcome {
     /// history failed this cycle (the call or the write) must not take part:
     /// the stored one may be from an earlier session (a false stripe).
     pub history_ok: bool,
+    /// The rank part failed: the `comp_updates` call (which also skips the
+    /// `mmr` call), or the `mmr` call. Any error but `ClientGone`, which
+    /// aborts the sync instead. R155: such a player is synced again later
+    /// (`LiveModel::note_rank_sync`).
+    pub rank_failed: bool,
 }
 
 /// `ClientGone` -> [`Gone`]; anything else is logged and swallowed.
@@ -354,10 +364,13 @@ pub async fn sync_player(
     puuid: &str,
 ) -> Result<SyncOutcome, Gone> {
     let mut ids = Vec::new();
+    // R155: set when the rank part fails, for the retry.
+    let mut rank_failed = false;
 
     let comp = sync_comp_updates(st, session, puuid, 5).await?;
-    if let Some(rows) = &comp {
-        ids.extend(rows.iter().map(|r| r.match_id.clone()));
+    match &comp {
+        Some(rows) => ids.extend(rows.iter().map(|r| r.match_id.clone())),
+        None => rank_failed = true,
     }
 
     let history_ok = match session.match_history(puuid, Some(0), Some(2), None).await {
@@ -400,11 +413,17 @@ pub async fn sync_player(
                     };
                     st.db(move |repo| repo.save_mmr_snapshot(&snap)).await;
                 }
-                Err(e) => check(e, "mmr", puuid)?,
+                Err(e) => {
+                    check(e, "mmr", puuid)?;
+                    rank_failed = true;
+                }
             }
         }
     }
-    Ok(SyncOutcome { history_ok })
+    Ok(SyncOutcome {
+        history_ok,
+        rank_failed,
+    })
 }
 
 /// Player Details' deeper sync: the last [`TEAMMATE_WINDOW`] competitive
@@ -918,8 +937,9 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
 
 /// The live roster's background worker (worker `id`, claimed via
 /// `LiveModel::try_start_worker`). Each job — one `names()` call for the
-/// visible players still unnamed, one player's sync in display order, or,
-/// last of all, one step of the own-history backfill — is chosen by
+/// visible players still unnamed, one player's sync in display order, a due
+/// rank retry (R155), one names-fill request, or, last of all, one step of the
+/// own-history backfill — is chosen by
 /// `LiveModel::next_job` under the model's lock, which also
 /// releases the claim when nothing is left (R45: no roster change can
 /// slip between "nothing to do" and the task ending). Roster changes
@@ -930,7 +950,8 @@ pub async fn run_worker(st: Arc<AppState>, session: Arc<RiotSession>, id: u64) {
         let outcome = match job {
             None => return,
             Some(Job::Names(needed)) => names_step(&st, &session, needed).await,
-            Some(Job::Sync(puuid)) => sync_step(&st, &session, puuid).await,
+            Some(Job::Sync(puuid)) => sync_step(&st, &session, puuid, false).await,
+            Some(Job::RankRetry(puuid)) => sync_step(&st, &session, puuid, true).await,
             Some(Job::FillNames) => fill_names_step(&st, &session).await,
             Some(Job::Backfill) => backfill_step(&st, &session).await,
         };
@@ -945,6 +966,7 @@ async fn sync_step(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
     puuid: String,
+    retry: bool,
 ) -> Result<(), Gone> {
     let outcome = sync_player(st, session, &puuid).await?;
     let (p, me) = (puuid.clone(), session.self_puuid().to_string());
@@ -961,6 +983,8 @@ async fn sync_step(
         if outcome.history_ok && db.is_some() {
             live.party_ready.insert(puuid.clone());
         }
+        // R155: a failed rank part is synced again later, bounded.
+        live.note_rank_sync(&puuid, outcome.rank_failed, retry);
         if let (Some(db), Some(slot)) =
             (db, live.slots.iter_mut().find(|s| s.roster.puuid == puuid))
         {

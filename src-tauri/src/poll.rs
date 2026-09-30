@@ -249,6 +249,8 @@ impl Poller {
                 // (their hidden players were just forgotten above).
                 live.name_fill.clear();
                 live.match_end_ms = None;
+                // R155: nor are its pending rank retries.
+                live.rank_retries.clear();
             }
             live.self_puuid = Some(me.clone());
             live.self_name_attempted = false;
@@ -370,6 +372,12 @@ impl Poller {
         // handle. Not while VALORANT is closed (R137: no worker on a stale
         // session); the next roster install starts one then.
         if self.st.take_worker_kick() && self.stage != Stage::Closed {
+            self.ensure_worker(session);
+        }
+        // R155: a rank retry came due. The worker exits when nothing else is
+        // queued and never waits for one, so this tick (every 2 s while
+        // VALORANT runs) is what wakes it; a running worker takes it itself.
+        if self.stage != Stage::Closed && lock(&self.st.live).due_rank_retry().is_some() {
             self.ensure_worker(session);
         }
         Ok(())
@@ -918,6 +926,8 @@ impl Poller {
             live.map_path = map_path;
             live.slots = slots;
             live.note_hidden();
+            // R155: a player the new roster no longer shows is not retried.
+            live.prune_rank_retries();
         }
         self.st.publish();
         // An open Details of someone on this roster follows it (a lock-in,
@@ -952,6 +962,7 @@ impl Poller {
             live.map_path = None;
             live.map_id = None;
             live.slots = slot.into_iter().collect();
+            live.prune_rank_retries();
         }
         self.st.publish();
         self.ensure_worker(session);
@@ -983,6 +994,8 @@ impl Poller {
             live.coregame_match_id = None;
             live.loadouts.clear();
             live.slots = slot.into_iter().collect();
+            // R155: nothing is retried while VALORANT is closed.
+            live.prune_rank_retries();
         }
         self.st.publish();
     }
@@ -1663,6 +1676,125 @@ mod tests {
                 .any(|r| r.method.as_str() == "PUT"),
             "the tick started a worker that asked name-service"
         );
+        poller.stop_worker();
+    }
+
+    /// The mmr path of `puuid`.
+    fn mmr_of(puuid: &str) -> String {
+        format!("/mmr/v1/players/{puuid}")
+    }
+
+    /// `ME`'s `mmr` request always fails (a 500).
+    async fn mmr_fails(h: &Harness) {
+        Mock::given(method("GET"))
+            .and(path(mmr_of(ME).as_str()))
+            .respond_with(ResponseTemplate::new(500))
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+    }
+
+    /// How often `ME`'s mmr has been asked so far.
+    async fn mmr_requests(h: &Harness) -> usize {
+        requests(&h.server)
+            .await
+            .iter()
+            .filter(|r| r.url.path() == mmr_of(ME))
+            .count()
+    }
+
+    /// Waits (up to ~5s) until `ME`'s mmr has been asked `n` times.
+    async fn wait_for_mmr_requests(h: &Harness, n: usize) -> usize {
+        let mut seen = 0;
+        for _ in 0..250 {
+            seen = mmr_requests(h).await;
+            if seen >= n {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        seen
+    }
+
+    #[tokio::test]
+    async fn a_due_rank_retry_gets_a_worker_at_the_next_tick() {
+        // R155: the worker exits when nothing else is queued and never waits
+        // for a retry: the poll loop's tick is what starts one when it is due.
+        let h = harness().await;
+        mmr_fails(&h).await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Menus;
+            live.slots = vec![Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            }];
+        }
+        // The first pass (the tick's roster-install path is not under test).
+        let id = lock(&h.st.live).try_start_worker().expect("first pass");
+        crate::sync::run_worker(h.st.clone(), h.session.clone(), id).await;
+        assert_eq!(mmr_requests(&h).await, 1);
+
+        // Not due: the tick starts nothing.
+        poller.connected_tick(&h.session).await.unwrap();
+        assert!(!lock(&h.st.live).worker_running());
+        lock(&h.st.live).advance_clock(Duration::from_secs(19));
+        poller.connected_tick(&h.session).await.unwrap();
+        assert!(!lock(&h.st.live).worker_running(), "19 s: not yet");
+
+        // Due, with nothing else queued: the next tick starts a worker.
+        lock(&h.st.live).advance_clock(Duration::from_secs(1));
+        poller.connected_tick(&h.session).await.unwrap();
+        assert_eq!(wait_for_mmr_requests(&h, 2).await, 2, "the retry ran");
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn no_tick_starts_a_retry_while_closed_and_closing_drops_it() {
+        let h = harness().await;
+        mmr_fails(&h).await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Menus;
+            live.slots = vec![Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            }];
+        }
+        let id = lock(&h.st.live).try_start_worker().expect("first pass");
+        crate::sync::run_worker(h.st.clone(), h.session.clone(), id).await;
+        assert_eq!(mmr_requests(&h).await, 1);
+        assert!(!lock(&h.st.live).rank_retries.is_empty());
+
+        // VALORANT closes: the retry is dropped with the session's roster.
+        poller.enter_closed().await;
+        assert!(lock(&h.st.live).rank_retries.is_empty());
+        lock(&h.st.live).advance_clock(Duration::from_secs(1_000));
+        poller.stage = Stage::Closed;
+        poller.connected_tick(&h.session).await.unwrap();
+        assert!(!lock(&h.st.live).worker_running());
+        sleep(Duration::from_millis(200)).await;
+        assert_eq!(mmr_requests(&h).await, 1, "no retry ran");
+    }
+
+    #[tokio::test]
+    async fn an_account_switch_drops_the_pending_retries() {
+        let h = harness().await;
+        {
+            let mut live = lock(&h.st.live);
+            live.self_puuid = Some("previous-account".into());
+            live.rank_retries
+                .first_pass("someone", true, std::time::Instant::now());
+        }
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        assert!(lock(&h.st.live).rank_retries.is_empty());
         poller.stop_worker();
     }
 

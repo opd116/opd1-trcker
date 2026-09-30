@@ -19,6 +19,7 @@ mod match_details;
 #[cfg(test)]
 mod pipeline_tests;
 mod poll;
+mod rank_retry;
 mod roster;
 mod state;
 mod store;

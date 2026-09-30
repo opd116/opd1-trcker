@@ -1200,7 +1200,7 @@ pub(crate) mod backfill;
 #[cfg(test)]
 mod names_fill;
 
-/// R154's rank tests: the rank when MMR has no answer (their own file; same
-/// harness).
+/// R154's and R155's rank tests: the rank without an MMR answer, and the
+/// bounded retry of a failed rank sync (their own file; same harness).
 #[cfg(test)]
 mod rank;

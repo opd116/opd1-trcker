@@ -28,6 +28,7 @@ use opd1_riot::to_core::{current_rank_from_mmr, seasonal_map_from_mmr};
 use opd1_riot::RiotSession;
 
 use crate::logbuf::short;
+use crate::rank_retry::{RankRetries, RANK_RETRY_DELAYS};
 use crate::roster::{current_act, RawLoadout, RosterPlayer};
 use crate::store::{PlayerDb, StoredPlayer, SELF_LOADOUT_KEY};
 
@@ -108,6 +109,10 @@ pub enum Job {
     Names(Vec<(String, bool)>),
     /// The per-player sync of one puuid.
     Sync(String),
+    /// R155: the sync of one puuid again, because its rank part failed
+    /// (`LiveModel::due_rank_retry`). Handed out after the first-pass syncs
+    /// and before the names fill and the backfill.
+    RankRetry(String),
     /// R150: one names-fill request (`sync::fill_names_step`): the queued
     /// asks worth sending, in one name-service `PUT`. Handed out when no
     /// `Names` or `Sync` job is left and before the backfill, and only
@@ -257,6 +262,15 @@ pub struct LiveModel {
     /// match that just ended: its players are asked about
     /// (`AppState::match_end_asks`).
     pub match_end_ms: Option<i64>,
+    /// R155: the players whose rank sync failed and are synced again later
+    /// (`Self::note_rank_sync`, `Self::due_rank_retry`). Only players on the
+    /// live roster; dropped with a roster change, an account switch, and when
+    /// VALORANT closes.
+    pub rank_retries: RankRetries,
+    /// Test clock: added to "now" wherever the retries are timed, so a test
+    /// moves time forward instead of sleeping (`Self::advance_clock`).
+    #[cfg(test)]
+    clock_offset: Duration,
     /// The last built/emitted state (`live_state()` returns it).
     pub current: LiveState,
     last_bytes: Vec<u8>,
@@ -287,6 +301,9 @@ impl LiveModel {
             backfill: None,
             name_fill: VecDeque::new(),
             match_end_ms: None,
+            rank_retries: RankRetries::default(),
+            #[cfg(test)]
+            clock_offset: Duration::ZERO,
             current: LiveState {
                 stage: Stage::Closed,
                 map_id: None,
@@ -533,10 +550,12 @@ impl LiveModel {
             .cloned()
     }
 
-    /// A `Names` or `Sync` job is waiting: what the backfill and the names
-    /// fill must yield to.
+    /// A `Names`, `Sync` or (R155) due `RankRetry` job is waiting: what the
+    /// backfill and the names fill must yield to.
     pub fn live_job_pending(&self) -> bool {
-        !self.names_needed().is_empty() || self.next_unsynced().is_some()
+        !self.names_needed().is_empty()
+            || self.next_unsynced().is_some()
+            || self.due_rank_retry().is_some()
     }
 
     /// Between matches: Lobby or Closed, and the raw presence is not in a
@@ -561,6 +580,93 @@ impl LiveModel {
     /// in the queue through a match and run after it.
     pub fn fill_ready(&self) -> bool {
         !self.name_fill.is_empty() && self.between_matches()
+    }
+
+    /// The clock the rank retries are timed by.
+    fn now(&self) -> Instant {
+        let now = Instant::now();
+        #[cfg(test)]
+        let now = now + self.clock_offset;
+        now
+    }
+
+    /// Moves the retry clock forward (tests only: the 20 s and 60 s waits).
+    #[cfg(test)]
+    pub fn advance_clock(&mut self, by: Duration) {
+        self.clock_offset += by;
+    }
+
+    /// R155: a per-player sync of `puuid` ended (`retry`: it was a retry, not
+    /// the first pass) and `failed` says its rank part did. A failed first
+    /// pass schedules the first retry, a failed retry the next one (or, after
+    /// the last, nothing: [`crate::rank_retry::RANK_RETRY_DELAYS`]); a success
+    /// ends the round. Nothing is scheduled for a player who is not on the
+    /// live roster, nor while VALORANT is closed. A retry was counted when it
+    /// was handed out ([`Self::next_job`]).
+    pub fn note_rank_sync(&mut self, puuid: &str, failed: bool, retry: bool) {
+        let shown = self.stage != Stage::Closed && self.shows(puuid);
+        if !shown {
+            self.rank_retries.forget(puuid);
+            return;
+        }
+        let now = self.now();
+        if retry {
+            self.rank_retries.finished(puuid, failed, now);
+        } else {
+            self.rank_retries.first_pass(puuid, failed, now);
+        }
+        if !failed {
+            return;
+        }
+        match self.rank_retries.retries_done(puuid) {
+            Some(done) => log::info!(
+                "rank sync for {} failed; retry {} of {} in {}s",
+                short(puuid),
+                done + 1,
+                RANK_RETRY_DELAYS.len(),
+                RANK_RETRY_DELAYS[done].as_secs()
+            ),
+            None if retry => log::info!("rank sync for {} failed again; giving up", short(puuid)),
+            None => {}
+        }
+    }
+
+    /// R155: the first player on the live roster (display order) whose rank
+    /// retry is due — `None` while VALORANT is closed, and for a player who
+    /// is no longer shown. Like the first-pass syncs it is work for the
+    /// roster worker ([`Self::next_job`]); waiting for it is not.
+    pub fn due_rank_retry(&self) -> Option<String> {
+        if self.stage == Stage::Closed || self.rank_retries.is_empty() {
+            return None;
+        }
+        let now = self.now();
+        self.slots
+            .iter()
+            .map(|s| &s.roster.puuid)
+            .find(|p| self.rank_retries.is_due(p, now))
+            .cloned()
+    }
+
+    /// R155: drops the pending retries of players the roster no longer shows
+    /// (all of them while VALORANT is closed). Called whenever a roster is
+    /// installed; [`Self::due_rank_retry`] never hands out such a player
+    /// anyway, but a stale round must not come back with a later roster.
+    pub fn prune_rank_retries(&mut self) {
+        let Self {
+            stage,
+            slots,
+            rank_retries,
+            ..
+        } = self;
+        if *stage == Stage::Closed {
+            rank_retries.clear();
+        } else {
+            rank_retries.retain(|p| slots.iter().any(|s| s.roster.puuid == p));
+        }
+    }
+
+    fn shows(&self, puuid: &str) -> bool {
+        self.slots.iter().any(|s| s.roster.puuid == puuid)
     }
 
     pub fn has_pending_work(&self) -> bool {
@@ -669,6 +775,15 @@ impl LiveModel {
         }
         if let Some(puuid) = self.next_unsynced() {
             return Some(Job::Sync(puuid));
+        }
+        // R155: after every first-pass sync, before the fill and the
+        // backfill. Not due: not work; the worker never waits for it.
+        if let Some(puuid) = self.due_rank_retry() {
+            // Counted now, not when it ends: a retry cut short (the worker
+            // is aborted by a stage change) has still used up its turn.
+            let now = self.now();
+            self.rank_retries.started(&puuid, now);
+            return Some(Job::RankRetry(puuid));
         }
         // After the live cards, before the backfill: one request a screen
         // may be waiting on. Only between matches.
@@ -1845,6 +1960,190 @@ mod tests {
         m.backfill = None;
         assert_eq!(m.next_job(id), None);
         assert!(!m.worker_running(), "claim released");
+    }
+
+    // -- R155: bounded rank retries --------------------------------------
+
+    const S: Duration = Duration::from_secs(1);
+
+    /// A Lobby whose players are all named and synced: nothing to do.
+    fn settled_lobby(puuids: &[&str]) -> LiveModel {
+        let mut m = model(puuids.iter().map(|p| slot(p, false)).collect());
+        m.stage = Stage::Menus;
+        for p in puuids {
+            m.synced.insert(p.to_string());
+            m.names_attempted.insert(p.to_string());
+        }
+        m
+    }
+
+    #[test]
+    fn a_failed_rank_sync_is_retried_20s_then_60s_later_and_no_more() {
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_sync("me", true, false);
+        // Waiting is not work: no worker, no due retry.
+        assert!(!m.has_pending_work());
+        assert!(m.try_start_worker().is_none());
+        m.advance_clock(19 * S);
+        assert_eq!(m.due_rank_retry(), None, "not before 20 s");
+        assert!(m.try_start_worker().is_none());
+        m.advance_clock(S);
+        assert_eq!(m.due_rank_retry().as_deref(), Some("me"));
+        let id = m.try_start_worker().expect("a due retry is work");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+
+        // The first retry fails too: the second is 60 s after it.
+        m.note_rank_sync("me", true, true);
+        assert_eq!(m.next_job(id), None, "the worker does not wait for it");
+        assert!(!m.worker_running());
+        m.advance_clock(59 * S);
+        assert!(m.try_start_worker().is_none());
+        m.advance_clock(S);
+        let id = m.try_start_worker().expect("the second retry is due");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+
+        // The second fails as well: that was the last.
+        m.note_rank_sync("me", true, true);
+        assert_eq!(m.next_job(id), None);
+        m.advance_clock(100_000 * S);
+        assert!(m.try_start_worker().is_none());
+        assert_eq!(m.due_rank_retry(), None);
+    }
+
+    #[test]
+    fn a_retry_cut_short_by_an_aborted_worker_still_uses_up_its_turn() {
+        // A stage change aborts the worker mid-retry: no outcome is ever
+        // noted. The turn is spent all the same, so aborts cannot add
+        // attempts: the next retry is 60 s after this one was handed out.
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_sync("me", true, false);
+        m.advance_clock(20 * S);
+        let id = m.try_start_worker().expect("due");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+        m.revoke_worker(); // aborted; nothing noted
+        assert_eq!(m.due_rank_retry(), None, "not straight away again");
+        m.advance_clock(59 * S);
+        assert!(m.try_start_worker().is_none());
+        m.advance_clock(S);
+        let id = m.try_start_worker().expect("the second and last turn");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+        m.revoke_worker(); // aborted again
+        m.advance_clock(100_000 * S);
+        assert!(m.try_start_worker().is_none(), "no third turn, ever");
+    }
+
+    #[test]
+    fn a_retry_that_works_ends_the_round() {
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_sync("me", true, false);
+        m.advance_clock(20 * S);
+        m.note_rank_sync("me", false, true);
+        m.advance_clock(1_000 * S);
+        assert!(m.try_start_worker().is_none());
+    }
+
+    #[test]
+    fn a_due_retry_comes_after_first_pass_syncs_and_before_the_fill_and_the_backfill() {
+        let mut m = model(vec![
+            slot("me", false),
+            slot("p1", false),
+            slot("p2", false),
+        ]);
+        m.stage = Stage::Menus;
+        m.names_attempted
+            .extend(["p1".to_string(), "p2".to_string()]);
+        m.synced.extend(["me".to_string(), "p1".to_string()]);
+        m.note_rank_sync("p1", true, false);
+        m.advance_clock(20 * S);
+        m.queue_name_fill([NameAsk {
+            puuid: "stranger".into(),
+            match_start_ms: Some(1),
+        }]);
+        m.start_backfill(None, None);
+        let id = m.try_start_worker().expect("work pending");
+
+        // p2 was never synced: a first pass goes before any retry.
+        assert_eq!(m.next_job(id), Some(Job::Sync("p2".into())));
+        m.synced.insert("p2".into());
+        // The due retry goes before the names fill and the backfill.
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("p1".into())));
+        m.note_rank_sync("p1", false, true);
+        assert_eq!(m.next_job(id), Some(Job::FillNames));
+        m.name_fill.clear();
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
+        // A retry that comes due while the backfill runs is taken before its
+        // next step: the run's own yield check sees it.
+        m.note_rank_sync("p2", true, false);
+        assert!(!m.live_job_pending(), "not due yet");
+        m.advance_clock(20 * S);
+        assert!(m.live_job_pending(), "due: the backfill yields to it");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("p2".into())));
+    }
+
+    #[test]
+    fn a_retry_that_is_not_due_yet_blocks_no_other_work() {
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_sync("me", true, false);
+        m.start_backfill(None, None);
+        let id = m.try_start_worker().expect("the run is work");
+        assert_eq!(m.next_job(id), Some(Job::Backfill), "no waiting for it");
+        m.backfill = None;
+        assert_eq!(m.next_job(id), None, "the worker exits, it does not wait");
+        assert!(!m.worker_running());
+        // And it wakes for the retry once due, with nothing else queued.
+        m.advance_clock(20 * S);
+        let id = m.try_start_worker().expect("the retry is work");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+    }
+
+    #[test]
+    fn a_player_who_left_the_roster_is_not_retried() {
+        let mut m = settled_lobby(&["me", "p1"]);
+        m.note_rank_sync("p1", true, false);
+        m.slots.retain(|s| s.roster.puuid != "p1");
+        m.prune_rank_retries();
+        m.advance_clock(100 * S);
+        assert_eq!(m.due_rank_retry(), None);
+        assert!(m.try_start_worker().is_none());
+        // Back on a later roster: the old round is gone (not resumed).
+        m.slots.push(slot("p1", false));
+        m.synced.insert("p1".into());
+        assert_eq!(m.due_rank_retry(), None);
+
+        // Never scheduled for someone who is not on the roster.
+        m.note_rank_sync("ghost", true, false);
+        m.advance_clock(100 * S);
+        m.slots.push(slot("ghost", false));
+        assert_eq!(m.due_rank_retry(), None);
+    }
+
+    #[test]
+    fn a_retry_waits_out_a_roster_change_without_the_player_leaving() {
+        // The user's own card counts, and a roster that still shows the
+        // player keeps their pending retry.
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_sync("me", true, false);
+        m.slots.push(slot("newcomer", false));
+        m.prune_rank_retries();
+        m.advance_clock(20 * S);
+        assert_eq!(m.due_rank_retry().as_deref(), Some("me"));
+    }
+
+    #[test]
+    fn no_retry_runs_or_is_scheduled_while_valorant_is_closed() {
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_sync("me", true, false);
+        m.stage = Stage::Closed;
+        m.advance_clock(1_000 * S);
+        assert_eq!(m.due_rank_retry(), None);
+        assert!(m.try_start_worker().is_none());
+        // A sync finishing while closed schedules nothing.
+        let mut m = settled_lobby(&["me"]);
+        m.stage = Stage::Closed;
+        m.note_rank_sync("me", true, false);
+        m.stage = Stage::Menus;
+        m.advance_clock(1_000 * S);
+        assert_eq!(m.due_rank_retry(), None);
     }
 
     #[test]

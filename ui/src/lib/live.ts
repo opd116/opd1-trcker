@@ -23,8 +23,9 @@ export function liveColumns(s: LiveState | null): { left: SlotItem[]; right: Slo
   const empty = s.players.length === 0;
   switch (s.stage) {
     case "closed":
-      // No card at all before the user's PUUID was ever learned: a skeleton here would never resolve (spec §5.3).
-      return { left: column(selfFirst(s.players)), right: fill("none") };
+      // Only the user's own card (spec §5.3), whatever else was emitted. No card at all before the user's PUUID was
+      // ever learned: a skeleton here would never resolve.
+      return { left: column(s.players.filter((p) => p.isSelf)), right: fill("none") };
     case "menus":
       return {
         left: empty ? [{ kind: "skeleton" }, ...fill("none", SLOTS - 1)] : column(selfFirst(s.players)),

@@ -29,7 +29,7 @@ export async function checkLiveNoOverflow(page: Page): Promise<string[]> {
     const hide = document.createElement("style");
     hide.textContent = ".uline{display:none!important}";
     document.head.appendChild(hide);
-    const label = (el: Element) => `${el.tagName.toLowerCase()}.${[...el.classList].filter((c) => !c.startsWith("svelte-")).join(".")}`;
+    const label = (el: Element) => `${el.tagName.toLowerCase()}.${[...el.classList].filter((c) => !/^s(velte)?-/.test(c)).join(".")}`;
     for (const el of [grid, ...grid.querySelectorAll("*")]) {
       if (!(el instanceof HTMLElement)) continue;
       if (el.closest("[data-ellipsis]")) continue;
@@ -66,9 +66,72 @@ export async function checkFontFloor(page: Page): Promise<string[]> {
 /**
  * 5. Nothing clips except the `data-ellipsis` spans. A truncated allowed span ends in an ellipsis, and a truncated
  * Riot-ID name keeps its tag fully visible. The Peak and Prev rows are strict.
- * Horizontal only: ink that hangs outside a clipping box (a text-decoration) is `decorationInk`'s job below.
+ * Vertically, nothing clips at all, the allowed spans included: every text's glyph box (its font's ascent to
+ * descent) lies inside each clipping ancestor's paint box (`overflow-clip-margin` counted), and every text
+ * decoration paints whole (`checkDecorations`: the underline hangs below the glyph box, where no DOM rect reaches).
  */
 export async function checkClipping(page: Page): Promise<string[]> {
+  return [...(await checkHorizontal(page)), ...(await checkVertical(page)), ...(await checkDecorations(page))];
+}
+
+async function checkVertical(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const out: string[] = [];
+    const app = document.getElementById("app")!;
+    /** Where `el` stops painting its content, or null when it does not clip in y. */
+    const clipBox = (el: HTMLElement): { top: number; bottom: number } | null => {
+      const s = getComputedStyle(el);
+      if (s.overflowY === "visible") return null;
+      const r = el.getBoundingClientRect();
+      // overflow:clip may paint past the padding box by overflow-clip-margin; hidden/auto/scroll never do.
+      const m = s.overflowY === "clip" ? parseFloat(s.getPropertyValue("overflow-clip-margin")) || 0 : 0;
+      return { top: r.top + parseFloat(s.borderTopWidth) - m, bottom: r.bottom - parseFloat(s.borderBottomWidth) + m };
+    };
+    const walker = document.createTreeWalker(app, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (!n.textContent?.trim()) continue;
+      const range = document.createRange();
+      range.selectNodeContents(n);
+      const g = range.getBoundingClientRect();
+      if (g.height === 0) continue;
+      for (let el = n.parentElement; el && el !== app.parentElement; el = el.parentElement) {
+        const c = clipBox(el);
+        if (c && (g.top < c.top - 0.5 || g.bottom > c.bottom + 0.5)) {
+          out.push(`"${n.textContent.trim()}" is cut vertically by ${el.tagName.toLowerCase()}.${[...el.classList].filter((k) => !/^s(velte)?-/.test(k)).join(".")}`);
+          break;
+        }
+      }
+    }
+    return out;
+  });
+}
+
+/**
+ * Every element that draws a text decoration (today: the remembered name's dotted underline, R128) paints it
+ * whole: `decorationInk` below, once per element, tagged for the probe and untagged after.
+ */
+async function checkDecorations(page: Page): Promise<string[]> {
+  const labels = await page.evaluate(() => {
+    const found: string[] = [];
+    for (const el of document.querySelectorAll<HTMLElement>("#app *")) {
+      if (getComputedStyle(el).textDecorationLine === "none" || !el.textContent?.trim() || el.getClientRects().length === 0) continue;
+      el.dataset.decoProbe = String(found.length);
+      found.push(el.textContent.trim());
+    }
+    return found;
+  });
+  const out: string[] = [];
+  for (const [i, text] of labels.entries()) {
+    const { ink, unclipped, width } = await decorationInk(page, `[data-deco-probe="${i}"]`);
+    // A 1px dotted line lights about half the pixels under the span; a quarter is a safe floor.
+    if (unclipped < Math.floor(width / 4)) out.push(`"${text}": its text decoration does not paint (${unclipped}px of ink)`);
+    else if (ink < unclipped) out.push(`"${text}": a clip eats ${unclipped - ink} of ${unclipped} decoration pixels`);
+  }
+  await page.evaluate(() => document.querySelectorAll("[data-deco-probe]").forEach((el) => el.removeAttribute("data-deco-probe")));
+  return out;
+}
+
+async function checkHorizontal(page: Page): Promise<string[]> {
   return page.evaluate(() => {
     const out: string[] = [];
     const seen = new Set<Element>();
@@ -99,9 +162,9 @@ export async function checkClipping(page: Page): Promise<string[]> {
 }
 
 /**
- * Ink probe for a text decoration that hangs below its text (fix round 1, F7). Check 5 measures only horizontal
- * overflow, and ink outside an `overflow:hidden` box never shows up in `scrollHeight`, so a clipped underline
- * would pass it. For the first match of `sel` this screenshots the box plus a 10px band under it twice, with and
+ * Ink probe for a text decoration that hangs below its text (fix round 1, F7; check 5 runs it on every decorated
+ * element). Ink outside an `overflow:hidden` box never shows up in `scrollHeight` or in any DOM rect, so a clipped
+ * underline passes every box measurement. For the first match of `sel` this screenshots the box plus a 10px band under it twice, with and
  * without `text-decoration`, and counts the pixels that differ: that is the decoration's ink. It counts once as
  * rendered and once with the clip pushed 14px out (`overflow:clip` + `overflow-clip-margin`, which keeps the
  * text-overflow ellipsis, so the decoration's extent is the same in both), so `ink < unclipped` means the clip is
@@ -143,6 +206,31 @@ export async function decorationInk(page: Page, sel: string): Promise<{ ink: num
   const ink = await count("");
   const unclipped = await count(`${sel}{overflow:clip!important;overflow-clip-margin:14px!important}`);
   return { ink, unclipped, width: r.width };
+}
+
+/**
+ * R125/R126 (spec §3.6 Prev): the widest Prev row must fit its 158px column unclipped. For every card's Prev row
+ * that shows a tier name, each of `labels` is written into the name in turn and the name and the row are measured
+ * (the icon is a fixed 18px, so the text is all that varies). The rows' own text is put back afterwards.
+ */
+export async function checkPrevNames(page: Page, labels: string[]): Promise<string[]> {
+  return page.evaluate((names) => {
+    const out: string[] = [];
+    const rows = [...document.querySelectorAll<HTMLElement>(".live .card .prev")].filter((r) => r.querySelector(".pname"));
+    if (rows.length === 0) return ["no Prev row with a tier name"];
+    rows.forEach((row, ri) => {
+      const name = row.querySelector<HTMLElement>(".pname")!;
+      const own = name.textContent;
+      for (const n of names) {
+        name.textContent = n;
+        if (name.scrollWidth > name.clientWidth || row.scrollWidth > row.clientWidth) {
+          out.push(`row ${ri}: "Prev ${n}" clips (${name.scrollWidth} > ${name.clientWidth})`);
+        }
+      }
+      name.textContent = own;
+    });
+    return out;
+  }, labels);
 }
 
 /**
@@ -209,13 +297,16 @@ export async function checkFont(page: Page, family: string): Promise<string[]> {
 
 /**
  * 9. Hidden-name integrity (regression check only, R96): a card drawn in the hidden style carries no real name
- * anywhere in its DOM, attributes included. `real` = the fixture names hidden in this scene.
+ * anywhere in its DOM, attributes included. `real` = the fixture names hidden in this scene. A hidden card is one
+ * whose name has the eye-off icon and no tag: that covers `Hidden Player`, the agent name, and an agent name that
+ * is still a meta-pending bar (no `.hid` yet). A remembered name has the eye too, but keeps its tag.
  */
 export async function checkHiddenIntegrity(page: Page, real: string[]): Promise<string[]> {
   return page.evaluate((names) => {
     const out: string[] = [];
     for (const card of document.querySelectorAll(".live .card")) {
-      if (!card.querySelector(".nm .hid")) continue;
+      const nm = card.querySelector(".nm");
+      if (!nm?.querySelector("svg") || nm.querySelector(".t")) continue;
       const html = card.outerHTML;
       if (/#[A-Za-z0-9]/.test(card.textContent ?? "")) out.push("a hidden card shows a #tag");
       for (const n of names) if (html.includes(n)) out.push(`a hidden card contains "${n}"`);

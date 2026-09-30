@@ -224,7 +224,7 @@ describe("live scenes", () => {
     expect(SCENES["pregame-loading"].live?.players).toEqual([]);
   });
 
-  it("ingame-longnames: long names, Ascendant 3, V26 A4 · 11mo except one E10 A3, one 123", () => {
+  it("ingame-longnames: long names, Ascendant 3 (current and prev), V26 A4 · 11mo except one E10 A3, one 123", () => {
     const p = players("ingame-longnames");
     expect(p).toHaveLength(10);
     for (const c of p) {
@@ -233,6 +233,8 @@ describe("live scenes", () => {
         expect(c.name.tag).toBe("WWWWW");
       }
       expect(c.rank?.tier).toBe(23);
+      // R125/R126: the widest Prev row (`Prev` + `Ascendant 3`) on every card.
+      expect(c.prevActTier).toBe(23);
       expect(c.peak?.tier).toBe(23);
       expect(c.peak && Math.floor(c.peak.sinceActEndMs! / 86_400_000 / 30)).toBe(11);
     }

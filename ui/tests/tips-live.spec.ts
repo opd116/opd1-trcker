@@ -2,7 +2,7 @@
 // placement rules (spec §4.1). Playwright's fake clock is installed before load and paused once the page has
 // settled, so the 450ms delay is stepped with clock.runFor and never depends on real timers.
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { openScene, pointerAway } from "./harness";
+import { openScene, pointerAway, varRgb } from "./harness";
 
 const card = (page: Page, text: string | RegExp) => page.locator(".live .card").filter({ hasText: text });
 const tip = (page: Page) => page.locator("#app [role=tooltip]");
@@ -147,17 +147,8 @@ test("the Win% tip shows W · L · games / This act in --win / --loss", async ({
   await expect(t.locator(".wl > span")).toHaveText(["31W", "·", "22L", "·", "53 games"]);
   await expect(t.locator(".scope")).toHaveText("This act");
   const colour = (sel: string) => t.locator(sel).evaluate((el) => getComputedStyle(el).color);
-  const probe = (v: string) =>
-    page.evaluate((name) => {
-      const d = document.createElement("div");
-      d.style.color = `var(${name})`;
-      document.body.appendChild(d);
-      const c = getComputedStyle(d).color;
-      d.remove();
-      return c;
-    }, v);
-  expect(await colour(".w")).toBe(await probe("--win"));
-  expect(await colour(".l")).toBe(await probe("--loss"));
+  expect(await colour(".w")).toBe(await varRgb(page, "--win"));
+  expect(await colour(".l")).toBe(await varRgb(page, "--loss"));
 });
 
 // F4/F13 (task 17 review), spec §2.3: no APR tip while a rank is still loading (a count would be false), and with
@@ -172,4 +163,20 @@ test("APR tip: `From 0 ranked players` when nobody is ranked", async ({ page }) 
   await openScene(page, "lobby2-unranked", {}, { clock: "manual" });
   await expect(page.locator("header.bar .apr .ebox")).toHaveCount(1);
   expect(await hoverTip(page, page.locator("header.bar .apr"))).toBe("Average party rank\nFrom 0 ranked players");
+});
+
+// Task 17 review minor 3: a stat block that is still loading carries no tooltip, like the loading APR and a Win%
+// whose games are unknown: the scope explains a number that is not there yet. ingame-partial: Kilo is loading all
+// three stats; Cypher is loading only K/D, so his HS% beside it keeps its tip.
+test("tips: ingame-partial, a loading K/D, HS% or Win% has no tip", async ({ page }) => {
+  await openScene(page, "ingame-partial", {}, { clock: "manual" });
+  await expect(card(page, "Kilo").locator(".stat .sk")).toHaveCount(3);
+  await expect(card(page, "Cypher").locator(".stat .sk")).toHaveCount(1);
+  await runItems(page, [
+    { what: "loading K/D", trigger: (p) => stat(p, "Kilo", 0), text: null },
+    { what: "loading HS%", trigger: (p) => stat(p, "Kilo", 1), text: null },
+    { what: "loading Win%", trigger: (p) => stat(p, "Kilo", 2), text: null },
+    { what: "loading K/D beside a known HS%", trigger: (p) => stat(p, "Cypher", 0), text: null },
+    { what: "known HS% beside a loading K/D", trigger: (p) => stat(p, "Cypher", 1), text: "Last 5 competitive" },
+  ]);
 });

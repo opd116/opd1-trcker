@@ -4,6 +4,8 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Page, Route } from "@playwright/test";
+import { tierLabel } from "../src/lib/meta";
+import type { Meta } from "../src/lib/types";
 
 /** The page clock (spec §8.1): only at 21:59 do the design's `45m / 2h / 4h ago` agree with its clock times. */
 export const NOW = new Date("2026-09-29T21:59:00Z");
@@ -16,11 +18,16 @@ export const fontSlug = (f: string) => f.replace(/ /g, "-");
 export const ACCENTS = ["#e3a54f", "#4fc3ae", "#7fb1ef", "#e58a9a"] as const;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-export const TESTS_DIR = HERE;
 export const UI_DIR = dirname(HERE);
 /** git-ignored (ui/tests/.cache/): valorant-api images and the design prototype's CDN scripts. */
 export const CACHE_DIR = join(HERE, ".cache");
 export const SHOTS_DIR = join(HERE, "shots");
+
+/** The 25 ranked tier names (3 `Iron 1` … 27 `Radiant`) exactly as the card writes them, from the demo meta. */
+export const TIER_LABELS: string[] = (() => {
+  const meta = JSON.parse(readFileSync(join(UI_DIR, "src", "lib", "demo", "meta.json"), "utf8")) as Meta;
+  return Array.from({ length: 25 }, (_, i) => tierLabel(meta, i + 3)!);
+})();
 
 // ── a byte-for-byte response cache (images here, unpkg in design-ref.ts) ─────────
 type Cached = { body: Buffer; type: string };
@@ -104,7 +111,8 @@ export type OpenOpts = {
   /**
    * `fixed` (default): Date.now is pinned at NOW and timers run normally.
    * `manual`: Playwright's fake clock, installed at NOW before the page loads; once the page has settled
-   * time stops, and only `page.clock.runFor` moves it (tooltip timing tests never depend on real timers).
+   * time stops where the page's clock is then, and only `page.clock.runFor` moves it (tooltip timing tests never
+   * depend on real timers, and a slow load never matters).
    */
   clock?: "fixed" | "manual";
 };
@@ -122,7 +130,25 @@ export async function openScene(
   await page.goto(sceneUrl(scene, params));
   await page.waitForFunction(() => document.documentElement.dataset.feed === "demo-feed");
   await settle(page);
-  if (opts.clock === "manual") await page.clock.pauseAt(new Date(NOW.getTime() + 30_000));
+  if (opts.clock === "manual") await pauseHere(page);
+}
+
+/**
+ * Stop the fake clock at the page's own current time (a beat ahead, for the round trip), not at a fixed offset
+ * from NOW: loading and settling take however long they take in real time. `pauseAt` stops time first, then
+ * fast-forwards to its target and refuses a target in the past, so if the round trip ever outlasts the beat the
+ * page's time is read again.
+ */
+async function pauseHere(page: Page): Promise<void> {
+  for (let attempt = 0; ; attempt++) {
+    const t = await page.evaluate(() => Date.now());
+    try {
+      await page.clock.pauseAt(t + 250);
+      return;
+    } catch (e) {
+      if (attempt >= 4 || !/past/i.test(String(e))) throw e;
+    }
+  }
 }
 
 /** Fonts ready, every `<img>` and CSS background image loaded, then two frames for paint. */
@@ -151,9 +177,16 @@ export async function settle(page: Page): Promise<void> {
   });
 }
 
-/** Spec §8.3 check 8's second half: the selected family is actually loaded. */
-export async function fontLoaded(page: Page, family: string): Promise<boolean> {
-  return page.evaluate((f) => document.fonts.check(`600 16px "${f}"`), family);
+/** A CSS variable resolved to rgb() through a probe element, so it compares with computed colours. */
+export function varRgb(page: Page, name: string): Promise<string> {
+  return page.evaluate((n) => {
+    const p = document.createElement("div");
+    p.style.color = `var(${n})`;
+    document.body.appendChild(p);
+    const c = getComputedStyle(p).color;
+    p.remove();
+    return c;
+  }, name);
 }
 
 /** Move the pointer to a spot with no tooltip trigger (top-left of the top bar). */

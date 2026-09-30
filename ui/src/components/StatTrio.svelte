@@ -8,9 +8,13 @@
 
   let { card }: { card: PlayerCard } = $props();
 
+  // A loading block (value absent) has no tooltip: its scope explains a number that is not there yet. Same rule as
+  // Win% (no tip while its games are unknown) and the top bar's Average party rank.
+  const scope = (v: number | null | undefined) => (v === undefined ? "" : LAST5_SCOPE);
+
   const blocks = $derived([
-    { label: "K/D", value: card.kd, text: kd2(card.kd), tip: LAST5_SCOPE },
-    { label: "HS%", value: card.hsPct, text: pct0(card.hsPct), tip: LAST5_SCOPE },
+    { label: "K/D", value: card.kd, text: kd2(card.kd), tip: scope(card.kd) },
+    { label: "HS%", value: card.hsPct, text: pct0(card.hsPct), tip: scope(card.hsPct) },
     { label: "Win%", value: card.actWinrate, text: pct0(card.actWinrate), tip: winTip(card) },
   ]);
 </script>

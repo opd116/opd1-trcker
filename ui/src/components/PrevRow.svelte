@@ -1,4 +1,9 @@
-<!-- Previous act rank (spec §3.6): greyed icon + tier name, or —. No tooltip. -->
+<!--
+  Previous act rank (spec §3.6, R125/R126): icon · `Prev` · tier name, or `Prev —`. No tooltip.
+  The icon sits centred in a 40px column, the width of the current-rank icon above it, so the two icons share one
+  centre line; the label starts right after that column and the name follows it. With no prev tier the column
+  stays, empty. The name's ellipsis is only a safety net: `Prev` + `Ascendant 3` fits in all three fonts (fit-live).
+-->
 <script lang="ts">
   import { assetUrl } from "../lib/assets";
   import { isRankedTier, tierLabel } from "../lib/meta";
@@ -15,9 +20,11 @@
     <!-- Loading: the whole row is one bar (spec §5.4). -->
     <Skel w={124} h={10} block />
   {:else}
+    <div class="icol">
+      {#if isRankedTier(tier)}<img class="pi" src={assetUrl("tier", tier)} alt="" />{/if}
+    </div>
     <span class="lbl">Prev</span>
     {#if isRankedTier(tier)}
-      <img class="pi" src={assetUrl("tier", tier)} alt="" />
       <span class="pname">{#if name === undefined}<Skel w={60} h={10} />{:else}{name ?? "—"}{/if}</span>
     {:else}
       <span class="dash">—</span>
@@ -36,9 +43,12 @@
     color: var(--text2);
   }
 
-  .lbl {
-    width: 50px;
+  /* The rank icon's column (spec §3.6 Current): 11px + 18px icon + 11px. */
+  .icol {
+    width: 40px;
     flex: none;
+    display: flex;
+    justify-content: center;
   }
 
   .pi {
@@ -46,12 +56,17 @@
     width: 18px;
     height: 18px;
     flex: none;
-    margin-right: 6px;
     filter: grayscale(0.7);
     opacity: 0.75;
   }
 
+  .lbl {
+    flex: none;
+    margin-right: 6px;
+  }
+
   .pname {
+    min-width: 0;
     font-size: 13px;
     font-weight: 500;
     color: var(--text2);

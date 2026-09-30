@@ -20,6 +20,12 @@ describe("liveColumns", () => {
     expect(col(right)).toEqual(NONE5);
   });
 
+  it("closed with an extra emitted card → still self only (spec §5.3)", () => {
+    const { left, right } = liveColumns(st("closed", [c("a"), me()]));
+    expect(col(left)).toEqual(["me", "none", "none", "none", "none"]);
+    expect(col(right)).toEqual(NONE5);
+  });
+
   it("closed with players [] → no card and no skeleton", () => {
     const { left, right } = liveColumns(st("closed", []));
     expect(col(left)).toEqual(NONE5);

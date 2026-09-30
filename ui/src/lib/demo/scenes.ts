@@ -80,7 +80,7 @@ function pregame(mapId: string | null): LiveState {
   return state("pregame", mapId, p);
 }
 
-/** The long-name stress case: every visible name 16+5 W, every tier Ascendant 3, peaks 11 months old. */
+/** The long-name stress case: every visible name 16+5 W, every tier Ascendant 3 (the widest Prev row too, R125/R126), peaks 11 months old. */
 function longnames(): PlayerCard[] {
   const p = roster();
   for (const c of p) {
@@ -88,6 +88,7 @@ function longnames(): PlayerCard[] {
       c.name = { ...c.name, name: LONGEST_NAME, tag: LONGEST_TAG };
     }
     c.rank = { tier: 23, rr: c.rank?.rr ?? 0 };
+    c.prevActTier = 23;
     c.peak = peak(ACT["V26 A4"], 23, SINCE["11mo"]);
   }
   p[8]!.peak = peak(ACT["E10 A3"], 23, SINCE["11mo"]); // Rook: the longer act label

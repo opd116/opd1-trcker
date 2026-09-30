@@ -5,8 +5,8 @@
      identical everywhere (CLAUDE.md) and R99 already names this state "the empty agent slot". The box is not a
      loading shape: it is `div.agent`, never the skeleton's `.sk`, and it sits beside a real name, rank and stats.
      A transparent slot in Lobby/Closed would make one card state (no agent) render two ways depending on stage,
-     and leave a 40px hole beside the name. If the user ever wants it: a stage prop plus one `transparent` rule here, and flip the
-     fit-live agent-box test (task 17 review F8). -->
+     and leave a 40px hole beside the name. If the user ever wants it: a stage prop plus one `transparent` rule
+     here, and flip the fit-live agent-box test (task 17 review F8; ruled R127). -->
 <script lang="ts">
   import { assetUrl } from "../lib/assets";
 

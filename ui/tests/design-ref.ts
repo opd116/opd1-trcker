@@ -8,7 +8,7 @@
 //   - media.valorant-api.com         → the same image cache as the app harness
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, extname, join, normalize } from "node:path";
-import type { Page, Route } from "@playwright/test";
+import type { Locator, Page, Route } from "@playwright/test";
 import { CACHE_DIR, readCache, routeMedia, serveCached, settle, UI_DIR, writeCache } from "./harness";
 
 export const DESIGN_FILE = "OPD1 Tracker v8.dc.html";
@@ -157,5 +157,37 @@ async function clickStep(page: Page, step: DesignStep): Promise<void> {
   await settle(page);
 }
 
-/** Both renders hide the ⟲ badge: the design draws a Segoe UI Symbol glyph, we draw the spec §3.5 SVG. */
-export const COMPARE_STYLE = '[data-tip$=" against"]{visibility:hidden!important}';
+/**
+ * Both renders hide the ⟲ glyph, and only the glyph: the design draws it as a Segoe UI Symbol character (a system
+ * font, so whatever the machine falls back to), we draw the spec §3.5 SVG. The count beside it is compared: the
+ * same font, right-aligned in the same 36px slot, so it lands on the same pixels.
+ */
+export const COMPARE_STYLE = '[style*="Segoe UI Symbol"], .enc svg{visibility:hidden!important}';
+
+/**
+ * R125 (a user-delegated change to the design; spec §3.6 and §8.4): the card's Prev row reads icon · Prev · name,
+ * where the design has Prev · icon · name. That grid cell (card-relative x 313, y 62, 158×18) is the one approved
+ * deviation, so both renders mask exactly it, in one colour. visual-live asserts that the two sets of masked
+ * rects are identical, so the mask can never grow past the row.
+ */
+export const designPrevRows = (page: Page) => page.locator("xpath=//div[span[1][normalize-space(.)='Prev']]");
+export const ourPrevRows = (page: Page) => page.locator(".live .card .prev");
+export const MASK_COLOR = "#ff00ff";
+
+export type Rect = [x: number, y: number, w: number, h: number];
+
+/** The rects of every rendered element `loc` matches. */
+export const rectsOf = (loc: Locator): Promise<Rect[]> =>
+  loc.evaluateAll((els) =>
+    els
+      .map((e) => e.getBoundingClientRect())
+      .filter((r) => r.width > 0 && r.height > 0)
+      .map((r) => [r.x, r.y, r.width, r.height] as Rect),
+  );
+
+/**
+ * The largest coordinate gap between two rect lists of equal length (Infinity when the lengths differ). The rows
+ * sit at fractional y (59 + 147.8i) and the two layouts round them a few hundredths apart.
+ */
+export const rectGap = (a: Rect[], b: Rect[]): number =>
+  a.length !== b.length ? Infinity : Math.max(0, ...a.flatMap((r, i) => r.map((v, k) => Math.abs(v - b[i]![k]!))));

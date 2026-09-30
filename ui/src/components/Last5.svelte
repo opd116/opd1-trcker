@@ -25,7 +25,8 @@
   <div class={["l5", `size-${size}`]}>
     <div class="l5col">
       <div class="tiles">
-        {#each tiles as t, i (t.entry ? t.entry.startMs : `e${i}`)}
+        <!-- Keyed by slot: the tiles are positional, and two entries may share a startMs (bad or placeholder data). -->
+        {#each tiles as t, i (i)}
           {#if t.entry}
             <div class="tile" style={boxStyle(t.key, t.newest && arrow)} use:tip={last5Tip(t.entry, $now)}>{t.key}{#if t.newest && !arrow}<div class="uline"></div>{/if}</div>
           {:else}

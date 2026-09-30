@@ -8,12 +8,14 @@ import {
   checkClipping,
   checkFont,
   checkFontFloor,
+  checkHiddenIntegrity,
   checkLiveNoOverflow,
   checkNoStatusText,
+  checkPrevNames,
   decorationInk,
   liveChecks,
 } from "./checks";
-import { ACCENTS, FONTS, fontSlug, openScene, pointerAway, SHOTS_DIR, watchFontCdn, type ThemeParams } from "./harness";
+import { ACCENTS, FONTS, fontSlug, openScene, pointerAway, SHOTS_DIR, TIER_LABELS, varRgb, watchFontCdn, type ThemeParams } from "./harness";
 
 const LIVE_SCENES = [
   "closed", "closed-empty", "boot", "lobby1", "lobby2", "lobby3", "lobby4", "lobby5", "lobby2-loading", "lobby2-unranked",
@@ -37,16 +39,6 @@ const left = (page: Page) => page.locator(".live .col").nth(0);
 const right = (page: Page) => page.locator(".live .col").nth(1);
 const cardNamed = (page: Page, text: string | RegExp) => page.locator(".live .card").filter({ hasText: text });
 const css = (l: Locator, prop: string) => l.evaluate((el, p) => getComputedStyle(el).getPropertyValue(p), prop);
-/** A CSS variable resolved to rgb() through a probe element, so it compares with computed colours. */
-const varRgb = (page: Page, name: string) =>
-  page.evaluate((n) => {
-    const p = document.createElement("div");
-    p.style.color = `var(${n})`;
-    document.body.appendChild(p);
-    const c = getComputedStyle(p).color;
-    p.remove();
-    return c;
-  }, name);
 
 /** What each scene puts in the grid (spec §5.1–§5.7): cards, full skeleton cards, dashed slots. */
 function slots(scene: string): [number, number, number] {
@@ -151,6 +143,18 @@ test("geometry: ingame", async ({ page }) => {
   const slot = await rel(".encslot");
   near(slot.x, 261, "⟲ slot x");
   near(slot.r, 297, "⟲ slot right");
+  // The design-ref gate hides the ⟲ glyph (the design draws a system-font character) and compares only the count,
+  // whose colour and nudges are a few dozen pixels: the badge's own look is pinned here instead (spec §3.5).
+  const enc = mara.locator(".enc");
+  near((await rel(".enc")).r, 297, "⟲ badge right-aligned in its slot");
+  const glyph = await rel(".enc svg");
+  near(glyph.w, 12, "⟲ glyph w");
+  near(glyph.h, 12, "⟲ glyph h");
+  expect(await css(enc, "color")).toBe(await varRgb(page, "--text2"));
+  expect(await css(enc, "font-size")).toBe("13px");
+  expect(await css(enc, "font-weight")).toBe("600");
+  expect(await css(enc, "column-gap")).toBe("3px");
+  await expect(enc).toHaveText("3");
   const tab = await rel(".ptab");
   near(tab.x, 464, "party tab x");
   near(tab.r, 485, "party tab right");
@@ -160,6 +164,69 @@ test("geometry: ingame", async ({ page }) => {
   near(stripe.x, 482, "stripe x");
   near(stripe.r, 485, "stripe right");
 });
+
+// R125/R126 (spec §3.6 Prev, §8.4): the card's Prev row reads icon · Prev · name. The greyed 18px icon is centred in
+// the 40px rank-icon column (the rank icon's centre line, card x 333), the label starts right after that column
+// (x 353) and the name follows 6px after the label. No prev tier: the column stays, empty, then `Prev —`.
+test("Prev row (R125/R126): icon on the rank icon's centre line, label after the 40px column, name 6px on", async ({ page }) => {
+  await openScene(page, "ingame");
+  const mara = cardNamed(page, "Mara");
+  const o = await box(mara);
+  const row = await box(mara.locator(".prev"));
+  const col = await box(mara.locator(".prev .icol"));
+  near(col.x - o.x, 313, "icon column x");
+  near(col.width, 40, "icon column w");
+  const img = mara.locator(".prev .icol img");
+  const icon = await box(img);
+  const rank = await box(mara.locator(".rank img"));
+  near(icon.width, 18, "prev icon w");
+  near(icon.height, 18, "prev icon h");
+  near(icon.x - o.x, 313 + 11, "11px before the icon");
+  near(icon.x + icon.width / 2 - o.x, 333, "prev icon centre x");
+  near(icon.x + icon.width / 2, rank.x + rank.width / 2, "the rank icon's centre line");
+  near(icon.y + icon.height / 2, row.y + row.height / 2, "icon centred in the row");
+  expect(await css(img, "filter")).toBe("grayscale(0.7)");
+  expect(await css(img, "opacity")).toBe("0.75");
+  const lbl = mara.locator(".prev .lbl");
+  await expect(lbl).toHaveText("Prev");
+  const lb = await box(lbl);
+  near(lb.x - o.x, 353, "label x: right after the 40px column");
+  const name = mara.locator(".prev .pname");
+  await expect(name).toHaveText("Immortal 1");
+  const nb = await box(name);
+  near(nb.x - (lb.x + lb.width), 6, "label → name gap");
+  const text2 = await varRgb(page, "--text2");
+  for (const [l, size] of [[lbl, "12px"], [name, "13px"]] as const) {
+    expect(await css(l, "font-size")).toBe(size);
+    expect(await css(l, "font-weight")).toBe("500");
+    expect(await css(l, "color")).toBe(text2);
+  }
+
+  const nova = cardNamed(page, "Nova"); // no prev tier
+  const no = await box(nova);
+  await expect(nova.locator(".prev img")).toHaveCount(0);
+  const ncol = await box(nova.locator(".prev .icol"));
+  near(ncol.x - no.x, 313, "empty icon column x");
+  near(ncol.width, 40, "empty icon column w (layout kept)");
+  const nlb = await box(nova.locator(".prev .lbl"));
+  near(nlb.x - no.x, 353, "label x with no prev tier");
+  const dash = nova.locator(".prev .dash");
+  await expect(dash).toHaveText("—");
+  near((await box(dash)).x - (nlb.x + nlb.width), 6, "label → — gap");
+});
+
+// R126: the label starts at x 40 of the row (not at the rank name's x 50) so that the widest `Prev` + `Ascendant 3`
+// fits the 158px column in every font. ingame-longnames carries that row on all 10 cards; every other tier name is
+// written into each row in turn. Strict (the name's ellipsis is only a safety net). DPR 1.5: fit-dpr.spec.ts.
+for (const font of FONTS) {
+  test(`Prev row: \`Prev\` + every tier name fits the 158px column unclipped [${font}]`, async ({ page }) => {
+    await openScene(page, "ingame-longnames", { font });
+    await expect(page.locator(".live .card .prev .pname")).toHaveText(Array(10).fill("Ascendant 3"));
+    expect(TIER_LABELS).toHaveLength(25);
+    expect(await checkPrevNames(page, TIER_LABELS)).toEqual([]);
+    expect(await checkClipping(page)).toEqual([]);
+  });
+}
 
 test("geometry: ingame [Underline]", async ({ page }) => {
   await openScene(page, "ingame", { last5: "Underline" });
@@ -209,6 +276,30 @@ test("pregame: 5 cards + 5 dashed slots", async ({ page }) => {
   const hid = hidden.locator(".nm .hid");
   await expect(hid).toHaveText("Hidden Player");
   expect(await css(hid, "font-style")).toBe("italic");
+});
+
+// Spec §2.3 map skeleton (v8:31): while pregame does not know the map, the top bar's right group is a 52×12 bar
+// (radius 3) and a 116×32 block (radius 4), both --skel, gap 12, in the map group's place (right edge 982).
+test("pregame-nomap: the map skeleton is 52×12 + 116×32 while mapId is null", async ({ page }) => {
+  await openScene(page, "pregame-nomap");
+  const group = page.locator("header.bar .right .map");
+  await expect(group).toHaveCount(1);
+  await expect(group.locator("img")).toHaveCount(0);
+  expect((await group.innerText()).trim()).toBe("");
+  const sk = group.locator(".sk");
+  await expect(sk).toHaveCount(2);
+  const [bar, block] = [await box(sk.nth(0)), await box(sk.nth(1))];
+  near(bar.width, 52, "name bar w");
+  near(bar.height, 12, "name bar h");
+  near(block.width, 116, "image block w");
+  near(block.height, 32, "image block h");
+  near(block.x - (bar.x + bar.width), 12, "gap");
+  near(block.x + block.width, 982, "image block right edge (the map image's)");
+  near(bar.y + bar.height / 2, block.y + block.height / 2, "centred on one line");
+  expect(await css(sk.nth(0), "border-radius")).toBe("3px");
+  expect(await css(sk.nth(1), "border-radius")).toBe("4px");
+  const skel = await varRgb(page, "--skel");
+  for (let i = 0; i < 2; i++) expect(await css(sk.nth(i), "background-color")).toBe(skel);
 });
 
 for (let n = 1; n <= 5; n++) {
@@ -353,6 +444,31 @@ test("last5 order: Fahad renders L W W L W and the rightmost is the newest style
   expect(await zephyr.locator(".tile").allInnerTexts()).toEqual(["", "", "", "", ""]);
   await expect(zephyr.locator(".arrow")).toHaveCount(1);
   expect((await zephyr.locator(".stat .v").allInnerTexts()).map((s) => s.trim())).toEqual(["—", "—", "—"]);
+});
+
+// Task 17 review minor 1: the tiles are positional, so the each block is keyed by slot. Two entries with the same
+// startMs (bad or placeholder data) must still give 5 tiles in order; a startMs key would throw
+// `each_key_duplicate` in DEV and could drop or misorder tiles in a build. The LiveState is pushed through the
+// app's own store (the dev server serves one module instance per URL); the body is a string so no test transform
+// touches the `import()`.
+test("last5: entries sharing one startMs still render 5 positional tiles", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("pageerror", (e) => errors.push(e.message));
+  page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  await openScene(page, "ingame");
+  await page.evaluate(`import("/src/lib/stores.ts").then(({ live }) => {
+    let s; live.subscribe((v) => (s = v))();
+    const next = structuredClone(s);
+    const fahad = next.players.find((p) => p.isSelf);
+    const t = fahad.last5[0].startMs;
+    const results = ["draw", "loss", "win", "loss", "loss"]; // newest first
+    fahad.last5 = fahad.last5.map((e, i) => ({ ...e, startMs: t, result: results[i] }));
+    live.set(next);
+  })`);
+  const tiles = cardNamed(page, "Fahad").locator(".tile");
+  await expect(tiles).toHaveText(["L", "L", "W", "L", "D"]); // oldest → newest
+  expect(await css(tiles.last(), "color"), "the rightmost tile keeps the newest style").toBe(await varRgb(page, "--rn-d-fg"));
+  expect(errors).toEqual([]);
 });
 
 async function stripeColours(page: Page) {
@@ -540,7 +656,7 @@ test("party stripe and tab paint above the card grid", async ({ page }) => {
 // R99 calls this state "the empty agent slot"): the same empty 40×40 `--raised` div that Agent Select draws before a
 // lock, never an image and never a skeleton shape. The cards around it are populated (no `.sk` anywhere), so the box
 // reads as a slot beside real values, not as a loading card.
-type BoxLook = { tag: string; w: number; h: number; bg: string; radius: string; cls: string };
+type BoxLook = { tag: string; w: number; h: number; bg: string; radius: string; cls: string; shadow: string; opacity: string; border: string };
 const emptyAgentBoxes = (page: Page): Promise<BoxLook[]> =>
   page.locator(".live .card .who .agent").evaluateAll((els) =>
     els
@@ -548,7 +664,18 @@ const emptyAgentBoxes = (page: Page): Promise<BoxLook[]> =>
       .map((el) => {
         const r = el.getBoundingClientRect();
         const cs = getComputedStyle(el);
-        return { tag: el.tagName, w: r.width, h: r.height, bg: cs.backgroundColor, radius: cs.borderTopLeftRadius, cls: el.className.replace(/ svelte-\S+/g, "") };
+        return {
+          tag: el.tagName,
+          w: r.width,
+          h: r.height,
+          bg: cs.backgroundColor,
+          radius: cs.borderTopLeftRadius,
+          cls: el.className.replace(/ svelte-\S+/g, ""),
+          // Anything else a stage-specific rule could change about the look (task 17 re-review r2, minor 2).
+          shadow: cs.boxShadow,
+          opacity: cs.opacity,
+          border: ["Top", "Right", "Bottom", "Left"].map((e) => cs.getPropertyValue(`border-${e.toLowerCase()}`)).join(" | "),
+        };
       }),
   );
 
@@ -560,6 +687,8 @@ test("the empty agent box is one look in every stage (Agent Select before a lock
   near(reference!.h, 40, "reference h");
   expect(reference!.bg).toBe(await varRgb(page, "--raised"));
   expect(reference!.radius).toBe("6px");
+  expect(reference!.shadow).toBe("none");
+  expect(reference!.opacity).toBe("1");
 
   for (const scene of ["lobby1", "lobby3", "lobby5", "closed"]) {
     await openScene(page, scene);
@@ -573,4 +702,36 @@ test("the empty agent box is one look in every stage (Agent Select before a lock
     expect(boxes.length, `${scene}: every card has the empty box`).toBe(n);
     for (const b of boxes) expect(b, scene).toEqual(reference);
   }
+});
+
+// Task 17 review minor 4: check 9 also scans a hidden card whose agent name is still a meta-pending bar (no `.hid`
+// yet). In ingame-nometa that is Cypher, the last enemy card. A name planted in its DOM, as a leak would put it,
+// must be reported.
+test("check 9 scans a hidden card whose name is still a meta-pending bar", async ({ page }) => {
+  await openScene(page, "ingame-nometa");
+  const cypher = right(page).locator(".card").nth(4);
+  await expect(cypher.locator(".nm svg")).toHaveCount(1);
+  await expect(cypher.locator(".nm .sk")).toHaveCount(1);
+  await expect(cypher.locator(".nm .hid, .nm .t")).toHaveCount(0);
+  expect(await checkHiddenIntegrity(page, ["Zed", "0042"])).toEqual([]);
+  await cypher.evaluate((el) => el.setAttribute("data-leak", "Zed#0042"));
+  expect(await checkHiddenIntegrity(page, ["Zed", "0042"])).toEqual(['a hidden card contains "Zed"', 'a hidden card contains "0042"']);
+});
+
+// Task 17 review minor 11: check 5 also catches vertical clipping. Two regressions it must report: the pre-R128
+// remembered-name CSS (the name clips with overflow:hidden and eats its dotted underline, which no DOM rect shows),
+// and a clipping box shorter than its text.
+test("check 5 reports a clipped underline and a vertically cut text", async ({ page }) => {
+  await openScene(page, "ingame");
+  await pointerAway(page);
+  expect(await checkClipping(page)).toEqual([]);
+  const oldRem = await page.addStyleTag({ content: ".live .card .nm .rem{overflow:hidden}" });
+  const underline = await checkClipping(page);
+  expect(underline.length, underline.join("\n")).toBe(1);
+  expect(underline[0]).toMatch(/^"Rook": a clip eats \d+ of \d+ decoration pixels$/);
+  await oldRem.evaluate((el) => (el as Element).remove());
+  await page.addStyleTag({ content: ".live .card .prev .pname{height:8px!important}" });
+  const cut = await checkClipping(page);
+  expect(cut.length).toBeGreaterThan(0);
+  for (const p of cut) expect(p).toMatch(/is cut vertically by span\.pname$/);
 });

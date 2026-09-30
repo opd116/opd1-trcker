@@ -1,6 +1,6 @@
 // Hover and click (spec §8.5 "Hover and click"), Live part. Task 18 adds the Details part.
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { openScene } from "./harness";
+import { openScene, varRgb } from "./harness";
 
 const onLive = async (page: Page) => {
   await expect(page.locator(".live")).toHaveCount(1);
@@ -15,23 +15,34 @@ test("hovering a card gives an inset 1px --line-hover shadow", async ({ page }) 
   expect(await shadow()).toBe("none");
   // The art strip: inside the card, on no tooltip trigger.
   await sable.hover({ position: { x: 20, y: 70 } });
-  const want = await page.evaluate(() => {
-    const d = document.createElement("div");
-    d.style.color = "var(--line-hover)";
-    document.body.appendChild(d);
-    const c = getComputedStyle(d).color;
-    d.remove();
-    return c;
-  });
-  expect(await shadow()).toBe(`${want} 0px 0px 0px 1px inset`);
+  expect(await shadow()).toBe(`${await varRgb(page, "--line-hover")} 0px 0px 0px 1px inset`);
   expect(await cursor(sable)).toBe("pointer");
 });
 
-test("clicking a card opens that player's details", async ({ page }) => {
+/**
+ * DEV only: a value read from the app's own module instances. The dev server serves each module at one URL, so a
+ * dynamic import in the page returns the very instance the app uses. The body is a string so no test transform
+ * touches the `import()`.
+ */
+const fromApp = <T>(page: Page, expr: string): Promise<T> => page.evaluate(expr) as Promise<T>;
+
+test("clicking a card opens that player's details (Sable, not another card)", async ({ page }) => {
   await openScene(page, "ingame");
+  const sable = await fromApp<string>(
+    page,
+    `import("/src/lib/stores.ts").then(({ live }) => {
+      let s; live.subscribe((v) => (s = v))();
+      return s.players.find((p) => p.name?.kind === "visible" && p.name.name === "Sable").puuid;
+    })`,
+  );
+  expect(sable).toBeTruthy();
   await page.locator(".live .card").filter({ hasText: "Sable" }).click({ position: { x: 20, y: 70 } });
   await expect(page.locator(".live")).toHaveCount(0);
   await expect(page.locator(".scroll")).toHaveCount(1);
+  // Details is Task 18's (a placeholder today), so the player it shows is the route's puuid. Task 18 adds the
+  // visible check (the hero's name).
+  const route = await fromApp<unknown>(page, `import("/src/lib/router.svelte.ts").then(({ router }) => JSON.parse(JSON.stringify(router.route)))`);
+  expect(route).toEqual({ name: "details", puuid: sable, more: false });
 });
 
 test("clicking a dashed slot leaves the route unchanged", async ({ page }) => {

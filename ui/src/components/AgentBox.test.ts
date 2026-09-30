@@ -13,12 +13,12 @@ describe("AgentBox", () => {
     const h = html(null);
     expect(h).toBe('<div class="agent"></div>');
     expect(h).not.toContain("<img");
-    expect(h).not.toContain("sk");
+    expect(h).not.toMatch(/class="[^"]*\bsk\b/); // the skeleton class token, not the letters anywhere
   });
 
   it("a locked agent: the head icon in the same box, with no alt text", () => {
     const h = html("add6443a-41bd-e414-f6ad-e58d267f4e95");
     expect(h).toMatch(/^<img class="agent" src="[^"]*add6443a-41bd-e414-f6ad-e58d267f4e95[^"]*" alt=""\/?>$/);
-    expect(h).not.toContain("sk");
+    expect(h).not.toMatch(/class="[^"]*\bsk\b/); // the skeleton class token, not the letters anywhere
   });
 });

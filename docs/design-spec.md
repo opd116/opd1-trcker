@@ -458,7 +458,7 @@ Shown only when `card.party && !card.isSelf && !card.isSelfParty`. `col = --part
 - `ago(ts)` = `span(now − ts) + ' ago'`.
 - `rrDelta`: `+18`, `−15`, `0`. This is the existing function.
 - `pct0(f)` **NEW** = `Math.round(f×100) + '%'`, or `—`. The card, hero, recent rows and scoreboard all use integer percentages. The existing 1-decimal `pct` is not used on these screens.
-- `kd2(x)` = `x.toFixed(2)`.
+- `kd2(x)` = `x.toFixed(2)`, or `—` when `x` is null (R102).
 - `count(n, word)` **NEW** = `${n} ${word}` when `n === 1`, else `${n} ${word}s` (`1 game`, `0 games`, `1 ranked player`). Used by the APR tip, the Win% tip and the Top 3 count (§6.7).
 - `score(a,b)` = `${a}–${b}`, or `—` if either is null.
 - `actDates(start,end)` **CHANGED**:
@@ -818,11 +818,14 @@ interface PlayerCard {
   isSelf: boolean;                      // NEW
 }
 
-interface MatchSummary {                // PlayerDetails.recent
-  matchId: string; mapId: string; startMs: number; result: Result;
+interface MatchSummary {                // PlayerDetails.recent; the My Stats last-5 row is the same Rust struct (that page is not built in this spec)
+  matchId: string; mapId: string;       // mapId is '' when the map is unknown
+  startMs: number; result: Result;
   roundsWon: number | null; roundsLost: number | null; agentId: string | null;
-  kills: number; deaths: number; assists: number; kd: number;
-  acs: number | null; hsPct: number | null; rrEarned: number | null;
+  kills: number | null; deaths: number | null; assists: number | null; kd: number | null;   // R102: null (never a counted 0) when the match has no stats row; the row shows —
+  acs: number | null;                   // R102: null without a stats row
+  hsPct: number | null;                 // 0..1; R102: null without a stats row (also null when no shot landed)
+  rrEarned: number | null;
   tier: number | null;                  // NEW: player's rank DURING that match: match_players.competitive_tier (Riot's at-match value), else comp_updates.tier_after (R81; one rule for recent rows, encounters and the scoreboard)
 }
 
@@ -833,7 +836,7 @@ interface Loadout { vandal?: WeaponSkin | null; phantom?: WeaponSkin | null;
                     operator?: WeaponSkin | null; sheriff?: WeaponSkin | null }   // CHANGED; tri-state per weapon (R97): absent = name resolving, null = none/unknown
 
 interface EncounterDetailRow {
-  matchId: string; mapId: string; startMs: number; with: boolean;
+  matchId: string; mapId: string /* '' when unknown */; startMs: number; with: boolean;
   result: Result;                       // NEW, user side (replaces selfWon)
   roundsWon: number | null; roundsLost: number | null;   // NEW, user side
   durationMs: number | null;            // NEW
@@ -846,19 +849,19 @@ interface PlayerDetails {
   topTeammates: { puuid: string; name: DisplayName; count: number }[];
   loadout: Loadout; encounters: EncounterDetailRow[] /* newest first */;
   heroKd: number | null;                // (R116) K/D over the most recent ≤20 current-act competitive matches; null when there are none
-  heroHs: number | null;                // (R116) HS% (0..1) over the same set; null when there are none
+  heroHs: number | null;                // (R116, R120) HS% over the same set, a 0..1 fraction like every other HS% field (card.hsPct, MatchSummary.hsPct, ScoreRow.hsPct), never an integer percent; `pct0` renders it; null when there are none
   heroMatches: number;                  // (R116) how many act matches heroKd / heroHs use (0..20); feeds the hero tooltip
 }
 
 interface MatchDetailsView {            // NEW — invoke('match_details', { matchId, focusPuuid })
-  matchId: string; mapId: string; queueId: string; startMs: number;
+  matchId: string; mapId: string /* '' when unknown */; queueId: string; startMs: number;
   durationMs: number | null;
   perspective: 'self' | 'focus';
   teams: {                              // [0] = perspective team; 1 entry for no-team modes
     teamId: string; result: Result | null; roundsWon: number | null; firstHalf: number | null;
     players: { puuid: string; name: DisplayName; agentId: string | null; tier: number | null;
-               kills: number; deaths: number; assists: number;
-               acs: number | null; adr: number | null; hsPct: number | null;
+               kills: number; deaths: number; assists: number;   // never null here (R102 covers MatchSummary only): a row with no stats sends 0/0/0 with null acs/adr/hsPct
+               acs: number | null; adr: number | null; hsPct: number | null;   // hsPct 0..1
                isSelf: boolean; isFocus: boolean }[];   // sorted by ACS desc
   }[];
 }
@@ -882,14 +885,15 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
 | Current rank | `card.rank.{tier,rr}`, `meta.tiers` | existing |
 | Peak row + tip | `card.peak.{tier,actLabel,actName,sinceActEndMs,actStartMs,actEndMs}` | existing |
 | Prev row | `card.prevActTier` | existing |
-| K/D, HS% | `card.kd`, `card.hsPct` | existing |
+| K/D, HS% (Live card) | `card.kd`, `card.hsPct` (last 5 competitive) | existing |
+| K/D, HS% (Details hero) | `details.heroKd`, `details.heroHs` over `details.heroMatches` current-act competitive matches, at most 20 (R116; `heroHs` is a 0..1 fraction, R120); tooltip `N = heroMatches` | **NEW** |
 | Win% | `card.actWinrate` | existing, **FIX** placement wins |
 | Win% tip, hero Games, W / L | `card.actWins`, `card.actGames` | **NEW** |
 | Last 5 tiles + tips | `card.last5[].{result,rrEarned,startMs}` | existing |
 | Party stripe / tab | `card.party.{group,confirmed}` | existing |
 | Self outline | `card.isSelf` | **NEW** |
 | Suppression of stripe / ⟲ | `card.isSelf`, `card.isSelfParty` | existing + NEW |
-| Recent row | `details.recent[]`: `mapId, startMs, agentId, tier, result, roundsWon, roundsLost, kills, deaths, assists, kd, hsPct, matchId` | existing, plus **NEW** `tier` |
+| Recent row | `details.recent[]`: `mapId, startMs, agentId, tier, result, roundsWon, roundsLost, kills, deaths, assists, kd, hsPct, matchId` (`kills, deaths, assists, kd, hsPct` are `null` for a match with no stats row and render `—`, R102) | existing, plus **NEW** `tier` |
 | Encounters row | `details.encounters[]`: `mapId, startMs, durationMs, themAgentId, themTier, with, selfAgentId, selfTier, result, roundsWon, roundsLost, matchId` | **NEW** (all but `matchId`/`mapId`/`startMs`/`with`) |
 | Top 3 | `details.topTeammates[].{puuid,name,count}` plus a live join on `live.players[].{puuid,name.kind,agentId,rank.tier}` | existing |
 | Loadout | `details.loadout.{vandal,phantom,operator,sheriff}.{chromaId,skinName,chromaName,tierId}` (each key tri-state, R97) → `assetUrl('chroma')`, `assetUrl('contentTier')` | **NEW** shape + kind |

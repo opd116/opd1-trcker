@@ -14,9 +14,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use opd1_riot::session::{ConnectOverrides, RiotError, RiotSession, VersionSource};
 use support::{
-    connect_against, delete_lockfile, mount_entitlements, mount_presence_with_version,
-    mount_sessions_with_version, mount_sessions_without_valorant_entry, mount_valorant_api_version,
-    write_lockfile, write_shooter_log, TempDir, SELF_PUUID,
+    connect_against, delete_lockfile, mount_entitlements, mount_presence_private,
+    mount_presence_with_version, mount_valorant_api_version, presence_private_b64, write_lockfile,
+    write_shooter_log, write_shooter_log_with_version, TempDir, SELF_PUUID,
 };
 
 #[tokio::test]
@@ -26,7 +26,6 @@ async fn session_connects_and_exposes_self_puuid() {
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "release-09.08-shipping-11-3200000").await;
 
     let session = connect_against(tmp.path(), &server).await;
 
@@ -50,7 +49,6 @@ async fn session_detects_lockfile_deleted_after_connect() {
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
 
     let session = connect_against(tmp.path(), &server).await;
 
@@ -71,7 +69,6 @@ async fn session_detects_port_change() {
     let original_port = server.address().port();
     write_lockfile(tmp.path(), "http", original_port, "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
 
     let session = connect_against(tmp.path(), &server).await;
 
@@ -93,7 +90,6 @@ async fn session_detects_password_change_even_if_port_is_unchanged() {
     let port = server.address().port();
     write_lockfile(tmp.path(), "http", port, "pw-1");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
 
     let session = connect_against(tmp.path(), &server).await;
 
@@ -107,38 +103,6 @@ async fn session_detects_password_change_even_if_port_is_unchanged() {
 }
 
 #[tokio::test]
-async fn session_threads_product_session_version_into_remote_headers() {
-    let tmp = TempDir::new();
-    write_shooter_log(tmp.path());
-    let server = MockServer::start().await;
-    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
-    mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "release-09.08-shipping-11-3200000").await;
-
-    let session = connect_against(tmp.path(), &server).await;
-
-    // Only responds if the client threaded the product-session version
-    // through as X-Riot-ClientVersion on a *remote* (pd) call.
-    Mock::given(method("GET"))
-        .and(path(format!("/mmr/v1/players/{SELF_PUUID}")))
-        .and(header(
-            "X-Riot-ClientVersion",
-            "release-09.08-shipping-11-3200000",
-        ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "Subject": SELF_PUUID, "QueueSkills": {}
-        })))
-        .mount(&server)
-        .await;
-
-    let result: Value = session
-        .pd(&format!("/mmr/v1/players/{SELF_PUUID}"))
-        .await
-        .expect("mmr call should succeed with the right client version header");
-    assert_eq!(result["Subject"], SELF_PUUID);
-}
-
-#[tokio::test]
 async fn player_loadout_reads_only_the_sessions_own_puuid() {
     // R90: the personalization endpoint is asked for the user's own puuid
     // and nothing else; the method takes no puuid, so no caller can send
@@ -148,7 +112,6 @@ async fn player_loadout_reads_only_the_sessions_own_puuid() {
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "release-09.08-shipping-11-3200000").await;
     let session = connect_against(tmp.path(), &server).await;
 
     let own = format!("/personalization/v3/players/{SELF_PUUID}/playerloadout");
@@ -174,43 +137,12 @@ async fn player_loadout_reads_only_the_sessions_own_puuid() {
 }
 
 #[tokio::test]
-async fn session_falls_back_to_presence_client_version() {
-    let tmp = TempDir::new();
-    write_shooter_log(tmp.path());
-    let server = MockServer::start().await;
-    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
-    mount_entitlements(&server, SELF_PUUID).await;
-    // No `valorant` entry in product-session -> must fall through to the
-    // presence-based fallback.
-    mount_sessions_without_valorant_entry(&server).await;
-    mount_presence_with_version(&server, SELF_PUUID, "release-fallback-1").await;
-
-    let session = connect_against(tmp.path(), &server).await;
-
-    Mock::given(method("GET"))
-        .and(path(format!("/mmr/v1/players/{SELF_PUUID}")))
-        .and(header("X-Riot-ClientVersion", "release-fallback-1"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "Subject": SELF_PUUID, "QueueSkills": {}
-        })))
-        .mount(&server)
-        .await;
-
-    let result: Value = session
-        .pd(&format!("/mmr/v1/players/{SELF_PUUID}"))
-        .await
-        .expect("mmr call should succeed using the presence-fallback version");
-    assert_eq!(result["Subject"], SELF_PUUID);
-}
-
-#[tokio::test]
 async fn session_reauths_once_on_401_then_succeeds() {
     let tmp = TempDir::new();
     write_shooter_log(tmp.path());
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
 
     let session = connect_against(tmp.path(), &server).await;
 
@@ -245,7 +177,6 @@ async fn session_retries_after_429_honoring_retry_after() {
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
 
     let session = connect_against(tmp.path(), &server).await;
 
@@ -284,7 +215,6 @@ async fn session_gives_up_after_exhausting_429_retries() {
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
 
     let session = connect_against(tmp.path(), &server).await;
 
@@ -322,7 +252,6 @@ async fn session_local_call_times_out_when_server_never_responds() {
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
 
     let base = server.uri();
     let session = RiotSession::connect_with_overrides(
@@ -371,7 +300,6 @@ async fn session_remote_call_times_out_when_server_never_responds() {
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
 
     let base = server.uri();
     let session = RiotSession::connect_with_overrides(
@@ -423,7 +351,6 @@ async fn a_network_error_never_carries_the_url() {
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
     let base = server.uri();
     let session = RiotSession::connect_with_overrides(
         tmp.path(),
@@ -485,7 +412,6 @@ async fn session_debug_output_redacts_secrets() {
     write_lockfile(tmp.path(), "http", server.address().port(), password);
     // Fixed tokens from `mount_entitlements`: "access-token-1" / "entitlements-jwt-1".
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
 
     let session = connect_against(tmp.path(), &server).await;
 
@@ -524,7 +450,6 @@ async fn raw_captures_only_records_successful_responses() {
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    mount_sessions_with_version(&server, "v1").await;
 
     let session = connect_against(tmp.path(), &server).await;
 
@@ -573,6 +498,13 @@ async fn raw_captures_only_records_successful_responses() {
 /// A session against `server` (its `ShooterGame.log` has shards only).
 async fn session_for(server: &MockServer, tmp: &TempDir) -> RiotSession {
     write_shooter_log(tmp.path());
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(server, SELF_PUUID).await;
+    connect_against(tmp.path(), server).await
+}
+
+/// Like [`session_for`], for a test that wrote `ShooterGame.log` itself.
+async fn session_for_written_log(server: &MockServer, tmp: &TempDir) -> RiotSession {
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(server, SELF_PUUID).await;
     connect_against(tmp.path(), server).await
@@ -739,82 +671,246 @@ async fn a_refused_connection_says_connect() {
     );
 }
 
+// ---------------------------------------------------------------------
+// R159: the client version and User-Agent, as Valorant-Scout sends them
+// ---------------------------------------------------------------------
+
+/// The string the game itself reports (a decoded presence blob of a real
+/// session).
+const GAME_VERSION: &str = "release-13.06-shipping-18-5590001";
+const SCOUT_UA: &str = "ShooterGame/13 Windows/10.0.19043.1.256.64bit";
+
 #[tokio::test]
-async fn the_client_version_source_order_is_sessions_presence_valorant_api_fallback() {
-    // Nothing answers: the literal fallback, named as such.
+async fn every_remote_request_sends_scouts_user_agent_and_the_presence_version() {
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    mount_presence_with_version(&server, SELF_PUUID, GAME_VERSION).await;
+    let session = session_for(&server, &tmp).await;
+    assert_eq!(session.client_version(), GAME_VERSION);
+
+    // Only answers when both headers are exactly as sent: one pd path and
+    // one glz path.
+    for p in [mmr_path(), format!("/pregame/v1/players/{SELF_PUUID}")] {
+        Mock::given(method("GET"))
+            .and(path(p.as_str()))
+            .and(header("User-Agent", SCOUT_UA))
+            .and(header("X-Riot-ClientVersion", GAME_VERSION))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+    }
+    let _: Value = session
+        .pd(&mmr_path())
+        .await
+        .expect("pd carries both headers");
+    let _: Value = session
+        .glz(&format!("/pregame/v1/players/{SELF_PUUID}"))
+        .await
+        .expect("glz carries both headers");
+
+    // The local client's calls are unchanged: no User-Agent of ours.
+    let requests = server.received_requests().await.unwrap();
+    let local: Vec<_> = requests
+        .iter()
+        .filter(|r| {
+            r.url.path() == "/entitlements/v1/token" || r.url.path() == "/chat/v4/presences"
+        })
+        .collect();
+    assert!(!local.is_empty());
+    assert!(
+        local.iter().all(|r| r.headers.get("user-agent").is_none()),
+        "local calls send no User-Agent"
+    );
+}
+
+#[tokio::test]
+async fn the_version_source_order_is_presence_then_valorant_api_then_the_log_then_the_literal() {
+    // Nothing answers: Scout's literal, named as such.
     let tmp = TempDir::new();
     let server = MockServer::start().await;
     let session = session_for(&server, &tmp).await;
     assert_eq!(session.client_version_source(), VersionSource::Fallback);
-    assert_eq!(session.client_version(), "unknown");
+    assert_eq!(session.client_version(), "release-09.00");
 
-    // valorant-api alone.
+    // The log's `CI server version:` line alone: the rest of the line, trimmed.
     let tmp = TempDir::new();
     let server = MockServer::start().await;
+    write_shooter_log_with_version(tmp.path(), "   release-log-9  ");
+    let session = session_for_written_log(&server, &tmp).await;
+    assert_eq!(session.client_version_source(), VersionSource::Log);
+    assert_eq!(session.client_version(), "release-log-9");
+
+    // valorant-api beats the log.
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    write_shooter_log_with_version(tmp.path(), " release-log-9");
     mount_valorant_api_version(&server, "release-api-9").await;
-    let session = session_for(&server, &tmp).await;
+    let session = session_for_written_log(&server, &tmp).await;
     assert_eq!(session.client_version_source(), VersionSource::ValorantApi);
     assert_eq!(session.client_version(), "release-api-9");
 
-    // presence beats valorant-api.
-    mount_presence_with_version(&server, SELF_PUUID, "release-presence-9").await;
-    let tmp = TempDir::new();
-    let session = session_for(&server, &tmp).await;
-    assert_eq!(session.client_version_source(), VersionSource::Presence);
-    assert_eq!(session.client_version(), "release-presence-9");
-
-    // sessions beats presence.
-    mount_sessions_with_version(&server, "release-sessions-9").await;
-    let tmp = TempDir::new();
-    let session = session_for(&server, &tmp).await;
-    assert_eq!(session.client_version_source(), VersionSource::Sessions);
-    assert_eq!(session.client_version(), "release-sessions-9");
+    // The user's own presence beats both, nested or flat.
+    for private in [
+        json!({"partyPresenceData": {"partyClientVersion": "release-presence-9"}}),
+        json!({"partyClientVersion": "release-presence-9"}),
+    ] {
+        let tmp = TempDir::new();
+        let server = MockServer::start().await;
+        write_shooter_log_with_version(tmp.path(), " release-log-9");
+        mount_valorant_api_version(&server, "release-api-9").await;
+        mount_presence_private(&server, SELF_PUUID, private).await;
+        let session = session_for_written_log(&server, &tmp).await;
+        assert_eq!(session.client_version_source(), VersionSource::Presence);
+        assert_eq!(session.client_version(), "release-presence-9");
+    }
 }
 
 #[tokio::test]
-async fn an_empty_or_blank_version_falls_through_to_the_next_source() {
+async fn an_empty_or_blank_version_falls_through_at_every_step() {
     for blank in ["", "   "] {
-        // sessions blank -> presence
+        // presence blank -> valorant-api
         let tmp = TempDir::new();
         let server = MockServer::start().await;
-        mount_sessions_with_version(&server, blank).await;
-        mount_presence_with_version(&server, SELF_PUUID, "release-presence-1").await;
-        mount_valorant_api_version(&server, "release-api-1").await;
-        let session = session_for(&server, &tmp).await;
-        assert_eq!(
-            session.client_version_source(),
-            VersionSource::Presence,
-            "{blank:?}"
-        );
-        assert_eq!(session.client_version(), "release-presence-1");
-
-        // sessions and presence blank -> valorant-api
-        let tmp = TempDir::new();
-        let server = MockServer::start().await;
-        mount_sessions_with_version(&server, blank).await;
+        write_shooter_log_with_version(tmp.path(), blank);
         mount_presence_with_version(&server, SELF_PUUID, blank).await;
-        mount_valorant_api_version(&server, "release-api-2").await;
-        let session = session_for(&server, &tmp).await;
+        mount_valorant_api_version(&server, "release-api-1").await;
+        let session = session_for_written_log(&server, &tmp).await;
         assert_eq!(
             session.client_version_source(),
             VersionSource::ValorantApi,
             "{blank:?}"
         );
 
-        // every source blank -> fallback, and the header is never blank
+        // presence and valorant-api blank -> the log
         let tmp = TempDir::new();
         let server = MockServer::start().await;
-        mount_sessions_with_version(&server, blank).await;
+        write_shooter_log_with_version(tmp.path(), " release-log-1");
         mount_presence_with_version(&server, SELF_PUUID, blank).await;
         mount_valorant_api_version(&server, blank).await;
-        let session = session_for(&server, &tmp).await;
+        let session = session_for_written_log(&server, &tmp).await;
+        assert_eq!(
+            session.client_version_source(),
+            VersionSource::Log,
+            "{blank:?}"
+        );
+        assert_eq!(session.client_version(), "release-log-1");
+
+        // every step blank -> the literal, and the header is never blank
+        let tmp = TempDir::new();
+        let server = MockServer::start().await;
+        write_shooter_log_with_version(tmp.path(), blank);
+        mount_presence_with_version(&server, SELF_PUUID, blank).await;
+        mount_valorant_api_version(&server, blank).await;
+        let session = session_for_written_log(&server, &tmp).await;
         assert_eq!(
             session.client_version_source(),
             VersionSource::Fallback,
             "{blank:?}"
         );
-        assert!(!session.client_version().trim().is_empty());
+        assert_eq!(session.client_version(), "release-09.00");
     }
+}
+
+#[tokio::test]
+async fn external_sessions_is_never_asked_for_the_version() {
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    // It would answer with a version; it must not be asked.
+    Mock::given(method("GET"))
+        .and(path("/product-session/v1/external-sessions"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "s": {"productId": "valorant", "version": "release-sessions-must-not-win"}
+        })))
+        .mount(&server)
+        .await;
+    mount_valorant_api_version(&server, GAME_VERSION).await;
+    let session = session_for(&server, &tmp).await;
+
+    assert_eq!(session.client_version(), GAME_VERSION);
+    let asked = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.url.path().contains("external-sessions"));
+    assert!(!asked, "no request to external-sessions any more");
+}
+
+#[tokio::test]
+async fn the_presence_version_replaces_a_lower_source_once_the_game_shows_up() {
+    // The session is built before the game's presence exists: the version
+    // comes from valorant-api. The first presence with a version — read by
+    // the poll loop, no request of ours — replaces it for the next request.
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    mount_valorant_api_version(&server, "release-api-old").await;
+    let session = session_for(&server, &tmp).await;
+    assert_eq!(session.client_version(), "release-api-old");
+    assert_eq!(session.client_version_source(), VersionSource::ValorantApi);
+
+    for (version, p) in [
+        ("release-api-old", mmr_path()),
+        (GAME_VERSION, format!("/pregame/v1/players/{SELF_PUUID}")),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(p.as_str()))
+            .and(header("X-Riot-ClientVersion", version))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+    }
+    let _: Value = session
+        .pd(&mmr_path())
+        .await
+        .expect("the old version so far");
+
+    let asked_before = server.received_requests().await.unwrap().len();
+    let private = presence_private_b64(&json!({
+        "partyPresenceData": {"partyClientVersion": GAME_VERSION},
+    }));
+    assert!(session.note_presence_version(&private), "it changed");
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        asked_before,
+        "no request to resolve it"
+    );
+    assert_eq!(session.client_version(), GAME_VERSION);
+    assert_eq!(session.client_version_source(), VersionSource::Presence);
+    let _: Value = session
+        .glz(&format!("/pregame/v1/players/{SELF_PUUID}"))
+        .await
+        .expect("the next request carries the presence version");
+
+    // Nothing more to do once the top source has spoken.
+    assert!(!session.note_presence_version(&private));
+    let other = presence_private_b64(&json!({"partyClientVersion": "release-other"}));
+    assert!(!session.note_presence_version(&other));
+    assert_eq!(session.client_version(), GAME_VERSION);
+}
+
+#[tokio::test]
+async fn a_presence_without_a_usable_version_changes_nothing() {
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    mount_valorant_api_version(&server, "release-api-old").await;
+    let session = session_for(&server, &tmp).await;
+    for private in [
+        json!({"sessionLoopState": "MENUS"}),
+        json!({"partyClientVersion": "  "}),
+        json!({"partyPresenceData": {"partyClientVersion": ""}}),
+    ] {
+        assert!(!session.note_presence_version(&presence_private_b64(&private)));
+    }
+    assert!(!session.note_presence_version("not base64 at all!"));
+    assert!(!session.note_presence_version(&presence_private_b64(&json!("not an object"))));
+    assert_eq!(session.client_version(), "release-api-old");
+    assert_eq!(session.client_version_source(), VersionSource::ValorantApi);
+
+    // The same string from the presence: the source is now the presence,
+    // the header value did not change.
+    let same = presence_private_b64(&json!({"partyClientVersion": "release-api-old"}));
+    assert!(!session.note_presence_version(&same), "no change to report");
+    assert_eq!(session.client_version_source(), VersionSource::Presence);
 }
 
 /// Every `opd1_riot` log line, for [`the_client_version_and_its_source_are_logged_once`].
@@ -837,8 +933,19 @@ impl log::Log for Capture {
 
 static CAPTURE: Capture = Capture(std::sync::Mutex::new(Vec::new()));
 
+fn captured(marker: &str) -> Vec<String> {
+    CAPTURE
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|l| l.contains(marker))
+        .cloned()
+        .collect()
+}
+
 #[tokio::test]
-async fn the_client_version_and_its_source_are_logged_once_per_session() {
+async fn the_client_version_and_its_source_are_logged_once_and_a_change_once() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         log::set_logger(&CAPTURE).unwrap();
@@ -846,34 +953,116 @@ async fn the_client_version_and_its_source_are_logged_once_per_session() {
     });
     let tmp = TempDir::new();
     let server = MockServer::start().await;
-    mount_presence_with_version(&server, SELF_PUUID, "release-logged-once-1").await;
-    let session = session_for(&server, &tmp).await;
+    write_shooter_log_with_version(tmp.path(), " release-logged-once-1");
+    let session = session_for_written_log(&server, &tmp).await;
     // A few requests must not log it again.
     Mock::given(method("GET"))
         .and(path(mmr_path()))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"Subject": SELF_PUUID, "QueueSkills": {}})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
         .mount(&server)
         .await;
     for _ in 0..3 {
         let _: Value = session.pd(&mmr_path()).await.unwrap();
     }
-
-    let lines: Vec<String> = CAPTURE
-        .0
-        .lock()
-        .unwrap()
-        .iter()
-        .filter(|l| l.contains("release-logged-once-1"))
-        .cloned()
-        .collect();
+    let lines = captured("release-logged-once-1");
     assert_eq!(lines.len(), 1, "{lines:?}");
     assert!(lines[0].starts_with("INFO "), "info level: {}", lines[0]);
+    assert!(lines[0].contains("from log"), "the source: {}", lines[0]);
+
+    // The presence changes it: one more line, naming both, once.
+    let private = presence_private_b64(&json!({"partyClientVersion": "release-logged-once-2"}));
+    assert!(session.note_presence_version(&private));
+    assert!(!session.note_presence_version(&private));
+    let lines = captured("release-logged-once-2");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].starts_with("INFO "), "{}", lines[0]);
     assert!(
-        lines[0].contains("from presence"),
-        "the source: {}",
+        lines[0].contains("presence") && lines[0].contains("release-logged-once-1"),
+        "{}",
         lines[0]
     );
+}
+
+// ---------------------------------------------------------------------
+// R159: gzip on remote calls
+// ---------------------------------------------------------------------
+
+fn gzip(bytes: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(bytes).unwrap();
+    enc.finish().unwrap()
+}
+
+#[tokio::test]
+async fn a_gzip_answer_is_decoded_and_captured_decoded() {
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    let session = session_for(&server, &tmp).await;
+    let body = json!({"Subject": SELF_PUUID, "QueueSkills": {}, "pad": "z".repeat(2_000)});
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-encoding", "gzip")
+                .set_body_bytes(gzip(body.to_string().as_bytes())),
+        )
+        .mount(&server)
+        .await;
+
+    let got: Value = session.pd(&mmr_path()).await.expect("a gzip body decodes");
+    assert_eq!(got["Subject"], SELF_PUUID);
+    // The raw capture stores the decoded JSON, not the compressed bytes.
+    let captures = session.raw_captures();
+    assert_eq!(captures.len(), 1);
+    let stored: Value = serde_json::from_str(&captures[0].1).expect("decoded JSON");
+    assert_eq!(stored["Subject"], SELF_PUUID);
+
+    // The request said it accepts gzip.
+    let asked = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.url.path() == mmr_path())
+        .unwrap();
+    let accept = asked
+        .headers
+        .get("accept-encoding")
+        .expect("Accept-Encoding")
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(accept.contains("gzip"), "{accept}");
+
+    // A plain (uncompressed) answer still works: `buffer_response` is the same.
+    Mock::given(method("GET"))
+        .and(path("/match-details/v1/matches/abc"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .mount(&server)
+        .await;
+    let plain: Value = session.pd("/match-details/v1/matches/abc").await.unwrap();
+    assert_eq!(plain["ok"], true);
+}
+
+#[tokio::test]
+async fn a_gzip_error_body_is_decoded_for_the_excerpt() {
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    let session = session_for(&server, &tmp).await;
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(
+            ResponseTemplate::new(500)
+                .insert_header("content-encoding", "gzip")
+                .set_body_bytes(gzip(br#"{"errorCode":"GZIPPED_ERROR"}"#)),
+        )
+        .mount(&server)
+        .await;
+    let msg = session
+        .pd::<Value>(&mmr_path())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(msg.contains("GZIPPED_ERROR"), "{msg}");
 }

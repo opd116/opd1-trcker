@@ -11,7 +11,7 @@ opd1-core = { path = "../core" }
 # `rustls` so we can install the ring crypto provider ourselves at
 # `RiotSession::connect()` time. No `http2`/`http3`/`charset` — none of
 # those are needed for plain JSON GET/PUT calls.
-reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json"] }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider", "json", "gzip"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 # `time` (for `throttle.rs`'s `sleep`), `sync` (for `assets.rs`'s
 # per-`(kind,id)` download-dedup lock, fix-round item 5), and
@@ -55,3 +55,5 @@ test-support = []
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 wiremock = "0.6"
 tempfile = "3"
+# Gzip-encoded mock answers for the remote client's `gzip` tests (R159).
+flate2 = "1"

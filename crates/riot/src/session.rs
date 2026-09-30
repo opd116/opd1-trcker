@@ -14,14 +14,14 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use reqwest::header::{HeaderMap, AUTHORIZATION, RETRY_AFTER};
+use reqwest::header::{HeaderMap, AUTHORIZATION, RETRY_AFTER, USER_AGENT};
 use reqwest::{Client, Method, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 
 use opd1_core::lockfile::parse_lockfile;
-use opd1_core::shards::parse_shards;
+use opd1_core::shards::{parse_client_version, parse_shards};
 
 use crate::raw_capture::{excerpt, ErrorDump, RawCaptures, LOG_EXCERPT_CHARS};
 use crate::throttle::Throttle;
@@ -62,17 +62,20 @@ const REMOTE_TIMEOUT: Duration = Duration::from_secs(8);
 /// How long to wait for the TCP+TLS handshake alone, on remote calls.
 const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
 
-/// Used when every client-version source fails. Requests will likely still
-/// work — Riot's remote endpoints don't appear to hard-reject on a stale
-/// `X-Riot-ClientVersion` — but this is unverified without a real client
-/// (see task-3-report.md concerns).
-const FALLBACK_CLIENT_VERSION: &str = "unknown";
+/// Used when every client-version source fails: Valorant-Scout's own last
+/// resort (`riot_client.py::_client_version`), a well-formed version, never a
+/// word the server cannot parse.
+const FALLBACK_CLIENT_VERSION: &str = "release-09.00";
 
 /// The standard `X-Riot-ClientPlatform` value: base64 of
 /// `{"platformType":"PC","platformOS":"Windows","platformOSVersion":"10.0.19042.1.256.64bit","platformChipset":"Unknown"}`.
 /// Verbatim from Valorant-Scout's `riot_client.py` and techchrism's
 /// `common-components.md` (identical in both sources).
 const CLIENT_PLATFORM_B64: &str = "ew0KCSJwbGF0Zm9ybVR5cGUiOiAiUEMiLA0KCSJwbGF0Zm9ybU9TIjogIldpbmRvd3MiLA0KCSJwbGF0Zm9ybU9TVmVyc2lvbiI6ICIxMC4wLjE5MDQyLjEuMjU2LjY0Yml0IiwNCgkicGxhdGZvcm1DaGlwc2V0IjogIlVua25vd24iDQp9";
+
+/// The `User-Agent` every remote (pd/glz) call sends, exactly as
+/// Valorant-Scout does (`riot_client.py::headers`). Local calls send none.
+const REMOTE_USER_AGENT: &str = "ShooterGame/13 Windows/10.0.19043.1.256.64bit";
 
 /// Everything that can go wrong talking to the Riot client or its remote
 /// services.
@@ -155,13 +158,13 @@ struct AuthState {
 /// once per session, so a field report says which source the version had.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VersionSource {
-    /// The running VALORANT process's `version` in the local
-    /// `/product-session/v1/external-sessions`.
-    Sessions,
-    /// The user's own VALORANT presence (`partyClientVersion`).
+    /// The user's own VALORANT presence (`partyClientVersion`): what the game
+    /// itself reports.
     Presence,
-    /// `valorant-api.com/v1/version`.
+    /// `valorant-api.com/v1/version`'s `riotClientVersion`.
     ValorantApi,
+    /// The `CI server version:` line of `ShooterGame.log`.
+    Log,
     /// Nothing answered: the literal fallback.
     Fallback,
 }
@@ -170,9 +173,9 @@ impl VersionSource {
     /// The name the log line uses.
     pub fn as_str(self) -> &'static str {
         match self {
-            VersionSource::Sessions => "sessions",
             VersionSource::Presence => "presence",
             VersionSource::ValorantApi => "valorant-api",
+            VersionSource::Log => "log",
             VersionSource::Fallback => "fallback",
         }
     }
@@ -327,9 +330,14 @@ impl RiotSession {
             .timeout(local_timeout)
             .build()
             .map_err(http_error)?;
+        // `gzip`: pd/glz bodies (match-details is about 1 MB) come back
+        // compressed, as they do for Valorant-Scout's `requests`; reqwest
+        // decodes them before `buffer_response`, so captures and parsing see
+        // plain JSON. Not on the local client: it talks to 127.0.0.1.
         let remote_client = Client::builder()
             .timeout(remote_timeout)
             .connect_timeout(REMOTE_CONNECT_TIMEOUT)
+            .gzip(true)
             .build()
             .map_err(http_error)?;
 
@@ -353,6 +361,7 @@ impl RiotSession {
             &basic_auth,
             &entitlements.subject,
             &valorant_api_base,
+            &raw_log,
         )
         .await;
         // Once per session: the version string is not a secret, and which
@@ -423,6 +432,36 @@ impl RiotSession {
     /// nor replaces its 2xx capture.
     pub fn raw_error_captures(&self) -> Vec<ErrorDump> {
         self.raw_captures.error_snapshot()
+    }
+
+    /// R159: the poll loop hands over the user's `valorant` presence `private`
+    /// blob (base64) the first time it sees one after the session started —
+    /// no request of ours. A session built before the game's presence existed
+    /// took its version from a lower source (valorant-api, the log, the
+    /// literal); the game's own presence is the top of the chain
+    /// ([`fetch_client_version`]), so a usable `partyClientVersion` replaces
+    /// them, for the next request on. A presence without one changes nothing,
+    /// and once the presence has spoken it is not asked again.
+    ///
+    /// Returns whether the header value changed (logged once, at info level).
+    pub fn note_presence_version(&self, private_b64: &str) -> bool {
+        let Some(version) = version_from_private_b64(private_b64) else {
+            return false;
+        };
+        let mut auth = self.auth.lock().unwrap();
+        if auth.client_version_source == VersionSource::Presence {
+            return false;
+        }
+        let was = std::mem::replace(&mut auth.client_version, version.clone());
+        let was_from = std::mem::replace(&mut auth.client_version_source, VersionSource::Presence);
+        let changed = was != version;
+        if changed {
+            log::info!(
+                "client version changed to {version} (from presence; was {was} from {})",
+                was_from.as_str()
+            );
+        }
+        changed
     }
 
     /// The `X-Riot-ClientVersion` this session sends on pd/glz calls.
@@ -550,7 +589,8 @@ impl RiotSession {
             .header(AUTHORIZATION, format!("Bearer {access_token}"))
             .header("X-Riot-Entitlements-JWT", entitlements_jwt)
             .header("X-Riot-ClientPlatform", CLIENT_PLATFORM_B64)
-            .header("X-Riot-ClientVersion", client_version);
+            .header("X-Riot-ClientVersion", client_version)
+            .header(USER_AGENT, REMOTE_USER_AGENT);
         if let Some(b) = body {
             req = req.json(b);
         }
@@ -730,18 +770,20 @@ fn retry_after_seconds(headers: &HeaderMap) -> Option<f64> {
     Some(raw.min(MAX_RETRY_AFTER_SECS))
 }
 
-/// Client version, in priority order (ruling R17):
-/// 1. Local `/product-session/v1/external-sessions` (the running
-///    VALORANT process's own `version`).
-/// 2. The local player's own `/chat/v4/presences` entry (Scout's
-///    `partyClientVersion` fallback).
-/// 3. `valorant-api.com/v1/version`'s `data.riotClientVersion`.
+/// Client version, in Valorant-Scout's order (`riot_client.py::_client_version`,
+/// R159):
+/// 1. The user's own VALORANT presence in the local `/chat/v4/presences`:
+///    `partyClientVersion`, under `partyPresenceData` or flat.
+/// 2. `valorant-api.com/v1/version`'s `data.riotClientVersion`.
+/// 3. The `CI server version:` line of `ShooterGame.log` (`raw_log`, already
+///    read for the shards).
+/// 4. Last resort, Scout's literal `release-09.00`.
 ///
-/// Each step is best-effort — any failure (network, missing field, bad
-/// JSON) just falls through to the next step, matching Scout's try/except
-/// chain in `_client_version`. So does an empty or whitespace-only answer
-/// (R158): it is no answer, never a blank `X-Riot-ClientVersion`. The
-/// winner's name comes back with the value, for the log.
+/// `/product-session/v1/external-sessions` is not a source (R159). Each step
+/// is best-effort — a failure (network, missing field, bad JSON) falls through
+/// to the next step, and so does an empty or whitespace-only answer (R158): it
+/// is no answer, never a blank `X-Riot-ClientVersion`. The winner's name comes
+/// back with the value, for the log.
 async fn fetch_client_version(
     local_client: &Client,
     remote_client: &Client,
@@ -749,10 +791,8 @@ async fn fetch_client_version(
     basic_auth: &str,
     self_puuid: &str,
     valorant_api_base: &str,
+    raw_log: &str,
 ) -> (String, VersionSource) {
-    if let Some(v) = fetch_version_from_sessions(local_client, local_base, basic_auth).await {
-        return (v, VersionSource::Sessions);
-    }
     if let Some(v) =
         fetch_version_from_presence(local_client, local_base, basic_auth, self_puuid).await
     {
@@ -760,6 +800,9 @@ async fn fetch_client_version(
     }
     if let Some(v) = fetch_version_from_valorant_api(remote_client, valorant_api_base).await {
         return (v, VersionSource::ValorantApi);
+    }
+    if let Some(v) = parse_client_version(raw_log) {
+        return (v, VersionSource::Log);
     }
     (FALLBACK_CLIENT_VERSION.to_string(), VersionSource::Fallback)
 }
@@ -769,38 +812,6 @@ async fn fetch_client_version(
 fn usable_version(raw: &str) -> Option<String> {
     let v = raw.trim();
     (!v.is_empty()).then(|| v.to_string())
-}
-
-async fn fetch_version_from_sessions(
-    client: &Client,
-    local_base: &str,
-    basic_auth: &str,
-) -> Option<String> {
-    let resp = client
-        .get(format!("{local_base}/product-session/v1/external-sessions"))
-        .header(AUTHORIZATION, basic_auth)
-        .send()
-        .await
-        .ok()?;
-    if !resp.status().is_success() {
-        return None;
-    }
-    let value: Value = resp.json().await.ok()?;
-    version_from_sessions_json(&value)
-}
-
-/// Pulls the `version` field from whichever session entry has
-/// `productId == "valorant"` (the running game process, as opposed to the
-/// Riot Client itself).
-fn version_from_sessions_json(value: &Value) -> Option<String> {
-    value.as_object()?.values().find_map(|session| {
-        let obj = session.as_object()?;
-        if obj.get("productId")?.as_str()? == "valorant" {
-            usable_version(obj.get("version")?.as_str()?)
-        } else {
-            None
-        }
-    })
 }
 
 async fn fetch_version_from_presence(
@@ -827,28 +838,32 @@ async fn fetch_version_from_presence(
         if presence.get("product").and_then(Value::as_str) != Some("valorant") {
             return None;
         }
-        let private_b64 = presence.get("private")?.as_str()?;
-        let decoded = BASE64.decode(private_b64).ok()?;
-        let private_json: Value = serde_json::from_slice(&decoded).ok()?;
-        version_from_presence_value(&private_json)
+        version_from_private_b64(presence.get("private")?.as_str()?)
     })
 }
 
-/// Reads `partyClientVersion`, at the top level (the flat shape) or under
-/// `partyPresenceData` (the nested shape) — same fallback pattern as
-/// `opd1_core::presence::decode_presence`.
+/// The `partyClientVersion` inside a presence's base64 `private` blob.
+fn version_from_private_b64(private_b64: &str) -> Option<String> {
+    let decoded = BASE64.decode(private_b64).ok()?;
+    let private_json: Value = serde_json::from_slice(&decoded).ok()?;
+    version_from_presence_value(&private_json)
+}
+
+/// Reads `partyClientVersion`, under `partyPresenceData` (the nested shape)
+/// or at the top level (the flat shape) — Scout looks at the nested one first
+/// — same fallback pattern as `opd1_core::presence::decode_presence`.
 fn version_from_presence_value(value: &Value) -> Option<String> {
-    let flat = || value.get("partyClientVersion")?.as_str();
     let nested = || {
         value
             .get("partyPresenceData")?
             .get("partyClientVersion")?
             .as_str()
     };
-    // An empty flat value does not hide a usable nested one, nor the reverse.
-    flat()
+    let flat = || value.get("partyClientVersion")?.as_str();
+    // An empty value in one place does not hide a usable one in the other.
+    nested()
         .and_then(usable_version)
-        .or_else(|| nested().and_then(usable_version))
+        .or_else(|| flat().and_then(usable_version))
 }
 
 async fn fetch_version_from_valorant_api(client: &Client, base: &str) -> Option<String> {
@@ -868,31 +883,6 @@ fn version_from_valorant_api_json(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
-
-    #[test]
-    fn version_from_sessions_json_finds_the_valorant_entry() {
-        let value = json!({
-            "session-1": { "productId": "riot_client", "version": "not-this-one" },
-            "session-2": { "productId": "valorant", "version": "release-09.08" },
-        });
-        assert_eq!(
-            version_from_sessions_json(&value).as_deref(),
-            Some("release-09.08")
-        );
-    }
-
-    #[test]
-    fn version_from_sessions_json_none_when_no_valorant_entry() {
-        let value = json!({
-            "session-1": { "productId": "riot_client", "version": "not-this-one" },
-        });
-        assert_eq!(version_from_sessions_json(&value), None);
-    }
-
-    #[test]
-    fn version_from_sessions_json_none_for_empty_object() {
-        assert_eq!(version_from_sessions_json(&json!({})), None);
-    }
 
     #[test]
     fn version_from_presence_value_reads_top_level_field() {
@@ -938,10 +928,6 @@ mod tests {
     fn an_empty_or_blank_version_is_no_answer_at_any_source() {
         // R158: never a blank `X-Riot-ClientVersion`; the chain goes on.
         for blank in ["", "   ", "\t\n"] {
-            let sessions = json!({
-                "s": { "productId": "valorant", "version": blank },
-            });
-            assert_eq!(version_from_sessions_json(&sessions), None, "{blank:?}");
             let presence = json!({ "partyClientVersion": blank });
             assert_eq!(version_from_presence_value(&presence), None, "{blank:?}");
             let nested = json!({ "partyPresenceData": { "partyClientVersion": blank } });
@@ -952,32 +938,35 @@ mod tests {
     }
 
     #[test]
-    fn a_blank_version_does_not_hide_a_usable_one_beside_it() {
-        // A blank valorant session entry next to a real one: the real one.
-        let sessions = json!({
-            "a": { "productId": "valorant", "version": "  " },
-            "b": { "productId": "valorant", "version": "release-09.08" },
+    fn a_blank_presence_version_does_not_hide_a_usable_one_beside_it() {
+        // A blank nested field next to a real flat one, and back.
+        let both = json!({
+            "partyClientVersion": "release-flat-2",
+            "partyPresenceData": { "partyClientVersion": "" },
         });
         assert_eq!(
-            version_from_sessions_json(&sessions).as_deref(),
-            Some("release-09.08")
+            version_from_presence_value(&both).as_deref(),
+            Some("release-flat-2")
         );
-        // A blank flat presence field next to a real nested one, and back.
         let both = json!({
-            "partyClientVersion": "",
+            "partyClientVersion": " ",
             "partyPresenceData": { "partyClientVersion": "release-nested-2" },
         });
         assert_eq!(
             version_from_presence_value(&both).as_deref(),
             Some("release-nested-2")
         );
+    }
+
+    #[test]
+    fn the_nested_presence_version_comes_first_like_scouts() {
         let both = json!({
-            "partyClientVersion": "release-flat-2",
-            "partyPresenceData": { "partyClientVersion": " " },
+            "partyClientVersion": "release-flat-3",
+            "partyPresenceData": { "partyClientVersion": "release-nested-3" },
         });
         assert_eq!(
             version_from_presence_value(&both).as_deref(),
-            Some("release-flat-2")
+            Some("release-nested-3")
         );
     }
 
@@ -993,9 +982,9 @@ mod tests {
 
     #[test]
     fn version_source_names_are_the_ones_the_log_uses() {
-        assert_eq!(VersionSource::Sessions.as_str(), "sessions");
         assert_eq!(VersionSource::Presence.as_str(), "presence");
         assert_eq!(VersionSource::ValorantApi.as_str(), "valorant-api");
+        assert_eq!(VersionSource::Log.as_str(), "log");
         assert_eq!(VersionSource::Fallback.as_str(), "fallback");
     }
 

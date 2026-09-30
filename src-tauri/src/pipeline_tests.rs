@@ -138,12 +138,6 @@ async fn mock_riot(server: &MockServer) {
         })))
         .mount(server)
         .await;
-    get(
-        server,
-        "/product-session/v1/external-sessions",
-        json!({"s": {"productId": "valorant", "version": "release-test"}}),
-    )
-    .await;
 
     let comp = format!("/mmr/v1/players/{ME}/competitiveupdates");
     // The first two syncs see one competitive match…

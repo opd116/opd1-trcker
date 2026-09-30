@@ -80,6 +80,22 @@ pub fn write_shooter_log(dir: &Path) {
     .expect("write ShooterGame.log");
 }
 
+/// Like [`write_shooter_log`], plus a `CI server version:` line carrying
+/// `version` (the raw text after the colon, whitespace included).
+pub fn write_shooter_log_with_version(dir: &Path, version: &str) {
+    let log_dir = dir.join("VALORANT").join("Saved").join("Logs");
+    std::fs::create_dir_all(&log_dir).expect("create log dir");
+    std::fs::write(
+        log_dir.join("ShooterGame.log"),
+        format!(
+            "[0000] LogInit: CI server version:{version}\n\
+             [0001] LogPlatform: Info: https://pd.eu.a.pvp.net/account-xp/v1/players/abc\n\
+             [0002] LogPlatform: Info: https://glz-eu-1.eu.a.pvp.net/pregame/v1/players/abc\n"
+        ),
+    )
+    .expect("write ShooterGame.log");
+}
+
 /// Mounts `/entitlements/v1/token` so it can be hit any number of times
 /// (both the initial `connect()` and any 401/403 re-auth).
 pub async fn mount_entitlements(server: &MockServer, puuid: &str) {
@@ -96,75 +112,32 @@ pub async fn mount_entitlements(server: &MockServer, puuid: &str) {
         .await;
 }
 
-/// Mounts `/product-session/v1/external-sessions` with a single `valorant`
-/// entry reporting `version`, matching the shape techchrism's
-/// `RiotClientSession_FetchSessions` doc describes.
-pub async fn mount_sessions_with_version(server: &MockServer, version: &str) {
-    Mock::given(method("GET"))
-        .and(path("/product-session/v1/external-sessions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "11111111-2222-3333-4444-555555555555": {
-                "exitCode": 0,
-                "exitReason": null,
-                "isInternal": false,
-                "launchConfiguration": {
-                    "arguments": [],
-                    "executable": "VALORANT-Win64-Shipping.exe",
-                    "locale": null,
-                    "voiceLocale": null,
-                    "workingDirectory": "",
-                },
-                "patchlineFullName": "VALORANT",
-                "patchlineId": "live",
-                "phase": "game",
-                "productId": "valorant",
-                "version": version,
-            }
-        })))
-        .mount(server)
-        .await;
-}
-
-/// Mounts `/product-session/v1/external-sessions` with no `valorant` entry
-/// at all, forcing the client-version fallback chain past this step.
-pub async fn mount_sessions_without_valorant_entry(server: &MockServer) {
-    Mock::given(method("GET"))
-        .and(path("/product-session/v1/external-sessions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "11111111-2222-3333-4444-555555555555": {
-                "exitCode": 0,
-                "exitReason": null,
-                "isInternal": false,
-                "launchConfiguration": {
-                    "arguments": [],
-                    "executable": "RiotClientServices.exe",
-                    "locale": null,
-                    "voiceLocale": null,
-                    "workingDirectory": "",
-                },
-                "patchlineFullName": "riot_client",
-                "patchlineId": "",
-                "phase": "idle",
-                "productId": "riot_client",
-                "version": "not-the-game",
-            }
-        })))
-        .mount(server)
-        .await;
-}
-
 /// Mounts `/chat/v4/presences` with a single self-presence whose `private`
-/// blob decodes to `{"partyClientVersion": version, ...}`.
+/// blob decodes to `{"partyClientVersion": version, ...}` (the flat shape).
 pub async fn mount_presence_with_version(server: &MockServer, puuid: &str, version: &str) {
+    mount_presence_private(
+        server,
+        puuid,
+        json!({
+            "isValid": true,
+            "sessionLoopState": "MENUS",
+            "partyClientVersion": version,
+        }),
+    )
+    .await;
+}
+
+/// `private` as the client sends it: the JSON, base64-encoded.
+pub fn presence_private_b64(private: &serde_json::Value) -> String {
     use base64::engine::general_purpose::STANDARD as BASE64;
     use base64::Engine as _;
+    BASE64.encode(private.to_string())
+}
 
-    let private = json!({
-        "isValid": true,
-        "sessionLoopState": "MENUS",
-        "partyClientVersion": version,
-    });
-    let private_b64 = BASE64.encode(private.to_string());
+/// Mounts `/chat/v4/presences` with a single VALORANT self-presence whose
+/// `private` blob decodes to `private`.
+pub async fn mount_presence_private(server: &MockServer, puuid: &str, private: serde_json::Value) {
+    let private_b64 = presence_private_b64(&private);
 
     Mock::given(method("GET"))
         .and(path("/chat/v4/presences"))

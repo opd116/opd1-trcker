@@ -102,6 +102,10 @@ pub(crate) struct Poller {
     /// The user's own loadout was asked for under this session (R90: once
     /// per connect, at the first presence that shows VALORANT running).
     self_loadout_asked: bool,
+    /// The client version was re-resolved from the user's VALORANT presence
+    /// under this session (R159: once per connect, at that same first
+    /// presence — no extra request).
+    version_from_presence_done: bool,
     /// The presence `queueId` while in a match — decides the post-match
     /// check for the match that just ended (R48).
     match_queue: Option<String>,
@@ -141,6 +145,7 @@ impl Poller {
             presence_stage: Stage::Closed,
             game: GameWatch::default(),
             self_loadout_asked: false,
+            version_from_presence_done: false,
             match_queue: None,
             presence_errors: 0,
             party_key: None,
@@ -274,6 +279,8 @@ impl Poller {
         self.game = GameWatch::default();
         // R90: asked at this session's first presence showing VALORANT.
         self.self_loadout_asked = false;
+        // R159: so is the client version, from that same presence.
+        self.version_from_presence_done = false;
         self.presence_errors = 0;
         self.next_presence = Instant::now();
         // R43: the user's own Riot ID, from the local chat session.
@@ -424,7 +431,10 @@ impl Poller {
         let decoded = private.as_deref().and_then(decode_presence);
 
         match self.game.on_presence(decoded.is_some()) {
-            GameVerdict::Present => self.read_self_loadout_once(session),
+            GameVerdict::Present => {
+                self.read_self_loadout_once(session);
+                self.client_version_from_presence_once(session, private.as_deref());
+            }
             // The session was built (or has lived) while VALORANT wasn't
             // running: stale shards / fallback client version. Rebuild it
             // now that the game is up — first launch or relaunch (R46).
@@ -513,6 +523,25 @@ impl Poller {
         tauri::async_runtime::spawn(async move {
             let _ = crate::sync::fetch_self_loadout(&st, &s).await;
         });
+    }
+
+    /// R159: the first time this session sees the user's VALORANT presence,
+    /// its `partyClientVersion` (already in hand: the tick read the presences)
+    /// replaces a client version the session took from a lower source when it
+    /// was built before the game's presence existed. No request; the header
+    /// value of the next remote call changes if the version did.
+    fn client_version_from_presence_once(
+        &mut self,
+        session: &Arc<RiotSession>,
+        private: Option<&str>,
+    ) {
+        if self.version_from_presence_done {
+            return;
+        }
+        self.version_from_presence_done = true;
+        if let Some(private) = private {
+            session.note_presence_version(private);
+        }
     }
 
     pub(crate) fn stop_worker(&mut self) {
@@ -1675,6 +1704,99 @@ mod tests {
                 .iter()
                 .any(|r| r.method.as_str() == "PUT"),
             "the tick started a worker that asked name-service"
+        );
+        poller.stop_worker();
+    }
+
+    /// Like [`mock_presence`], the private blob also carrying
+    /// `partyClientVersion` (nested, as the game sends it).
+    async fn mock_presence_with_version(h: &Harness, state: &str, version: &str, times: u64) {
+        let private = BASE64.encode(
+            json!({
+                "sessionLoopState": state, "queueId": "competitive", "partyId": "party-1",
+                "partyPresenceData": {"partyClientVersion": version},
+            })
+            .to_string(),
+        );
+        Mock::given(method("GET"))
+            .and(path("/chat/v4/presences"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "presences": [{"puuid": ME, "product": "valorant", "private": private}]
+            })))
+            .up_to_n_times(times)
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+    }
+
+    /// The `X-Riot-ClientVersion` of the newest request to `p`.
+    async fn last_version_header(h: &Harness, p: &str) -> String {
+        let reqs = requests(&h.server).await;
+        let r = reqs
+            .iter()
+            .rev()
+            .find(|r| r.url.path() == p)
+            .expect("asked");
+        r.headers
+            .get("x-riot-clientversion")
+            .expect("header")
+            .to_str()
+            .unwrap()
+            .to_string()
+    }
+
+    #[tokio::test]
+    async fn the_first_valorant_presence_re_resolves_the_client_version_once() {
+        // R159: the session was built before the game's presence existed (the
+        // harness's own sources are all empty: the literal fallback). The
+        // first presence with a `partyClientVersion` — read by the tick, no
+        // request of ours — puts the game's own value on the next request.
+        let h = harness().await;
+        assert_eq!(
+            h.session.client_version_source(),
+            opd1_riot::session::VersionSource::Fallback
+        );
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.presence_stage = Stage::Menus;
+        poller.party_key = mocked_party_key();
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        synced_lobby(&h);
+        mock_presence_with_version(&h, "MENUS", "release-13.06-shipping-18-5590001", 1).await;
+
+        let asked_before = requests(&h.server).await.len();
+        poller.presence_tick(&h.session).await.unwrap();
+        assert_eq!(
+            requests(&h.server)
+                .await
+                .iter()
+                .skip(asked_before)
+                .filter(|r| r.url.path() != "/chat/v4/presences")
+                .count(),
+            0,
+            "the tick's own presence read is the only request it makes"
+        );
+        assert_eq!(
+            h.session.client_version(),
+            "release-13.06-shipping-18-5590001"
+        );
+        assert_eq!(
+            h.session.client_version_source(),
+            opd1_riot::session::VersionSource::Presence
+        );
+        h.session.mmr(ME).await.ok();
+        assert_eq!(
+            last_version_header(&h, &mmr_of(ME)).await,
+            "release-13.06-shipping-18-5590001",
+            "the next remote request carries it"
+        );
+
+        // Once per session: a later presence with another value changes nothing.
+        mock_presence_with_version(&h, "MENUS", "release-other-0", 10).await;
+        poller.presence_tick(&h.session).await.unwrap();
+        assert_eq!(
+            h.session.client_version(),
+            "release-13.06-shipping-18-5590001"
         );
         poller.stop_worker();
     }

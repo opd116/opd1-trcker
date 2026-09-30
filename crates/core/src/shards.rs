@@ -59,3 +59,18 @@ pub fn parse_shards(log: &str) -> Option<Shards> {
         _ => None,
     }
 }
+
+const CI_VERSION_ANCHOR: &str = "CI server version:";
+
+/// The game's own client version from the same log (R159): the rest of the
+/// first `CI server version:` line, trimmed — Valorant-Scout's third source
+/// for `X-Riot-ClientVersion` (`riot_client.py::_client_version`). A line
+/// with nothing after the colon says nothing and is skipped; `None` when no
+/// line carries a version.
+pub fn parse_client_version(log: &str) -> Option<String> {
+    log.lines().find_map(|line| {
+        let after = &line[line.find(CI_VERSION_ANCHOR)? + CI_VERSION_ANCHOR.len()..];
+        let version = after.trim();
+        (!version.is_empty()).then(|| version.to_string())
+    })
+}

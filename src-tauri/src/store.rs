@@ -764,8 +764,17 @@ mod tests {
         stored_match(
             &r,
             "m3",
-            "unrated",
+            "competitive",
             50,
+            &[mp("me", "Blue", "x", None), mp("h1", "Red", "y", None)],
+        );
+        // m4: an unrated match the user shared with h1 — R156: only
+        // competitive matches are encounters, so it adds nothing to the count.
+        stored_match(
+            &r,
+            "m4",
+            "unrated",
+            60,
             &[mp("me", "Blue", "x", None), mp("h1", "Red", "y", None)],
         );
         indexed(

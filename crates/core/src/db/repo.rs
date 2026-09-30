@@ -720,10 +720,49 @@ pub struct Encounters {
     pub matches: Vec<EncounterRow>,
 }
 
+/// [`Repo::encounters`]' query (`?1` the user, `?2` the other player): the
+/// competitive matches both played (R156, user 2026-09-30: Deathmatch and
+/// every other queue are no encounter), newest first. Every join is a key
+/// seek: the user's rows by `idx_match_players_puuid`, the other player's,
+/// the match's and each side's RR row by primary key. Public so a test can
+/// `EXPLAIN QUERY PLAN` exactly this text.
+pub const ENCOUNTERS_SQL: &str =
+    "SELECT m.match_id, m.map_id, m.start_ms, mp_self.team_id, mp_other.team_id, m.winning_team,
+            MAX(CASE WHEN t.team_id = mp_self.team_id THEN t.rounds_won END),
+            CASE WHEN COUNT(CASE WHEN t.team_id != mp_self.team_id THEN 1 END) = 1
+                 THEN MAX(CASE WHEN t.team_id != mp_self.team_id THEN t.rounds_won END) END,
+            m.game_length_ms, mp_self.agent_id, mp_other.agent_id,
+            COALESCE(mp_self.competitive_tier, cu_self.tier_after),
+            COALESCE(mp_other.competitive_tier, cu_other.tier_after)
+     FROM match_players mp_self
+     JOIN match_players mp_other
+       ON mp_other.match_id = mp_self.match_id AND mp_other.puuid = ?2
+     JOIN matches m ON m.match_id = mp_self.match_id AND m.queue_id = 'competitive'
+     LEFT JOIN match_teams t ON t.match_id = m.match_id
+     LEFT JOIN comp_updates cu_self
+       ON cu_self.puuid = mp_self.puuid AND cu_self.match_id = m.match_id
+     LEFT JOIN comp_updates cu_other
+       ON cu_other.puuid = mp_other.puuid AND cu_other.match_id = m.match_id
+     WHERE mp_self.puuid = ?1
+     GROUP BY m.match_id
+     ORDER BY m.start_ms DESC";
+
+/// [`Repo::encounter_counts`]' query (`?1` the user, `?2` the other player):
+/// the same competitive-only rule as [`ENCOUNTERS_SQL`], by the same key
+/// seeks, without reading anything else. Public for the plan test.
+pub const ENCOUNTER_COUNTS_SQL: &str =
+    "SELECT COALESCE(SUM(mp_self.team_id = mp_other.team_id), 0),
+            COALESCE(SUM(mp_self.team_id != mp_other.team_id), 0)
+     FROM match_players mp_self
+     JOIN match_players mp_other
+       ON mp_other.match_id = mp_self.match_id AND mp_other.puuid = ?2
+     JOIN matches m ON m.match_id = mp_self.match_id AND m.queue_id = 'competitive'
+     WHERE mp_self.puuid = ?1";
+
 impl Repo {
-    /// Every match where both `self_puuid` and `other` have a
-    /// `match_players` row, any mode. Deathmatch players are always on
-    /// different team ids, so they naturally count as "against".
+    /// Every competitive match where both `self_puuid` and `other` have a
+    /// `match_players` row (R156: Deathmatch and the other queues are not
+    /// encounters; party detection and remembered names still read them).
     ///
     /// The two teams of each match are aggregated with a join (the user's
     /// team's rounds, and the other team's when there is exactly one), not
@@ -731,27 +770,7 @@ impl Repo {
     /// key. [`Repo::encounter_counts`] answers "how many" without reading
     /// any of this.
     pub fn encounters(&self, self_puuid: &str, other: &str) -> Result<Encounters> {
-        let mut stmt = self.conn.prepare(
-            "SELECT m.match_id, m.map_id, m.start_ms, mp_self.team_id, mp_other.team_id, m.winning_team,
-                    MAX(CASE WHEN t.team_id = mp_self.team_id THEN t.rounds_won END),
-                    CASE WHEN COUNT(CASE WHEN t.team_id != mp_self.team_id THEN 1 END) = 1
-                         THEN MAX(CASE WHEN t.team_id != mp_self.team_id THEN t.rounds_won END) END,
-                    m.game_length_ms, mp_self.agent_id, mp_other.agent_id,
-                    COALESCE(mp_self.competitive_tier, cu_self.tier_after),
-                    COALESCE(mp_other.competitive_tier, cu_other.tier_after)
-             FROM match_players mp_self
-             JOIN match_players mp_other
-               ON mp_other.match_id = mp_self.match_id AND mp_other.puuid = ?2
-             JOIN matches m ON m.match_id = mp_self.match_id
-             LEFT JOIN match_teams t ON t.match_id = m.match_id
-             LEFT JOIN comp_updates cu_self
-               ON cu_self.puuid = mp_self.puuid AND cu_self.match_id = m.match_id
-             LEFT JOIN comp_updates cu_other
-               ON cu_other.puuid = mp_other.puuid AND cu_other.match_id = m.match_id
-             WHERE mp_self.puuid = ?1
-             GROUP BY m.match_id
-             ORDER BY m.start_ms DESC",
-        )?;
+        let mut stmt = self.conn.prepare(ENCOUNTERS_SQL)?;
 
         let rows = stmt.query_map(params![self_puuid, other], |row| {
             let self_team: String = row.get(3)?;
@@ -786,20 +805,14 @@ impl Repo {
         })
     }
 
-    /// `(with, against)`: how many matches `self_puuid` shared with
-    /// `other`, on the same team / not — one `COUNT` query over the two
-    /// players' rows, for the ⟲ badge on every card.
+    /// `(with, against)`: how many competitive matches `self_puuid` shared
+    /// with `other` (R156), on the same team / not — one `COUNT` query over
+    /// the two players' rows, for the ⟲ badge on every card.
     pub fn encounter_counts(&self, self_puuid: &str, other: &str) -> Result<(u32, u32)> {
-        self.conn.query_row(
-            "SELECT COALESCE(SUM(mp_self.team_id = mp_other.team_id), 0),
-                    COALESCE(SUM(mp_self.team_id != mp_other.team_id), 0)
-             FROM match_players mp_self
-             JOIN match_players mp_other
-               ON mp_other.match_id = mp_self.match_id AND mp_other.puuid = ?2
-             WHERE mp_self.puuid = ?1",
-            params![self_puuid, other],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
+        self.conn
+            .query_row(ENCOUNTER_COUNTS_SQL, params![self_puuid, other], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
     }
 
     /// The best name the DB knows for `other`, from any source, most recent

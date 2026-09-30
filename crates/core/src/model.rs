@@ -161,8 +161,8 @@ pub struct PartyMark {
     pub confirmed: bool,
 }
 
-/// The ⟲ badge's count (CLAUDE.md's "Encounters"): past matches shared
-/// with the user, with and against.
+/// The ⟲ badge's count (CLAUDE.md's "Encounters"): past competitive matches
+/// shared with the user, with and against (R156).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EncounterCount {
@@ -458,8 +458,9 @@ impl Default for Loadout {
     }
 }
 
-/// One shared match in Player Details' Encounters, from the user's side
-/// (`result`, `rounds_*`, `self_*`) with the other player as `them_*`.
+/// One shared competitive match (R156) in Player Details' Encounters, from
+/// the user's side (`result`, `rounds_*`, `self_*`) with the other player as
+/// `them_*`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EncounterDetailRow {

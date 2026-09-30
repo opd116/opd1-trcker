@@ -614,10 +614,11 @@ async fn worker_names_only_visible_players_and_settles_failures() {
 
     assert_eq!(other.encounters, None, "never met: no badge");
 
-    // HIDDEN played m1 + m2 against ME, and also a newer match ME did not
-    // play (R145: any stored match is a known-name source, newest first):
-    // the newest row's name is remembered, marked as from another match,
-    // and the badge still counts only the matches shared with ME.
+    // HIDDEN played m1 (competitive) + m2 (a Deathmatch) against ME, and
+    // also a newer match ME did not play (R145: any stored match is a
+    // known-name source, newest first): the newest row's name is remembered,
+    // marked as from another match, and the badge counts only the
+    // competitive matches shared with ME (R156): m1.
     let hidden = &last.players[1];
     assert_eq!(
         hidden.name,
@@ -634,7 +635,7 @@ async fn worker_names_only_visible_players_and_settles_failures() {
         hidden.encounters,
         Some(EncounterCount {
             with: 0,
-            against: 2
+            against: 1
         })
     );
     assert_eq!(hidden.party, None, "no synced history: no party link");
@@ -678,12 +679,13 @@ async fn worker_names_only_visible_players_and_settles_failures() {
         "unknown map → empty id, never the Riot path"
     );
     assert!(d.encounters.is_empty());
-    // Details for the hidden enemy: encounters exist (m1, m2), their card
-    // keeps the remembered name, and STRANGER (their teammate in the
-    // foreign match, hidden on screen) is in Top Teammates by the same
-    // rule as their own card (R145).
+    // Details for the hidden enemy: the one encounter is m1 (m2, a
+    // Deathmatch, is none: R156), their card keeps the remembered name, and
+    // STRANGER (their teammate in the foreign match, hidden on screen) is in
+    // Top Teammates by the same rule as their own card (R145).
     let d = crate::details::build(&h.st, HIDDEN).await.unwrap();
-    assert_eq!(d.encounters.len(), 2);
+    assert_eq!(d.encounters.len(), 1);
+    assert_eq!(d.encounters[0].match_id, "m1");
     assert!(d.encounters.iter().all(|e| !e.with));
     assert!(matches!(
         d.card.name,

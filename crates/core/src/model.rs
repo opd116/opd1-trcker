@@ -357,9 +357,9 @@ pub fn match_summary(row: &CompMatchRow) -> MatchSummary {
     }
 }
 
-/// Player Details' hero K/D and HS% (R116): pooled over `rows`, the
-/// player's most recent (up to 20) competitive matches of the current act,
-/// the same set Top 3 Teammates reads. Only rows with a stats row count
+/// Player Details' hero K/D and HS% (R116): pooled over `rows`, the 20
+/// newest current-act competitive matches, the window the Details sync
+/// fetches for Top 3. Only rows with a stats row count
 /// (R102): a match without one adds no kills, deaths or shots and is not
 /// in `matches`. No such row: everything is `None` / 0.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
@@ -532,9 +532,12 @@ pub struct ScoreRow {
     pub agent_id: Option<String>,
     /// The player's rank during the match (R81); `None` below 3.
     pub tier: Option<u8>,
-    pub kills: i64,
-    pub deaths: i64,
-    pub assists: i64,
+    /// `None` (JSON `null`, the UI shows `—`) when the player has no stats
+    /// row in the match (R124): unknown is never a counted 0. Same rule as
+    /// `acs`, `adr` and `hs_pct`, and as `MatchSummary` (R102).
+    pub kills: Option<i64>,
+    pub deaths: Option<i64>,
+    pub assists: Option<i64>,
     pub acs: Option<f32>,
     pub adr: Option<f32>,
     pub hs_pct: Option<f32>,

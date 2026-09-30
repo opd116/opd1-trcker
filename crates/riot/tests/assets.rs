@@ -1189,6 +1189,102 @@ async fn concurrent_weapon_skin_calls_share_one_request() {
     assert_eq!(skin_requests(&server).await, 1);
 }
 
+/// The paths a mock server has been asked for, in order.
+async fn requested_paths(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .collect()
+}
+
+/// A cache written before content tiers existed: every table current, no
+/// `contenttiers.json`.
+async fn pre_upgrade_cache_dir() -> tempfile::TempDir {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    assert!(cache.refresh_tables().await.unwrap());
+    std::fs::remove_file(dir.path().join("contenttiers.json")).unwrap();
+    dir
+}
+
+#[tokio::test]
+async fn a_missing_content_tier_file_refetches_only_the_content_tiers() {
+    let dir = pre_upgrade_cache_dir().await;
+
+    // The server knows the version and content tiers only: a request for
+    // agents, maps, tiers or seasons would 404 and fail the refresh.
+    let server = MockServer::start().await;
+    mount_version(&server, "v1").await;
+    mount_content_tiers(&server, None).await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    assert!(
+        cache.refresh_tables().await.unwrap(),
+        "something downloaded"
+    );
+
+    assert_eq!(
+        requested_paths(&server).await,
+        ["/v1/version", "/v1/contenttiers"],
+        "one call for the version, one for the missing table, nothing else"
+    );
+    assert!(dir.path().join("contenttiers.json").is_file());
+    // The other four tables came from disk, and the new one is in memory.
+    assert!(cache.meta().unwrap().agents.contains_key(AGENT_UUID));
+    assert_eq!(
+        cache.map_uuid_for_path(MAP_URL).unwrap().as_deref(),
+        Some(MAP_UUID)
+    );
+    Mock::given(method("GET"))
+        .and(path("/img/content-tier.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(64, 64)))
+        .mount(&server)
+        .await;
+    cache
+        .ensure_image(AssetKind::ContentTier, CONTENT_TIER_UUID)
+        .await
+        .expect("the fetched content tier is known");
+
+    // Now the cache is complete: the next start is version-only.
+    let again_server = MockServer::start().await;
+    mount_version(&again_server, "v1").await;
+    let again = AssetCache::with_base(dir.path().to_path_buf(), again_server.uri());
+    assert!(!again.refresh_tables().await.unwrap());
+    assert_eq!(requested_paths(&again_server).await, ["/v1/version"]);
+}
+
+#[tokio::test]
+async fn a_failed_content_tier_fetch_still_loads_the_other_tables() {
+    let dir = pre_upgrade_cache_dir().await;
+
+    // The version answers but `/v1/contenttiers` does not (404): the four
+    // current tables load from disk anyway, so the session is not left
+    // without tables until the retry; the file stays missing for that retry.
+    let server = MockServer::start().await;
+    mount_version(&server, "v1").await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    assert!(!cache.refresh_tables().await.unwrap(), "nothing downloaded");
+    assert!(cache.meta().unwrap().agents.contains_key(AGENT_UUID));
+    assert!(cache.acts().is_ok());
+    assert!(!dir.path().join("contenttiers.json").is_file());
+
+    // The retry, with the endpoint back, fetches just that table.
+    let retry_server = MockServer::start().await;
+    mount_version(&retry_server, "v1").await;
+    mount_content_tiers(&retry_server, None).await;
+    let retry = AssetCache::with_base(dir.path().to_path_buf(), retry_server.uri());
+    assert!(retry.refresh_tables().await.unwrap());
+    assert_eq!(
+        requested_paths(&retry_server).await,
+        ["/v1/version", "/v1/contenttiers"]
+    );
+    assert!(dir.path().join("contenttiers.json").is_file());
+}
+
 #[tokio::test]
 async fn refresh_tables_refetches_when_the_content_tier_file_is_missing() {
     // A cache written before content tiers existed has every other table

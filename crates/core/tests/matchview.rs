@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use opd1_core::db::repo::{Match, MatchPlayer, MatchTeam, StoredMatch};
-use opd1_core::matchview::{build_match_view, MatchViewInput};
+use opd1_core::matchview::{build_match_view, needs_known_name, MatchViewInput};
 use opd1_core::model::{DisplayName, MatchDetailsView, MatchResultKind, Perspective};
 use opd1_core::names::KnownName;
 
@@ -144,6 +144,51 @@ fn visible(name: &str, tag: &str) -> DisplayName {
 }
 
 // ---------------------------------------------------------------------
+
+#[test]
+fn needs_known_name_is_exactly_the_rows_drawn_in_the_hidden_style() {
+    // One predicate decides both "look up a remembered name" (the shell)
+    // and "draw the row in the hidden style" (`build_match_view`): for every
+    // row but the user's, they agree.
+    let mut no_tag = player("no-tag", "Red", "X");
+    no_tag.tag_line = Some(String::new());
+    let mut no_name = player("no-name", "Red", "X");
+    no_name.game_name = None;
+    let mut empty_name = player("empty-name", "Red", "X");
+    empty_name.game_name = Some(String::new());
+    let mut null_tag = player("null-tag", "Red", "X");
+    null_tag.tag_line = None;
+    let rows = vec![
+        player("shown", "Blue", "A"),
+        player("live-hidden", "Blue", "B"),
+        no_tag,
+        no_name,
+        empty_name,
+        null_tag,
+    ];
+    let m = duel(rows.clone());
+    let mut ctx = Ctx::new(Some(ME), "shown");
+    ctx.hidden_now.insert("live-hidden".into(), None);
+
+    let drawn = names(&ctx.view(&m));
+    let expect_hidden = [
+        ("shown", false),
+        ("live-hidden", true),
+        ("no-tag", true),
+        ("no-name", true),
+        ("empty-name", true),
+        ("null-tag", true),
+    ];
+    for (puuid, hidden) in expect_hidden {
+        let p = rows.iter().find(|p| p.puuid == puuid).unwrap();
+        assert_eq!(needs_known_name(p, &ctx.hidden_now), hidden, "{puuid}");
+        assert_eq!(
+            !matches!(drawn[puuid], DisplayName::Visible { .. }),
+            hidden,
+            "{puuid}: the predicate and the drawn row must agree"
+        );
+    }
+}
 
 #[test]
 fn perspective_self_puts_user_team_first() {
@@ -509,11 +554,14 @@ fn acs_adr_hs_computed_per_round() {
     (no_stats.rounds, no_stats.damage) = (None, None);
     (no_stats.hs, no_stats.bs, no_stats.ls) = (0, 0, 0);
     no_stats.competitive_tier = Some(2); // below 3: unranked
+    let mut zero_rounds = player("zero-rounds", "Blue", "Zero");
+    zero_rounds.rounds = Some(0);
     let m = duel(vec![
         player("full", "Blue", "Full"),
         no_damage,
         no_shots,
         no_stats,
+        zero_rounds,
         player("e", "Red", "E"),
     ]);
     let v = Ctx::new(None, "full").view(&m);
@@ -528,7 +576,10 @@ fn acs_adr_hs_computed_per_round() {
     assert_eq!(full.acs, Some(200.0), "4800 score / 24 rounds");
     assert_eq!(full.adr, Some(130.0), "3120 damage / 24 rounds");
     assert_eq!(full.hs_pct, Some(0.25), "10 / (10 + 20 + 10)");
-    assert_eq!((full.kills, full.deaths, full.assists), (20, 15, 5));
+    assert_eq!(
+        (full.kills, full.deaths, full.assists),
+        (Some(20), Some(15), Some(5))
+    );
     assert_eq!(full.tier, Some(15));
     assert_eq!(full.agent_id.as_deref(), Some("agent-full"));
 
@@ -537,6 +588,19 @@ fn acs_adr_hs_computed_per_round() {
     assert_eq!(row("ns").hs_pct, None, "no shot landed: no HS%");
     let none = row("nostats");
     assert_eq!((none.acs, none.adr, none.hs_pct), (None, None, None));
+    // R124: kills, deaths and assists are unknown too (whatever was stored),
+    // never a counted 0 — for a missing round count and for a zero one.
+    assert_eq!(
+        (none.kills, none.deaths, none.assists),
+        (None, None, None),
+        "no stats row: K/D/A are null"
+    );
+    let zero = row("zero-rounds");
+    assert_eq!(
+        (zero.kills, zero.deaths, zero.assists, zero.acs),
+        (None, None, None, None),
+        "a zero round count is no stats row either"
+    );
     assert_eq!(none.tier, None, "tiers below 3 are null");
 }
 

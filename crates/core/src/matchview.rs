@@ -61,6 +61,15 @@ fn stored_name(p: &MatchPlayer) -> Option<(String, String)> {
     ))
 }
 
+/// Whether a row other than the user's is drawn in the hidden style rather
+/// than by its stored name: hidden on the live screen now (R93), or without
+/// a stored name (R74). The one place this rule lives: [`build_match_view`]
+/// draws by it, and the shell looks up a remembered name (`Repo::known_name`)
+/// for exactly these rows.
+pub fn needs_known_name(p: &MatchPlayer, hidden_now: &HashMap<String, Option<String>>) -> bool {
+    hidden_now.contains_key(&p.puuid) || stored_name(p).is_none()
+}
+
 /// The name for a row that isn't shown by its stored name: what a hidden
 /// player's card shows (remembered, else the agent, else Hidden Player).
 fn hidden_style(input: &MatchViewInput, p: &MatchPlayer) -> DisplayName {
@@ -84,27 +93,26 @@ fn row_name(input: &MatchViewInput, p: &MatchPlayer) -> DisplayName {
         }
         return hidden_style(input, p);
     }
-    if input.hidden_now.contains_key(&p.puuid) {
-        return hidden_style(input, p);
-    }
     match stored_name(p) {
-        Some(name) => display_name(false, Some(name), None, None),
-        None => hidden_style(input, p),
+        Some(name) if !needs_known_name(p, input.hidden_now) => {
+            display_name(false, Some(name), None, None)
+        }
+        _ => hidden_style(input, p),
     }
 }
 
 fn score_row(input: &MatchViewInput, p: &MatchPlayer) -> ScoreRow {
     // Match-details stores no round count when the player had no stats row:
-    // then ACS, ADR and HS% are unknown, not zero.
+    // then K/D/A, ACS, ADR and HS% are unknown, not zero (R124).
     let rounds = p.rounds.filter(|&r| r > 0);
     ScoreRow {
         puuid: p.puuid.clone(),
         name: row_name(input, p),
         agent_id: non_empty(&p.agent_id).map(str::to_string),
         tier: display_tier(p.competitive_tier),
-        kills: p.kills,
-        deaths: p.deaths,
-        assists: p.assists,
+        kills: rounds.map(|_| p.kills),
+        deaths: rounds.map(|_| p.deaths),
+        assists: rounds.map(|_| p.assists),
         acs: rounds.map(|r| p.score as f32 / r as f32),
         adr: rounds.zip(p.damage).map(|(r, d)| d as f32 / r as f32),
         hs_pct: stats::hs_pct(p.hs, p.bs, p.ls).filter(|_| rounds.is_some()),

@@ -559,8 +559,10 @@ impl RiotSession {
     }
 
     /// The user's own equipped skins (R90): a read-only pd `GET`, made once
-    /// per connect and only ever with the user's own puuid.
-    pub async fn player_loadout(&self, puuid: &str) -> Result<PlayerLoadoutResponse, RiotError> {
+    /// per connect. It takes no puuid: it always asks for the session's own
+    /// ([`Self::self_puuid`]), so a caller cannot ask for anyone else's.
+    pub async fn player_loadout(&self) -> Result<PlayerLoadoutResponse, RiotError> {
+        let puuid = self.self_puuid();
         self.pd(&format!(
             "/personalization/v2/players/{puuid}/playerloadout"
         ))

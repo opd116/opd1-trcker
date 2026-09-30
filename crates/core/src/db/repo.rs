@@ -953,4 +953,12 @@ impl Repo {
         )?;
         Ok(())
     }
+
+    /// Removes one `app_state` key (absence is "never set"; a key that
+    /// isn't there is not an error).
+    pub fn delete_state(&self, key: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM app_state WHERE key = ?1", params![key])?;
+        Ok(())
+    }
 }

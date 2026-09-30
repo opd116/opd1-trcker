@@ -95,12 +95,12 @@
             "acs": null,
             "adr": null,
             "agentId": "agent-enemy-3",
-            "assists": 0,
-            "deaths": 0,
+            "assists": null,
+            "deaths": null,
             "hsPct": null,
             "isFocus": false,
             "isSelf": false,
-            "kills": 0,
+            "kills": null,
             "name": {
               "agentId": "agent-enemy-3",
               "kind": "hiddenAgent"

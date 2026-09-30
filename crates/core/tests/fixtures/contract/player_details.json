@@ -108,21 +108,21 @@
   },
   "recent": [
     {
-      "acs": 200.0,
+      "acs": null,
       "agentId": "agent-jett",
-      "assists": 4,
-      "deaths": 10,
-      "hsPct": 0.25,
-      "kd": 2.0,
-      "kills": 20,
+      "assists": null,
+      "deaths": null,
+      "hsPct": null,
+      "kd": null,
+      "kills": null,
       "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
-      "matchId": "m1",
+      "matchId": "m3",
       "result": "win",
       "roundsLost": 11,
       "roundsWon": 13,
-      "rrEarned": 21,
-      "startMs": 2100,
-      "tier": 15
+      "rrEarned": null,
+      "startMs": 2300,
+      "tier": null
     },
     {
       "acs": 200.0,
@@ -142,21 +142,21 @@
       "tier": null
     },
     {
-      "acs": null,
+      "acs": 200.0,
       "agentId": "agent-jett",
-      "assists": null,
-      "deaths": null,
-      "hsPct": null,
-      "kd": null,
-      "kills": null,
+      "assists": 4,
+      "deaths": 10,
+      "hsPct": 0.25,
+      "kd": 2.0,
+      "kills": 20,
       "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
-      "matchId": "m3",
+      "matchId": "m1",
       "result": "win",
       "roundsLost": 11,
       "roundsWon": 13,
-      "rrEarned": null,
-      "startMs": 2300,
-      "tier": null
+      "rrEarned": 21,
+      "startMs": 2100,
+      "tier": 15
     }
   ],
   "topTeammates": [

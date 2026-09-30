@@ -274,11 +274,12 @@ fn seven_cards() -> Vec<PlayerCard> {
     let unsourced = build_card(unsourced);
 
     // 4. Hidden, agent not locked yet: "Hidden Player", no agent.
-    let hidden_player = build_card(BuildCardInput {
-        mmr: Field::Missing,
-        last5: Field::Missing,
-        ..card(identity("puuid-hidden", true, false, ("", "")), Team::Enemy)
-    });
+    //    Only the Riot ID and tag are hidden: rank and stats stay visible,
+    //    so it gets the same mmr / last5 inputs as every other card.
+    let hidden_player = build_card(card(
+        identity("puuid-hidden", true, false, ("", "")),
+        Team::Enemy,
+    ));
 
     // 5. Hidden, agent locked: the agent's name.
     let mut hidden_agent = card(identity("puuid-agent", true, true, ("", "")), Team::Enemy);
@@ -408,8 +409,9 @@ fn skin(name: &str, chroma: Option<&str>, tier: Option<&str>) -> WeaponSkin {
 fn player_details_value() -> Value {
     let known = seven_cards().remove(1);
 
-    // Recent rows: one with a rank, one with none (tier below 3 is null),
-    // one whose match had no stats row (every stat null, R102).
+    // Recent rows, newest first (spec §7.1: `recent` is "≤8 newest first"):
+    // one whose match had no stats row (every stat null, R102), one with no
+    // rank (tier below 3 is null), one with a rank.
     let no_stats = CompMatchRow {
         kills: 0,
         deaths: 0,
@@ -423,14 +425,14 @@ fn player_details_value() -> Value {
         ..comp_row("m3", 2_300, Some(2))
     };
     let recent = vec![
-        match_summary(&comp_row("m1", 2_100, Some(15))),
+        match_summary(&no_stats),
         match_summary(&CompMatchRow {
             winning_team: Some("Red".into()),
             rounds_won: Some(9),
             rounds_lost: Some(13),
             ..comp_row("m2", 2_200, None)
         }),
-        match_summary(&no_stats),
+        match_summary(&comp_row("m1", 2_100, Some(15))),
     ];
 
     let top_teammates = vec![
@@ -527,15 +529,22 @@ fn player_details_value() -> Value {
     // match with stats sends numbers.
     for key in ["kills", "deaths", "assists", "kd", "acs", "hsPct"] {
         assert_eq!(
-            json["recent"][2][key],
+            json["recent"][0][key],
             Value::Null,
             "no-stats row: `{key}` must be null, not a counted zero"
         );
         assert!(
-            json["recent"][0][key].is_number(),
+            json["recent"][2][key].is_number(),
             "row with stats: `{key}` must be a number"
         );
     }
+    let starts: Vec<i64> = json["recent"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["startMs"].as_i64().unwrap())
+        .collect();
+    assert_eq!(starts, [2_300, 2_200, 2_100], "recent is newest first");
     assert_eq!(json["recent"][1]["tier"], Value::Null);
     assert!(json["encounters"][0].get("selfWon").is_none());
     assert!(!json.to_string().contains("/Game/"));
@@ -665,6 +674,22 @@ fn match_views_value() -> Value {
         competitive["teams"][1]["players"][0]["name"]["kind"],
         "remembered"
     );
+    // R124: a scoreboard row whose details had no stats row sends `null`
+    // (never a counted 0) for kills, deaths and assists as well as for ACS,
+    // ADR and HS%, so the UI draws `—`. Rows with stats send numbers. The
+    // stat-less row sorts last (ACS nulls last).
+    let blue = &competitive["teams"][1]["players"];
+    for key in ["kills", "deaths", "assists", "acs", "adr", "hsPct"] {
+        assert_eq!(
+            blue[2][key],
+            Value::Null,
+            "no-stats row: `{key}` must be null, not a counted zero"
+        );
+        assert!(
+            blue[0][key].is_number(),
+            "row with stats: `{key}` must be a number"
+        );
+    }
 
     // A deathmatch the user did not play: no teams, nothing scored.
     let mut dm_players = vec![

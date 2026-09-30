@@ -275,8 +275,9 @@ pub async fn sync_player(
 /// Player Details' deeper sync: the last [`TEAMMATE_WINDOW`] competitive
 /// updates, then details for the newest 8 + the current act's matches
 /// (only those not in the DB). Also picks up the core-game loadouts (the
-/// equipped skin ids; their names resolve separately, from valorant-api,
-/// `details::resolve_skins`) if the live loop's fetch of them failed.
+/// equipped skin ids) if the live loop's fetch of them failed, and then
+/// resolves their names from valorant-api (`details::resolve_skins`)
+/// before returning, so the caller's rebuild already has them.
 pub async fn sync_details(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
@@ -298,9 +299,20 @@ pub async fn sync_details(
         match session.coregame_loadouts(&match_id).await {
             Ok(resp) => {
                 let loadouts = extract_loadouts(&resp);
-                let mut live = lock(&st.live);
-                if live.coregame_match_id.as_deref() == Some(match_id.as_str()) {
-                    live.loadouts = loadouts;
+                {
+                    let mut live = lock(&st.live);
+                    if live.coregame_match_id.as_deref() == Some(match_id.as_str()) {
+                        live.loadouts = loadouts;
+                    }
+                }
+                // R83, R97: skins that are now known to be equipped get
+                // their names before the caller rebuilds the details, or the
+                // rebuild would show `—` for them until the next open. The
+                // guard ends the mark even if the fetch panics.
+                if crate::details::skins_pending(st, puuid) {
+                    let resolving = st.begin_skin_resolve(puuid);
+                    crate::details::resolve_skins(st, puuid).await;
+                    drop(resolving);
                 }
             }
             Err(e) => check(e, "loadouts", puuid)?,
@@ -490,10 +502,9 @@ pub async fn fetch_self_loadout(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
 ) -> Result<(), Gone> {
-    let me = session.self_puuid().to_string();
-    let resp = match session.player_loadout(&me).await {
+    let resp = match session.player_loadout().await {
         Ok(resp) => resp,
-        Err(e) => return check(e, "player loadout", &me),
+        Err(e) => return check(e, "player loadout", session.self_puuid()),
     };
     let loadout = extract_player_loadout(&resp);
     let stored = serde_json::to_string(&loadout).unwrap_or_default();

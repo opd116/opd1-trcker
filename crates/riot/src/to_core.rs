@@ -194,9 +194,15 @@ fn total_damage(subject: &str, round_results: &[RoundResult]) -> Option<i64> {
 const TWELVE_ROUND_HALF_QUEUES: [&str; 3] = ["competitive", "unrated", "premier"];
 
 /// A team's wins among rounds `roundNum` 0..=11, or `None` when the queue
-/// has no such halves or the payload carries no round results.
+/// has no such halves, the payload carries no round results, or no round
+/// carries both `roundNum` and `winningTeam` (both are optional on the
+/// wire; without them the halves are unknown, never a counted 0).
 fn first_half_wins(queue_id: &str, team_id: &str, round_results: &[RoundResult]) -> Option<i64> {
-    if !TWELVE_ROUND_HALF_QUEUES.contains(&queue_id) || round_results.is_empty() {
+    if !TWELVE_ROUND_HALF_QUEUES.contains(&queue_id)
+        || !round_results
+            .iter()
+            .any(|r| r.round_num.is_some() && r.winning_team.is_some())
+    {
         return None;
     }
     let wins = round_results

@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use opd1_core::matchview::{build_match_view, MatchViewInput};
+use opd1_core::matchview::{build_match_view, needs_known_name, MatchViewInput};
 use opd1_core::model::MatchDetailsView;
 use opd1_core::names::KnownName;
 
@@ -67,11 +67,7 @@ async fn read(
             let mut remembered: HashMap<String, KnownName> = HashMap::new();
             if let Some(me) = me.as_deref() {
                 for p in stored.players.iter().filter(|p| p.puuid != me) {
-                    let nameless = p.game_name.as_deref().is_none_or(str::is_empty)
-                        || p.tag_line.as_deref().is_none_or(str::is_empty);
-                    if (hidden.contains_key(&p.puuid) || nameless)
-                        && !remembered.contains_key(&p.puuid)
-                    {
+                    if needs_known_name(p, &hidden) && !remembered.contains_key(&p.puuid) {
                         if let Some(name) = repo.known_name(me, &p.puuid)? {
                             remembered.insert(p.puuid.clone(), name);
                         }

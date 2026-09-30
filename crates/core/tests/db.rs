@@ -862,6 +862,29 @@ fn app_state_get_set_round_trip() {
     assert_eq!(rows, 1);
 }
 
+#[test]
+fn app_state_delete_removes_the_key_and_only_that_key() {
+    let repo = repo_in_memory();
+    repo.set_state("self_loadout", "{}").unwrap();
+    repo.set_state("self_puuid", "aaaa").unwrap();
+
+    repo.delete_state("self_loadout").unwrap();
+    assert_eq!(repo.get_state("self_loadout").unwrap(), None, "absent");
+    assert_eq!(
+        repo.get_state("self_puuid").unwrap().as_deref(),
+        Some("aaaa"),
+        "other keys stay"
+    );
+    // Deleting a key that was never set is fine, and a later set works.
+    repo.delete_state("self_loadout").unwrap();
+    repo.delete_state("never_set").unwrap();
+    repo.set_state("self_loadout", "[]").unwrap();
+    assert_eq!(
+        repo.get_state("self_loadout").unwrap().as_deref(),
+        Some("[]")
+    );
+}
+
 // ---------------------------------------------------------------------
 // Task 15: Phase 2 columns, R81 tier rule, R88 comp_matches, encounters
 // ---------------------------------------------------------------------
@@ -1002,6 +1025,15 @@ fn comp_matches_has_no_correlated_subqueries() {
             "correlated subquery in the plan: {detail}\nfull plan: {plan:#?}"
         );
     }
+    // The limited `mine` CTE is its own step (a co-routine, or a
+    // materialization on an older SQLite): a rewrite that joins everything
+    // first and only then GROUPs BY and LIMITs would read the whole history
+    // and has no such step.
+    assert!(
+        plan.iter()
+            .any(|d| d.starts_with("CO-ROUTINE mine") || d.starts_with("MATERIALIZE mine")),
+        "the player's rows must be limited first, in the `mine` step: {plan:#?}"
+    );
     let team_reads: Vec<&String> = plan.iter().filter(|d| d.contains("match_teams")).collect();
     assert!(
         !team_reads.is_empty(),

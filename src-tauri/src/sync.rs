@@ -125,7 +125,7 @@ pub const BACKFILL_MAX_FAILURES: u32 = 3;
 /// for good (the gap R101 forbids).
 pub fn counts_toward_skip(e: &RiotError) -> bool {
     match e {
-        RiotError::Status(code) => !matches!(code, 401 | 403 | 404 | 429),
+        RiotError::Status(code, _) => !matches!(code, 401 | 403 | 404 | 429),
         RiotError::Decode(_) => true,
         RiotError::ClientGone
         | RiotError::ShardsUnavailable
@@ -154,12 +154,22 @@ pub struct SyncOutcome {
     pub rank_failed: bool,
 }
 
+/// The warn line a failed call leaves in the log (R158): what failed, for
+/// whom — the short puuid only — and why: the HTTP status with Riot's own
+/// answer (its `errorCode`), `rate-limited`, the kind of transport failure, or
+/// that the body did not parse. All of it is the error's own text, which the
+/// riot crate keeps free of URLs, tokens and full puuids; this only adds the
+/// short puuid.
+fn failure_line(what: &str, puuid: &str, err: &RiotError) -> String {
+    format!("{what} for {} failed: {err}", short(puuid))
+}
+
 /// `ClientGone` -> [`Gone`]; anything else is logged and swallowed.
 fn check(err: RiotError, what: &str, puuid: &str) -> Result<(), Gone> {
     match err {
         RiotError::ClientGone => Err(Gone),
         other => {
-            log::warn!("{what} for {} failed: {other}", short(puuid));
+            log::warn!("{}", failure_line(what, puuid, &other));
             Ok(())
         }
     }
@@ -895,7 +905,7 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
                 end_run(st, me);
                 return Err(Gone);
             }
-            Err(e @ RiotError::Status(404)) => {
+            Err(e @ RiotError::Status(404, _)) => {
                 log::warn!("backfill: match {} skipped: {e}", short(&id));
                 pop(st);
             }
@@ -1283,27 +1293,72 @@ mod tests {
         // that doesn't decode. Rate-limit, network and auth errors say
         // nothing about the id: they end the run uncounted.
         for counted in [
-            RiotError::Status(500),
-            RiotError::Status(502),
-            RiotError::Status(400),
+            RiotError::Status(500, String::new()),
+            RiotError::Status(502, String::new()),
+            RiotError::Status(400, String::new()),
             RiotError::Decode("missing field".into()),
         ] {
             assert!(counts_toward_skip(&counted), "{counted:?} counts");
         }
         for uncounted in [
-            RiotError::Status(404),
-            RiotError::Status(429),
+            RiotError::Status(404, String::new()),
+            RiotError::Status(429, String::new()),
             RiotError::RateLimited,
             RiotError::Http("operation timed out".into()),
             RiotError::AuthFailed("no token".into()),
-            RiotError::Status(401),
-            RiotError::Status(403),
+            RiotError::Status(401, String::new()),
+            RiotError::Status(403, String::new()),
             RiotError::ShardsUnavailable,
             RiotError::ClientGone,
         ] {
             assert!(
                 !counts_toward_skip(&uncounted),
                 "{uncounted:?} is not counted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failure_line_says_what_failed_for_whom_and_why_and_nothing_more() {
+        const PUUID: &str = "aaaaaaaa-0000-0000-0000-000000000001";
+        let status = RiotError::Status(
+            500,
+            r#"{"errorCode":"INTERNAL_SERVER_ERROR","httpStatus":500}"#.into(),
+        );
+        let line = failure_line("mmr", PUUID, &status);
+        assert_eq!(
+            line,
+            "mmr for aaaaaaaa failed: unexpected HTTP status 500 from Riot: \
+             {\"errorCode\":\"INTERNAL_SERVER_ERROR\",\"httpStatus\":500}"
+        );
+        assert_eq!(
+            failure_line(
+                "comp updates",
+                PUUID,
+                &RiotError::Status(429, String::new())
+            ),
+            "comp updates for aaaaaaaa failed: unexpected HTTP status 429 from Riot"
+        );
+        // The other kinds: rate limit, decode, and the transport failure kind.
+        for (err, needle) in [
+            (RiotError::RateLimited, "rate-limited"),
+            (RiotError::Decode("missing field `Matches`".into()), "parse"),
+            (
+                RiotError::Http("timeout: error sending request".into()),
+                "timeout",
+            ),
+            (
+                RiotError::Http("connect: error sending request".into()),
+                "connect",
+            ),
+        ] {
+            let line = failure_line("mmr", PUUID, &err);
+            assert!(line.starts_with("mmr for aaaaaaaa failed: "), "{line}");
+            assert!(line.contains(needle), "{line}");
+            assert!(!line.contains(PUUID), "no full puuid: {line}");
+            assert!(
+                !line.contains("http://") && !line.contains("https://"),
+                "{line}"
             );
         }
     }

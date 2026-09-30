@@ -1204,3 +1204,8 @@ mod names_fill;
 /// bounded retry of a failed rank sync (their own file; same harness).
 #[cfg(test)]
 mod rank;
+
+/// R158's diagnostics tests: the failed-call warn line and `dump_raw` (their
+/// own file; same harness).
+#[cfg(test)]
+mod diagnostics;

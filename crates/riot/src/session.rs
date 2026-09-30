@@ -23,7 +23,7 @@ use serde_json::Value;
 use opd1_core::lockfile::parse_lockfile;
 use opd1_core::shards::parse_shards;
 
-use crate::raw_capture::RawCaptures;
+use crate::raw_capture::{excerpt, ErrorDump, RawCaptures, LOG_EXCERPT_CHARS};
 use crate::throttle::Throttle;
 
 /// The global remote-call bucket (every pd/glz call): burst 10, 10 rps.
@@ -96,9 +96,14 @@ pub enum RiotError {
     /// response body).
     Http(String),
     /// A non-2xx HTTP response (other than 401/403, which trigger a
-    /// re-auth, and 429, which triggers a throttled retry).
-    Status(u16),
-    /// The response body wasn't the JSON shape the caller expected.
+    /// re-auth, and 429, which triggers a throttled retry): the status and a
+    /// short log-safe excerpt of Riot's answer (R158: its `errorCode`) —
+    /// redacted, on one line, every full puuid shortened, at most
+    /// [`LOG_EXCERPT_CHARS`] characters; empty when the body was.
+    Status(u16, String),
+    /// The response body wasn't the JSON shape the caller expected. The text
+    /// is serde's message, made log-safe like a [`Status`](Self::Status)
+    /// excerpt (a message can quote a fragment of the body).
     Decode(String),
 }
 
@@ -110,7 +115,12 @@ impl fmt::Display for RiotError {
             RiotError::AuthFailed(msg) => write!(f, "Riot local auth failed: {msg}"),
             RiotError::RateLimited => write!(f, "rate-limited by Riot after retrying"),
             RiotError::Http(msg) => write!(f, "HTTP error talking to Riot: {msg}"),
-            RiotError::Status(code) => write!(f, "unexpected HTTP status {code} from Riot"),
+            RiotError::Status(code, body) if body.is_empty() => {
+                write!(f, "unexpected HTTP status {code} from Riot")
+            }
+            RiotError::Status(code, body) => {
+                write!(f, "unexpected HTTP status {code} from Riot: {body}")
+            }
             RiotError::Decode(msg) => write!(f, "couldn't parse Riot's response: {msg}"),
         }
     }
@@ -137,6 +147,35 @@ struct AuthState {
     access_token: String,
     entitlements_jwt: String,
     client_version: String,
+    /// Where `client_version` came from (logged once per session, R158).
+    client_version_source: VersionSource,
+}
+
+/// Where the `X-Riot-ClientVersion` a session sends came from (R158): logged
+/// once per session, so a field report says which source the version had.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VersionSource {
+    /// The running VALORANT process's `version` in the local
+    /// `/product-session/v1/external-sessions`.
+    Sessions,
+    /// The user's own VALORANT presence (`partyClientVersion`).
+    Presence,
+    /// `valorant-api.com/v1/version`.
+    ValorantApi,
+    /// Nothing answered: the literal fallback.
+    Fallback,
+}
+
+impl VersionSource {
+    /// The name the log line uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            VersionSource::Sessions => "sessions",
+            VersionSource::Presence => "presence",
+            VersionSource::ValorantApi => "valorant-api",
+            VersionSource::Fallback => "fallback",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -307,7 +346,7 @@ impl RiotSession {
 
         let entitlements = fetch_entitlements(&local_client, &local_base, &basic_auth).await?;
 
-        let client_version = fetch_client_version(
+        let (client_version, client_version_source) = fetch_client_version(
             &local_client,
             &remote_client,
             &local_base,
@@ -316,6 +355,13 @@ impl RiotSession {
             &valorant_api_base,
         )
         .await;
+        // Once per session: the version string is not a secret, and which
+        // source it came from is the first thing a "the game rejects the
+        // header" report needs.
+        log::info!(
+            "client version {client_version} (from {})",
+            client_version_source.as_str()
+        );
 
         Ok(Self {
             local_app_data: local_app_data.to_path_buf(),
@@ -334,6 +380,7 @@ impl RiotSession {
                 access_token: entitlements.access_token,
                 entitlements_jwt: entitlements.token,
                 client_version,
+                client_version_source,
             }),
             global_throttle: Throttle::new(GLOBAL_BURST, GLOBAL_RPS),
             mmr_throttle: Throttle::new(MMR_BURST, MMR_RPS),
@@ -368,6 +415,24 @@ impl RiotSession {
     /// this deliberately does not include.
     pub fn raw_captures(&self) -> Vec<(String, String)> {
         self.raw_captures.snapshot()
+    }
+
+    /// R158: the last non-2xx answer seen at each endpoint (redacted, at most
+    /// 4 KB each), ready to be written as `<key>.error.<ext>` beside the 2xx
+    /// captures, sorted by endpoint key. A later 2xx neither removes an entry
+    /// nor replaces its 2xx capture.
+    pub fn raw_error_captures(&self) -> Vec<ErrorDump> {
+        self.raw_captures.error_snapshot()
+    }
+
+    /// The `X-Riot-ClientVersion` this session sends on pd/glz calls.
+    pub fn client_version(&self) -> String {
+        self.auth.lock().unwrap().client_version.clone()
+    }
+
+    /// Where [`client_version`](Self::client_version) came from.
+    pub fn client_version_source(&self) -> VersionSource {
+        self.auth.lock().unwrap().client_version_source
     }
 
     /// `GET`s a path on the local client (`127.0.0.1:{port}`), with Basic
@@ -447,6 +512,10 @@ impl RiotSession {
         // overwrite a good, previously-captured success body.
         if captured.status.is_success() {
             self.raw_captures.record(path, &captured.body);
+        } else {
+            // R158: what Riot said when it refused, kept apart.
+            self.raw_captures
+                .record_error(path, captured.status.as_u16(), &captured.body);
         }
         Ok(captured)
     }
@@ -492,6 +561,9 @@ impl RiotSession {
         // re-auth) or 429 response never overwrites a good prior capture.
         if captured.status.is_success() {
             self.raw_captures.record(path, &captured.body);
+        } else {
+            self.raw_captures
+                .record_error(path, captured.status.as_u16(), &captured.body);
         }
         Ok(captured)
     }
@@ -607,14 +679,33 @@ async fn fetch_entitlements(
 /// the user shares copy-log, where ids are shortened. The caller knows
 /// which endpoint failed.
 fn http_error(e: reqwest::Error) -> RiotError {
-    RiotError::Http(e.without_url().to_string())
+    // reqwest's own text ("error sending request") does not say whether it
+    // timed out, could not connect or failed mid-body: the kind does.
+    let kind = if e.is_timeout() {
+        "timeout"
+    } else if e.is_connect() {
+        "connect"
+    } else if e.is_body() {
+        "body"
+    } else if e.is_decode() {
+        "decode"
+    } else if e.is_request() {
+        "request"
+    } else {
+        "other"
+    };
+    RiotError::Http(format!("{kind}: {}", e.without_url()))
 }
 
 fn parse_json<T: DeserializeOwned>(resp: &CapturedResponse) -> Result<T, RiotError> {
     if !resp.status.is_success() {
-        return Err(RiotError::Status(resp.status.as_u16()));
+        return Err(RiotError::Status(
+            resp.status.as_u16(),
+            excerpt(&resp.body, LOG_EXCERPT_CHARS),
+        ));
     }
-    serde_json::from_slice(&resp.body).map_err(|e| RiotError::Decode(e.to_string()))
+    serde_json::from_slice(&resp.body)
+        .map_err(|e| RiotError::Decode(excerpt(e.to_string().as_bytes(), LOG_EXCERPT_CHARS)))
 }
 
 /// Parses `Retry-After` as a plain number of seconds (Riot doesn't use the
@@ -648,7 +739,9 @@ fn retry_after_seconds(headers: &HeaderMap) -> Option<f64> {
 ///
 /// Each step is best-effort — any failure (network, missing field, bad
 /// JSON) just falls through to the next step, matching Scout's try/except
-/// chain in `_client_version`.
+/// chain in `_client_version`. So does an empty or whitespace-only answer
+/// (R158): it is no answer, never a blank `X-Riot-ClientVersion`. The
+/// winner's name comes back with the value, for the log.
 async fn fetch_client_version(
     local_client: &Client,
     remote_client: &Client,
@@ -656,19 +749,26 @@ async fn fetch_client_version(
     basic_auth: &str,
     self_puuid: &str,
     valorant_api_base: &str,
-) -> String {
+) -> (String, VersionSource) {
     if let Some(v) = fetch_version_from_sessions(local_client, local_base, basic_auth).await {
-        return v;
+        return (v, VersionSource::Sessions);
     }
     if let Some(v) =
         fetch_version_from_presence(local_client, local_base, basic_auth, self_puuid).await
     {
-        return v;
+        return (v, VersionSource::Presence);
     }
     if let Some(v) = fetch_version_from_valorant_api(remote_client, valorant_api_base).await {
-        return v;
+        return (v, VersionSource::ValorantApi);
     }
-    FALLBACK_CLIENT_VERSION.to_string()
+    (FALLBACK_CLIENT_VERSION.to_string(), VersionSource::Fallback)
+}
+
+/// `raw` trimmed, or `None` when nothing is left: a version source that
+/// answers an empty or whitespace-only string has not answered.
+fn usable_version(raw: &str) -> Option<String> {
+    let v = raw.trim();
+    (!v.is_empty()).then(|| v.to_string())
 }
 
 async fn fetch_version_from_sessions(
@@ -696,7 +796,7 @@ fn version_from_sessions_json(value: &Value) -> Option<String> {
     value.as_object()?.values().find_map(|session| {
         let obj = session.as_object()?;
         if obj.get("productId")?.as_str()? == "valorant" {
-            obj.get("version")?.as_str().map(str::to_string)
+            usable_version(obj.get("version")?.as_str()?)
         } else {
             None
         }
@@ -738,16 +838,17 @@ async fn fetch_version_from_presence(
 /// `partyPresenceData` (the nested shape) — same fallback pattern as
 /// `opd1_core::presence::decode_presence`.
 fn version_from_presence_value(value: &Value) -> Option<String> {
-    value
-        .get("partyClientVersion")
-        .and_then(Value::as_str)
-        .or_else(|| {
-            value
-                .get("partyPresenceData")?
-                .get("partyClientVersion")?
-                .as_str()
-        })
-        .map(str::to_string)
+    let flat = || value.get("partyClientVersion")?.as_str();
+    let nested = || {
+        value
+            .get("partyPresenceData")?
+            .get("partyClientVersion")?
+            .as_str()
+    };
+    // An empty flat value does not hide a usable nested one, nor the reverse.
+    flat()
+        .and_then(usable_version)
+        .or_else(|| nested().and_then(usable_version))
 }
 
 async fn fetch_version_from_valorant_api(client: &Client, base: &str) -> Option<String> {
@@ -760,11 +861,7 @@ async fn fetch_version_from_valorant_api(client: &Client, base: &str) -> Option<
 }
 
 fn version_from_valorant_api_json(value: &Value) -> Option<String> {
-    value
-        .get("data")?
-        .get("riotClientVersion")?
-        .as_str()
-        .map(str::to_string)
+    usable_version(value.get("data")?.get("riotClientVersion")?.as_str()?)
 }
 
 #[cfg(test)]
@@ -835,5 +932,121 @@ mod tests {
             version_from_valorant_api_json(&json!({"status": 200})),
             None
         );
+    }
+
+    #[test]
+    fn an_empty_or_blank_version_is_no_answer_at_any_source() {
+        // R158: never a blank `X-Riot-ClientVersion`; the chain goes on.
+        for blank in ["", "   ", "\t\n"] {
+            let sessions = json!({
+                "s": { "productId": "valorant", "version": blank },
+            });
+            assert_eq!(version_from_sessions_json(&sessions), None, "{blank:?}");
+            let presence = json!({ "partyClientVersion": blank });
+            assert_eq!(version_from_presence_value(&presence), None, "{blank:?}");
+            let nested = json!({ "partyPresenceData": { "partyClientVersion": blank } });
+            assert_eq!(version_from_presence_value(&nested), None, "{blank:?}");
+            let api = json!({ "data": { "riotClientVersion": blank } });
+            assert_eq!(version_from_valorant_api_json(&api), None, "{blank:?}");
+        }
+    }
+
+    #[test]
+    fn a_blank_version_does_not_hide_a_usable_one_beside_it() {
+        // A blank valorant session entry next to a real one: the real one.
+        let sessions = json!({
+            "a": { "productId": "valorant", "version": "  " },
+            "b": { "productId": "valorant", "version": "release-09.08" },
+        });
+        assert_eq!(
+            version_from_sessions_json(&sessions).as_deref(),
+            Some("release-09.08")
+        );
+        // A blank flat presence field next to a real nested one, and back.
+        let both = json!({
+            "partyClientVersion": "",
+            "partyPresenceData": { "partyClientVersion": "release-nested-2" },
+        });
+        assert_eq!(
+            version_from_presence_value(&both).as_deref(),
+            Some("release-nested-2")
+        );
+        let both = json!({
+            "partyClientVersion": "release-flat-2",
+            "partyPresenceData": { "partyClientVersion": " " },
+        });
+        assert_eq!(
+            version_from_presence_value(&both).as_deref(),
+            Some("release-flat-2")
+        );
+    }
+
+    #[test]
+    fn a_version_is_trimmed() {
+        let api =
+            json!({ "data": { "riotClientVersion": "  release-13.06-shipping-18-5590001\n" } });
+        assert_eq!(
+            version_from_valorant_api_json(&api).as_deref(),
+            Some("release-13.06-shipping-18-5590001")
+        );
+    }
+
+    #[test]
+    fn version_source_names_are_the_ones_the_log_uses() {
+        assert_eq!(VersionSource::Sessions.as_str(), "sessions");
+        assert_eq!(VersionSource::Presence.as_str(), "presence");
+        assert_eq!(VersionSource::ValorantApi.as_str(), "valorant-api");
+        assert_eq!(VersionSource::Fallback.as_str(), "fallback");
+    }
+
+    #[test]
+    fn a_status_error_prints_the_code_then_riots_answer_and_nothing_else() {
+        let e = RiotError::Status(400, r#"{"errorCode":"BAD_CLAIMS"}"#.into());
+        assert_eq!(
+            e.to_string(),
+            r#"unexpected HTTP status 400 from Riot: {"errorCode":"BAD_CLAIMS"}"#
+        );
+        // An empty body prints as before.
+        assert_eq!(
+            RiotError::Status(500, String::new()).to_string(),
+            "unexpected HTTP status 500 from Riot"
+        );
+    }
+
+    #[test]
+    fn a_decode_error_never_quotes_a_puuid_or_a_token() {
+        // serde's message can quote the offending value.
+        let resp = CapturedResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: br#"{"Subject": 5}"#.to_vec(),
+        };
+        #[derive(serde::Deserialize, Debug)]
+        #[allow(dead_code)]
+        struct Wants {
+            #[serde(rename = "Subject")]
+            subject: String,
+        }
+        let e = parse_json::<Wants>(&resp).unwrap_err();
+        let RiotError::Decode(msg) = &e else {
+            panic!("{e:?}")
+        };
+        assert!(msg.contains("invalid type"), "{msg}");
+        // A message that quotes a puuid: shortened.
+        let resp = CapturedResponse {
+            status: StatusCode::OK,
+            headers: HeaderMap::new(),
+            body: br#"{"Subject": "aaaaaaaa-0000-0000-0000-000000000001"}"#.to_vec(),
+        };
+        #[derive(serde::Deserialize, Debug)]
+        #[allow(dead_code)]
+        struct WantsNumber {
+            #[serde(rename = "Subject")]
+            subject: u64,
+        }
+        let e = parse_json::<WantsNumber>(&resp).unwrap_err();
+        let msg = e.to_string();
+        assert!(msg.contains("aaaaaaaa"), "{msg}");
+        assert!(!msg.contains("aaaaaaaa-0000"), "{msg}");
     }
 }

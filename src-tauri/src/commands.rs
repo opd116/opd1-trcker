@@ -15,7 +15,8 @@
 //! - `my_stats()` — the user's My Stats for the current act, from the DB
 //!   only (no Riot call); `null` while the user or the act is unknown.
 //! - `copy_log()` — the last 500 log lines (R30; the UI copies them).
-//! - `dump_raw()` — redacted raw responses to `app_data/debug/*.json`.
+//! - `dump_raw()` — redacted raw responses (the last 2xx and the last error
+//!   of each endpoint) and the log to `app_data/debug/`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -256,27 +257,67 @@ fn file_stem(key: &str) -> String {
     }
 }
 
+/// What the debug dump writes, as `(file name, contents)` (R158):
+/// - `<key>.json`: the last 2xx body of each endpoint, redacted;
+/// - `<key>.error.json` / `<key>.error.txt`: the last non-2xx answer of each
+///   endpoint (status and Riot's `errorCode`), redacted and at most 4 KB;
+/// - `log.txt`: exactly the lines `copy_log` returns — written even with
+///   nothing captured, since the log is what explains why there is nothing.
+fn dump_files(
+    captures: Vec<(String, String)>,
+    errors: Vec<opd1_riot::raw_capture::ErrorDump>,
+    log: String,
+) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = captures
+        .into_iter()
+        .map(|(key, body)| (format!("{}.json", file_stem(&key)), body))
+        .collect();
+    files.extend(
+        errors
+            .into_iter()
+            .map(|e| (format!("{}.error.{}", file_stem(&e.key), e.ext), e.contents)),
+    );
+    files.push(("log.txt".to_string(), log));
+    files
+}
+
+/// Writes `files` into `dir` (created if needed); how many were written.
+fn write_dump(dir: &std::path::Path, files: &[(String, String)]) -> std::io::Result<u32> {
+    std::fs::create_dir_all(dir)?;
+    let mut n = 0;
+    for (name, contents) in files {
+        std::fs::write(dir.join(name), contents)?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 #[tauri::command]
 pub async fn dump_raw(state: AppStateRef<'_>) -> Result<DumpResult, String> {
-    let Some(session) = state.session() else {
-        return Err("VALORANT is not connected".into());
-    };
+    dump_raw_for(state.inner()).await
+}
+
+/// `dump_raw` without the Tauri wrapper. With no session (VALORANT closed, or
+/// a connect that keeps failing) there are no captures, and the log is still
+/// written — it is the part that says why.
+pub(crate) async fn dump_raw_for(st: &Arc<AppState>) -> Result<DumpResult, String> {
+    dump_raw_with(st, crate::logbuf::snapshot()).await
+}
+
+/// [`dump_raw_for`] with the log text given (what `copy_log` returns).
+pub(crate) async fn dump_raw_with(st: &Arc<AppState>, log: String) -> Result<DumpResult, String> {
     // Already redacted by opd1-riot (tokens/JWTs/passwords).
-    let captures = session.raw_captures();
-    let dir = state.debug_dir.clone();
+    let (captures, errors) = match st.session() {
+        Some(session) => (session.raw_captures(), session.raw_error_captures()),
+        None => (Vec::new(), Vec::new()),
+    };
+    let files = dump_files(captures, errors, log);
+    let dir = st.debug_dir.clone();
     let shown = dir.display().to_string();
-    let files = tauri::async_runtime::spawn_blocking(move || -> std::io::Result<u32> {
-        std::fs::create_dir_all(&dir)?;
-        let mut n = 0;
-        for (key, body) in captures {
-            std::fs::write(dir.join(format!("{}.json", file_stem(&key))), body)?;
-            n += 1;
-        }
-        Ok(n)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map_err(|e| e.to_string())?;
+    let files = tauri::async_runtime::spawn_blocking(move || write_dump(&dir, &files))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
     log::info!("dump_raw: wrote {files} files");
     Ok(DumpResult { dir: shown, files })
 }
@@ -459,6 +500,49 @@ mod tests {
             check_match_args("", "../x"),
             Err("invalid match id".to_string())
         );
+    }
+
+    #[test]
+    fn the_dump_is_the_captures_the_errors_and_the_log() {
+        use opd1_riot::raw_capture::ErrorDump;
+        let files = dump_files(
+            vec![("mmr".into(), "{}".into()), ("a/../b".into(), "x".into())],
+            vec![ErrorDump {
+                key: "mmr".into(),
+                ext: "json",
+                contents: r#"{"status":500}"#.into(),
+            }],
+            "line one\nline two".into(),
+        );
+        let names: Vec<&str> = files.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(
+            names,
+            ["mmr.json", "a____b.json", "mmr.error.json", "log.txt"]
+        );
+        assert_eq!(files.last().unwrap().1, "line one\nline two");
+        // Nothing captured at all: the log alone.
+        let files = dump_files(Vec::new(), Vec::new(), String::new());
+        assert_eq!(files, [("log.txt".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn writing_the_dump_counts_the_log_and_works_with_no_captures() {
+        let dir = tempfile::tempdir().unwrap();
+        let debug = dir.path().join("debug");
+        let files = dump_files(Vec::new(), Vec::new(), "the log".into());
+        assert_eq!(write_dump(&debug, &files).unwrap(), 1);
+        assert_eq!(
+            std::fs::read_to_string(debug.join("log.txt")).unwrap(),
+            "the log"
+        );
+
+        let files = dump_files(
+            vec![("mmr".into(), "{}".into())],
+            Vec::new(),
+            "the log".into(),
+        );
+        assert_eq!(write_dump(&debug, &files).unwrap(), 2, "the log counts");
+        assert!(debug.join("mmr.json").exists());
     }
 
     #[test]

@@ -215,3 +215,25 @@ pub async fn connect_against(tmp: &Path, server: &MockServer) -> opd1_riot::sess
     .await
     .expect("connect should succeed")
 }
+
+/// Mounts `valorant-api.com`'s `/v1/version` (the mock server doubles as
+/// the valorant-api base) with `data.riotClientVersion` = `version`.
+pub async fn mount_valorant_api_version(server: &MockServer, version: &str) {
+    Mock::given(method("GET"))
+        .and(path("/v1/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "status": 200,
+            "data": {
+                "manifestId": "ABC",
+                "branch": "release-13.06",
+                "version": "13.06.00.5590001",
+                "buildVersion": "18",
+                "engineVersion": "5.3.2",
+                "riotClientVersion": version,
+                "riotClientBuild": "123.4.5.6",
+                "buildDate": "2026-09-01T00:00:00Z",
+            }
+        })))
+        .mount(server)
+        .await;
+}

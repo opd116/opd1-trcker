@@ -1,13 +1,17 @@
 # Rust / Cargo workspace
 /target/
 
-# Tauri
-/src-tauri/gen/schemas/
-
 # Node
 node_modules/
 ui/dist/
 npm-debug.log*
+
+# Playwright (ui/tests): screenshots, image/CDN caches, design reference PNGs, reports
+ui/tests/shots/
+ui/tests/.cache/
+ui/tests/ref/
+ui/test-results/
+ui/playwright-report/
 
 # Editors / OS
 .DS_Store

@@ -1,78 +1,65 @@
 <script lang="ts">
-  type Tab = "live" | "my-stats";
+  import { isTauri } from "@tauri-apps/api/core";
+  import Tooltip from "./components/Tooltip.svelte";
+  import TopBar from "./components/TopBar.svelte";
+  import { tauriBridge } from "./lib/api";
+  import { keyAction, runKeyAction } from "./lib/boot";
+  import { router, scrollHost } from "./lib/router.svelte";
+  import { live } from "./lib/stores";
+  import Details from "./screens/Details.svelte";
+  import Live from "./screens/Live.svelte";
+  import Match from "./screens/Match.svelte";
 
-  let activeTab = $state<Tab>("live");
+  // Ctrl+Shift+L / Ctrl+Shift+D (no UI). Only meaningful with the Rust side present.
+  function onkeydown(e: KeyboardEvent) {
+    const action = keyAction(e);
+    if (!action || !isTauri()) return;
+    e.preventDefault();
+    runKeyAction(action, tauriBridge, (text) => navigator.clipboard.writeText(text)).catch((err) =>
+      console.error(`${action} failed`, err),
+    );
+  }
 </script>
 
-<main>
-  <div class="tabs" role="tablist" aria-label="Screens">
-    <button
-      type="button"
-      role="tab"
-      aria-selected={activeTab === "live"}
-      class:active={activeTab === "live"}
-      onclick={() => (activeTab = "live")}
-    >
-      Live
-    </button>
-    <button
-      type="button"
-      role="tab"
-      aria-selected={activeTab === "my-stats"}
-      class:active={activeTab === "my-stats"}
-      onclick={() => (activeTab = "my-stats")}
-    >
-      My Stats
-    </button>
-  </div>
+<svelte:window {onkeydown} />
 
-  <section class="panel" role="tabpanel">
-    {#if activeTab === "live"}
-      <div class="live"></div>
+<TopBar route={router.route} live={$live} />
+{#if router.route.name === "live"}
+  <Live live={$live} />
+{:else}
+  <!-- One scroll container for Details and Match (spec §6.1); `go` resets it to the top. -->
+  <div class="scroll" use:scrollHost>
+    {#if router.route.name === "details"}
+      <Details puuid={router.route.puuid} more={router.route.more} />
     {:else}
-      <div class="my-stats"></div>
+      <Match matchId={router.route.matchId} focusPuuid={router.route.focusPuuid} from={router.route.from} />
     {/if}
-  </section>
-</main>
+  </div>
+{/if}
+<Tooltip />
 
 <style>
-  main {
+  /* #app is the mount target from index.html (spec §2.1). */
+  :global(#app) {
+    position: relative;
+    width: 1000px;
+    height: 800px;
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font);
     display: flex;
     flex-direction: column;
-    height: 100vh;
-    box-sizing: border-box;
+    -webkit-font-smoothing: antialiased;
   }
 
-  .tabs {
-    display: flex;
-    flex-shrink: 0;
-    border-bottom: 1px solid #2a2a2a;
-  }
-
-  .tabs button {
-    flex: 1;
-    padding: 12px 0;
-    font-size: 14px;
-    font-family: inherit;
-    background: transparent;
-    color: inherit;
-    border: none;
-    border-bottom: 2px solid transparent;
-    cursor: pointer;
-  }
-
-  .tabs button.active {
-    border-bottom-color: currentColor;
-  }
-
-  .panel {
+  .scroll {
     flex: 1;
     min-height: 0;
-    overflow: hidden;
-  }
-
-  .live,
-  .my-stats {
-    height: 100%;
+    overflow-y: auto;
+    scrollbar-width: thin;
+    scrollbar-color: var(--scroll) transparent;
+    scrollbar-gutter: stable;
+    padding: 14px 8px 22px 16px;
   }
 </style>

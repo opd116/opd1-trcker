@@ -2,6 +2,10 @@
 import { svelte } from "@sveltejs/vite-plugin-svelte";
 import { defineConfig } from "vite";
 
+// The date formatters read local time. Pin the zone so their tests (and every
+// vitest worker, which inherits this) give the same answer on any machine.
+process.env.TZ = "UTC";
+
 // Tauri sets this when running `tauri dev` against a LAN host (mobile
 // testing). Unused on desktop, harmless to read.
 const host = process.env.TAURI_DEV_HOST;
@@ -31,8 +35,9 @@ export default defineConfig({
   },
 
   test: {
-    // No tests exist yet (Task 1 is scaffold-only); later tasks add real
-    // component/unit tests. This keeps CI green until then.
-    passWithNoTests: true,
+    // Unit tests only; Playwright specs under tests/ run with `playwright test`.
+    include: ["src/**/*.test.ts"],
+    // Type tests (`*.test-d.ts`, Task 16b): `ui/tsconfig.json` only lists references, so name the project.
+    typecheck: { enabled: true, include: ["src/**/*.test-d.ts"], tsconfig: "./tsconfig.app.json" },
   },
 });

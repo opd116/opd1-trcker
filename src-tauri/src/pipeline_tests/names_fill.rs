@@ -63,16 +63,25 @@ async fn mount_match(server: &MockServer, match_id: &str, queue: &str, start: i6
     .await;
 }
 
+/// The names name-service knows: a test can add one between two requests.
+type NameBook = Arc<std::sync::Mutex<HashMap<String, (String, String)>>>;
+
 /// Name-service: a name for each puuid in `named`, a blank for the rest.
 async fn mount_name_service(server: &MockServer, named: &[(String, &str, &str)]) {
     let names: HashMap<String, (String, String)> = named
         .iter()
         .map(|(p, n, t)| (p.clone(), (n.to_string(), t.to_string())))
         .collect();
+    mount_name_book(server, Arc::new(std::sync::Mutex::new(names))).await;
+}
+
+/// [`mount_name_service`] over a book the test keeps a handle on.
+async fn mount_name_book(server: &MockServer, book: NameBook) {
     Mock::given(method("PUT"))
         .and(path("/name-service/v2/players"))
         .respond_with(move |req: &Request| {
             let asked: Vec<String> = serde_json::from_slice(&req.body).unwrap();
+            let names = book.lock().unwrap();
             let answer: Vec<Value> = asked
                 .iter()
                 .map(|p| {
@@ -85,6 +94,38 @@ async fn mount_name_service(server: &MockServer, named: &[(String, &str, &str)])
         .with_priority(1)
         .mount(server)
         .await;
+}
+
+/// The repo mutex held by a plain thread: whatever asks the DB next (a fill
+/// step's `names_to_ask`) waits until [`DbHold::release`]. Deterministic
+/// stand-in for "the step is between taking its asks and the request".
+struct DbHold {
+    release: std::sync::mpsc::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+impl DbHold {
+    fn take(st: &Arc<AppState>) -> Self {
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (release, release_rx) = std::sync::mpsc::channel::<()>();
+        let st = st.clone();
+        let thread = std::thread::spawn(move || {
+            st.db_blocking(|_| {
+                held_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            });
+        });
+        held_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the DB is held");
+        Self { release, thread }
+    }
+
+    fn release(self) {
+        self.release.send(()).unwrap();
+        self.thread.join().unwrap();
+    }
 }
 
 /// Every name-service request so far: the puuids it carried, in order.
@@ -555,19 +596,7 @@ async fn a_match_that_starts_between_taking_the_asks_and_the_request_sends_nothi
 
     // Hold the DB: the step's `names_to_ask` waits behind this, i.e. after
     // `take_fill` (the queue is empty by then) and before the request.
-    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
-    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
-    let st = h.st.clone();
-    let holder = std::thread::spawn(move || {
-        st.db_blocking(|_| {
-            held_tx.send(()).unwrap();
-            release_rx.recv().unwrap();
-            Ok(())
-        })
-    });
-    held_rx
-        .recv_timeout(Duration::from_secs(5))
-        .expect("the DB is held");
+    let hold = DbHold::take(&h.st);
     let step = tokio::spawn({
         let (st, session) = (h.st.clone(), h.session.clone());
         async move { fill_names_step(&st, &session).await }
@@ -591,8 +620,7 @@ async fn a_match_that_starts_between_taking_the_asks_and_the_request_sends_nothi
         live.slots = roster_of_the_next_match;
         live.note_hidden();
     }
-    release_tx.send(()).unwrap();
-    holder.join().unwrap();
+    hold.release();
     step.await.unwrap().unwrap();
 
     assert!(puts(&h.server).await.is_empty(), "nothing is sent");
@@ -615,6 +643,123 @@ async fn a_match_that_starts_between_taking_the_asks_and_the_request_sends_nothi
         seen(&h.st, HIDDEN.to_string()).await,
         Some(("Real".to_string(), "HID".to_string()))
     );
+}
+
+#[tokio::test]
+async fn a_step_that_is_dropped_before_the_send_keeps_its_asks() {
+    // The poll loop aborts the worker on a stage change, which drops the step
+    // wherever it waits. The asks it had taken are the only route to a hidden
+    // player's name (a stored match queues only once): they go back.
+    let h = harness().await;
+    mount_name_service(&h.server, &[(HIDDEN.to_string(), "Real", "HID")]).await;
+    back_to_the_lobby(&h, None).await;
+    let mut want = vec![(HIDDEN.to_string(), Some(1)), (OTHER.to_string(), Some(1))];
+    want.sort();
+    lock(&h.st.live).queue_name_fill([ask(HIDDEN, Some(1)), ask(OTHER, Some(1))]);
+
+    // Dropped while it waits for the DB (after taking the asks).
+    let hold = DbHold::take(&h.st);
+    let step = tokio::time::timeout(
+        Duration::from_millis(100),
+        fill_names_step(&h.st, &h.session),
+    )
+    .await;
+    assert!(step.is_err(), "the step was still waiting for the DB");
+    hold.release();
+    assert_eq!(queue_of(&h), want, "kept: dropped on the DB");
+    assert!(puts(&h.server).await.is_empty());
+
+    // Dropped while it waits for a throttle token (the DB check is done).
+    let slow = RiotSession::connect_with_overrides(
+        h._dir.path(),
+        ConnectOverrides {
+            pd_base: Some(h.server.uri()),
+            glz_base: Some(h.server.uri()),
+            valorant_api_base: Some(h.server.uri()),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap()
+    .with_global_rate(2.0);
+    for _ in 0..2 {
+        slow.match_history(ME, Some(0), Some(1), None)
+            .await
+            .unwrap();
+    }
+    let step = tokio::time::timeout(Duration::from_millis(60), fill_names_step(&h.st, &slow)).await;
+    assert!(step.is_err(), "the step was still waiting for a token");
+    assert_eq!(queue_of(&h), want, "kept: dropped in the throttle");
+    assert!(puts(&h.server).await.is_empty(), "nothing was sent");
+
+    // Nothing is lost for good: the next step asks for both.
+    run_fill(&h).await;
+    let sent = puts(&h.server).await;
+    assert_eq!(sent.len(), 1);
+    let mut got = sent[0].clone();
+    got.sort();
+    assert_eq!(got, [HIDDEN.to_string(), OTHER.to_string()]);
+    assert_eq!(
+        seen(&h.st, HIDDEN.to_string()).await,
+        Some(("Real".to_string(), "HID".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn a_completed_step_does_not_requeue_and_a_lost_client_keeps_the_asks() {
+    let h = harness().await;
+    lobby(&h);
+    mount_name_service(&h.server, &[(HIDDEN.to_string(), "Real", "HID")]).await;
+    // A puuid whose name is already known is consumed without a request.
+    h.st.db(|repo| {
+        save_player(
+            repo.conn(),
+            &PlayerUpdate {
+                puuid: pid(3),
+                name: Some(("Known".into(), "KNW".into())),
+                account_level: 5,
+                card_id: "c".into(),
+            },
+            1,
+        )
+    })
+    .await
+    .unwrap();
+    lock(&h.st.live).queue_name_fill([
+        ask(HIDDEN, Some(1)),
+        ask(OTHER, Some(1)),
+        ask(&pid(3), None),
+    ]);
+
+    // Answered (one name, one blank) and one not worth asking: nothing comes
+    // back to the queue.
+    fill_names_step(&h.st, &h.session).await.unwrap();
+    assert_eq!(
+        puts(&h.server).await,
+        [vec![HIDDEN.to_string(), OTHER.to_string()]]
+    );
+    assert!(queue_of(&h).is_empty(), "a completed step keeps nothing");
+    assert_eq!(marker(&h.st, OTHER.to_string()).await, Some(1));
+
+    // The Riot client goes away before the answer: nothing was answered, so
+    // the asks stay for the next connection.
+    std::fs::remove_file(
+        h._dir
+            .path()
+            .join("Riot Games")
+            .join("Riot Client")
+            .join("Config")
+            .join("lockfile"),
+    )
+    .unwrap();
+    lock(&h.st.live).queue_name_fill([ask(&pid(1), Some(2)), ask(&pid(2), Some(2))]);
+    assert!(fill_names_step(&h.st, &h.session).await.is_err());
+    assert_eq!(
+        queue_of(&h),
+        [(pid(1), Some(2)), (pid(2), Some(2))],
+        "kept: the client was gone"
+    );
+    assert_eq!(puts(&h.server).await.len(), 1, "no second request");
 }
 
 // ---------------------------------------------------------------------
@@ -1065,6 +1210,96 @@ async fn a_top_3_teammate_who_was_hidden_earlier_is_asked_and_the_open_page_refr
     );
 }
 
+#[tokio::test]
+async fn top_3_teammates_a_details_sync_brings_in_are_asked_too() {
+    // The first build of the page had no teammates to ask about. The Riot
+    // sync behind it stores new matches and rebuilds the page: the teammates
+    // that now show as Hidden Player are queued then, not only at the next
+    // open — once each, and the name refreshes the open page.
+    let h = harness().await;
+    lobby(&h);
+    h.st.set_session(Some(h.session.clone()));
+    h.st.db(|repo| {
+        save_player(
+            repo.conn(),
+            &PlayerUpdate {
+                puuid: OTHER.into(),
+                name: Some(("Hero".into(), "HRO".into())),
+                account_level: 30,
+                card_id: "card".into(),
+            },
+            1,
+        )
+    })
+    .await
+    .unwrap();
+    // OTHER's history: one competitive match of the act, with a teammate
+    // (`unnamed_match` puts the odd slots on OTHER's team, Blue) whose name
+    // match-details left blank.
+    let start = now_ms() - 60_000;
+    let others = vec![pid(9), OTHER.to_string(), pid(8), pid(1)];
+    mount_match(&h.server, "n-sync", "competitive", start, &others).await;
+    // Beats the harness's 500 for OTHER's routes (lower number = first).
+    Mock::given(method("GET"))
+        .and(path(format!("/mmr/v1/players/{OTHER}/competitiveupdates")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "Subject": OTHER,
+            "Matches": [{
+                "MatchID": "n-sync", "MapID": "/Game/Maps/Ascent/Ascent", "SeasonID": ACT,
+                "MatchStartTime": start, "TierAfterUpdate": 15, "TierBeforeUpdate": 15,
+                "RankedRatingAfterUpdate": 42, "RankedRatingBeforeUpdate": 30,
+                "RankedRatingEarned": 12
+            }]
+        })))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    mount_name_service(&h.server, &[(pid(1), "Mate", "ONE")]).await;
+
+    let d = crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    assert!(d.top_teammates.is_empty(), "no matches stored yet");
+    assert!(queue_of(&h).is_empty(), "nothing to ask at the first build");
+
+    // The sync's rebuild shows the teammate as Hidden Player; queued then.
+    let mut queued = false;
+    for _ in 0..500 {
+        if queue_of(&h).iter().any(|(p, _)| p == &pid(1)) {
+            queued = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(queued, "the rebuilt page's unnamed teammate is queued");
+    let queue = queue_of(&h);
+    assert_eq!(
+        queue.iter().filter(|(p, _)| p == &pid(1)).count(),
+        1,
+        "no duplicate ask: {queue:?}"
+    );
+    assert!(
+        !queue.iter().any(|(p, _)| p == ME),
+        "the named teammate (the user) is not asked: {queue:?}"
+    );
+
+    run_fill(&h).await;
+    let events = h.rec.details.lock().unwrap().clone();
+    let last = events.last().expect("a details event");
+    let mate = last
+        .top_teammates
+        .iter()
+        .find(|t| t.puuid == pid(1))
+        .expect("a Top 3 row");
+    assert_eq!(
+        mate.name,
+        DisplayName::Visible {
+            name: "Mate".into(),
+            tag: "ONE".into()
+        }
+    );
+}
+
 /// One scoreboard row's name.
 fn board_name(view: &MatchDetailsView, puuid: &str) -> DisplayName {
     view.teams
@@ -1134,6 +1369,77 @@ async fn match_details_asks_once_for_nine_unknown_players_and_refreshes() {
         .unwrap();
     run_fill(&h).await;
     assert_eq!(puts(&h.server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn a_closed_match_details_gets_no_match_event_and_reopens_as_before() {
+    // The UI calls `close_match` when the scoreboard is left: the open-match
+    // slot is empty, so a names fill that stores a name for that match builds
+    // and emits nothing. Opening it again works as before.
+    let h = harness().await;
+    lobby(&h);
+    let others: Vec<String> = (1..=3).map(pid).collect();
+    mount_match(
+        &h.server,
+        "n-close",
+        "competitive",
+        now_ms() - 30 * 60_000,
+        &others,
+    )
+    .await;
+    store_match(&h, "n-close").await;
+    let book: NameBook = Arc::new(std::sync::Mutex::new(HashMap::from([(
+        pid(1),
+        ("One".to_string(), "T1".to_string()),
+    )])));
+    mount_name_book(&h.server, book.clone()).await;
+
+    crate::match_details::load(&h.st, "n-close", &pid(1))
+        .await
+        .unwrap();
+    assert!(h.st.open_match_args().is_some());
+    crate::commands::close_match_for(&h.st);
+    assert_eq!(h.st.open_match_args(), None, "nothing is open");
+    crate::commands::close_match_for(&h.st); // idempotent
+
+    run_fill(&h).await;
+    assert_eq!(puts(&h.server).await, [others]);
+    assert_eq!(
+        seen(&h.st, pid(1)).await,
+        Some(("One".to_string(), "T1".to_string())),
+        "the name is stored"
+    );
+    assert!(
+        h.rec.matches.lock().unwrap().is_empty(),
+        "no match event for a page nobody sees"
+    );
+
+    // Opened again: the view has the stored name, and a name that arrives
+    // while it is open is emitted as before.
+    let view = crate::match_details::load(&h.st, "n-close", &pid(1))
+        .await
+        .unwrap();
+    assert_eq!(
+        board_name(&view, &pid(1)),
+        DisplayName::Visible {
+            name: "One".into(),
+            tag: "T1".into()
+        }
+    );
+    book.lock()
+        .unwrap()
+        .insert(pid(2), ("Two".to_string(), "T2".to_string()));
+    lock(&h.st.live).queue_name_fill([ask(&pid(2), Some(now_ms()))]);
+    run_fill(&h).await;
+    let events = h.rec.matches.lock().unwrap().clone();
+    assert_eq!(events.len(), 1, "one event, for the reopened page");
+    assert_eq!(
+        board_name(&events[0], &pid(2)),
+        DisplayName::Visible {
+            name: "Two".into(),
+            tag: "T2".into()
+        }
+    );
 }
 
 #[tokio::test]

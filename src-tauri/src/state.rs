@@ -1045,6 +1045,13 @@ impl AppState {
         });
     }
 
+    /// The UI left the Match Details page (`close_match`): nothing is open,
+    /// so no `match` event is built or emitted until the next
+    /// `match_details` call. A no-op with nothing open.
+    pub fn close_match(&self) {
+        *lock(&self.open_match) = None;
+    }
+
     /// `(match id, focus puuid)` of the open Match Details, if any.
     pub fn open_match_args(&self) -> Option<(String, String)> {
         lock(&self.open_match)
@@ -1124,6 +1131,15 @@ impl AppState {
         lock(&self.open_details)
             .as_ref()
             .is_some_and(|d| d.card.puuid == puuid)
+    }
+
+    /// `puuid`'s Player Details as the UI was last given them, when that is
+    /// the page open now.
+    pub fn open_details_of(&self, puuid: &str) -> Option<PlayerDetails> {
+        lock(&self.open_details)
+            .as_ref()
+            .filter(|d| d.card.puuid == puuid)
+            .cloned()
     }
 
     /// The player whose Details the UI has open, if any.

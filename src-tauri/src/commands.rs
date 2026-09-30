@@ -12,6 +12,8 @@
 //!   forgotten, so nothing is rebuilt or emitted for it.
 //! - `match_details(matchId, focusPuuid)` — one match as the Match Details
 //!   scoreboard, from the DB (fetched once when it isn't stored yet).
+//! - `close_match()` — the UI left the Match Details page: the open match is
+//!   forgotten, so no `"match"` event is built or emitted for it.
 //! - `my_stats()` — the user's My Stats for the current act, from the DB
 //!   only (no Riot call); `null` while the user or the act is unknown.
 //! - `copy_log()` — the last 500 log lines (R30; the UI copies them).
@@ -126,6 +128,13 @@ pub(crate) async fn player_details_for(
                 // The card on screen may have gained matches too.
                 st.reload_slot(&puuid).await;
                 crate::details::refresh(&st, &puuid).await;
+                // R153: the sync may have stored matches that put new
+                // teammates into the Top 3; the ones now shown unnamed are
+                // asked too (a puuid already queued or answered blank is not
+                // asked again: `queue_name_fill`, `Repo::names_to_ask`).
+                if let Some(page) = st.open_details_of(&puuid) {
+                    st.queue_name_fill(details_asks(&page));
+                }
             });
         }
     }
@@ -176,6 +185,20 @@ pub fn close_details(state: AppStateRef<'_>) {
 /// `close_details` without the Tauri wrapper.
 pub(crate) fn close_details_for(st: &Arc<AppState>) {
     st.close_details();
+}
+
+/// The UI left the Match Details page (Back, or another page): nothing is
+/// open any more, so a closed scoreboard is never rebuilt or emitted to.
+/// Closing with nothing open does nothing; a later `match_details` or
+/// `player_details` call works as before.
+#[tauri::command]
+pub fn close_match(state: AppStateRef<'_>) {
+    close_match_for(state.inner());
+}
+
+/// `close_match` without the Tauri wrapper.
+pub(crate) fn close_match_for(st: &Arc<AppState>) {
+    st.close_match();
 }
 
 #[tauri::command]

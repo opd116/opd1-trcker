@@ -1057,36 +1057,47 @@ pub const NAME_BATCH_MAX: usize = 100;
 ///
 /// The request goes through the session's throttle like every pd call. A
 /// failed request stores nothing: an error is not an answer, and the asks
-/// are not kept — a later trigger asks again.
+/// are not kept — a later trigger asks again (a loop on a persistent error
+/// would be worse).
+///
+/// The asks it has taken are held by a [`TakenAsks`] guard until the request
+/// is answered: a step that is dropped on the way — the poll loop aborts the
+/// worker on a stage change — or that loses the Riot client puts them back in
+/// the queue, because for a player who hid their name they are the only
+/// route to it (a stored match queues its players once).
 pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Result<(), Gone> {
-    let mut asks: Vec<NameAsk> = Vec::new();
-    while asks.len() < NAME_BATCH_MAX {
-        let batch = lock(&st.live).take_fill(NAME_BATCH_MAX - asks.len());
+    let mut held = TakenAsks::new(st);
+    while held.asks.len() < NAME_BATCH_MAX {
+        let batch = lock(&st.live).take_fill(NAME_BATCH_MAX - held.asks.len());
         if batch.is_empty() {
             break;
         }
+        held.checking = batch.clone();
         // A SQLite failure (`None`, already logged) drops the batch.
-        if let Some(worth) = st.db(move |repo| repo.names_to_ask(&batch)).await {
-            asks.extend(worth);
+        let worth = st.db(move |repo| repo.names_to_ask(&batch)).await;
+        held.checking.clear();
+        if let Some(worth) = worth {
+            held.asks.extend(worth);
         }
     }
 
     // The last look, under the lock the `VisiblePuuid`s are built under: a
     // match may have started while the DB was read — then nothing is sent and
-    // the asks go back to the queue (R153: the stage is the guard, not who
-    // was hidden).
+    // the asks go back to the queue (`held` puts them there when it goes out
+    // of scope, after `live`; R153: the stage is the guard, not who was
+    // hidden).
     let visible: Vec<VisiblePuuid> = {
-        let mut live = lock(&st.live);
+        let live = lock(&st.live);
         if !live.between_matches() {
-            live.queue_name_fill(asks);
             return Ok(());
         }
-        asks.retain(|a| live.fill_allowed(&a.puuid));
+        held.asks.retain(|a| live.fill_allowed(&a.puuid));
         // `false`: between matches a player who hid their name *during* the
         // match is asked about on purpose (R153) — the `VisiblePuuid` claim
         // for this door is "not asked during a live stage", which the stage
         // checks above guarantee.
-        asks.iter()
+        held.asks
+            .iter()
             .filter_map(|a| VisiblePuuid::new(a.puuid.clone(), false))
             .collect()
     };
@@ -1096,12 +1107,16 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
 
     let entries = match session.names(&visible).await {
         Ok(entries) => entries,
+        // Nothing was answered: `held` keeps the asks for the next connection.
         Err(RiotError::ClientGone) => return Err(Gone),
         Err(e) => {
             log::warn!("names fill for {} players failed: {e}", visible.len());
+            held.asks.clear();
             return Ok(());
         }
     };
+    // Answered: from here on the asks are spent, whatever happens next.
+    let asks = held.answered();
     let asked: HashSet<&str> = asks.iter().map(|a| a.puuid.as_str()).collect();
     let learned: Vec<(String, String, String)> = entries
         .into_iter()
@@ -1131,6 +1146,44 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
         crate::match_details::refresh_open(st).await;
     }
     Ok(())
+}
+
+/// The asks a names-fill step has taken off the queue and had no answer for
+/// yet ([`fill_names_step`]). Dropping it — the step's future dropped, or the
+/// step returning without an answer — puts them back in the queue
+/// ([`LiveModel::queue_name_fill`], which drops the user and empty ids again
+/// and merges with what is queued). [`Self::answered`] hands them over for
+/// good.
+struct TakenAsks<'a> {
+    st: &'a Arc<AppState>,
+    /// Taken and being checked against the DB (`Repo::names_to_ask`).
+    checking: Vec<NameAsk>,
+    /// Worth asking, waiting for the request and its answer.
+    asks: Vec<NameAsk>,
+}
+
+impl<'a> TakenAsks<'a> {
+    fn new(st: &'a Arc<AppState>) -> Self {
+        Self {
+            st,
+            checking: Vec::new(),
+            asks: Vec::new(),
+        }
+    }
+
+    /// The request was answered: the asks are spent and stay out of the queue.
+    fn answered(&mut self) -> Vec<NameAsk> {
+        std::mem::take(&mut self.asks)
+    }
+}
+
+impl Drop for TakenAsks<'_> {
+    fn drop(&mut self) {
+        let back: Vec<NameAsk> = self.checking.drain(..).chain(self.asks.drain(..)).collect();
+        if !back.is_empty() {
+            lock(&self.st.live).queue_name_fill(back);
+        }
+    }
 }
 
 async fn save_names(st: &Arc<AppState>, learned: Vec<(String, String, String)>) {

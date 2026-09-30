@@ -88,8 +88,10 @@ pub(crate) fn endpoint_key(path: &str) -> String {
         };
     }
 
-    // R90: `/personalization/v2/players/{puuid}/playerloadout`.
-    if path_only.starts_with("/personalization/v2/players/")
+    // R90: `/personalization/v3/players/{puuid}/playerloadout` (v2 before
+    // Riot moved it; both name the same capture file).
+    if (path_only.starts_with("/personalization/v3/players/")
+        || path_only.starts_with("/personalization/v2/players/"))
         && path_only.ends_with("/playerloadout")
     {
         return "player_loadout".to_string();
@@ -315,17 +317,22 @@ mod tests {
 
     #[test]
     fn endpoint_key_names_the_player_loadout() {
-        // R90: `dump_raw` writes it as `player_loadout.json`.
-        assert_eq!(
-            endpoint_key("/personalization/v2/players/abc/playerloadout"),
-            "player_loadout"
-        );
-        assert_eq!(
-            endpoint_key(
-                "/personalization/v2/players/123e4567-e89b-12d3-a456-426614174000/playerloadout"
-            ),
-            "player_loadout"
-        );
+        // R90: `dump_raw` writes it as `player_loadout.json`. Riot moved the
+        // endpoint from v2 to v3; both versions get the same file name.
+        for version in ["v2", "v3"] {
+            assert_eq!(
+                endpoint_key(&format!(
+                    "/personalization/{version}/players/abc/playerloadout"
+                )),
+                "player_loadout"
+            );
+            assert_eq!(
+                endpoint_key(&format!(
+                    "/personalization/{version}/players/123e4567-e89b-12d3-a456-426614174000/playerloadout"
+                )),
+                "player_loadout"
+            );
+        }
     }
 
     #[test]

@@ -309,12 +309,15 @@ fn names_deserializes_when_display_name_is_missing() {
 
 #[test]
 fn player_loadout_fixture_parses() {
-    // R90, built from techchrism's `player-loadout/response.json` (field
-    // names per `PlayerLoadout.ts`): `Subject`, `Guns[].{ID, SkinID,
-    // ChromaID}`; the other keys (`Sprays`, `Identity`, charms ...) are
-    // ignored.
-    let parsed: PlayerLoadoutResponse =
-        serde_json::from_str(&fixture("player_loadout.json")).unwrap();
+    // R90, the v3 shape of `personalization/v3/.../playerloadout` (Riot moved
+    // it from v2; `Guns[]` is unchanged): `Subject`, `Guns[].{ID, SkinID,
+    // ChromaID}`. The other keys (`ActiveExpressions`, `DynamicOptions`,
+    // `Identity`, charms ...) are ignored. The fixture carries the new keys
+    // and no `Sprays`.
+    let raw = fixture("player_loadout.json");
+    assert!(raw.contains("\"ActiveExpressions\""), "v3 fixture shape");
+    assert!(!raw.contains("\"Sprays\""), "v3 fixture has no Sprays");
+    let parsed: PlayerLoadoutResponse = serde_json::from_str(&raw).unwrap();
     assert_eq!(parsed.subject, "49e4dd9b-f2b5-4155-96a6-9ae7af3dd95d");
     assert_eq!(parsed.guns.len(), 18, "the fixture's gun count (knife too)");
     for gun in &parsed.guns {
@@ -334,6 +337,46 @@ fn player_loadout_fixture_parses() {
             "E336C6B8-418D-9340-D77F-7A9E4CFE0702",
         ]
     );
+}
+
+#[test]
+fn player_loadout_v2_shaped_body_still_parses() {
+    // The old v2 body (`Sprays[]` instead of `ActiveExpressions[]`, no
+    // `DynamicOptions`) decodes to the same guns: only `Guns[]` is read.
+    let parsed: PlayerLoadoutResponse = serde_json::from_str(
+        r#"{
+            "Subject": "p",
+            "Guns": [{"ID": "g", "SkinID": "s", "SkinLevelID": "l", "ChromaID": "c",
+                      "Attachments": []}],
+            "Sprays": [{"EquipSlotID": "x", "SprayID": "y", "SprayLevelID": null}],
+            "Identity": {"PlayerCardID": "c"},
+            "Incognito": false
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(parsed.subject, "p");
+    assert_eq!(parsed.guns.len(), 1);
+    assert_eq!(parsed.guns[0].skin_id, "s");
+    assert_eq!(parsed.guns[0].chroma_id, "c");
+}
+
+#[test]
+fn player_loadout_v3_ignores_unknown_and_new_fields() {
+    // v3 adds `ActiveExpressions[{TypeID, AssetID}]` and `DynamicOptions`;
+    // whatever else Riot adds later must not break the decode either.
+    let parsed: PlayerLoadoutResponse = serde_json::from_str(
+        r#"{
+            "Subject": "p",
+            "Guns": [{"ID": "g", "SkinID": "s", "ChromaID": "c", "Attachments": [],
+                      "SomethingNew": {"a": 1}}],
+            "ActiveExpressions": [{"TypeID": "t", "AssetID": "a", "Extra": 1}],
+            "DynamicOptions": [{"any": "thing"}],
+            "BrandNewTopLevelKey": [1, 2, 3]
+        }"#,
+    )
+    .unwrap();
+    assert_eq!(parsed.guns.len(), 1);
+    assert_eq!(parsed.guns[0].id, "g");
 }
 
 #[test]

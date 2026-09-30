@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use opd1_core::matchview::{build_match_view, needs_known_name, MatchViewInput};
+use opd1_core::matchview::{build_match_view, needs_known_name, needs_seen_name, MatchViewInput};
 use opd1_core::model::MatchDetailsView;
 use opd1_core::names::KnownName;
 
@@ -60,25 +60,33 @@ async fn read(
             let Some(stored) = repo.match_rows(&m)? else {
                 return Ok(None);
             };
-            // Names the user learned in their OWN finished matches
-            // (`known_name` never reads anyone else's), only for the rows
-            // whose stored name isn't shown as is: hidden on the live
-            // screen now (R93), or without a stored name (R74).
+            // Names the DB knows (R145). A row without a stored name that is
+            // not hidden on the live screen shows the `players`-table name
+            // as a plain name; every other row that isn't shown by its
+            // stored name gets the best known name from any source
+            // (`known_name`), for the remembered style. Nothing is ever
+            // requested from Riot here.
+            let me = me.as_deref().unwrap_or_default();
             let mut remembered: HashMap<String, KnownName> = HashMap::new();
-            if let Some(me) = me.as_deref() {
-                for p in stored.players.iter().filter(|p| p.puuid != me) {
-                    if needs_known_name(p, &hidden) && !remembered.contains_key(&p.puuid) {
-                        if let Some(name) = repo.known_name(me, &p.puuid)? {
-                            remembered.insert(p.puuid.clone(), name);
-                        }
+            let mut seen: HashMap<String, (String, String)> = HashMap::new();
+            for p in stored.players.iter().filter(|p| p.puuid != me) {
+                if needs_seen_name(p, &hidden) && !seen.contains_key(&p.puuid) {
+                    if let Some(name) = repo.seen_name(&p.puuid)? {
+                        seen.insert(p.puuid.clone(), name);
+                        continue;
+                    }
+                }
+                if needs_known_name(p, &hidden) && !remembered.contains_key(&p.puuid) {
+                    if let Some(name) = repo.known_name(me, &p.puuid)? {
+                        remembered.insert(p.puuid.clone(), name);
                     }
                 }
             }
-            Ok(Some((stored, remembered)))
+            Ok(Some((stored, remembered, seen)))
         })
         .await
         .ok_or_else(|| "database unavailable".to_string())?;
-    let Some((stored, remembered)) = loaded else {
+    let Some((stored, remembered, seen)) = loaded else {
         return Ok(None);
     };
 
@@ -90,5 +98,6 @@ async fn read(
         focus_puuid,
         hidden_now: &hidden_now,
         remembered: &remembered,
+        seen: &seen,
     })))
 }

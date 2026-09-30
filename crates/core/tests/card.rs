@@ -5,7 +5,7 @@
 use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow};
 use opd1_core::model::{
     build_card, hero_stats, match_summary, shown_agent, BuildCardInput, CurrentRank, Field,
-    Identity, MatchResultKind, MmrInput, Team,
+    Identity, MatchResultKind, MmrInput, RememberedSource, Team,
 };
 use opd1_core::names::KnownName;
 use opd1_core::stats::Act;
@@ -388,13 +388,14 @@ fn display_name_json_covers_all_four_variants() {
         serde_json::to_value(DisplayName::Remembered {
             name: "Rival".to_string(),
             tag: "ENEMY".to_string(),
+            source: RememberedSource::OwnMatch,
             from_map_id: None,
             from_start_ms: None,
         })
         .unwrap(),
         serde_json::json!({
             "kind": "remembered", "name": "Rival", "tag": "ENEMY",
-            "fromMapId": null, "fromStartMs": null
+            "source": "ownMatch", "fromMapId": null, "fromStartMs": null
         })
     );
     assert_eq!(
@@ -590,6 +591,7 @@ fn remembered(name: &str, tag: &str) -> Option<KnownName> {
         tag: tag.to_string(),
         map_id: None,
         start_ms: None,
+        source: RememberedSource::OwnMatch,
     })
 }
 
@@ -612,6 +614,7 @@ fn incognito_card_shows_a_remembered_name_before_and_after_pick() {
             Field::Value(DisplayName::Remembered {
                 name: "Rival".into(),
                 tag: "ENEMY".into(),
+                source: RememberedSource::OwnMatch,
                 from_map_id: None,
                 from_start_ms: None,
             }),
@@ -794,13 +797,14 @@ fn remembered_name_serializes_source() {
         tag: "ENEMY".into(),
         map_id: Some("uuid-split".into()),
         start_ms: Some(1_234),
+        source: RememberedSource::OwnMatch,
     });
     let json = serde_json::to_value(build_card(input)).unwrap();
     assert_eq!(
         json["name"],
         serde_json::json!({
             "kind": "remembered", "name": "Rival", "tag": "ENEMY",
-            "fromMapId": "uuid-split", "fromStartMs": 1234
+            "source": "ownMatch", "fromMapId": "uuid-split", "fromStartMs": 1234
         })
     );
 
@@ -811,6 +815,41 @@ fn remembered_name_serializes_source() {
     let name = json["name"].as_object().unwrap();
     assert_eq!(name["fromMapId"], serde_json::Value::Null);
     assert_eq!(name["fromStartMs"], serde_json::Value::Null);
+}
+
+#[test]
+fn remembered_source_kind_reaches_the_wire_camel_case() {
+    // R145: the UI tells where a hidden player's name came from.
+    let mut hidden = identity();
+    hidden.incognito = true;
+    for (source, wire, map) in [
+        (RememberedSource::OwnMatch, "ownMatch", Some("uuid-split")),
+        (
+            RememberedSource::OtherMatch,
+            "otherMatch",
+            Some("uuid-split"),
+        ),
+        // A name-service answer has no map.
+        (RememberedSource::Seen, "seen", None),
+    ] {
+        let mut input = base_input(hidden.clone());
+        input.remembered = Some(KnownName {
+            name: "Rival".into(),
+            tag: "ENEMY".into(),
+            map_id: map.map(str::to_string),
+            start_ms: Some(1_234),
+            source,
+        });
+        let json = serde_json::to_value(build_card(input)).unwrap();
+        assert_eq!(json["name"]["kind"], "remembered", "{wire}");
+        assert_eq!(json["name"]["source"], wire);
+        assert_eq!(
+            json["name"]["fromMapId"],
+            map.map_or(serde_json::Value::Null, |m| serde_json::json!(m)),
+            "{wire}"
+        );
+        assert_eq!(json["name"]["fromStartMs"], 1_234, "{wire}");
+    }
 }
 
 // ---------------------------------------------------------------------

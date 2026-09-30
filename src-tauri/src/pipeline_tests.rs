@@ -17,7 +17,9 @@ use opd1_core::db::open_db;
 use opd1_core::db::repo::{
     CompUpdateRow, HistoryEntry, Match, MatchPlayer, MatchTeam, MmrSnapshot, Repo,
 };
-use opd1_core::model::{DisplayName, EncounterCount, Field, LiveState, PlayerDetails, Team};
+use opd1_core::model::{
+    DisplayName, EncounterCount, Field, LiveState, PlayerDetails, RememberedSource, Team,
+};
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
 use opd1_riot::assets::AssetCache;
@@ -33,7 +35,7 @@ pub(crate) const ME: &str = "aaaaaaaa-0000-0000-0000-000000000001";
 const HIDDEN: &str = "bbbbbbbb-0000-0000-0000-000000000002";
 const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
 /// Incognito, and never in a match with ME: their name is only in the DB
-/// from someone else's match.
+/// from someone else's match (a known name from another match, R145).
 const STRANGER: &str = "dddddddd-0000-0000-0000-000000000004";
 /// OTHER's teammate in the party-mark tests.
 const MATE: &str = "eeeeeeee-0000-0000-0000-000000000005";
@@ -485,9 +487,17 @@ pub(crate) fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
 }
 
 /// A competitive match of the current act that ME did not play: HIDDEN and
-/// STRANGER as teammates, with real names (as someone else's match history
-/// would carry them) — so each is in the other's Top Teammates.
-async fn store_foreign_match(st: &AppState) {
+/// STRANGER as teammates, with names (as someone else's match history would
+/// carry them, the tag "LEAK") — so each is in the other's Top Teammates and
+/// each has a known name from another match (R145).
+async fn store_foreign_match(st: &AppState) -> i64 {
+    let start = now_ms() - 60_000;
+    store_foreign_match_at(st, start).await;
+    start
+}
+
+/// [`store_foreign_match`] at a chosen start (epoch ms).
+async fn store_foreign_match_at(st: &AppState, start_ms: i64) {
     let player = |puuid: &str, name: &str| MatchPlayer {
         puuid: puuid.into(),
         team_id: "Blue".into(),
@@ -510,7 +520,7 @@ async fn store_foreign_match(st: &AppState) {
         match_id: "m-foreign".into(),
         map_id: "/Game/Maps/Ascent/Ascent".into(),
         queue_id: "competitive".into(),
-        start_ms: now_ms() - 60_000,
+        start_ms,
         winning_team: None,
         is_ranked: false,
         rounds_played: None,
@@ -525,7 +535,7 @@ async fn store_foreign_match(st: &AppState) {
 #[tokio::test]
 async fn worker_names_only_visible_players_and_settles_failures() {
     let h = harness().await;
-    store_foreign_match(&h.st).await;
+    let foreign_start = store_foreign_match(&h.st).await;
     {
         let mut live = lock(&h.st.live);
         live.stage = Stage::Ingame;
@@ -599,18 +609,20 @@ async fn worker_names_only_visible_players_and_settles_failures() {
 
     assert_eq!(other.encounters, None, "never met: no badge");
 
-    // HIDDEN played m1 + m2 against ME: their name as shown after those
-    // matches is remembered, and the badge counts both.
+    // HIDDEN played m1 + m2 against ME, and also a newer match ME did not
+    // play (R145: any stored match is a known-name source, newest first):
+    // the newest row's name is remembered, marked as from another match,
+    // and the badge still counts only the matches shared with ME.
     let hidden = &last.players[1];
     assert_eq!(
         hidden.name,
         Field::Value(DisplayName::Remembered {
             name: "SecretName".into(),
-            tag: "HID".into(),
-            // The newest shared match is m2; the asset tables aren't loaded,
-            // so its map has no uuid.
+            tag: "LEAK".into(),
+            source: RememberedSource::OtherMatch,
+            // The asset tables aren't loaded, so its map has no uuid.
             from_map_id: None,
-            from_start_ms: Some(2_000),
+            from_start_ms: Some(foreign_start),
         })
     );
     assert_eq!(
@@ -622,12 +634,17 @@ async fn worker_names_only_visible_players_and_settles_failures() {
     );
     assert_eq!(hidden.party, None, "no synced history: no party link");
 
-    // STRANGER's name is only in a match ME didn't play: never shown.
+    // STRANGER never met ME; their name is only in a match ME didn't play.
+    // R145: still a known name, from another match.
     let stranger = &last.players[3];
     assert_eq!(
         stranger.name,
-        Field::Value(DisplayName::HiddenAgent {
-            agent_id: "agent".into()
+        Field::Value(DisplayName::Remembered {
+            name: "LeakedName".into(),
+            tag: "LEAK".into(),
+            source: RememberedSource::OtherMatch,
+            from_map_id: None,
+            from_start_ms: Some(foreign_start),
         })
     );
     assert_eq!(stranger.encounters, None);
@@ -646,10 +663,6 @@ async fn worker_names_only_visible_players_and_settles_failures() {
     // stays visible.
     assert!(matches!(hidden.last5, Field::Value(ref v) if v.len() == 2));
     assert_eq!(hidden.kd, Field::Value(5.0 / 15.0));
-    // A name seen only in someone else's match never reaches the live
-    // payload (nor does HIDDEN's name from that foreign match).
-    let payload = serde_json::to_string(last).unwrap();
-    assert!(!payload.contains("LeakedName") && !payload.contains("LEAK"));
 
     // Player Details for ME: recent from the DB; no encounters with self.
     let d = crate::details::build(&h.st, ME).await.unwrap();
@@ -662,7 +675,8 @@ async fn worker_names_only_visible_players_and_settles_failures() {
     assert!(d.encounters.is_empty());
     // Details for the hidden enemy: encounters exist (m1, m2), their card
     // keeps the remembered name, and STRANGER (their teammate in the
-    // foreign match, hidden on screen) is never named in Top Teammates.
+    // foreign match, hidden on screen) is in Top Teammates by the same
+    // rule as their own card (R145).
     let d = crate::details::build(&h.st, HIDDEN).await.unwrap();
     assert_eq!(d.encounters.len(), 2);
     assert!(d.encounters.iter().all(|e| !e.with));
@@ -674,28 +688,29 @@ async fn worker_names_only_visible_players_and_settles_failures() {
     assert_eq!(d.top_teammates[0].puuid, STRANGER);
     assert_eq!(
         d.top_teammates[0].name,
-        DisplayName::HiddenAgent {
-            agent_id: "agent".into()
+        DisplayName::Remembered {
+            name: "LeakedName".into(),
+            tag: "LEAK".into(),
+            source: RememberedSource::OtherMatch,
+            from_map_id: None,
+            from_start_ms: Some(foreign_start),
         }
     );
-    let json = serde_json::to_string(&d).unwrap();
-    assert!(!json.contains("LeakedName") && !json.contains("LEAK"));
 
-    // STRANGER's details: HIDDEN (hidden on screen) as a teammate shows the
-    // name remembered from ME's own match — never the foreign one.
+    // STRANGER's details: HIDDEN (hidden on screen) as a teammate shows
+    // their newest known name, from the foreign match.
     let d = crate::details::build(&h.st, STRANGER).await.unwrap();
     assert_eq!(d.top_teammates.len(), 1);
     assert_eq!(
         d.top_teammates[0].name,
         DisplayName::Remembered {
             name: "SecretName".into(),
-            tag: "HID".into(),
+            tag: "LEAK".into(),
+            source: RememberedSource::OtherMatch,
             from_map_id: None,
-            from_start_ms: Some(2_000),
+            from_start_ms: Some(foreign_start),
         }
     );
-    let json = serde_json::to_string(&d).unwrap();
-    assert!(!json.contains("LeakedName") && !json.contains("LEAK"));
 }
 
 // ---------------------------------------------------------------------
@@ -817,6 +832,7 @@ async fn remembered_name_source_is_map_uuid() {
     let name = card_json(&h.st, HIDDEN)["name"].clone();
     assert_eq!(name["kind"], "remembered");
     assert_eq!(name["name"], "SecretName");
+    assert_eq!(name["source"], "ownMatch", "the user played that match");
     assert_eq!(name["fromMapId"], Value::Null);
     assert_eq!(name["fromStartMs"], json!(start));
     assert!(!serde_json::to_string(&h.st.live_state())
@@ -840,8 +856,9 @@ async fn top3_remembered_source_is_map_uuid() {
     let h = harness().await;
     let start = store_split_match(&h.st).await;
     // HIDDEN and STRANGER are teammates in a competitive match of the
-    // current act that ME did not play.
-    store_foreign_match(&h.st).await;
+    // current act that ME did not play, older than the Split match: the
+    // newest known name (R145) is the one from the user's own match.
+    store_foreign_match_at(&h.st, now_ms() - 600_000).await;
     mount_asset_tables(&h.assets_server).await;
     h.st.ensure_tables(false).await.expect("tables load");
     {
@@ -866,13 +883,17 @@ async fn top3_remembered_source_is_map_uuid() {
         DisplayName::Remembered {
             name: "SecretName".into(),
             tag: "HID".into(),
+            source: RememberedSource::OwnMatch,
             from_map_id: Some(SPLIT_UUID.into()),
             from_start_ms: Some(start),
         }
     );
     let json = serde_json::to_string(&d).unwrap();
     assert!(!json.contains("/Game/"), "no Riot map path in {json}");
-    assert!(!json.contains("LEAK"), "the foreign match's name stays out");
+    assert!(
+        !json.contains("LEAK"),
+        "the older foreign name loses to the newer own one"
+    );
 }
 
 #[tokio::test]

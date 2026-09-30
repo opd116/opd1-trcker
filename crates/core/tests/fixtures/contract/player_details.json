@@ -36,6 +36,7 @@
       "fromStartMs": 1758970000000,
       "kind": "remembered",
       "name": "Rival",
+      "source": "ownMatch",
       "tag": "ENEMY"
     },
     "party": {
@@ -176,6 +177,7 @@
         "fromStartMs": 1758970000000,
         "kind": "remembered",
         "name": "Rival",
+        "source": "ownMatch",
         "tag": "ENEMY"
       },
       "puuid": "puuid-mate-2"

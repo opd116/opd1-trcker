@@ -98,8 +98,8 @@ async fn match_details_hides_live_incognito_rows() {
         live.slots = slots;
     }
 
-    // A match ME played: HIDDEN follows their card, which shows the name
-    // ME learned in this very match, in the remembered style (R93).
+    // A match ME played: HIDDEN follows their card, which shows the newest
+    // known name in the remembered style (R93, R145).
     let view = crate::match_details::load(&h.st, "m-split", ME)
         .await
         .unwrap();
@@ -112,23 +112,163 @@ async fn match_details_hides_live_incognito_rows() {
         row_name(&view, HIDDEN)
     );
 
-    // A match ME did not play: HIDDEN is remembered from ME's own match;
-    // STRANGER (never met ME) shows no name, and the leaked names stay out.
+    // A match ME did not play (R145): both hidden rows follow their cards,
+    // which show the newest name the DB knows. Both names are in this very
+    // match's rows, which is newer than the matches ME played.
     let view = crate::match_details::load(&h.st, "m-foreign", HIDDEN)
         .await
         .unwrap();
     assert_eq!(view.perspective, opd1_core::model::Perspective::Focus);
-    assert!(matches!(
-        row_name(&view, HIDDEN),
-        DisplayName::Remembered { ref name, .. } if name == "SecretName"
-    ));
-    assert_eq!(row_name(&view, STRANGER), DisplayName::HiddenPlayer);
-    let text = serde_json::to_string(&view).unwrap();
-    assert!(
-        !text.contains("LeakedName") && !text.contains("LEAK"),
-        "the foreign match's stored names never reach the wire: {text}"
+    for (puuid, name) in [(HIDDEN, "SecretName"), (STRANGER, "LeakedName")] {
+        assert!(
+            matches!(
+                row_name(&view, puuid),
+                DisplayName::Remembered { name: ref n, source: RememberedSource::OtherMatch, .. }
+                    if n == name
+            ),
+            "{puuid}: {:?}",
+            row_name(&view, puuid)
+        );
+    }
+    assert!(!serde_json::to_string(&view).unwrap().contains("/Game/"));
+}
+
+/// Riot's match-details, on the user's real account, returned empty names
+/// for everyone but the user. Stores such a match: ME with a name, and
+/// OTHER, HIDDEN, STRANGER and MATE without.
+async fn store_nameless_match(st: &AppState) {
+    let m = Match {
+        match_id: "m-nameless".into(),
+        map_id: SPLIT_PATH.into(),
+        queue_id: "competitive".into(),
+        start_ms: now_ms() - 90_000,
+        winning_team: None,
+        is_ranked: true,
+        rounds_played: None,
+        game_length_ms: None,
+    };
+    let players = vec![
+        player_row(ME, "Blue", "Me", "TAG"),
+        player_row(OTHER, "Blue", "", ""),
+        player_row(MATE, "Blue", "", ""),
+        player_row(HIDDEN, "Red", "", ""),
+        player_row(STRANGER, "Red", "", ""),
+    ];
+    st.db(move |repo| repo.upsert_match(&m, &[], &players))
+        .await
+        .unwrap();
+}
+
+/// A name-service answer stored while `puuid` was visible.
+async fn save_seen_name(st: &AppState, puuid: &'static str, name: &str, tag: &str, at: i64) {
+    let (name, tag) = (name.to_string(), tag.to_string());
+    st.db(move |repo| {
+        save_player(
+            repo.conn(),
+            &PlayerUpdate {
+                puuid: puuid.into(),
+                name: Some((name, tag)),
+                account_level: 30,
+                card_id: "card".into(),
+            },
+            at,
+        )
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn match_details_names_rows_riot_left_empty_from_the_players_table() {
+    // R145, the field report: every row but the user's came back nameless,
+    // so the whole scoreboard was drawn hidden. A visible sighting's name
+    // is a name.
+    let h = harness().await;
+    store_nameless_match(&h.st).await;
+    let at = now_ms() - 3_600_000;
+    save_seen_name(&h.st, OTHER, "Friend", "FR1", at).await;
+    save_seen_name(&h.st, HIDDEN, "Ghost", "BOO", at).await;
+    {
+        // HIDDEN is incognito on the live screen right now; the rest are
+        // not on screen at all.
+        let slots = vec![
+            slot_for(&h.st, ME, false).await,
+            slot_for(&h.st, HIDDEN, true).await,
+        ];
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.slots = slots;
+    }
+
+    let view = crate::match_details::load(&h.st, "m-nameless", OTHER)
+        .await
+        .unwrap();
+    // Not hidden now, no stored name, a players-table name: a plain name.
+    assert_eq!(
+        row_name(&view, OTHER),
+        DisplayName::Visible {
+            name: "Friend".into(),
+            tag: "FR1".into()
+        }
     );
-    assert!(!text.contains("/Game/"));
+    // Hidden now: the card rule — the same known name, in the remembered
+    // style with its kind, never as a plain name.
+    assert_eq!(
+        row_name(&view, HIDDEN),
+        DisplayName::Remembered {
+            name: "Ghost".into(),
+            tag: "BOO".into(),
+            source: RememberedSource::Seen,
+            from_map_id: None,
+            from_start_ms: Some(at),
+        }
+    );
+    // No name anywhere: today's behaviour (the row's agent, else hidden).
+    assert!(matches!(
+        row_name(&view, STRANGER),
+        DisplayName::HiddenAgent { .. } | DisplayName::HiddenPlayer
+    ));
+    assert!(matches!(
+        row_name(&view, MATE),
+        DisplayName::HiddenAgent { .. } | DisplayName::HiddenPlayer
+    ));
+    // The user is the user.
+    assert_eq!(
+        row_name(&view, ME),
+        DisplayName::Visible {
+            name: "Me".into(),
+            tag: "TAG".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn top_teammates_name_a_friend_riot_left_nameless_from_the_players_table() {
+    // R145, the field report: "Hidden Player" for friends with 34 shared
+    // games, because the stored match rows carry no name.
+    let h = harness().await;
+    store_nameless_match(&h.st).await;
+    save_hidden_self(&h.st).await; // the user's own `players` row (Details needs it off screen)
+    save_seen_name(&h.st, MATE, "Buddy", "BD1", now_ms() - 1_000).await;
+
+    let d = crate::details::build(&h.st, ME).await.unwrap();
+    let by = |puuid: &str| {
+        d.top_teammates
+            .iter()
+            .find(|t| t.puuid == puuid)
+            .unwrap_or_else(|| panic!("{puuid} is not a top teammate"))
+            .name
+            .clone()
+    };
+    assert_eq!(
+        by(MATE),
+        DisplayName::Visible {
+            name: "Buddy".into(),
+            tag: "BD1".into()
+        }
+    );
+    // A teammate with no name anywhere keeps today's behaviour.
+    assert_eq!(by(OTHER), DisplayName::HiddenPlayer);
 }
 
 /// ME (Jett, tier 21 during the match) lost 10-13 against OTHER (Reyna,
@@ -841,7 +981,7 @@ async fn wait_for_playerloadouts(h: &Harness, n: usize) {
 async fn self_loadout_fetched_once_per_connect() {
     let h = harness().await;
     let (raw, body) = fixture_loadout();
-    let own_path = format!("/personalization/v2/players/{ME}/playerloadout");
+    let own_path = format!("/personalization/v3/players/{ME}/playerloadout");
     get(&h.server, &own_path, body).await;
     let vandal = raw.vandal.clone().unwrap();
     mount_skin(&h.assets_server, &vandal.skin_id, &vandal.chroma_id).await;
@@ -912,7 +1052,7 @@ async fn self_loadout_waits_for_valorant_and_is_read_once_per_connect() {
     let (_, body) = fixture_loadout();
     get(
         &h.server,
-        &format!("/personalization/v2/players/{ME}/playerloadout"),
+        &format!("/personalization/v3/players/{ME}/playerloadout"),
         body,
     )
     .await;
@@ -934,7 +1074,7 @@ async fn self_loadout_waits_for_valorant_and_is_read_once_per_connect() {
     let (_, body) = fixture_loadout();
     get(
         &h.server,
-        &format!("/personalization/v2/players/{ME}/playerloadout"),
+        &format!("/personalization/v3/players/{ME}/playerloadout"),
         body,
     )
     .await;
@@ -960,7 +1100,7 @@ async fn self_loadout_kept_in_app_state() {
     let (raw, body) = fixture_loadout();
     get(
         &h.server,
-        &format!("/personalization/v2/players/{ME}/playerloadout"),
+        &format!("/personalization/v3/players/{ME}/playerloadout"),
         body,
     )
     .await;
@@ -1227,21 +1367,21 @@ async fn show(poller: &mut Poller, h: &Harness, stage: Stage, roster: Vec<Roster
 }
 
 #[tokio::test]
-async fn a_hidden_player_who_left_the_screen_stays_hidden_in_details() {
-    // HIDDEN was visible in an earlier match, so the `players` row holds the
-    // name name-service gave then. Today they are incognito in the user's
-    // Agent Select; the user opens their Details, then a dodge takes them
-    // off the screen before a rebuild. The rebuilt card must keep the card
-    // rule (Hidden Player / the agent / the remembered name) — never the
-    // name-service name in the visible style.
+async fn a_hidden_player_who_left_the_screen_keeps_the_card_rule_in_details() {
+    // HIDDEN is incognito in the user's Agent Select; the user opens their
+    // Details, then a dodge takes them off the screen before a rebuild. The
+    // rebuilt card keeps the card rule: Hidden Player / the agent while no
+    // name is known, and (R145) the remembered style — never the visible
+    // style — once the DB knows the name from any source.
     let h = harness().await;
     let now = now_ms();
+    // A first sighting while hidden: level and card only, no name.
     h.st.db(move |repo| {
         save_player(
             repo.conn(),
             &PlayerUpdate {
                 puuid: HIDDEN.into(),
-                name: Some(("RealName".into(), "OLD".into())),
+                name: None,
                 account_level: 40,
                 card_id: "card".into(),
             },
@@ -1269,7 +1409,6 @@ async fn a_hidden_player_who_left_the_screen_stays_hidden_in_details() {
         off_screen.card.name,
         Field::Value(DisplayName::HiddenPlayer)
     );
-    assert!(!leaks(&off_screen), "no name-service name off screen");
 
     // Locked: the agent name.
     show(
@@ -1287,21 +1426,49 @@ async fn a_hidden_player_who_left_the_screen_stays_hidden_in_details() {
             agent_id: "agent".into()
         })
     );
-    assert!(!leaks(&off_screen));
 
-    // A name the user learned in their own finished match: the remembered
-    // style, still never the name-service one.
+    // A name-service answer from an earlier time HIDDEN was visible, stored
+    // ten days ago (R145): the remembered style, of the `seen` kind.
+    let seen_at = now - 10 * 86_400_000;
+    save_seen_name(&h.st, HIDDEN, "RealName", "OLD", seen_at).await;
+    let seen_name = DisplayName::Remembered {
+        name: "RealName".into(),
+        tag: "OLD".into(),
+        source: RememberedSource::Seen,
+        from_map_id: None,
+        from_start_ms: Some(seen_at),
+    };
+    let off_screen = crate::details::build(&h.st, HIDDEN).await.unwrap();
+    assert_eq!(off_screen.card.name, Field::Value(seen_name.clone()));
+    // …and while they are on screen, hidden, in Agent Select.
+    show(
+        &mut poller,
+        &h,
+        Stage::Pregame,
+        vec![roster(ME, false), hidden_ally("locked")],
+    )
+    .await;
+    let on_screen = crate::details::build(&h.st, HIDDEN).await.unwrap();
+    assert_eq!(on_screen.card.name, Field::Value(seen_name));
+    show(&mut poller, &h, Stage::Menus, vec![roster(ME, false)]).await;
+
+    // A name the user learned in their own finished match, newer than that
+    // sighting: it wins, as an own-match name.
     store_split_match(&h.st).await;
     let off_screen = crate::details::build(&h.st, HIDDEN).await.unwrap();
     assert!(
         matches!(
             off_screen.card.name,
-            Field::Value(DisplayName::Remembered { ref name, .. }) if name == "SecretName"
+            Field::Value(DisplayName::Remembered {
+                ref name,
+                source: RememberedSource::OwnMatch,
+                ..
+            }) if name == "SecretName"
         ),
         "{:?}",
         off_screen.card.name
     );
-    assert!(!leaks(&off_screen));
+    assert!(!leaks(&off_screen), "the older sighting's name lost");
 
     // Seen visible later: the stored name, as before.
     show(
@@ -1326,6 +1493,158 @@ async fn a_hidden_player_who_left_the_screen_stays_hidden_in_details() {
     );
 }
 
+// ---------------------------------------------------------------------
+// UI review: an open Details follows the live screen
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn open_details_follow_a_teammates_lock_in_agent_select() {
+    // A hidden teammate is opened before they lock: Hidden Player, no
+    // agent. The next roster (the pregame re-poll) shows the locked agent
+    // on their card, and the open Details must follow it, not keep the
+    // snapshot from the click.
+    let h = harness().await;
+    let mut poller = Poller::new(h.st.clone());
+    show(
+        &mut poller,
+        &h,
+        Stage::Pregame,
+        vec![roster(ME, false), hidden_ally("")],
+    )
+    .await;
+    let opened = crate::commands::player_details_for(&h.st, HIDDEN)
+        .await
+        .unwrap();
+    assert_eq!(opened.card.name, Field::Value(DisplayName::HiddenPlayer));
+    let seen = details_events(&h.rec);
+
+    show(
+        &mut poller,
+        &h,
+        Stage::Pregame,
+        vec![roster(ME, false), hidden_ally("locked")],
+    )
+    .await;
+    let event = details_event_after(&h.rec, seen, HIDDEN, |d| {
+        d["card"]["name"]["kind"] == "hiddenAgent"
+    })
+    .await;
+    assert_eq!(event["card"]["agentId"], "agent", "the agent box fills too");
+}
+
+#[tokio::test]
+async fn open_details_get_the_pregame_loadouts_that_arrive_after_the_click() {
+    let h = harness().await;
+    mock_pregame(&h.server).await;
+    mount_skin(&h.assets_server, REAVER, REAVER_RED).await;
+    let mut poller = Poller::new(h.st.clone());
+    poller.fetch_pregame(&h.session, ME).await.unwrap();
+    poller.stop_worker();
+
+    // MATE (an ally, on the roster) is opened before any loadout: every
+    // weapon is `—` (null). MATE's entry is the capture's Reaver Vandal.
+    let opened = crate::commands::player_details_for(&h.st, MATE)
+        .await
+        .unwrap();
+    assert_eq!(loadout_of(&opened)["vandal"], Value::Null);
+    let seen = details_events(&h.rec);
+
+    // Re-poll 1: Riot's answer is not valid yet. Re-poll 2: valid — the
+    // loadout is merged and the open Details is rebuilt with the skin named.
+    poller.pregame_repoll(&h.session).await.unwrap();
+    poller.pregame_repoll(&h.session).await.unwrap();
+    poller.stop_worker();
+    let event = details_event_after(&h.rec, seen, MATE, |d| {
+        d["loadout"].get("vandal").is_some_and(|v| v.is_object())
+    })
+    .await;
+    assert_eq!(event["loadout"]["vandal"]["skinName"], "Reaver");
+    let mut asked: Vec<String> = h
+        .assets_server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .filter(|p| p.starts_with("/v1/weapons/skins/"))
+        .collect();
+    // Only the open player's skins are named, each once (the capture's
+    // Vandal, and the two other weapons the entry equips).
+    assert!(asked.contains(&format!("/v1/weapons/skins/{REAVER}")));
+    let all = asked.len();
+    asked.sort();
+    asked.dedup();
+    assert_eq!(asked.len(), all, "no skin name is fetched twice: {asked:?}");
+    assert_eq!(
+        all, 3,
+        "MATE's three equipped skins, nobody else's: {asked:?}"
+    );
+    assert!(!h.st.skins_resolving(MATE), "the attempt is over");
+}
+
+#[tokio::test]
+async fn a_live_change_leaves_the_open_details_of_an_absent_player_alone() {
+    // OTHER's Details is open but they are not on the new roster: nothing
+    // on the live screen changed for them, so nothing is rebuilt (proved by
+    // a new stored match that a rebuild would show).
+    let h = harness().await;
+    lobby_with(&h, OTHER).await;
+    let opened = crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    assert!(opened.recent.is_empty());
+    let seen = details_events(&h.rec);
+    h.st.db(|repo| {
+        store_act_match(repo, OTHER, 1, act_match_start(1), Some(10));
+        Ok(())
+    })
+    .await
+    .unwrap();
+
+    let mut poller = Poller::new(h.st.clone());
+    show(&mut poller, &h, Stage::Pregame, vec![roster(ME, false)]).await;
+    assert_eq!(
+        details_events(&h.rec),
+        seen,
+        "no rebuild for an absent player"
+    );
+}
+
+#[tokio::test]
+async fn closed_details_are_never_refreshed() {
+    // The UI calls `close_details` when the page is left: nothing is
+    // rebuilt or emitted for it afterwards, whatever the live screen does.
+    let h = harness().await;
+    let mut poller = Poller::new(h.st.clone());
+    show(
+        &mut poller,
+        &h,
+        Stage::Pregame,
+        vec![roster(ME, false), hidden_ally("")],
+    )
+    .await;
+    crate::commands::player_details_for(&h.st, HIDDEN)
+        .await
+        .unwrap();
+    assert!(h.st.details_open_for(HIDDEN));
+    let seen = details_events(&h.rec);
+
+    crate::commands::close_details_for(&h.st);
+    assert!(!h.st.details_open_for(HIDDEN));
+    show(
+        &mut poller,
+        &h,
+        Stage::Pregame,
+        vec![roster(ME, false), hidden_ally("locked")],
+    )
+    .await;
+    crate::details::refresh(&h.st, HIDDEN).await;
+    assert_eq!(details_events(&h.rec), seen, "a closed page gets no event");
+
+    // Closing again, or with nothing open, is fine.
+    crate::commands::close_details_for(&h.st);
+}
+
 #[tokio::test]
 async fn a_late_own_loadout_answer_never_lands_on_another_account() {
     // The read of account A's loadout is still in flight (a slow answer, a
@@ -1335,7 +1654,7 @@ async fn a_late_own_loadout_answer_never_lands_on_another_account() {
     let (raw, body) = fixture_loadout();
     get(
         &h.server,
-        &format!("/personalization/v2/players/{ME}/playerloadout"),
+        &format!("/personalization/v3/players/{ME}/playerloadout"),
         body,
     )
     .await;

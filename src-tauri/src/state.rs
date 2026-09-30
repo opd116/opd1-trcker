@@ -322,8 +322,8 @@ impl LiveModel {
         //   stored copy) — shown to the user, never looked up remotely;
         // - an incognito player: no visible name is fed into the card from
         //   any source (build_card also ignores it, belt and braces) — only
-        //   the name remembered from a finished match the user played in
-        //   (`PlayerDb::remembered`, `Repo::known_name`);
+        //   the best name the DB knows from any source, in the remembered
+        //   style (`PlayerDb::remembered`, `Repo::known_name`, R145);
         // - a visible player: this run's name-service answer first, then
         //   the name stored the last time they were visible (cached-first).
         let stored = || slot.db.row.as_ref().and_then(StoredPlayer::name);
@@ -866,6 +866,19 @@ impl AppState {
             .is_some_and(|d| d.card.puuid == puuid)
     }
 
+    /// The player whose Details the UI has open, if any.
+    pub fn open_details_puuid(&self) -> Option<String> {
+        lock(&self.open_details)
+            .as_ref()
+            .map(|d| d.card.puuid.clone())
+    }
+
+    /// The UI left the Details page (`close_details`): nothing is open, so
+    /// no rebuild is done or emitted for it until the next open.
+    pub fn close_details(&self) {
+        *lock(&self.open_details) = None;
+    }
+
     /// Emits `fresh` as a `"details"` event when it is the open Player
     /// Details and differs from what the UI was last given; `true` when it
     /// was emitted. Compare, emit and record happen under one lock, so two
@@ -1018,10 +1031,10 @@ impl Drop for SkinResolveGuard {
 mod tests {
     use super::*;
     use opd1_core::db::repo::MatchPlayerRow;
-    use opd1_core::model::{DisplayName, EncounterCount, PartyMark};
+    use opd1_core::model::{DisplayName, EncounterCount, PartyMark, RememberedSource};
     use opd1_core::names::KnownName;
     use opd1_core::party::SharedRef;
-    use serde_json::Value;
+    use serde_json::{json, Value};
 
     fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
         RosterPlayer {
@@ -1160,8 +1173,10 @@ mod tests {
     /// The src-tauri half of CLAUDE.md "Hidden names": an incognito
     /// player's real name may be sitting in the `players` row (seen while
     /// visible) or in this run's name-service answers, yet their card only
-    /// ever shows HiddenPlayer / HiddenAgent — or, when the user learned
-    /// it in a finished match the user played, the remembered name.
+    /// ever shows HiddenPlayer / HiddenAgent — or, when the DB knows the
+    /// name from some source (R145, `Repo::known_name` fills
+    /// `db.remembered`), the remembered name; the slot's own row and this
+    /// run's answers are never read for it by the card.
     #[test]
     fn incognito_card_never_carries_a_visible_name_unless_remembered() {
         let mut s = slot("h1", true);
@@ -1191,19 +1206,23 @@ mod tests {
             })
         );
         assert!(!leaks(&m));
-        // Remembered from a match the user played: that name, in its own
-        // style — still never the players-row / name-service one.
+        // Remembered (R145: the DB knows the name from some source): that
+        // name, in its own style. The card never reads the slot's `players`
+        // row or this run's name-service answers by itself for an incognito
+        // player — only what `Repo::known_name` handed over.
         m.slots[0].db.remembered = Some(KnownName {
             name: "Seen".into(),
             tag: "AFTER".into(),
             map_id: None,
             start_ms: None,
+            source: RememberedSource::OwnMatch,
         });
         assert_eq!(
             card(&m).name,
             Field::Value(DisplayName::Remembered {
                 name: "Seen".into(),
                 tag: "AFTER".into(),
+                source: RememberedSource::OwnMatch,
                 from_map_id: None,
                 from_start_ms: None,
             })
@@ -1223,6 +1242,30 @@ mod tests {
     }
 
     #[test]
+    fn card_for_shows_a_seen_name_of_a_hidden_player_in_the_remembered_style() {
+        // R145: a name-service answer from a time the player was visible
+        // (`Repo::known_name`'s `Seen` source) is shown while they are
+        // hidden now: remembered style, no map, never the visible style.
+        let mut s = slot("h1", true);
+        s.db.remembered = Some(KnownName {
+            name: "Vis".into(),
+            tag: "IBLE".into(),
+            map_id: None,
+            start_ms: Some(700),
+            source: RememberedSource::Seen,
+        });
+        let m = model(vec![s]);
+        let json = serde_json::to_value(&m.build(&[], 0, &|_| None).players[0]).unwrap();
+        assert_eq!(
+            json["name"],
+            json!({
+                "kind": "remembered", "name": "Vis", "tag": "IBLE", "source": "seen",
+                "fromMapId": null, "fromStartMs": 700
+            })
+        );
+    }
+
+    #[test]
     fn card_for_maps_remembered_source() {
         let mut s = slot("h1", true);
         s.db.remembered = Some(KnownName {
@@ -1231,6 +1274,7 @@ mod tests {
             // The stored Riot path (R84): converted only when the card is built.
             map_id: Some("/Game/Maps/Bonsai/Bonsai".into()),
             start_ms: Some(1_234),
+            source: RememberedSource::OwnMatch,
         });
         let m = model(vec![s]);
         let card_json = |lookup: &dyn Fn(&str) -> Option<String>| {

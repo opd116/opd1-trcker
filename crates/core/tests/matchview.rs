@@ -5,8 +5,10 @@
 use std::collections::HashMap;
 
 use opd1_core::db::repo::{Match, MatchPlayer, MatchTeam, StoredMatch};
-use opd1_core::matchview::{build_match_view, needs_known_name, MatchViewInput};
-use opd1_core::model::{DisplayName, MatchDetailsView, MatchResultKind, Perspective};
+use opd1_core::matchview::{build_match_view, needs_known_name, needs_seen_name, MatchViewInput};
+use opd1_core::model::{
+    DisplayName, MatchDetailsView, MatchResultKind, Perspective, RememberedSource,
+};
 use opd1_core::names::KnownName;
 
 const ME: &str = "me";
@@ -92,6 +94,8 @@ struct Ctx {
     focus: &'static str,
     hidden_now: HashMap<String, Option<String>>,
     remembered: HashMap<String, KnownName>,
+    /// `Repo::seen_name`: the `players`-table names (R145).
+    seen: HashMap<String, (String, String)>,
 }
 
 impl Ctx {
@@ -101,6 +105,7 @@ impl Ctx {
             focus,
             hidden_now: HashMap::new(),
             remembered: HashMap::new(),
+            seen: HashMap::new(),
         }
     }
 
@@ -115,6 +120,7 @@ impl Ctx {
             focus_puuid: self.focus,
             hidden_now: &self.hidden_now,
             remembered: &self.remembered,
+            seen: &self.seen,
         })
     }
 }
@@ -133,6 +139,7 @@ fn known(name: &str, map: Option<&str>) -> KnownName {
         tag: "OLD".into(),
         map_id: map.map(str::to_string),
         start_ms: Some(99),
+        source: RememberedSource::OwnMatch,
     }
 }
 
@@ -400,6 +407,7 @@ fn hidden_now_rows_use_display_name_in_every_view() {
             DisplayName::Remembered {
                 name: "Seen".into(),
                 tag: "OLD".into(),
+                source: RememberedSource::OwnMatch,
                 from_map_id: Some(SPLIT_UUID.into()),
                 from_start_ms: Some(99),
             }
@@ -430,11 +438,11 @@ fn hidden_now_rows_use_display_name_in_every_view() {
 }
 
 #[test]
-fn user_absent_remembered_only_from_users_own_matches() {
+fn user_absent_remembered_from_any_known_source() {
     // The user did not play this match. A row without a stored name is
-    // remembered only when the user's OWN finished match taught the name
-    // (`remembered` comes from `Repo::known_name`, which never looks at
-    // matches the user did not play); otherwise it is the agent.
+    // remembered when the DB knows the name from any source (R145:
+    // `remembered` comes from `Repo::known_name`); otherwise it is the
+    // agent. A remembered name's source kind travels with it.
     let m = duel(vec![
         player("taught", "Blue", ""),
         player("stranger", "Blue", ""),
@@ -449,6 +457,7 @@ fn user_absent_remembered_only_from_users_own_matches() {
         DisplayName::Remembered {
             name: "FromMyMatch".into(),
             tag: "OLD".into(),
+            source: RememberedSource::OwnMatch,
             from_map_id: Some(SPLIT_UUID.into()),
             from_start_ms: Some(99),
         }
@@ -641,4 +650,146 @@ fn self_and_focus_flags() {
     assert!(first.get("hsPct").is_some());
     let v = Ctx::new(None, "friend").view(&m);
     assert_eq!(serde_json::to_value(&v).unwrap()["perspective"], "focus");
+}
+
+// ---------------------------------------------------------------------
+// R145: names off the live screen
+// ---------------------------------------------------------------------
+
+fn seen(name: &str, tag: &str) -> (String, String) {
+    (name.to_string(), tag.to_string())
+}
+
+#[test]
+fn row_without_a_stored_name_shows_the_players_table_name_as_visible() {
+    // Riot returned an empty name for the row; the player is not hidden on
+    // the live screen now, and a visible sighting stored their name.
+    let m = duel(vec![
+        player(ME, "Blue", "Me"),
+        player("friend", "Blue", ""),
+        player("plain", "Red", "Plain"),
+    ]);
+    let mut ctx = Ctx::new(Some(ME), "plain");
+    ctx.seen.insert("friend".into(), seen("Friend", "FR1"));
+    let n = names(&ctx.view(&m));
+    assert_eq!(n["friend"], visible("Friend", "FR1"));
+    assert_eq!(n["plain"], visible("Plain", "TAG"));
+}
+
+#[test]
+fn a_stored_name_beats_the_players_table_name() {
+    let m = duel(vec![
+        player(ME, "Blue", "Me"),
+        player("plain", "Red", "InMatch"),
+    ]);
+    let mut ctx = Ctx::new(Some(ME), "plain");
+    ctx.seen.insert("plain".into(), seen("Seen", "S"));
+    assert_eq!(names(&ctx.view(&m))["plain"], visible("InMatch", "TAG"));
+}
+
+#[test]
+fn the_players_table_name_beats_a_remembered_one_for_a_visible_row() {
+    // Not hidden now, no stored name: the players-table name is shown as
+    // is, even when a remembered name (from another match) exists too.
+    let m = duel(vec![player(ME, "Blue", "Me"), player("friend", "Red", "")]);
+    let mut ctx = Ctx::new(Some(ME), "friend");
+    ctx.seen.insert("friend".into(), seen("Friend", "FR1"));
+    ctx.remembered
+        .insert("friend".into(), known("Elsewhere", Some(SPLIT_PATH)));
+    assert_eq!(names(&ctx.view(&m))["friend"], visible("Friend", "FR1"));
+}
+
+#[test]
+fn a_row_hidden_on_the_live_screen_keeps_the_card_rule_despite_a_seen_name() {
+    // Hidden now: remembered style (any source) else the agent, never the
+    // players-table name as a Visible one.
+    let m = duel(vec![
+        player(ME, "Blue", "Me"),
+        player("h-known", "Red", ""),
+        player("h-none", "Red", ""),
+    ]);
+    let mut ctx = Ctx::new(Some(ME), "h-known");
+    ctx.hidden_now.insert("h-known".into(), None);
+    ctx.hidden_now.insert("h-none".into(), None);
+    ctx.seen.insert("h-known".into(), seen("Seen", "S"));
+    ctx.seen.insert("h-none".into(), seen("Seen2", "S2"));
+    ctx.remembered.insert(
+        "h-known".into(),
+        KnownName {
+            source: RememberedSource::Seen,
+            map_id: None,
+            ..known("Seen", None)
+        },
+    );
+    let n = names(&ctx.view(&m));
+    assert_eq!(
+        n["h-known"],
+        DisplayName::Remembered {
+            name: "Seen".into(),
+            tag: "OLD".into(),
+            source: RememberedSource::Seen,
+            from_map_id: None,
+            from_start_ms: Some(99),
+        }
+    );
+    assert_eq!(
+        n["h-none"],
+        DisplayName::HiddenAgent {
+            agent_id: "agent-h-none".into()
+        },
+        "no remembered name: the agent, not the seen name"
+    );
+}
+
+#[test]
+fn a_row_with_no_name_at_all_keeps_todays_behaviour() {
+    let m = duel(vec![player(ME, "Blue", "Me"), player("ghost", "Red", "")]);
+    let ctx = Ctx::new(Some(ME), "ghost");
+    assert_eq!(
+        names(&ctx.view(&m))["ghost"],
+        DisplayName::HiddenAgent {
+            agent_id: "agent-ghost".into()
+        }
+    );
+}
+
+#[test]
+fn the_remembered_source_kind_is_kept_in_the_view() {
+    let m = duel(vec![player(ME, "Blue", "Me"), player("h", "Red", "")]);
+    for source in [
+        RememberedSource::OwnMatch,
+        RememberedSource::OtherMatch,
+        RememberedSource::Seen,
+    ] {
+        let mut ctx = Ctx::new(Some(ME), "h");
+        ctx.hidden_now.insert("h".into(), None);
+        ctx.remembered.insert(
+            "h".into(),
+            KnownName {
+                source,
+                ..known("X", None)
+            },
+        );
+        match &names(&ctx.view(&m))["h"] {
+            DisplayName::Remembered { source: got, .. } => assert_eq!(*got, source),
+            other => panic!("expected remembered, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn needs_seen_name_is_a_row_without_a_stored_name_that_is_not_hidden_now() {
+    let mut nameless = player("nameless", "Red", "X");
+    nameless.game_name = None;
+    let named = player("named", "Red", "X");
+    let hidden_nameless = player("hidden-nameless", "Red", "");
+    let hidden_named = player("hidden-named", "Red", "Y");
+    let hidden_now: HashMap<String, Option<String>> = HashMap::from([
+        ("hidden-nameless".to_string(), None),
+        ("hidden-named".to_string(), None),
+    ]);
+    assert!(needs_seen_name(&nameless, &hidden_now));
+    assert!(!needs_seen_name(&named, &hidden_now));
+    assert!(!needs_seen_name(&hidden_nameless, &hidden_now));
+    assert!(!needs_seen_name(&hidden_named, &hidden_now));
 }

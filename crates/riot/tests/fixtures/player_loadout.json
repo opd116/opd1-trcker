@@ -180,6 +180,17 @@
       "Attachments": []
     }
   ],
+  "ActiveExpressions": [
+    {
+      "TypeID": "d5f120f8-ff8c-4aac-92ea-f2b5acbe9475",
+      "AssetID": "0a6db78c-48b9-a32d-c47a-82be597584c1"
+    },
+    {
+      "TypeID": "d5f120f8-ff8c-4aac-92ea-f2b5acbe9475",
+      "AssetID": "0a6db78c-48b9-a32d-c47a-82be597584c1"
+    }
+  ],
+  "DynamicOptions": [],
   "Identity": {
     "PlayerCardID": "5221fe3f-7422-4063-b42b-2ae81b96bd69",
     "PlayerTitleID": "cb983ddd-b7f1-4b8a-90df-4af5a6717ec5",

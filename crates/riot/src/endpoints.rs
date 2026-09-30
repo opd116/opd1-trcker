@@ -140,9 +140,10 @@ pub struct PregameLoadoutsResponse {
 // The user's own loadout (personalization)
 // ---------------------------------------------------------------------
 
-/// One gun of `personalization/v2/players/{puuid}/playerloadout` (techchrism
-/// `PlayerLoadout.ts`): the weapon uuid and what is equipped on it. Charm
-/// fields, `SkinLevelID` and `Attachments` are ignored.
+/// One gun of `personalization/v3/players/{puuid}/playerloadout` (`Guns[]` is
+/// the same in v2 and v3; techchrism `PlayerLoadout.ts`): the weapon uuid and
+/// what is equipped on it. Charm fields, `SkinLevelID` and `Attachments` are
+/// ignored.
 #[derive(Debug, Clone, Deserialize)]
 pub struct LoadoutGun {
     /// The weapon's uuid (`/v1/weapons/{uuid}`); the knife is in the list too.
@@ -156,9 +157,14 @@ pub struct LoadoutGun {
     pub chroma_id: String,
 }
 
-/// `personalization/v2/players/{puuid}/playerloadout` — "only works for
+/// `personalization/v3/players/{puuid}/playerloadout` — "only works for
 /// your own PUUID" (techchrism), so the app calls it for the user only
-/// (R90). `Sprays`, `Identity`, `Incognito` and the rest are ignored.
+/// (R90). Riot moved it from v2 (which now answers 404 `RESOURCE_NOT_FOUND`
+/// on every shard) to v3, where `Sprays[]` became
+/// `ActiveExpressions[{TypeID, AssetID}]` and `DynamicOptions` was added.
+/// Only `Subject` and `Guns[]` are read; every other key (v2's `Sprays`,
+/// v3's `ActiveExpressions` / `DynamicOptions`, `Identity`, `Incognito`) is
+/// ignored, so a v2-shaped body still decodes.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlayerLoadoutResponse {
     #[serde(rename = "Subject")]
@@ -571,7 +577,7 @@ impl RiotSession {
     pub async fn player_loadout(&self) -> Result<PlayerLoadoutResponse, RiotError> {
         let puuid = self.self_puuid();
         self.pd(&format!(
-            "/personalization/v2/players/{puuid}/playerloadout"
+            "/personalization/v3/players/{puuid}/playerloadout"
         ))
         .await
     }

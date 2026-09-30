@@ -12,6 +12,7 @@ use std::ops::Range;
 
 use rusqlite::{params, Connection, OptionalExtension, Result};
 
+use crate::model::RememberedSource;
 use crate::names::KnownName;
 
 /// Wraps a [`Connection`] (from [`super::open_db`]) with the app's typed
@@ -117,7 +118,8 @@ pub struct MatchPlayer {
     pub bs: i64,
     pub ls: i64,
     /// The name as shown *in this match's own details* — never fetched
-    /// from name-service for an incognito player. Feeds [`Repo::known_name`].
+    /// from name-service for an incognito player. Feeds [`Repo::known_name`]
+    /// (R145: any stored row with a full name is a known name).
     pub game_name: Option<String>,
     pub tag_line: Option<String>,
     /// Riot's rank for the player DURING the match, as stored (migration 2;
@@ -800,41 +802,88 @@ impl Repo {
         )
     }
 
-    /// The most recent non-empty name `other` used in a match `self_puuid`
-    /// also has a row in, with where and when that match was (the stored
-    /// Riot map path — the shell converts it when it builds a
-    /// `DisplayName` — and its start). Never widen this to a match
-    /// `self_puuid` didn't play — this is the privacy boundary that lets
-    /// a hidden player's name show once the user has legitimately learned
-    /// it (CLAUDE.md's "Hidden names" exception), and it must never leak
-    /// a name seen only in someone else's match history.
+    /// The best name the DB knows for `other`, from any source, most recent
+    /// first (R145): a stored `match_players` row with a full name (marked
+    /// [`RememberedSource::OwnMatch`] when `self_puuid` also has a row in
+    /// that match, else [`RememberedSource::OtherMatch`]; its map is the
+    /// stored Riot path — the shell converts it when it builds a
+    /// `DisplayName` — and its start is the match's), or the `players`
+    /// row a name-service answer for a visible player stored
+    /// ([`RememberedSource::Seen`]: no map, `start_ms` is `updated_ms`).
+    /// On equal times own match beats seen beats other match.
+    ///
+    /// # Privacy boundary
+    ///
+    /// R145 (user decision, 2026-09-30, superseding R143's own-matches-only
+    /// rule): a hidden player's name may be *shown* whenever the DB knows it
+    /// from any of these sources — on the live screen in the remembered
+    /// style, off it as a plain name. What never changes is what is
+    /// *requested*: no endpoint is ever asked for a hidden player's name;
+    /// name-service is only called with a `VisiblePuuid`, so the `players`
+    /// table only ever holds names Riot gave for a player who was visible at
+    /// that moment. This function reads; it fetches nothing.
+    ///
+    /// One indexed query: seeks on `idx_match_players_puuid`, the primary
+    /// keys of `matches` and `match_players`, and `players` (see
+    /// [`KNOWN_NAME_SQL`]).
     pub fn known_name(&self, self_puuid: &str, other: &str) -> Result<Option<KnownName>> {
         self.conn
+            .query_row(KNOWN_NAME_SQL, params![self_puuid, other], |row| {
+                let map_id: Option<String> = row.get(2)?;
+                let source = match row.get::<_, i64>(4)? {
+                    0 => RememberedSource::OwnMatch,
+                    1 => RememberedSource::Seen,
+                    _ => RememberedSource::OtherMatch,
+                };
+                Ok(KnownName {
+                    name: row.get(0)?,
+                    tag: row.get(1)?,
+                    map_id: map_id.filter(|m| !m.is_empty()),
+                    start_ms: Some(row.get(3)?),
+                    source,
+                })
+            })
+            .optional()
+    }
+
+    /// `other`'s name in the `players` table (what a name-service answer for
+    /// a visible player stored), when it is a full name: one primary-key
+    /// lookup. Match Details shows it as a plain name for a row whose stored
+    /// match name is empty and who is not hidden on the live screen (R145).
+    pub fn seen_name(&self, other: &str) -> Result<Option<(String, String)>> {
+        self.conn
             .query_row(
-                "SELECT mp_other.game_name, mp_other.tag_line, m.map_id, m.start_ms
-                 FROM match_players mp_other
-                 JOIN match_players mp_self
-                   ON mp_self.match_id = mp_other.match_id AND mp_self.puuid = ?1
-                 JOIN matches m ON m.match_id = mp_other.match_id
-                 WHERE mp_other.puuid = ?2
-                   AND mp_other.game_name IS NOT NULL AND mp_other.game_name != ''
-                   AND mp_other.tag_line IS NOT NULL AND mp_other.tag_line != ''
-                 ORDER BY m.start_ms DESC
-                 LIMIT 1",
-                params![self_puuid, other],
-                |row| {
-                    let map_id: String = row.get(2)?;
-                    Ok(KnownName {
-                        name: row.get(0)?,
-                        tag: row.get(1)?,
-                        map_id: (!map_id.is_empty()).then_some(map_id),
-                        start_ms: Some(row.get(3)?),
-                    })
-                },
+                "SELECT game_name, tag_line FROM players
+                 WHERE puuid = ?1 AND game_name != '' AND tag_line != ''",
+                params![other],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
     }
 }
+
+/// [`Repo::known_name`]'s query (`?1` the user, `?2` the other player): the
+/// named `match_players` rows of `?2` (rank 0 when `?1` has a row in the
+/// same match, else 2) and their `players` row (rank 1), newest first, ties
+/// by rank. Public so a test can `EXPLAIN QUERY PLAN` exactly this text.
+pub const KNOWN_NAME_SQL: &str = "SELECT name, tag, map_id, ts, rank FROM (
+       SELECT mp.game_name AS name, mp.tag_line AS tag, m.map_id AS map_id,
+              m.start_ms AS ts,
+              CASE WHEN EXISTS (SELECT 1 FROM match_players mine
+                                WHERE mine.match_id = mp.match_id AND mine.puuid = ?1)
+                   THEN 0 ELSE 2 END AS rank
+       FROM match_players mp
+       JOIN matches m ON m.match_id = mp.match_id
+       WHERE mp.puuid = ?2
+         AND mp.game_name IS NOT NULL AND mp.game_name != ''
+         AND mp.tag_line IS NOT NULL AND mp.tag_line != ''
+       UNION ALL
+       SELECT p.game_name, p.tag_line, NULL, p.updated_ms, 1
+       FROM players p
+       WHERE p.puuid = ?2 AND p.game_name != '' AND p.tag_line != ''
+     )
+     ORDER BY ts DESC, rank ASC
+     LIMIT 1";
 
 // ---------------------------------------------------------------------
 // top_teammates
@@ -852,8 +901,10 @@ impl Repo {
     /// The current act's most frequent teammates: competitive matches
     /// with `start_ms >= season_start_ms`, other players on the same
     /// team, ordered by shared-match count desc (tie -> most recent
-    /// shared match). Name comes from their most recent shared row and
-    /// may be `None` (e.g. an incognito player never resolved).
+    /// shared match). The name is the most recent full name among their
+    /// shared rows (Riot's match-details can return them empty), else the
+    /// `players` row a visible sighting stored (R145); `None` (both
+    /// halves) when neither has a full name.
     pub fn top_teammates(
         &self,
         puuid: &str,
@@ -861,48 +912,64 @@ impl Repo {
         limit: usize,
     ) -> Result<Vec<TeammateRow>> {
         let mut stmt = self.conn.prepare(
-            "SELECT mp2.puuid, mp2.game_name, mp2.tag_line, m.start_ms
+            "SELECT mp2.puuid, mp2.game_name, mp2.tag_line, m.start_ms,
+                    pl.game_name, pl.tag_line
              FROM match_players mp1
              JOIN match_players mp2
                ON mp2.match_id = mp1.match_id
               AND mp2.team_id = mp1.team_id
               AND mp2.puuid != mp1.puuid
              JOIN matches m ON m.match_id = mp1.match_id
+             LEFT JOIN players pl ON pl.puuid = mp2.puuid
              WHERE mp1.puuid = ?1
                AND m.queue_id = 'competitive'
                AND m.start_ms >= ?2
              ORDER BY m.start_ms DESC",
         )?;
 
+        /// `(name, tag)` when both halves are non-empty.
+        fn full(name: Option<String>, tag: Option<String>) -> Option<(String, String)> {
+            name.zip(tag)
+                .filter(|(n, t)| !n.is_empty() && !t.is_empty())
+        }
+
         struct Agg {
             count: u32,
             most_recent_ms: i64,
-            game_name: Option<String>,
-            tag_line: Option<String>,
+            /// The most recent shared row with a full name.
+            match_name: Option<(String, String)>,
+            /// The `players` row's full name (the same for every row).
+            seen_name: Option<(String, String)>,
         }
 
         let mut agg: HashMap<String, Agg> = HashMap::new();
         let rows = stmt.query_map(params![puuid, season_start_ms], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
+                full(row.get(1)?, row.get(2)?),
                 row.get::<_, i64>(3)?,
+                full(row.get(4)?, row.get(5)?),
             ))
         })?;
 
         // Rows arrive newest-first, so the first time a teammate is seen
         // is their most recent shared match — later (older) occurrences
-        // must only bump the count, never overwrite the name/recency.
+        // only bump the count, and fill the name when every newer row had
+        // none.
         for row in rows {
-            let (teammate_puuid, game_name, tag_line, start_ms) = row?;
+            let (teammate_puuid, match_name, start_ms, seen_name) = row?;
             agg.entry(teammate_puuid)
-                .and_modify(|a| a.count += 1)
+                .and_modify(|a| {
+                    a.count += 1;
+                    if a.match_name.is_none() {
+                        a.match_name = match_name.clone();
+                    }
+                })
                 .or_insert(Agg {
                     count: 1,
                     most_recent_ms: start_ms,
-                    game_name,
-                    tag_line,
+                    match_name,
+                    seen_name,
                 });
         }
 
@@ -916,11 +983,17 @@ impl Repo {
 
         Ok(rows
             .into_iter()
-            .map(|(puuid, a)| TeammateRow {
-                puuid,
-                game_name: a.game_name,
-                tag_line: a.tag_line,
-                count: a.count,
+            .map(|(puuid, a)| {
+                let (game_name, tag_line) = match a.match_name.or(a.seen_name) {
+                    Some((name, tag)) => (Some(name), Some(tag)),
+                    None => (None, None),
+                };
+                TeammateRow {
+                    puuid,
+                    game_name,
+                    tag_line,
+                    count: a.count,
+                }
             })
             .collect())
     }

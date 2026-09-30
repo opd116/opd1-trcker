@@ -8,6 +8,8 @@
 //! - `player_details(puuid)` — cached details now; a background sync (and
 //!   the worker's sync of that player) then emits `"details"` if it found
 //!   more.
+//! - `close_details()` — the UI left the Details page: the open Details is
+//!   forgotten, so nothing is rebuilt or emitted for it.
 //! - `match_details(matchId, focusPuuid)` — one match as the Match Details
 //!   scoreboard, from the DB (fetched once when it isn't stored yet).
 //! - `my_stats()` — the user's My Stats for the current act, from the DB
@@ -103,13 +105,8 @@ pub(crate) async fn player_details_for(
     st.set_open_details(&details);
 
     if let Some(guard) = resolving {
-        let (st, puuid) = (st.clone(), puuid.clone());
-        tauri::async_runtime::spawn(async move {
-            crate::details::resolve_skins(&st, &puuid).await;
-            // Ended before the rebuild, so a name still unknown is `null`.
-            drop(guard);
-            crate::details::refresh(&st, &puuid).await;
-        });
+        // The mark ends before the rebuild, so a name still unknown is `null`.
+        crate::details::resolve_skins_in_background(&st, &puuid, guard);
     }
 
     if let Some(session) = st.session() {
@@ -130,6 +127,18 @@ pub(crate) async fn player_details_for(
         }
     }
     Ok(details)
+}
+
+/// The UI left the Player Details page (Back, or another page): nothing is
+/// open any more, so a closed page is never refreshed or emitted to.
+#[tauri::command]
+pub fn close_details(state: AppStateRef<'_>) {
+    close_details_for(state.inner());
+}
+
+/// `close_details` without the Tauri wrapper.
+pub(crate) fn close_details_for(st: &Arc<AppState>) {
+    st.close_details();
 }
 
 #[tauri::command]

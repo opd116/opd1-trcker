@@ -15,22 +15,25 @@ use opd1_core::names::{display_name, KnownName};
 
 use crate::logbuf::short;
 use crate::roster::{EquippedSkin, RawLoadout, RosterPlayer};
-use crate::state::{card_clock, closed_self_slot, lock, now_ms, AppState, LiveModel, Slot};
+use crate::state::{
+    card_clock, closed_self_slot, lock, now_ms, AppState, LiveModel, SkinResolveGuard, Slot,
+};
 use crate::store::{act_hero_stats, load_player_db, recent_matches};
 use crate::sync::RECENT_COUNT;
 
 /// CLAUDE.md: "Top 3 Teammates".
 const TOP_TEAMMATES: usize = 3;
 
-/// R18: a teammate who is incognito in the current live roster
+/// R18, R145: a teammate who is incognito in the current live roster
 /// (`hidden_now`: puuid -> the agent their card shows) is shown by the
-/// same rules as their card — the name remembered from a finished match
-/// the user played in (`remembered`, from `Repo::known_name`), else their
-/// agent, else Hidden Player — never with the name in the details
-/// player's own match history. Anyone else: the name from their most
-/// recent shared row; a row without a full name (never resolved) is
-/// hidden too. A remembered name's source map arrives as the stored Riot
-/// path and is converted here with `map_uuid` (`KnownName::with_map_uuid`).
+/// same rules as their card — the best name the DB knows from any source
+/// (`remembered`, from `Repo::known_name`; the remembered style), else
+/// their agent, else Hidden Player. Anyone else: the name `top_teammates`
+/// found (the most recent full name of their shared match rows, else the
+/// `players`-table name of a visible sighting); a row without any full name
+/// is Hidden Player. A remembered name's source map arrives as the stored
+/// Riot path and is converted here with `map_uuid`
+/// (`KnownName::with_map_uuid`).
 pub fn teammate_name(
     row: &TeammateRow,
     hidden_now: &HashMap<String, Option<String>>,
@@ -186,9 +189,9 @@ fn encounter_row(e: EncounterRow, lookup: &dyn Fn(&str) -> Option<String>) -> En
 /// whose card showed them hidden when last on screen (`seen_hidden`: the
 /// Details was opened in Agent Select, then a dodge or the match end took
 /// them off screen) keeps that card's rule — Hidden Player, the agent, or
-/// the name remembered from the user's own finished match — never the
-/// `players` row name, which name-service gave at an earlier visible
-/// sighting.
+/// (R145) the best name the DB knows from any source, in the remembered
+/// style; that includes the `players` row's name from an earlier visible
+/// sighting (its `Seen` kind), never shown in the visible style.
 fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Option<PlayerCard> {
     let mut slot: Slot = closed_self_slot(puuid, db)?;
     let live = lock(&st.live);
@@ -213,6 +216,41 @@ fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Opt
     // Nothing is being fetched for it right now: unknown means `—`.
     crate::state::settle_card(&mut card, true, true);
     Some(card)
+}
+
+/// Names `puuid`'s unnamed skins in the background (R83, R97) and rebuilds
+/// their open Details when done. `guard` is the mark taken *before* the
+/// build that showed the weapons resolving; it is dropped before the
+/// rebuild, so a name still unknown ends as `null`.
+pub fn resolve_skins_in_background(st: &Arc<AppState>, puuid: &str, guard: SkinResolveGuard) {
+    let (st, puuid) = (st.clone(), puuid.to_string());
+    tauri::async_runtime::spawn(async move {
+        resolve_skins(&st, &puuid).await;
+        drop(guard);
+        refresh(&st, &puuid).await;
+    });
+}
+
+/// The live screen just changed (a roster was applied, or pre-game
+/// loadouts were merged): rebuilds the open Player Details when that player
+/// is on the new roster, so a snapshot taken at the click never outlives
+/// the hero's own card. `AppState::emit_details_if_changed` emits only a
+/// real change. Skins that just became known are named like an open does
+/// ([`resolve_skins_in_background`], with the mark taken before the
+/// rebuild). A no-op with nothing open, and for a player who is not on the
+/// roster (nothing changed for them).
+pub async fn refresh_open_after_live_change(st: &Arc<AppState>) {
+    let Some(puuid) = st.open_details_puuid() else {
+        return;
+    };
+    if !lock(&st.live).slots.iter().any(|s| s.roster.puuid == puuid) {
+        return;
+    }
+    let resolving = skins_pending(st, &puuid).then(|| st.begin_skin_resolve(&puuid));
+    refresh(st, &puuid).await;
+    if let Some(guard) = resolving {
+        resolve_skins_in_background(st, &puuid, guard);
+    }
 }
 
 /// Rebuilds `puuid`'s details and emits them (`"details"`) when they are
@@ -269,8 +307,8 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
                 ),
                 None => (Vec::new(), HeroStats::default()),
             };
-            // R18: names the user learned in their own matches, only for
-            // the teammates hidden on screen right now.
+            // R18, R145: the best known name from any source, only for the
+            // teammates hidden on screen right now.
             let mut remembered = HashMap::new();
             if let Some(me) = self_puuid.as_deref() {
                 for t in teammates.iter().filter(|t| hidden_ids.contains(&t.puuid)) {
@@ -329,6 +367,7 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    use opd1_core::model::RememberedSource;
 
     fn row(puuid: &str, name: Option<&str>) -> TeammateRow {
         TeammateRow {
@@ -349,6 +388,7 @@ mod tests {
             tag: tag.into(),
             map_id: map_id.map(str::to_string),
             start_ms,
+            source: RememberedSource::OwnMatch,
         }
     }
 
@@ -402,6 +442,7 @@ mod tests {
             DisplayName::Remembered {
                 name: "Seen".into(),
                 tag: "AFTER".into(),
+                source: RememberedSource::OwnMatch,
                 from_map_id: None,
                 from_start_ms: None,
             }
@@ -440,6 +481,7 @@ mod tests {
             DisplayName::Remembered {
                 name: "Seen".into(),
                 tag: "AFTER".into(),
+                source: RememberedSource::OwnMatch,
                 from_map_id: Some("uuid-split".into()),
                 from_start_ms: Some(99),
             }
@@ -450,9 +492,50 @@ mod tests {
             DisplayName::Remembered {
                 name: "Seen".into(),
                 tag: "AFTER".into(),
+                source: RememberedSource::OwnMatch,
                 from_map_id: None,
                 from_start_ms: Some(99),
             }
+        );
+    }
+
+    #[test]
+    fn hidden_teammate_remembered_keeps_the_source_kind() {
+        // R145: the name may come from any source; its kind reaches the wire.
+        let hidden: HashMap<String, Option<String>> = [("duo".to_string(), None)].into();
+        for source in [
+            RememberedSource::OwnMatch,
+            RememberedSource::OtherMatch,
+            RememberedSource::Seen,
+        ] {
+            let remembered: HashMap<String, KnownName> = [(
+                "duo".to_string(),
+                KnownName {
+                    source,
+                    ..known("Seen", "AFTER", None, Some(5))
+                },
+            )]
+            .into();
+            assert_eq!(
+                teammate_name(&row("duo", None), &hidden, &remembered, &no_maps),
+                DisplayName::Remembered {
+                    name: "Seen".into(),
+                    tag: "AFTER".into(),
+                    source,
+                    from_map_id: None,
+                    from_start_ms: Some(5),
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn a_teammate_with_no_name_at_all_is_hidden_player() {
+        // The repo already folded the players-table name into the row
+        // (R145); a row that still has none keeps today's behaviour.
+        assert_eq!(
+            teammate_name(&row("x", None), &HashMap::new(), &none(), &no_maps),
+            DisplayName::HiddenPlayer
         );
     }
 

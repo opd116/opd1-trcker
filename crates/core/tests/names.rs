@@ -1,7 +1,7 @@
 //! Tests for `opd1_core::names::display_name` — CLAUDE.md's "Hidden names
 //! (incognito)" precedence: visible -> remembered -> agent -> hidden.
 
-use opd1_core::model::DisplayName;
+use opd1_core::model::{DisplayName, RememberedSource};
 use opd1_core::names::{display_name, KnownName};
 
 fn pair(name: &str, tag: &str) -> Option<(String, String)> {
@@ -14,6 +14,7 @@ fn known(name: &str, tag: &str) -> Option<KnownName> {
         tag: tag.to_string(),
         map_id: None,
         start_ms: None,
+        source: RememberedSource::OwnMatch,
     })
 }
 
@@ -77,6 +78,7 @@ fn display_name_remembered_beats_agent() {
         DisplayName::Remembered {
             name: "Rival".into(),
             tag: "ENEMY".into(),
+            source: RememberedSource::OwnMatch,
             from_map_id: None,
             from_start_ms: None,
         }
@@ -87,6 +89,7 @@ fn display_name_remembered_beats_agent() {
         DisplayName::Remembered {
             name: "Rival".into(),
             tag: "ENEMY".into(),
+            source: RememberedSource::OwnMatch,
             from_map_id: None,
             from_start_ms: None,
         }
@@ -117,16 +120,59 @@ fn display_name_remembered_carries_source() {
         tag: "ENEMY".into(),
         map_id: Some("uuid-split".into()),
         start_ms: Some(1_700_000_000_000),
+        source: RememberedSource::OwnMatch,
     });
     assert_eq!(
         display_name(true, None, Some("agent-jett"), source),
         DisplayName::Remembered {
             name: "Rival".into(),
             tag: "ENEMY".into(),
+            source: RememberedSource::OwnMatch,
             from_map_id: Some("uuid-split".into()),
             from_start_ms: Some(1_700_000_000_000),
         }
     );
+}
+
+#[test]
+fn display_name_remembered_passes_every_source_kind_through() {
+    // R145: where the name came from is part of the answer.
+    for source in [
+        RememberedSource::OwnMatch,
+        RememberedSource::OtherMatch,
+        RememberedSource::Seen,
+    ] {
+        let known = Some(KnownName {
+            name: "Rival".into(),
+            tag: "ENEMY".into(),
+            map_id: None,
+            start_ms: Some(7),
+            source,
+        });
+        assert_eq!(
+            display_name(true, None, Some("agent-jett"), known),
+            DisplayName::Remembered {
+                name: "Rival".into(),
+                tag: "ENEMY".into(),
+                source,
+                from_map_id: None,
+                from_start_ms: Some(7),
+            }
+        );
+    }
+}
+
+#[test]
+fn known_name_with_map_uuid_keeps_the_source() {
+    let converted = KnownName {
+        name: "Rival".into(),
+        tag: "ENEMY".into(),
+        map_id: Some("/Game/Maps/Bonsai/Bonsai".into()),
+        start_ms: Some(42),
+        source: RememberedSource::OtherMatch,
+    }
+    .with_map_uuid(&|_| Some("uuid-split".to_string()));
+    assert_eq!(converted.source, RememberedSource::OtherMatch);
 }
 
 #[test]
@@ -138,6 +184,7 @@ fn known_name_with_map_uuid_converts_path() {
         tag: "ENEMY".into(),
         map_id: map_id.map(str::to_string),
         start_ms: Some(42),
+        source: RememberedSource::OwnMatch,
     };
 
     let converted = from(Some("/Game/Maps/Bonsai/Bonsai")).with_map_uuid(&lookup);
@@ -172,12 +219,14 @@ fn display_name_never_passes_a_map_path_to_from_map_id() {
         tag: "ENEMY".into(),
         map_id: Some("/Game/Maps/Bonsai/Bonsai".into()),
         start_ms: Some(42),
+        source: RememberedSource::OwnMatch,
     });
     assert_eq!(
         display_name(true, None, Some("agent-jett"), path_source),
         DisplayName::Remembered {
             name: "Rival".into(),
             tag: "ENEMY".into(),
+            source: RememberedSource::OwnMatch,
             from_map_id: None,
             from_start_ms: Some(42),
         }

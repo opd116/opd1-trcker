@@ -318,6 +318,7 @@ The party stripe and tab (§3.9) come **before** the grid in the markup, as in t
 - Shown only when `!card.isSelf && !card.isSelfParty && encounters && (with+against) > 0`.
 - Content: `display:flex; align-items:center; gap:3px; font-size:13px; font-weight:600; color:var(--text2); tab`. It holds the icon, then the count `with+against`. Tooltip `{with} with · {against} against`.
 - **(R149)** The glyph is the design's own (v8:73, v8:196): the U+27F2 character `⟲` in a `<span class="glyph">` set in `font-family:"Segoe UI Symbol","Segoe UI",sans-serif; font-weight:400`, at the badge's own size (13px in the card, 14px in the hero) and colour. No SVG, no icon library. The app is Windows-only, so the system font is always there and nothing is downloaded. This supersedes the inline Lucide `rotate-ccw` SVG that R79 had chosen (that reason, the glyph existing only on Windows, does not hold for a Windows-only app). Covered by `EncounterBadge.test.ts`.
+- **(R156)** The count is shared competitive matches only, with or against. A Deathmatch or any other queue shared with the user adds nothing, and a player met only there shows no badge.
 - **[C] (R129)** The card's badge has `margin-left:5px`, and only 3+ digit counts show it (1–2 digits keep the design's 36px slot, §3.3). The hero badge (§6.2) has no such margin.
 - 3+ digit counts: see the slot's `min-width` in §3.3. `ingame-longnames` carries a `123` count (§8.2).
 
@@ -656,7 +657,7 @@ Map names, agent names (hidden-agent cards, Details `shortName`, Top-3 and toolt
   - `visible` / `remembered` → name;
   - `hiddenAgent` → agent name;
   - `hiddenPlayer` → `Hidden Player`.
-- Rows: `height:50px`, other styles as §6.4. Click → `match(matchId, puuid, 'encounter')`. All shared matches, newest first, no cap.
+- Rows: `height:50px`, other styles as §6.4. Click → `match(matchId, puuid, 'encounter')`. All shared competitive matches (R156: Deathmatch and other queues do not count), newest first, no cap.
 
 | Cell | Spec |
 |---|---|
@@ -782,8 +783,9 @@ Container and Back as §6.1. Back → details.
   - otherwise, a match the user played → names as match-details gives them;
   - otherwise (a match the user didn't play) → names as Riot returns them (R143). A row Riot left blank and whose player is not hidden on the live screen shows the name stored in the players table as a plain name; with none, the remembered rule above, else the agent name;
   - This replaces audit §2.12's "any player flagged incognito in that match": match-details carries no incognito flag (`endpoints.rs` `MatchPlayer`), so that rule can't be implemented.
-  - **Name-service (R150):** off the live stages (Match Details, Top 3, encounter rows, backfilled own matches) the app may ask name-service, batched, throttled and cached in `players`, for the participants of a match that have no known name. Riot itself blanks anyone who currently hides their name, so nothing hidden is revealed. During the live stages a live incognito puuid is never sent to any endpoint. Decided, not built yet in v0.2.0 (the code reads only the players table for such rows).
+  - **Name-service (R150):** off the live stages (Match Details, Top 3, encounter rows, backfilled own matches) the app may ask name-service, batched, throttled and cached in `players`, for the participants of a match that have no known name. Riot itself blanks anyone who currently hides their name, so nothing hidden is revealed. During the live stages a live-incognito player's name is never requested (their rank, stats and history are fetched like anyone's). Built: a fill after each match, and the names a match's rows lack are asked when the page opens (asks are sent only between matches, R153); the page then updates through the `match` event (below).
 - **No-team modes** (Deathmatch): a single team block. The team header shows no chip, `—` for rounds, and the label `Players`. The header chip is omitted, the score is `—`, and halves are hidden.
+- **Refresh (R150):** a `match` event for the open match id replaces the scoreboard in place: the rows are keyed, so a row that was the agent name (hidden) becomes the name that arrived, and nothing else moves. An event for another match, or one that arrives after the page was left, changes nothing. Leaving the page calls `close_match` (§2.4). A page opened again starts from the skeleton, never from an earlier payload.
 - **Loading [C]:** the header box with a 150×56 `--skel` radius-5 box and a 120×18 bar; the scoreboard header row; 2 team headers with 5 rows each (28-box, 22-circle, 120×13 bar, and 30×13 bars aligned as each column's numbers are; the K / D / A bar is centred, as that column is in the design).
 
 ---
@@ -866,7 +868,7 @@ interface PlayerDetails {
   heroMatches: number;                  // (R116) how many act matches heroKd / heroHs use (0..20); feeds the hero tooltip
 }
 
-interface MatchDetailsView {            // NEW — invoke('match_details', { matchId, focusPuuid })
+interface MatchDetailsView {            // NEW — invoke('match_details', { matchId, focusPuuid }); also the payload of the `match` event (R150)
   matchId: string; mapId: string /* '' when unknown */; queueId: string; startMs: number;
   durationMs: number | null;
   perspective: 'self' | 'focus';
@@ -932,6 +934,7 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
    - `match_players.damage INTEGER` (the sum of `roundResults[].playerStats[].damage[].damage`).
    - Parse `matchInfo.gameLengthMillis`, `players[].competitiveTier`, `roundResults[].winningTeam`/`roundNum`.
 9. New command `match_details(matchId, focusPuuid) -> MatchDetailsView` (perspective, sorting, hidden-name rule, no-team modes).
+10. Migration 3 (R150): `players.name_asked_ms INTEGER`, the names fill's blank-answer marker (no UI reads it). The `match` event (payload `MatchDetailsView`) and the command `close_match()` (no arguments) that ends it for a page that was left; both are described in §2.4 and §6.10.
 
 ### 7.4 Contract test descriptors (`ui/src/lib/contract.shape.ts`, Task 16b; test-only)
 

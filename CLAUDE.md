@@ -79,7 +79,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 **Card indicators** (one meaning, one look, each explained by a tooltip; no visible legend):
 - Outline around the card = the user's own card.
 - Coloured right-edge stripe + party tab = detected party (dashed/outlined = likely, solid/filled = confirmed). Tooltip `Party · likely` / `Party · confirmed`.
-- ⟲ + count = past matches with the user (see Encounters).
+- ⟲ + count = past competitive matches with the user (see Encounters).
 - Eye-off icon + dotted-underlined name + tag = hidden player's name remembered by the DB, from any source (R145). The tooltip names the source: `Hidden name · known from your match` or `Hidden name · known from a past match`, each + map · date; `Hidden name · seen before` + date only.
 - Eye-off icon + italic agent name = hidden name. Tooltip `Hidden name`.
 
@@ -128,8 +128,8 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Account level shows `—` only when Riot itself withholds it (HideAccountLevel) — a separate player setting, not part of the hidden name — except on the user's own card, which always shows the user's own level (R100).
 - **Exception:** if the DB already knows that player's name, show it during live stages in the remembered-name style (Card indicators). Which sources count is in the R145 paragraph below.
 - **Never request a hidden player's name** from any endpoint (name-service or otherwise) while that player is incognito in a live stage (R150 below).
-- **Names from any source (R145, user 2026-09-30) and name-service (R150):** During live stages, a hidden player's name shows in the remembered style when the DB knows it from any source: the user's own matches, other matches, or a name-service answer from when the player was visible. The tooltip names the source. Outside live stages, name-service may be asked for match participants with no known name. Riot blanks anyone who currently hides their name. Live incognito puuids are never sent to any endpoint.
-- After a match ends, show names as the client/match-details shows them.
+- **Names from any source (R145, user 2026-09-30) and name-service (R150):** During live stages, a hidden player's name shows in the remembered style when the DB knows it from any source: the user's own matches, other matches, or a name-service answer from when the player was visible. The tooltip names the source. Outside live stages, name-service may be asked for match participants with no known name. Riot blanks anyone who currently hides their name. A live-incognito player's **name** is never requested (name-service is never called for them during a live stage); their rank, stats and history are fetched like anyone's ("every other field stays visible").
+- After a match ends, show names as the client/match-details shows them. The game's own Match History shows every player's real name after the match, so the app asks name-service once for that match's other players, including the ones hidden during it (R151–R153, user 2026-09-30), stores the names by PUUID, and shows them later in the remembered style. Player Details / Match Details ask for the names they lack. Asks are only sent between matches: nothing is asked while the stage is Agent Select or In Game (a Deathmatch counts as a match too).
 - Match Details: in every view, a player incognito on the live screen now shows as on their card: the remembered name when the DB knows it from any source (R145), else the agent name (R93). Otherwise, a match the user played shows names as match-details gives them, and so does a match the user did not play when Riot returns them (R143); a player with no stored name shows as the agent name (or the remembered name). A row Riot left blank shows the name stored in the players table, else the agent name (R145 supersedes R74's rule that only the user's own matches supply known names; match-details has no incognito flag).
 
 ## Smart data (SQLite)
@@ -153,7 +153,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Each group has its own colour across the screen. The design has 2 party colours; extend to 4 per accent (max real groups: 2 ally + 2 enemy, since the user's own party is excluded), distinct from W/L colours and the accent.
 
 **Encounters:**
-- Count every past match shared with the user, with or against.
+- Count every past **competitive** match shared with the user, with or against (user 2026-09-30, R156). Deathmatch and other queues do not count; party detection still uses any mode.
 - The card shows ⟲ + count only when the count is above 0. Hover: `N with · M against`.
 - Player Details lists shared matches as the design shows them (map, date, side, both players' agent + rank), with the result from the user's side under the header `Your result`. Clicking a row opens Match Details.
 - **The user and their own party members get no party stripe and no encounter badge.**
@@ -173,7 +173,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
   - `pregame`, `core-game` (+ loadouts; the user's own loadout via `personalization/v3`)
   - `mmr/v1/players/{puuid}` (+ `/competitiveupdates`)
   - `match-history`, `match-details`
-  - `name-service/v2/players` (never for hidden players)
+  - `name-service/v2/players` (never for a hidden player during a live stage; after the match every participant without a stored name is asked once)
   - `parties`
 - **Throttle** every remote call with a token bucket and honor `429 Retry-After`. Reference implementation: Scout's `backend/riot_client.py`.
 

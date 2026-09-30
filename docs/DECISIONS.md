@@ -1,9 +1,9 @@
 # Decisions
 
-Every ruling made while building OPD1 TRCKER, in number order (R1 to R150). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
+Every ruling made while building OPD1 TRCKER, in number order (R1 to R157). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.
-- Rulings come from the working ledger (R1 to R73 and R87 to R150) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
+- Rulings come from the working ledger (R1 to R73 and R87 to R157) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
 - Precedence when rules disagree (R92): `docs/requirements-raw.md` (newest dated block) > the design file > older `CLAUDE.md` visual rules. `docs/design-spec.md` outranks the design file only for the R74 to R86 gap-fills.
 - The user's own words are in `docs/requirements-raw.md`; the [user decisions index](#user-decisions-index) at the end maps each dated block to a summary.
 
@@ -1052,10 +1052,45 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R150). Each
 
 ### R150 — Off the live stages, name-service may be asked for match participants
 
-- **What:** Outside the live stages (Match Details, Top 3, encounters, backfilled own matches) the app may ask name-service for match participants: batched, throttled, only for puuids with no known name, and the results cached in `players`. Riot itself blanks anyone who currently hides their name, so no hidden name is revealed. During the live stages the `VisiblePuuid` rule stays: a live incognito puuid is never sent to any endpoint. The user's dump is no longer needed to proceed; it remains a check after the next build.
+- **What:** Outside the live stages (Match Details, Top 3, encounters, backfilled own matches) the app may ask name-service for match participants: batched, throttled, only for puuids with no known name, and the results cached in `players`. Riot itself blanks anyone who currently hides their name, so no hidden name is revealed. During the live stages the `VisiblePuuid` rule stays: a live incognito player's name is never requested (the rule is about names only; rank, stats and history are fetched for a hidden player like anyone's). The user's dump is no longer needed to proceed; it remains a check after the next build. Built as a `FillNames` worker job (behind the live cards, ahead of the backfill) plus a `match` event: when a fill stores names, the open Player Details and the open Match Details are rebuilt and emitted (`details`, `match`). Leaving Match Details calls `close_match` (no arguments, idempotent, mirrors `close_details`), so the backend stops rebuilding a page nobody sees.
 - **Why:** Scout's evidence (`backend/live_match.py` `reveal_names` and `diagnose_reveal`, 5e0cd0a): Scout PUTs name-service for all match participants and keeps only the non-empty `GameName`. Match-details names are dynamic on the player's current status (blank while they hide now), so history alone cannot reveal hidden names, and post-match names come from name-service with Riot enforcing the privacy.
 - **Cost:** Extra name-service calls (bounded, cached).
-- **Status:** active (decided; the batched off-live name-service call is not built yet, only the `VisiblePuuid` guard and the players-table fallback exist)
+- **Status:** active (built in v0.2.0; refined by R151 and R153)
+
+### R151 — Names are captured at each match end
+
+- **What:** User decision 2026-09-30, refining R150. Names are captured right at each match end: one batched name-service PUT (at most 100 puuids) for the players of the match that just ended who have no stored name, kept by PUUID forever. A blank answer is asked again only at a later match end where that PUUID appears, with no time-based retry. The marker is `players.name_asked_ms` (migration 3): the start of the newest finished match whose question came back blank, or 0 for an on-demand blank. A name learned this way shows later in the remembered style (source `seen`, R145) when that PUUID appears hidden. Recognition is by PUUID, exact and surviving renames, so no stat-similarity matching is needed.
+- **Why:** The user wants a hidden player recognisable the next time they are met. Scout does the same (name-service, encounters keyed by puuid) and has no other post-match route; its only reveal path is a Riot developer key through account-v1, which this app does not use.
+- **Cost:** One name-service PUT per match end, bounded and cached.
+- **Status:** active
+
+### R152 — The game's own Match History shows real names after a match
+
+- **What:** User confirmation 2026-09-30: the game's Match History shows every player's real name after the match, including players who were shown as their agent during it. So a post-match source exists, and it is name-service (the client and VRY use it; VRY added a streamer-mode filter because name-service returns incognito names). R151's match-end capture asks it. This matches `requirements-raw.md` line 16 (after the match, show what the client shows). During live stages the rule stays: a live-incognito player's name is never requested and only stored names show, in the remembered style.
+- **Why:** The user's own observation of the game client, given as the reason a post-match name is possible at all.
+- **Cost:** If name-service answers blank for a player who hid during the match, the fill stores only the marker for them and nothing is lost. Whether it does is settled by the user's next test.
+- **Status:** active
+
+### R153 — The names fill includes players hidden during the match
+
+- **What:** Ruling 2026-09-30. The between-matches fill asks name-service about players who were hidden in the match that just ended, or earlier this run, like anyone else. R150's first build skipped them, which defeats the fill. Only two things are never asked: the user (the own name comes from the chat session, R43) and an empty id. The one hard guard is the stage: nothing is sent while a match is running (Agent Select, In Game, a Deathmatch). It is checked where asks leave the queue (`take_fill`) and again under the `live` lock right before the request, and asks queued during a match wait and go out after it. A step that is dropped (the poll loop aborts the worker on a stage change) or that loses the Riot client puts its asks back in the queue; a failed request drops them and the next trigger asks again. Player Details (the hero and the Top 3 Teammates shown as Hidden Player, also after the details sync), Match Details and the backfill queue the names they lack, hidden players included. The live-stage lookup (`Job::Names`) is unchanged.
+- **Why:** The players who most need a post-match name are the ones hidden during the match (R152). Riot blanks anyone who currently hides, so nothing hidden is revealed.
+- **Cost:** Between matches, name-service receives the puuids of players who were incognito in the match that just ended.
+- **Status:** active
+
+### R156 — Encounters count competitive matches only
+
+- **What:** User decision 2026-09-30. The ⟲ badge and the Player Details encounter list count only shared competitive matches, with or against. Deathmatch, unrated, spike rush, swiftplay and every other queue do not count. This supersedes CLAUDE.md's "Count every past match shared with the user". Party detection (any mode, Deathmatch included), the known-name lookup (any match) and Top 3 Teammates (already competitive) are unchanged. `Repo::encounter_counts` and `Repo::encounters` join `matches` on `queue_id = 'competitive'`, and a plan test asserts they stay index-backed.
+- **Why:** The user's call; no reason is recorded.
+- **Cost:** One SQL condition.
+- **Status:** active
+
+### R157 — Friends' names from the friends list (withdrawn)
+
+- **What:** Proposed 2026-09-30, withdrawn by the user the same day: take a friend's name from the local `/chat/v4/presences` answer. Friends get their names the same way as every other player (the R151 to R153 fill), so no separate friends-list source exists and none is built.
+- **Why:** The user: "same way as the other players".
+- **Cost:** None.
+- **Status:** dropped (withdrawn by the user, 2026-09-30)
 
 ## User decisions index
 
@@ -1073,4 +1108,4 @@ Each row is a dated block of `docs/requirements-raw.md`, in file order. That fil
 | 2026-09-27 to 2026-09-28 | `قرارات أثناء التنفيذ` | GitHub Actions works; the user must approve the design before the screens; Claude orchestrates and agents implement; the Peak tip shows the full act name and dates; design v1 rejected; last 5 shows W/L/draw only with RR and time on hover; design rounds 2 and 3 not liked; new direction "easy on the eye" (one system for type, numbers, spacing); party-detection details; a trial round on two screens; three refinement passes; obsolete files archived to `ارشيف/`. |
 | 2026-09-28 | `ملاحظات المستخدم على تصميم v7.1` | Nine points: the card is crowded, secondary text is too faint, each statistic's scope must be clear (shown without hovering: superseded, see the marker), long names truncate but the tag never does, one meaning per indicator, last 5 must be clearer, Peak names the tier, shared-match results read `Your result`, hidden means the name only. |
 | 2026-09-28 | `ملاحظات المستخدم على v8` | Remove the printed scope headings (tooltip only); numbers and last-5 results look off; the palette looks AI-made; the user said the design pleases them (to confirm). |
-| 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. Later 2026-09-29 line: Player Details hero K/D and HS% from the last 20 act matches (R116). Later 2026-09-30 line: names Riot returns for matches the user did not play may show off the live screen (R143). |
+| 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. Later 2026-09-29 line: Player Details hero K/D and HS% from the last 20 act matches (R116). Later 2026-09-30 lines: names Riot returns for matches the user did not play may show off the live screen (R143); a hidden player's name shows in the remembered style from any source the DB knows (R145); name-service may be asked off the live stages (R150); names are captured after each match because the game's own Match History shows them; Encounters count competitive matches only (R156); friends' names come like everyone else's (R157, withdrawn). |

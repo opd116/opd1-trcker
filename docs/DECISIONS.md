@@ -1,9 +1,9 @@
 # Decisions
 
-Every ruling made while building OPD1 TRCKER, in number order (R1 to R108, then R116). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
+Every ruling made while building OPD1 TRCKER, in number order (R1 to R125). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.
-- Rulings come from the working ledger (R1 to R73, R87 to R108 and R116) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
+- Rulings come from the working ledger (R1 to R73 and R87 to R125) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
 - Precedence when rules disagree (R92): `docs/requirements-raw.md` (newest dated block) > the design file > older `CLAUDE.md` visual rules. `docs/design-spec.md` outranks the design file only for the R74 to R86 gap-fills.
 - The user's own words are in `docs/requirements-raw.md`; the [user decisions index](#user-decisions-index) at the end maps each dated block to a summary.
 
@@ -763,11 +763,123 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R108, then 
 - **Cost:** None.
 - **Status:** active
 
+### R109 — THIRD-PARTY-NOTICES.md ships inside the installer
+
+- **What:** `THIRD-PARTY-NOTICES.md` ships inside the installer. Task 19 bundles it as a resource, plus generated crate and npm notices if that is cheap.
+- **Why:** Licence hygiene for the binary friends receive.
+- **Cost:** One resource entry.
+- **Status:** active
+
+### R110 — Task 13 doc minors are fixed now, in one batch on main
+
+- **What:** Task 13's documentation Minors are fixed now, in one Sonnet batch on `main` (docs only; lane A is idle). Left out on purpose: the THIRD-PARTY bundling (R109, Task 19), the post-commit `staged_deletions` check noise (expected, no fix) and the CI Node-20 warning (already bumped in lane B, `0cb68c1`).
+- **Why:** Stale statuses and wrong process facts mislead later agents.
+- **Cost:** One small docs commit.
+- **Status:** active
+
+### R111 — The §0 update for the --bg fallback and the R106 ring is done on main
+
+- **What:** The `docs/design-spec.md` §0 update for the `--bg` fallback and the R106 focus ring is done on `main`, inside the Task 13 minors batch (lane A owns `docs/**`), not on `ui-lane`.
+- **Why:** It keeps lane ownership.
+- **Cost:** None.
+- **Status:** active
+
+### R112 — Task 16a minors fixed in one batch on ui-lane
+
+- **What:** Task 16a's Minors are fixed in one Sonnet batch on `ui-lane`: the design's party fallback per R92, the tooltip reading `data-tip` inside the 450ms timeout, a tautology test, DEV self `isSelfParty` true, DEV fallback rows honouring the hidden kind, the node types ref, a duplicate `expect`, a one-line Tooltip comment, the theme store's double apply, and the `imgBase` memo. Deferred to the Task 17/18 briefs: the TopBar right group (spec §2.2) and the rest of the §4.2 tips catalogue, which lands in `tips.ts`.
+- **Why:** Not recorded in the ledger.
+- **Cost:** Not recorded in the ledger.
+- **Status:** active
+
+### R113 — Every task reads the committed spec
+
+- **What:** From now on every task reads the spec from the committed `docs/design-spec.md` on `main`, never from the `.superpowers/design/cd-v8/spec.md` copy. That copy is now stale: only the committed copy is edited after Task 13 (plan line 476).
+- **Why:** A stale copy would send implementers to outdated rules.
+- **Cost:** None.
+- **Status:** active
+
+### R114 — The Task 19 checklist adds four real-client checks
+
+- **What:** The Task 19 Arabic test checklist adds the real-client checks the VPS cannot do: (a) the user's own level shows with HideAccountLevel on (the roster's AccountLevel is real for self); (b) the act Win% matches the client (`NumberOfWinsWithPlacements` is present); (c) the agent appears only after Lock (the state string is `locked`); (d) the card art is sharp at 160px (`largeArt`).
+- **Why:** The VPS has no game client, so only the user can check these.
+- **Cost:** Extra checklist lines.
+- **Status:** active
+
+### R115 — Task 14 minors fixed in one batch before Task 15
+
+- **What:** Task 14's Minors are fixed in one Sonnet batch on `p2-backend` before Task 15 starts: `map_uuid_for_path` searches under the read lock without cloning the tables (lightness first); `history_ok` and `party_ready` are set only when the `index_history` write and the reload succeed; the MMR snapshot is loaded once; the R99 doc fixes (`model.rs:558`, `state.rs:329`); the `SeasonInfo.number_of_wins` field doc (`stats.rs`); the test `closed_stage_never_shows_skeletons` lists `actWins` and `actGames`; the assets test helpers are de-duplicated; and `display_name` drops a `map_id` that starts with `/` (defence in depth for hidden names).
+- **Why:** Task 15 edits the same files, so the Minors go first.
+- **Cost:** Not recorded in the ledger.
+- **Status:** active
+
 ### R116 — Player Details hero K/D and HS% use the current act
 
 - **What:** User decision (2026-09-29). In Player Details, the hero stat strip (K/D, HS%, Win%, Games, W / L) takes its sources as follows. `Win%`, `Games` and `W / L` stay act-wide, from the MMR data (the design already works this way). `K/D` and `HS%` switch from the last 5 competitive matches to the player's most recent up to 20 competitive matches of the current act, the same match set Top 3 Teammates already fetches. The hero tooltip becomes `Last {N} competitive · this act`, with N the number of act matches used. With no current-act competitive match, both values show `—`. The Live card is unchanged: K/D and HS% from the last 5 competitive, tooltip `Last 5 competitive`. Backend (Task 15): `PlayerDetails` gains `heroKd` (number|null), `heroHs` (number|null) and `heroMatches` (number).
 - **Why:** The user wants the hero to describe the act, like Win%, Games and W / L beside it. It costs zero extra requests because Top 3 Teammates already fetches those matches.
 - **Cost:** The hero K/D and HS% can differ from the same player's card values, because the sets differ (up to 20 act matches vs. the last 5). Three new fields in Task 15.
+- **Status:** active
+
+### R117 — DECISIONS.md is re-synced with every ledger ruling
+
+- **What:** `docs/DECISIONS.md` is re-synced with every ledger ruling from R109 on. This was planned for Task 19's docs pass. The other half, spec §7.2's hero K/D and HS% source (`heroKd`, `heroHs`, `heroMatches`), was fixed in the docs catch-up commit `39baf13`.
+- **Why:** One docs writer at a time.
+- **Cost:** A stale mirror for a few hours.
+- **Status:** active (fulfilled by the 2026-09-30 docs pass that added R109 to R125)
+
+### R118 — Task 17 starts now, in parallel with Task 15
+
+- **What:** Task 17 starts now on `ui-lane`, in parallel with Task 15, built against the provisional `types.ts` (spec §7.1 already carries Task 14's live-card fields). Task 16b later reconciles the types for the 16a and 17 files and re-runs the fit specs. New order: [T15 ∥ T17] → land T15 → [T15b ∥ T16b] → T18 → T19. The files stay disjoint (`ui/**` vs `crates/**`). R121 sets the lane B order.
+- **Why:** Speed. On 2026-09-29 the user asked for faster work without any quality loss and approved more parallel agents at a higher token cost.
+- **Cost:** Small type renames in 16b.
+- **Status:** active
+
+### R119 — Opus implementers for the UI screen tasks
+
+- **What:** The UI screen tasks (17, 18) use Opus implementers. Sonnet stays for backend, docs and fix rounds (R103).
+- **Why:** Design fidelity is the user's top concern, and these are design-judgment tasks (the skill's Model Selection).
+- **Cost:** More tokens, same or better quality.
+- **Status:** active
+
+### R120 — heroHs is a 0..1 fraction
+
+- **What:** `heroHs` is an `f32` between 0 and 1, like every HS% in spec §7.1. The R116 dispatch had said `u32`; the spec convention wins.
+- **Why:** One representation for every rate (R5).
+- **Cost:** None.
+- **Status:** active
+
+### R121 — Lane B runs Task 15 review, then Task 15b
+
+- **What:** Lane B is sequenced as the Task 15 review, then Task 15b. They do not overlap. The docs catch-up on `main` runs right after the Task 15 review lands, before 16b: spec §7.1 `kills`/`deaths`/`assists`/`kd` become `| null` for R102, and spec §7.2 hero K/D and HS% come from `heroKd`/`heroHs`/`heroMatches` (R120).
+- **Why:** The fix rounds and 15b would edit the same files on the same branch. The UI lane (T17, then 16b, then T18) is the critical path, so this costs no wall-clock time.
+- **Cost:** None in wall-clock time.
+- **Status:** active
+
+### R122 — Own-loadout mechanism accepted
+
+- **What:** The own-loadout mechanism stays as built: the stored `app_state` key `self_loadout` is restored once in `AppState::new` into `live.self_loadout`, kept in step on change and blanked on account switch. The brief had asked for a per-build read instead.
+- **Why:** `skins_pending` and `resolve_skins` are synchronous over memory and need the loadout before the build. It is lighter per build, and the observable order is the same, pinned by `own_loadout_prefers_the_matches_over_the_stored_copy`.
+- **Cost:** None.
+- **Status:** active
+
+### R123 — Task 15 minors are fixed before 16b
+
+- **What:** Task 15's Minors (14, two of them duplicates) are fixed in one Sonnet batch on `p2-backend` and then landed on `main`, before 16b. The batch: `player_details.recent` is newest first; the `hidden_player` live card carries rank and stats like any card (only the name is hidden); `first_half_wins` is `None` when the rounds lack `round_num` or `winning_team`; one shared `needs_known_name` predicate holds the hidden-name rule in one place; the R88 plan test asserts the CO-ROUTINE/MATERIALIZE mine row; the hero-stats doc wording; the contenttiers-only refetch; `log::warn` on a `self_loadout` read error; the key is deleted instead of written as `""`; an RAII guard for the skin resolve (R97); the Task 15 pipeline tests move to their own module; `sync_details`'s fallback loadout triggers `resolve_skins`; and `player_loadout` takes no puuid (self only, R90).
+- **Why:** Two of the items change the golden contract that 16b builds against (`player_details.recent` newest first, and the `hidden_player` card carrying rank and stats).
+- **Cost:** Not recorded in the ledger.
+- **Status:** active
+
+### R124 — Scoreboard rows are nullable
+
+- **What:** `ScoreRow` `kills`, `deaths` and `assists` (and any derived +/− or K/D) are `number | null`. They are null when the player has no stats row, never 0/0/0. The row shows `—`. The golden `crates/core/tests/fixtures/contract/match_details_view.json` (row `enemy-3`) is the truth. The backend fix was item 13 of the Task 15 minors batch. Spec §7.1's scoreboard comment ("R102 does not apply") is corrected, and §6.10 and §7.2 say `—` for null, in the 2026-09-30 docs pass.
+- **Why:** The golden showed a no-stats scoreboard row as 0/0/0, which breaks the rule that a missing value shows `—`.
+- **Cost:** One `Option` field.
+- **Status:** active
+
+### R125 — The card's Prev row reads icon, Prev, name
+
+- **What:** The user delegated the call to Claude (choose what is best for the user experience), so this is a user-delegated change to the design (R92). The card's Prev row becomes icon · `Prev` · name (variant V4 in `.superpowers/sdd/plan/shots-prev/`): the greyed 18px prev icon is centred in the 40px rank-icon column, then comes the 12px `Prev` label, then the tier name in the rank-name column. With no prev tier: an empty icon column, then `Prev —`. The Peak row is unchanged (50px label), and so is the hero Prev row. Applied on `ui-lane` after the Task 17 review loop; the design-ref visual test accepts the Prev row as an approved deviation. Spec §3.6 (Prev) and the §8.4 geometry table record it.
+- **Why:** The user found the 50px label gap untidy. V4 mirrors the rank block above it (icon column, then text column), puts the word next to its value, and matches the design's own Details hero Prev order (icon · Prev · name, v8:214-218).
+- **Cost:** One CSS change.
 - **Status:** active
 
 ## User decisions index

@@ -342,11 +342,13 @@ After the grid come the party stripe and tab (§3.9), then the self outline (§3
 - The when span keeps the design's ellipsis only as a safety net; it must never trigger. Widest real row: `Ascendant 3` + `V26 A4 · 11mo` (or `E10 A3 · 11mo`) needs 224 / 240 / 235px of the 241px column in Barlow / IBM Plex Sans / Archivo (measured with the bundled 600/500 files). `ingame-longnames` holds that row and §8.3 check 5 asserts it does not clip.
 - `peak === null` → after the label, `—` 13px (weight 500 and `--text2` inherited).
 
-**Prev** (r2 c2, v8:96-105). No tooltip.
-- Row style as Peak. `Prev` label 50px.
-- `<img tier prevActTier>` 18×18 `flex:none; margin-right:6px; filter:grayscale(0.7); opacity:0.75`.
-- Name 13px/500 `--text2` `overflow:hidden; text-overflow:ellipsis`.
-- `prevActTier === null` (or < 3) → `—` 13px.
+**Prev** (r2 c2, v8:96-105). No tooltip. **[R125, user-delegated change to the design; matches the design's own Details hero Prev order, v8:214-218]** The design's card row is `Prev` (50px label) · icon · name. The card row is now icon · `Prev` · name, so the word sits next to its value. The Peak row is unchanged (50px label). The hero Prev row (§6.2) is unchanged.
+- Row style as Peak, minus the 50px label: `display:flex; align-items:center; min-width:0; white-space:nowrap; font-size:12px; font-weight:500; color:var(--text2)`.
+- Icon column: `width:40px; flex:none; display:flex; justify-content:center`. That is the width of the current-rank icon above it (§3.6 Current), so the two icons share one centre line.
+  - `<img tier prevActTier>` 18×18 `flex:none; filter:grayscale(0.7); opacity:0.75` (unchanged), centred in the column: 11px + 18px + 11px.
+- Label: `Prev` 12px/500 `--text2` `flex:none; margin-right:6px`.
+- Name: tier name 13px/500 `--text2` `min-width:0; overflow:hidden; text-overflow:ellipsis`, in the rank-name column. The ellipsis is a safety net only. The widest row (`Prev` + `Ascendant 3`) must still fit the 158px column unclipped in all three fonts (§8.3 check 5).
+- `prevActTier === null` (or < 3) → the icon column stays, empty (40px, layout kept), then `Prev`, then `—` 13px (weight 500 and `--text2` inherited). The label is never hidden (§5.5).
 
 ### 3.7 Stat trio (r3 c1, v8:107-120)
 
@@ -758,10 +760,10 @@ Container and Back as §6.1. Back → details.
       - `hiddenAgent` / `hiddenPlayer`: eye-off 14 (`align-self:center; --text2`) + name 14px/500 italic `--text-soft` `nowrap`.
       - `remembered`: eye-off 14 + name 14px/600 dotted underline (offset 4) + tag.
     - ACS: right, 14px/600 `tab`, integer.
-    - K / D / A: the §6.4 inner grid.
-    - +/−: right, 14px/600 `tab`, `k−d` as `+N` / `−N` / `0`, coloured `--win` if >0, `--loss` if <0, `--text2` if 0.
+    - K / D / A: the §6.4 inner grid. Each of k, d and a shows `—` when null (R124); the two `/` separators stay.
+    - +/−: right, 14px/600 `tab`, `k−d` as `+N` / `−N` / `0`, coloured `--win` if >0, `--loss` if <0, `--text2` if 0. `—` in `--text2` when `kills` or `deaths` is null (R124), never `0`.
     - ADR: right, 14px/500 `tab`, integer.
-    - HS%: right, 14px/500 `tab`, `pct0`. Null values → `—`.
+    - HS%: right, 14px/500 `tab`, `pct0`. Null values → `—` in every numeric cell (R124: a player with no stats row shows `—` in ACS, K / D / A, +/−, ADR and HS%, never 0).
   - Sort: each team's rows by ACS descending, with null ACS last (v8:668).
 - **Perspective** (backend sets it; the UI only renders):
   - `teams[0]` is the user's team when the user played in the match (`perspective:'self'`). Otherwise it is the focus player's team (`perspective:'focus'`).
@@ -860,8 +862,8 @@ interface MatchDetailsView {            // NEW — invoke('match_details', { mat
   teams: {                              // [0] = perspective team; 1 entry for no-team modes
     teamId: string; result: Result | null; roundsWon: number | null; firstHalf: number | null;
     players: { puuid: string; name: DisplayName; agentId: string | null; tier: number | null;
-               kills: number; deaths: number; assists: number;   // never null here (R102 covers MatchSummary only): a row with no stats sends 0/0/0 with null acs/adr/hsPct
-               acs: number | null; adr: number | null; hsPct: number | null;   // hsPct 0..1
+               kills: number | null; deaths: number | null; assists: number | null;   // R124: null (never a counted 0/0/0) when the player has no stats row; the row shows — (golden match_details_view.json, row enemy-3: kills, deaths, assists, acs, adr, hsPct and tier all null)
+               acs: number | null; adr: number | null; hsPct: number | null;   // hsPct 0..1; null without a stats row
                isSelf: boolean; isFocus: boolean }[];   // sorted by ACS desc
   }[];
 }
@@ -898,7 +900,7 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
 | Top 3 | `details.topTeammates[].{puuid,name,count}` plus a live join on `live.players[].{puuid,name.kind,agentId,rank.tier}` | existing |
 | Loadout | `details.loadout.{vandal,phantom,operator,sheriff}.{chromaId,skinName,chromaName,tierId}` (each key tri-state, R97) → `assetUrl('chroma')`, `assetUrl('contentTier')` | **NEW** shape + kind |
 | Match header | `mdv.{mapId,queueId,startMs,durationMs}`, `teams[0/1].{result,roundsWon,firstHalf}` | **NEW** command |
-| Scoreboard | `mdv.teams[].players[].{name,agentId,tier,kills,deaths,assists,acs,adr,hsPct,isSelf,isFocus}`, `mdv.perspective` | **NEW** |
+| Scoreboard | `mdv.teams[].players[].{name,agentId,tier,kills,deaths,assists,acs,adr,hsPct,isSelf,isFocus}`, `mdv.perspective` (`kills, deaths, assists, acs, adr, hsPct` and `tier` are `null` for a player with no stats row and render `—`, R124) | **NEW** |
 
 ### 7.3 Backend deltas this spec depends on (for the plan; no code here)
 
@@ -995,6 +997,7 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
 | Agent icon (card-relative) | (56,12) 40×40 |
 | Rank icon | (313,12) 40×40 |
 | Peak row / Prev row | y 62, h 18; x 56 / 313 |
+| Prev icon (R125) | 18×18 (absent when there is no prev tier), centre x 333 (313 + 20), the same centre line as the rank icon |
 | Stat trio | bottom at 127.8, blocks 76px wide starting x 56 |
 | Last-5 tiles (Arrow) | 5 × 22×22, x 313…443, y 95.8…117.8; arrow row y 120.8…127.8 |
 | Last-5 tiles (Underline) | y 105.8…127.8, underline under the rightmost tile only |

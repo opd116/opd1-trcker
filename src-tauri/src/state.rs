@@ -76,7 +76,8 @@ pub enum Job {
     /// The per-player sync of one puuid.
     Sync(String),
     /// One step of the own-history backfill (R101): only handed out when no
-    /// `Names` or `Sync` job is left, so it is always behind live cards.
+    /// `Names` or `Sync` job is left, so it is always behind live cards, and
+    /// only in Menus or Closed (R137), never during a match.
     Backfill,
 }
 
@@ -422,8 +423,16 @@ impl LiveModel {
         !self.names_needed().is_empty() || self.next_unsynced().is_some()
     }
 
+    /// R137: the own-history backfill runs only between matches (Lobby, or
+    /// Closed), never in Agent Select or In Game: a first run is tens of MB
+    /// of match-details and a 429 it triggers would hold the rate bucket the
+    /// live cards need. The run's cursor survives the pause.
+    fn backfill_ready(&self) -> bool {
+        self.backfill.is_some() && matches!(self.stage, Stage::Menus | Stage::Closed)
+    }
+
     pub fn has_pending_work(&self) -> bool {
-        self.live_job_pending() || self.backfill.is_some()
+        self.live_job_pending() || self.backfill_ready()
     }
 
     /// R101: starts an own-history backfill run. A no-op while one is
@@ -471,8 +480,9 @@ impl LiveModel {
         if let Some(puuid) = self.next_unsynced() {
             return Some(Job::Sync(puuid));
         }
-        // Lowest priority: only with no live job left.
-        if self.backfill.is_some() {
+        // Lowest priority: only with no live job left, and only between
+        // matches.
+        if self.backfill_ready() {
             return Some(Job::Backfill);
         }
         self.worker_id = None;
@@ -1366,6 +1376,7 @@ mod tests {
     #[test]
     fn backfill_job_is_lowest_priority() {
         let mut m = model(vec![slot("me", false), slot("p1", false)]);
+        m.stage = Stage::Menus;
         m.start_backfill(None, None);
         let id = m.try_start_worker().expect("work pending");
 
@@ -1397,11 +1408,47 @@ mod tests {
     }
 
     #[test]
+    fn backfill_waits_for_the_match_to_end() {
+        // R137: a first run is tens of MB of match-details; never during a
+        // match (Agent Select / In Game), where it would compete with the
+        // live cards for the shared rate bucket.
+        for stage in [Stage::Pregame, Stage::Ingame] {
+            let mut m = model(vec![slot("me", false)]);
+            m.synced.insert("me".into());
+            m.stage = stage;
+            m.start_backfill(None, None);
+            assert!(
+                m.try_start_worker().is_none(),
+                "{stage:?}: a run alone is no work during a match"
+            );
+
+            // A worker that claimed in Menus when the stage changed under it.
+            m.stage = Stage::Menus;
+            let id = m.try_start_worker().expect("Menus: the run is work");
+            m.stage = stage;
+            assert_eq!(m.next_job(id), None, "{stage:?}: never Backfill");
+            assert!(!m.worker_running(), "{stage:?}: the claim is released");
+            assert!(m.backfill.is_some(), "{stage:?}: the cursor waits");
+        }
+
+        // Back between matches: the same run resumes (Menus and Closed).
+        for stage in [Stage::Menus, Stage::Closed] {
+            let mut m = model(vec![slot("me", false)]);
+            m.synced.insert("me".into());
+            m.stage = stage;
+            m.start_backfill(None, None);
+            let id = m.try_start_worker().expect("the run is work");
+            assert_eq!(m.next_job(id), Some(Job::Backfill), "{stage:?}");
+        }
+    }
+
+    #[test]
     fn a_backfill_run_alone_starts_a_worker() {
         // The roster is fully synced; only the run is left. `try_start_worker`
         // must still claim (R45), or a run started after the sync would
         // never get a worker.
         let mut m = model(vec![slot("me", false)]);
+        m.stage = Stage::Menus;
         m.synced.insert("me".into());
         assert!(m.try_start_worker().is_none(), "no run, no work");
         m.start_backfill(None, None);

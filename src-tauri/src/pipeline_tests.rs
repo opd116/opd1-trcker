@@ -259,26 +259,33 @@ async fn harness_with_db_file() -> Harness {
     build_harness(true).await
 }
 
-async fn build_harness(db_file: bool) -> Harness {
-    let server = MockServer::start().await;
-    mock_riot(&server).await;
-    let dir = tempfile::tempdir().unwrap();
-    write_client_files(dir.path(), server.address().port());
-    let base = server.uri();
+/// A session against the mock Riot client whose lockfile is under `dir` and
+/// whose remote services (pd, glz, valorant-api) all answer at `uri`. The one
+/// place the tests' rate override lives: the production 10 rps would make the
+/// backfill tests (hundreds of requests) take half a minute; the bucket
+/// itself is tested in `opd1-riot`.
+pub(crate) async fn connect_mock_session(dir: &Path, uri: &str) -> Arc<RiotSession> {
     let session = RiotSession::connect_with_overrides(
-        dir.path(),
+        dir,
         ConnectOverrides {
-            pd_base: Some(base.clone()),
-            glz_base: Some(base.clone()),
-            valorant_api_base: Some(base),
+            pd_base: Some(uri.to_string()),
+            glz_base: Some(uri.to_string()),
+            valorant_api_base: Some(uri.to_string()),
             ..Default::default()
         },
     )
     .await
     .expect("connect to the mock client")
-    // The production 10 rps would make the backfill tests (hundreds of
-    // requests) take half a minute; the bucket itself is tested in `opd1-riot`.
     .with_global_rate(1_000.0);
+    Arc::new(session)
+}
+
+async fn build_harness(db_file: bool) -> Harness {
+    let server = MockServer::start().await;
+    mock_riot(&server).await;
+    let dir = tempfile::tempdir().unwrap();
+    write_client_files(dir.path(), server.address().port());
+    let session = connect_mock_session(dir.path(), &server.uri()).await;
 
     let rec = Arc::new(Recorder::default());
     let db_path = db_file.then(|| dir.path().join("opd1.sqlite"));
@@ -307,7 +314,7 @@ async fn build_harness(db_file: bool) -> Harness {
         server,
         assets_server,
         _dir: dir,
-        session: Arc::new(session),
+        session,
         st,
         rec,
     }

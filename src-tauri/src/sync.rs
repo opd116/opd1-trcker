@@ -22,7 +22,7 @@
 //! "attempted" rule, never a stuck skeleton. `ClientGone` aborts the whole
 //! run — the poll loop notices the client is gone on its own next tick.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -30,16 +30,14 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
 use opd1_core::db::repo::{CompUpdateRow, HistoryEntry, MmrSnapshot};
-use opd1_riot::endpoints::MatchHistoryResponse;
+use opd1_riot::endpoints::{MatchDetailsResponse, MatchHistoryResponse};
 use opd1_riot::to_core::{comp_update_rows_from_response, match_from_details};
 use opd1_riot::{RiotError, RiotSession, VisiblePuuid};
 
 use crate::logbuf::short;
 use crate::roster::{extract_loadouts, extract_player_loadout};
 use crate::state::{lock, now_ms, AppState, BackfillRun, Job};
-use crate::store::{
-    mmr_refresh_needed, save_player, trim_mmr, PlayerUpdate, SELF_LOADOUT_KEY, SELF_PUUID_KEY,
-};
+use crate::store::{mmr_refresh_needed, save_player, trim_mmr, PlayerUpdate, SELF_LOADOUT_KEY};
 
 /// Match-details requests in flight at once. They're large responses
 /// (hundreds of KB each); a small window overlaps latency without holding
@@ -66,9 +64,28 @@ pub const BACKFILL_PAGE: u32 = 20;
 /// act's start doesn't stop it sooner (Claude's lightness bound).
 pub const BACKFILL_FIRST_RUN_MAX: u32 = 200;
 
-/// The `app_state` key holding the backfill anchor: the newest match the
-/// last *finished* run saw, JSON `{"matchId": "…", "startMs": N}`.
-pub const BACKFILL_ANCHOR_KEY: &str = "self_history_anchor";
+/// The `app_state` key prefix of the backfill anchors (see [`anchor_key`]).
+const ANCHOR_KEY_PREFIX: &str = "self_history_anchor";
+
+/// R137: the `app_state` key holding `puuid`'s backfill anchor: the newest
+/// match the account's last *finished* run saw, JSON
+/// `{"matchId": "…", "startMs": N}`. One key per account, so an account
+/// switch neither deletes an anchor nor lets one account's anchor bound
+/// another's run, and switching back finds the first account's anchor
+/// again. (The pre-R137 single key `self_history_anchor` is no longer read;
+/// its one row stays, unused — the account's next run is a first run.)
+pub fn anchor_key(puuid: &str) -> String {
+    format!("{ANCHOR_KEY_PREFIX}:{puuid}")
+}
+
+/// R137: the `app_state` key holding the per-match failure counts of the
+/// backfill, JSON `{"<match id>": N}`: how many runs in a row ended at that
+/// id because its match-details failed. Cleared when a run finishes.
+pub const BACKFILL_FAILURES_KEY: &str = "self_history_failures";
+
+/// R137: a match whose match-details failed in this many runs in a row
+/// (any error except a 404) is skipped, logged, and the anchor passes it.
+pub const BACKFILL_MAX_FAILURES: u32 = 3;
 
 /// The Riot client went away mid-sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -174,6 +191,17 @@ async fn sync_comp_updates(
     }
 }
 
+/// A match-details response -> the compact rows stored in SQLite (~1-2 KB;
+/// the large body is dropped before the write). `None`: the write failed
+/// (`AppState::db` already logged it). Shared by the live sync
+/// ([`fetch_missing_details`]) and the own-history backfill.
+pub async fn store_details(st: &Arc<AppState>, details: MatchDetailsResponse) -> Option<()> {
+    let (m, teams, players) = match_from_details(&details);
+    drop(details);
+    st.db(move |repo| repo.upsert_match(&m, &teams, &players))
+        .await
+}
+
 /// Fetches match-details for every id the DB doesn't have yet and stores
 /// the compact rows.
 pub async fn fetch_missing_details(
@@ -212,10 +240,8 @@ pub async fn fetch_missing_details(
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((_, Ok(details))) => {
-                let (m, teams, players) = match_from_details(&details);
-                drop(details);
-                st.db(move |repo| repo.upsert_match(&m, &teams, &players))
-                    .await;
+                // A failed write is logged; the live sync goes on.
+                store_details(st, details).await;
             }
             Ok((_, Err(RiotError::ClientGone))) => {
                 gone = true;
@@ -449,12 +475,18 @@ pub fn backfill_take(
 }
 
 /// R101: starts a backfill run from the stored anchor (a no-op while a run
-/// is active). The poll loop calls it on connect and when a match ends, then
-/// makes sure a worker is running.
+/// is active). The poll loop calls it on connect (the run waits there until
+/// VALORANT is running and a roster's worker starts, R137) and when a match
+/// ends (then it makes sure a worker is running).
 pub async fn start_backfill_run(st: &Arc<AppState>) {
+    // The run is the current account's: its anchor is the account's own.
+    let Some(me) = lock(&st.live).self_puuid.clone() else {
+        return;
+    };
+    let key = anchor_key(&me);
     // A SQLite failure (`None`, already logged) skips the run: a run without
     // its anchor would be a first run again.
-    let Some(stored) = st.db(|repo| repo.get_state(BACKFILL_ANCHOR_KEY)).await else {
+    let Some(stored) = st.db(move |repo| repo.get_state(&key)).await else {
         return;
     };
     let anchor = stored.as_deref().and_then(parse_anchor);
@@ -471,7 +503,10 @@ pub async fn start_backfill_run(st: &Arc<AppState>) {
     } else {
         None
     };
-    lock(&st.live).start_backfill(anchor, act_start_ms);
+    let mut live = lock(&st.live);
+    if live.self_puuid.as_deref() == Some(me.as_str()) {
+        live.start_backfill(anchor, act_start_ms);
+    }
 }
 
 /// Runs `f` on the active run — only while it is still `me`'s: after an
@@ -573,6 +608,8 @@ async fn backfill_page(
             run.newest = page.first().map(|e| (e.match_id.clone(), e.start_ms));
         }
         run.scanned += take.entries.len() as u32;
+        // Kept once found: the later pages don't look the act up again.
+        run.act_start_ms = act_start_ms;
         // By what the page held, not by what was asked for: a short page
         // mid-history must not skip the entries behind it.
         run.next_index = index + page.len() as u32;
@@ -594,22 +631,18 @@ async fn finish_backfill(st: &Arc<AppState>, me: &str) {
     };
     let total = show_total(total);
     if let Some(newest) = newest.filter(|n| Some(n) != anchor.as_ref()) {
-        let (raw, owner) = (anchor_json(&newest), me.to_string());
+        // The account's own key: a write that lands after an account switch
+        // is still that account's finished run, so it needs no guard.
+        let (key, raw) = (anchor_key(me), anchor_json(&newest));
         let written = st
             .db(move |repo| {
-                // An account switch replaces the stored puuid (and deletes
-                // the anchor) in one DB call: a write from the previous
-                // account's run that lands after it is refused here.
-                let switched = repo
-                    .get_state(SELF_PUUID_KEY)?
-                    .is_some_and(|stored| stored != owner);
-                if !switched {
-                    repo.set_state(BACKFILL_ANCHOR_KEY, &raw)?;
-                }
-                Ok(!switched)
+                repo.set_state(&key, &raw)?;
+                // Every id of the run is stored, known or skipped by now:
+                // no failure count is still needed.
+                repo.delete_state(BACKFILL_FAILURES_KEY)
             })
             .await;
-        if written == Some(true) {
+        if written.is_some() {
             log::info!(
                 "own history backfill finished: {scanned} matches looked at of {total} in the history, anchor {}",
                 short(&newest.0)
@@ -625,6 +658,34 @@ async fn finish_backfill(st: &Arc<AppState>, me: &str) {
     end_run(st, me);
 }
 
+/// R137: counts a failed match-details fetch of `id` (this run ends at it)
+/// in `app_state`, and returns how many runs in a row have failed at it,
+/// this one included. At [`BACKFILL_MAX_FAILURES`] the count is reset: the
+/// caller skips the id. `None`: SQLite failed (the caller ends the run).
+async fn record_details_failure(st: &Arc<AppState>, id: &str) -> Option<u32> {
+    let id = id.to_string();
+    st.db(move |repo| {
+        let mut counts: BTreeMap<String, u32> = repo
+            .get_state(BACKFILL_FAILURES_KEY)?
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default();
+        let failed = counts.get(&id).copied().unwrap_or(0) + 1;
+        if failed >= BACKFILL_MAX_FAILURES {
+            counts.remove(&id);
+        } else {
+            counts.insert(id, failed);
+        }
+        if counts.is_empty() {
+            repo.delete_state(BACKFILL_FAILURES_KEY)?;
+        } else {
+            let raw = serde_json::to_string(&counts).unwrap_or_default();
+            repo.set_state(BACKFILL_FAILURES_KEY, &raw)?;
+        }
+        Ok(failed)
+    })
+    .await
+}
+
 /// One step of the own-history backfill (R101): fetch the next history page
 /// if the last one is used up, then match-details for the page's unknown
 /// ids, one at a time (through the session's throttle), yielding as soon as
@@ -632,9 +693,12 @@ async fn finish_backfill(st: &Arc<AppState>, me: &str) {
 /// run is done and nothing is pending, the anchor moves and the run ends.
 ///
 /// Every failure other than `ClientGone` ends the run without moving the
-/// anchor (the gap is retried from it next time), except a match Riot no
-/// longer has (404) or one that doesn't decode: retrying those can never
-/// succeed, and the anchor would be stuck behind them.
+/// anchor (the gap is retried from it next time), a decode error included
+/// (schema drift is systematic: skipping would lose every match for good).
+/// Two exceptions (R137): a match Riot no longer has (404) is skipped at
+/// once, since retrying can never succeed; and a match that failed in
+/// [`BACKFILL_MAX_FAILURES`] runs in a row is skipped (logged), so the
+/// anchor can't be stuck behind it forever.
 ///
 /// `Err(Gone)`: the client went away, or `session` belongs to an account
 /// that is no longer the current one.
@@ -679,12 +743,7 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
         }
         match session.match_details(&id).await {
             Ok(details) => {
-                let (m, teams, players) = match_from_details(&details);
-                drop(details);
-                let stored = st
-                    .db(move |repo| repo.upsert_match(&m, &teams, &players))
-                    .await;
-                if stored.is_none() {
+                if store_details(st, details).await.is_none() {
                     end_run(st, me);
                     return Ok(());
                 }
@@ -694,18 +753,27 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
                 end_run(st, me);
                 return Err(Gone);
             }
-            Err(e @ (RiotError::Status(404) | RiotError::Decode(_))) => {
+            Err(e @ RiotError::Status(404)) => {
                 log::warn!("backfill: match {} skipped: {e}", short(&id));
                 pop(st);
             }
-            Err(e) => {
-                log::warn!(
-                    "backfill: match {} failed: {e}; the backfill stops",
-                    short(&id)
-                );
-                end_run(st, me);
-                return Ok(());
-            }
+            Err(e) => match record_details_failure(st, &id).await {
+                Some(failed) if failed >= BACKFILL_MAX_FAILURES => {
+                    log::warn!(
+                        "backfill: match {} failed in {failed} runs in a row ({e}); skipped",
+                        short(&id)
+                    );
+                    pop(st);
+                }
+                _ => {
+                    log::warn!(
+                        "backfill: match {} failed: {e}; the backfill stops",
+                        short(&id)
+                    );
+                    end_run(st, me);
+                    return Ok(());
+                }
+            },
         }
     }
 

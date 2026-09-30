@@ -18,7 +18,8 @@ use wiremock::matchers::path_regex;
 
 use super::*;
 use crate::sync::{
-    backfill_step, parse_anchor, start_backfill_run, Gone, BACKFILL_ANCHOR_KEY, BACKFILL_PAGE,
+    anchor_json, anchor_key, backfill_step, parse_anchor, start_backfill_run, store_details, Gone,
+    BACKFILL_FAILURES_KEY, BACKFILL_MAX_FAILURES, BACKFILL_PAGE,
 };
 
 const DETAILS_FIXTURE: &str =
@@ -191,18 +192,40 @@ pub(crate) fn history_path() -> String {
     format!("/match-history/v1/history/{ME}")
 }
 
-pub(crate) async fn stored_anchor(st: &AppState) -> Option<(String, i64)> {
-    st.db(|repo| repo.get_state(BACKFILL_ANCHOR_KEY))
+/// The anchor stored for `puuid` (R137: one per account).
+pub(crate) async fn stored_anchor_of(st: &AppState, puuid: &str) -> Option<(String, i64)> {
+    let key = anchor_key(puuid);
+    st.db(move |repo| repo.get_state(&key))
         .await
         .flatten()
         .and_then(|raw| parse_anchor(&raw))
 }
 
+/// ME's stored anchor.
+pub(crate) async fn stored_anchor(st: &AppState) -> Option<(String, i64)> {
+    stored_anchor_of(st, ME).await
+}
+
+/// Stores entry `i` as `puuid`'s anchor.
+pub(crate) async fn store_anchor_for(st: &AppState, puuid: &str, i: usize, base: i64) {
+    let (key, raw) = (
+        anchor_key(puuid),
+        anchor_json(&(entry_id(i), entry_start(base, i))),
+    );
+    st.db(move |repo| repo.set_state(&key, &raw)).await.unwrap();
+}
+
 pub(crate) async fn store_anchor(st: &AppState, i: usize, base: i64) {
-    let raw = crate::sync::anchor_json(&(entry_id(i), entry_start(base, i)));
-    st.db(move |repo| repo.set_state(BACKFILL_ANCHOR_KEY, &raw))
+    store_anchor_for(st, ME, i, base).await;
+}
+
+/// The stored per-id failure counts (`{}` when none).
+async fn failure_counts(st: &AppState) -> std::collections::BTreeMap<String, u32> {
+    st.db(|repo| repo.get_state(BACKFILL_FAILURES_KEY))
         .await
-        .unwrap();
+        .flatten()
+        .and_then(|raw| serde_json::from_str(&raw).ok())
+        .unwrap_or_default()
 }
 
 /// A match row the DB already has (`new_match_ids` must skip it).
@@ -242,6 +265,21 @@ async fn run_backfill(h: &Harness) {
 
 pub(crate) fn run_active(st: &AppState) -> bool {
     lock(&st.live).backfill.is_some()
+}
+
+#[tokio::test]
+async fn store_details_stores_the_compact_rows() {
+    // The one place a match-details response becomes stored rows (the live
+    // sync's `fetch_missing_details` and the backfill both use it).
+    let h = harness().await;
+    mount_feed(&h.server, Feed::new(3)).await;
+    let details = h.session.match_details(&entry_id(1)).await.unwrap();
+    assert!(!is_stored(&h.st, entry_id(1)).await);
+
+    assert_eq!(store_details(&h.st, details).await, Some(()));
+
+    assert!(is_stored(&h.st, entry_id(1)).await);
+    assert!(!is_stored(&h.st, entry_id(2)).await, "only that match");
 }
 
 #[tokio::test]
@@ -390,6 +428,40 @@ async fn backfill_first_run_picks_up_act_tables_that_load_late() {
 }
 
 #[tokio::test]
+async fn backfill_stores_a_late_found_act_start_in_the_run() {
+    // The act tables load after the run started: the first page finds the act
+    // start, and the run keeps it — the later pages don't look it up again
+    // (and it stays the bound if the tables are reloaded meanwhile).
+    let h = harness().await;
+    let base = base_ms();
+    mount_feed(&h.server, Feed::new(230)).await;
+    h.st.set_acts_for_test(Vec::new());
+    start_backfill_run(&h.st).await;
+    let act_start = entry_start(base, 30) - 30_000;
+    h.st.set_acts_for_test(vec![Act {
+        id: ACT.into(),
+        name: "ACT V".into(),
+        episode_name: "V26".into(),
+        start_ms: act_start,
+        end_ms: now_ms() + 30 * 86_400_000,
+    }]);
+    {
+        // A live job is waiting, so the step yields right after its page.
+        let mut live = lock(&h.st.live);
+        live.slots.push(Slot {
+            roster: roster(OTHER, false),
+            db: PlayerDb::default(),
+        });
+        live.names_attempted.insert(OTHER.into());
+    }
+
+    backfill_step(&h.st, &h.session).await.unwrap();
+
+    let stored = lock(&h.st.live).backfill.as_ref().unwrap().act_start_ms;
+    assert_eq!(stored, Some(act_start), "kept in the run, found on page 0");
+}
+
+#[tokio::test]
 async fn backfill_without_act_tables_is_bounded_by_the_cap_alone() {
     // The act tables aren't loaded (`act_start_ms` is None): the 200 cap
     // still bounds the first run.
@@ -510,21 +582,7 @@ async fn backfill_interrupted_keeps_anchor() {
 
     // The next connect: a fresh session, the same anchor.
     write_client_files(h._dir.path(), h.server.address().port());
-    let base_url = h.server.uri();
-    let session = Arc::new(
-        RiotSession::connect_with_overrides(
-            h._dir.path(),
-            ConnectOverrides {
-                pd_base: Some(base_url.clone()),
-                glz_base: Some(base_url.clone()),
-                valorant_api_base: Some(base_url),
-                ..Default::default()
-            },
-        )
-        .await
-        .expect("reconnect to the mock client")
-        .with_global_rate(1_000.0),
-    );
+    let session = connect_mock_session(h._dir.path(), &h.server.uri()).await;
     start_backfill_run(&h.st).await;
     let id = lock(&h.st.live).try_start_worker().expect("run pending");
     run_worker(h.st.clone(), session, id).await;
@@ -588,6 +646,10 @@ async fn backfill_details_error_ends_the_run_but_a_missing_match_is_skipped() {
         Some((entry_id(0), entry_start(base, 0))),
         "the run completed past the 404"
     );
+    assert!(
+        failure_counts(&h.st).await.is_empty(),
+        "a 404 is skipped at once, not counted"
+    );
 
     // 500: a Riot error — the run ends, the anchor stays.
     let h = harness().await;
@@ -612,41 +674,51 @@ async fn backfill_never_writes_another_accounts_anchor() {
     let base = base_ms();
     mount_feed(&h.server, Feed::new(5)).await;
 
-    // (a) The live model moved to another account after the run started: the
+    // The live model moved to another account after the run started: the
     // step, still holding the old session, does nothing (and the worker
-    // running it ends) — no requests, no anchor for OTHER from ME's run.
+    // running it ends) — no requests, no anchor for anyone from ME's run.
     start_backfill_run(&h.st).await;
     lock(&h.st.live).self_puuid = Some(OTHER.into());
     assert_eq!(backfill_step(&h.st, &h.session).await, Err(Gone));
     assert_eq!(stored_anchor(&h.st).await, None);
+    assert_eq!(stored_anchor_of(&h.st, OTHER).await, None);
     assert_eq!(count(&h.server, "GET", &history_path()).await, 0);
 
-    // (b) The switch cleared the run and the stored anchor (what
-    // `Poller::on_connected` does); a stale write still in flight for the old
-    // account is refused by the DB-side check.
+    // Control: with ME as the account, the same run writes ME's anchor, and
+    // only that one.
     lock(&h.st.live).self_puuid = Some(ME.into());
     lock(&h.st.live).backfill = None;
-    h.st.db(|repo| repo.set_state(crate::store::SELF_PUUID_KEY, OTHER))
-        .await
-        .unwrap();
-    start_backfill_run(&h.st).await;
-    backfill_step(&h.st, &h.session).await.unwrap();
-    assert_eq!(
-        stored_anchor(&h.st).await,
-        None,
-        "the stored account is OTHER: ME's anchor must not be written"
-    );
-
-    // Control: with ME stored as the account, the same run does write it.
-    lock(&h.st.live).backfill = None;
-    h.st.db(|repo| repo.set_state(crate::store::SELF_PUUID_KEY, ME))
-        .await
-        .unwrap();
     start_backfill_run(&h.st).await;
     backfill_step(&h.st, &h.session).await.unwrap();
     assert_eq!(
         stored_anchor(&h.st).await,
         Some((entry_id(0), entry_start(base, 0)))
+    );
+    assert_eq!(stored_anchor_of(&h.st, OTHER).await, None);
+}
+
+#[tokio::test]
+async fn backfill_anchors_are_kept_per_account() {
+    // R137: each account has its own anchor, so an account switch deletes
+    // nothing and switching back finds the first account's anchor again.
+    let h = harness().await;
+    let base = base_ms();
+    mount_feed(&h.server, Feed::new(5)).await;
+    // OTHER's anchor is entry 3. It must not bound ME's run (ME has none: a
+    // first run reads all 5 entries; OTHER's anchor would stop it at 3)…
+    store_anchor_for(&h.st, OTHER, 3, base).await;
+
+    run_backfill(&h).await;
+
+    assert_eq!(details_asked(&requests(&h.server).await).len(), 5);
+    assert_eq!(
+        stored_anchor(&h.st).await,
+        Some((entry_id(0), entry_start(base, 0)))
+    );
+    // …and ME's finished run leaves OTHER's anchor alone.
+    assert_eq!(
+        stored_anchor_of(&h.st, OTHER).await,
+        Some((entry_id(3), entry_start(base, 3)))
     );
 }
 
@@ -690,10 +762,11 @@ async fn a_run_in_progress_keeps_going_when_another_trigger_fires() {
 /// Sets the stored anchor to an entry that isn't in the history (`gone`),
 /// older than every entry the mock serves: a run can never meet it.
 async fn store_unreachable_anchor(st: &AppState, base: i64) {
-    let raw = crate::sync::anchor_json(&("gone".to_string(), entry_start(base, 10_000)));
-    st.db(move |repo| repo.set_state(BACKFILL_ANCHOR_KEY, &raw))
-        .await
-        .unwrap();
+    let (key, raw) = (
+        anchor_key(ME),
+        anchor_json(&("gone".to_string(), entry_start(base, 10_000))),
+    );
+    st.db(move |repo| repo.set_state(&key, &raw)).await.unwrap();
 }
 
 #[tokio::test]
@@ -803,4 +876,89 @@ async fn backfill_a_total_that_claims_too_much_still_ends_on_an_empty_page() {
         Some((entry_id(0), entry_start(base, 0)))
     );
     assert!(!run_active(&h.st));
+}
+
+/// A `match-details` answer that isn't the JSON shape Riot's contract says:
+/// 200 with an empty body (a decode error in the session).
+const UNDECODABLE: u16 = 200;
+
+/// Entry 4 of 10 fails with `status` in every run; the anchor is entry 9.
+/// Runs 1 and 2 end at it and keep the anchor; the third skips it (logged),
+/// lets the anchor pass it and fetches the rest.
+async fn a_failing_id_is_skipped_on_the_third_failing_run(status: u16) {
+    let h = harness().await;
+    let base = base_ms();
+    let mut feed = Feed::new(10);
+    feed.details_status.insert(4, status);
+    mount_feed(&h.server, feed).await;
+    store_anchor(&h.st, 9, base).await;
+    let old = stored_anchor(&h.st).await;
+    let bad = entry_id(4);
+
+    // Run 1: entries 0..=4 tried, the run stops at 4.
+    run_backfill(&h).await;
+    assert_eq!(stored_anchor(&h.st).await, old, "status {status}: run 1");
+    assert!(!run_active(&h.st));
+    assert_eq!(details_asked(&requests(&h.server).await).len(), 5);
+    assert_eq!(failure_counts(&h.st).await.get(&bad), Some(&1));
+
+    // Run 2: 0..=3 are stored, so only entry 4 is asked again.
+    run_backfill(&h).await;
+    assert_eq!(stored_anchor(&h.st).await, old, "status {status}: run 2");
+    assert_eq!(details_asked(&requests(&h.server).await).len(), 6);
+    assert_eq!(failure_counts(&h.st).await.get(&bad), Some(&2));
+
+    // Run 3: the third failure in a row skips it; 5..=8 follow and the
+    // anchor moves past it.
+    assert_eq!(BACKFILL_MAX_FAILURES, 3);
+    run_backfill(&h).await;
+    assert_eq!(
+        stored_anchor(&h.st).await,
+        Some((entry_id(0), entry_start(base, 0))),
+        "status {status}: the anchor passes the skipped id"
+    );
+    assert!(!run_active(&h.st));
+    assert_eq!(details_asked(&requests(&h.server).await).len(), 6 + 1 + 4);
+    assert!(!is_stored(&h.st, bad).await, "the skipped id stays unknown");
+    assert!(
+        failure_counts(&h.st).await.is_empty(),
+        "the finished run cleared the counts"
+    );
+}
+
+#[tokio::test]
+async fn backfill_a_decode_error_is_transient_then_skipped_on_the_third_failing_run() {
+    // Schema drift (Riot changed match-details against our structs) is
+    // systematic: skipping at once would move the anchor past every match
+    // and lose them for good once the fix ships.
+    a_failing_id_is_skipped_on_the_third_failing_run(UNDECODABLE).await;
+}
+
+#[tokio::test]
+async fn backfill_a_failing_status_is_skipped_on_the_third_failing_run() {
+    // A persistent 5xx on one special match must not end every run at that
+    // id forever.
+    a_failing_id_is_skipped_on_the_third_failing_run(500).await;
+}
+
+#[tokio::test]
+async fn backfill_failure_counts_are_cleared_when_a_run_finishes() {
+    // Entry 4 failed twice in earlier runs, then Riot answers it: the run
+    // stores it, finishes, and no count is left behind.
+    let h = harness().await;
+    let base = base_ms();
+    mount_feed(&h.server, Feed::new(10)).await;
+    store_anchor(&h.st, 9, base).await;
+    h.st.db(|repo| repo.set_state(BACKFILL_FAILURES_KEY, r#"{"bf004":2}"#))
+        .await
+        .unwrap();
+
+    run_backfill(&h).await;
+
+    assert!(is_stored(&h.st, entry_id(4)).await);
+    assert_eq!(
+        stored_anchor(&h.st).await,
+        Some((entry_id(0), entry_start(base, 0)))
+    );
+    assert!(failure_counts(&h.st).await.is_empty());
 }

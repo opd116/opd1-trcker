@@ -48,7 +48,6 @@ use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
 use crate::store::{
     load_player_db, match_landed, save_player, PlayerDb, SELF_LOADOUT_KEY, SELF_PUUID_KEY,
 };
-use crate::sync::BACKFILL_ANCHOR_KEY;
 
 /// Closed: how often the lockfile's existence is checked.
 const CLOSED_CHECK: Duration = Duration::from_secs(5);
@@ -251,11 +250,9 @@ impl Poller {
                 repo.set_state(SELF_PUUID_KEY, &key_value)?;
                 if switched {
                     // The previous account's loadout copy must not show for
-                    // this one: no key is no stored loadout. Same for the
-                    // backfill anchor: another account's history can't
-                    // bound this one's (no anchor is a first run).
+                    // this one: no key is no stored loadout. (The backfill
+                    // anchors are per account, R137: nothing to delete.)
                     repo.delete_state(SELF_LOADOUT_KEY)?;
-                    repo.delete_state(BACKFILL_ANCHOR_KEY)?;
                 }
                 Ok(())
             })
@@ -286,12 +283,20 @@ impl Poller {
         // arrives (closed-stage card if the game isn't up).
         self.enter_closed().await;
         // R101: catch up on the matches played while the app was closed.
-        self.begin_backfill(&session).await;
+        // Only the run is queued here; R137: no worker until VALORANT is
+        // running. A session built while the game is closed is stale (R46:
+        // it is rebuilt, and the run dropped, when the game starts), so a
+        // worker now would sync the Closed slot and page history for
+        // nothing. The first presence that settles a stage installs the
+        // roster, whose `ensure_worker` runs the queued run behind the live
+        // cards (`LiveModel::next_job`).
+        crate::sync::start_backfill_run(&self.st).await;
     }
 
-    /// R101: starts the own-history backfill from the stored anchor (a run
-    /// already in progress keeps going) and makes sure a worker will run it
-    /// — behind any live card work, which `LiveModel::next_job` puts first.
+    /// R101: a match ended (VALORANT is running): starts the own-history
+    /// backfill from the stored anchor (a run already in progress keeps
+    /// going) and makes sure a worker will run it — behind any live card
+    /// work, which `LiveModel::next_job` puts first.
     async fn begin_backfill(&mut self, session: &Arc<RiotSession>) {
         crate::sync::start_backfill_run(&self.st).await;
         self.ensure_worker(session);
@@ -958,11 +963,11 @@ mod tests {
 
     use super::*;
     use crate::pipeline_tests::backfill::{
-        history_path, mount_feed, requests, run_active, store_anchor, stored_anchor, Feed,
+        history_path, mount_feed, requests, run_active, store_anchor, store_anchor_for,
+        stored_anchor, stored_anchor_of, Feed,
     };
     use crate::pipeline_tests::{card_json, harness, roster, Harness, ME};
     use crate::store::{save_player, PlayerUpdate};
-    use crate::sync::{anchor_json, BACKFILL_ANCHOR_KEY};
 
     /// Waits (up to ~5s) for a finished backfill run's anchor.
     async fn wait_for_anchor(st: &AppState) -> Option<(String, i64)> {
@@ -1007,14 +1012,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_connected_starts_a_backfill_run_and_a_worker_finishes_it() {
+    async fn on_connected_queues_the_run_and_the_first_presence_starts_the_worker() {
+        // R137: connecting while VALORANT is closed makes no Sync/backfill
+        // call: the session is stale (R46) and would be rebuilt when the
+        // game starts. The run waits in the model until the first presence
+        // shows VALORANT is up and the roster's worker picks it up.
         let h = harness().await;
         mount_feed(&h.server, Feed::new(5)).await;
         let mut poller = Poller::new(h.st.clone());
         poller.on_connected(h.session.clone()).await;
+        sleep(Duration::from_millis(400)).await;
 
-        // A first run (no anchor yet): it ends at the oldest entry and the
-        // anchor is the newest.
+        assert!(run_active(&h.st), "the run is queued");
+        assert!(!lock(&h.st.live).worker_running(), "no worker yet");
+        let calls = requests(&h.server)
+            .await
+            .iter()
+            .filter(|r| {
+                ["/match-history/", "/mmr/", "/match-details/"]
+                    .iter()
+                    .any(|p| r.url.path().starts_with(p))
+            })
+            .count();
+        assert_eq!(calls, 0, "no sync or backfill call on a Closed start");
+        assert_eq!(stored_anchor(&h.st).await, None);
+
+        // The first presence: VALORANT is up (Lobby). A first run (no anchor
+        // yet) ends at the oldest entry and the anchor is the newest.
+        mock_presence(&h, "MENUS", "unrated").await;
+        poller.presence_tick(&h.session).await.unwrap();
         let anchor = wait_for_anchor(&h.st).await.expect("the run finished");
         assert_eq!(anchor.0, crate::pipeline_tests::backfill::entry_id(0));
         assert_eq!(backfill_pages(&h).await, 1);
@@ -1091,33 +1117,65 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_account_switch_clears_the_run_and_the_anchor() {
+    async fn an_account_switch_clears_the_run_but_keeps_the_previous_anchor() {
         let h = harness().await;
         // Slow answers: the new account's run cannot finish before we look.
         let mut feed = Feed::new(50);
         feed.details_delay = Some(Duration::from_millis(100));
         mount_feed(&h.server, feed).await;
-        // The previous account's stale run and anchor.
+        // The previous account's stale run and its anchor.
+        let base = crate::pipeline_tests::backfill::base_ms();
         lock(&h.st.live).self_puuid = Some("previous-account".into());
         lock(&h.st.live).start_backfill(Some(("stale".into(), 1)), None);
-        let stale = anchor_json(&("stale".to_string(), 1));
-        h.st.db(move |repo| repo.set_state(BACKFILL_ANCHOR_KEY, &stale))
-            .await
-            .unwrap();
+        store_anchor_for(&h.st, "previous-account", 7, base).await;
 
         let mut poller = Poller::new(h.st.clone());
         poller.on_connected(h.session.clone()).await;
 
         assert_eq!(
-            stored_anchor(&h.st).await,
-            None,
-            "the previous account's anchor must not steer the new account's run"
+            stored_anchor_of(&h.st, "previous-account")
+                .await
+                .map(|a| a.0),
+            Some(crate::pipeline_tests::backfill::entry_id(7)),
+            "the switch deletes nothing: switching back finds it again"
         );
+        assert_eq!(stored_anchor(&h.st).await, None, "the new account has none");
         {
             let live = lock(&h.st.live);
             let run = live.backfill.as_ref().expect("the new account's own run");
             assert_eq!(run.anchor, None, "a first run, not the stale one");
         }
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn switching_back_to_an_account_finds_its_anchor() {
+        let h = harness().await;
+        let mut feed = Feed::new(50);
+        feed.details_delay = Some(Duration::from_millis(100));
+        mount_feed(&h.server, feed).await;
+        let base = crate::pipeline_tests::backfill::base_ms();
+        // The app was last connected as another account; ME's anchor is from
+        // an earlier session.
+        lock(&h.st.live).self_puuid = Some("previous-account".into());
+        store_anchor(&h.st, 40, base).await;
+
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+
+        let run_anchor = lock(&h.st.live)
+            .backfill
+            .as_ref()
+            .and_then(|r| r.anchor.clone());
+        assert_eq!(
+            run_anchor.map(|a| a.0),
+            Some(crate::pipeline_tests::backfill::entry_id(40)),
+            "the run resumes from ME's own anchor"
+        );
+        assert_eq!(
+            stored_anchor(&h.st).await.map(|a| a.0),
+            Some(crate::pipeline_tests::backfill::entry_id(40))
+        );
         poller.stop_worker();
     }
 

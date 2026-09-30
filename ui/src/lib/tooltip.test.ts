@@ -101,6 +101,22 @@ describe("tip action", () => {
     expect(n.attrs.size).toBe(0);
   });
 
+  it("`ifCut` sets data-tip-cut (never data-tip-ov: the tip itself always shows) and is cleared by a plain update and by destroy", () => {
+    const n = node();
+    const a = tip(n as unknown as HTMLElement, { text: "Hidden name · known from your match", ifCut: "Fahad#OPD1" });
+    expect(n.attrs.get("data-tip")).toBe("Hidden name · known from your match");
+    expect(n.attrs.get("data-tip-cut")).toBe("Fahad#OPD1");
+    expect(n.attrs.has("data-tip-ov")).toBe(false);
+
+    a.update("Hidden name");
+    expect(n.attrs.has("data-tip-cut")).toBe(false);
+
+    a.update({ text: "T", ifCut: "X#Y" });
+    expect(n.attrs.get("data-tip-cut")).toBe("X#Y");
+    a.destroy();
+    expect(n.attrs.size).toBe(0);
+  });
+
   it("an empty text is an empty data-tip, which shows nothing", () => {
     const n = node();
     tip(n as unknown as HTMLElement, "");
@@ -188,6 +204,24 @@ describe("tooltip engine (delegated mouseover, 450 ms)", () => {
     expect(tipState.tip).toBeNull();
     vi.advanceTimersByTime(1);
     expect(tipState.tip?.text).toBe("WWWWWWWWWWWWWWWW#WWWWW");
+  });
+
+  it("`data-tip-cut` adds its line under the tip only while the name span is cut off", () => {
+    const attrs = { "data-tip": "Hidden name · known from your match\nBind · Sep 12, 2026", "data-tip-cut": "WWWWWWWWWWWWWWWW#WWWWW" };
+    over(trigger(attrs, rect(100, 100, 100, 20), { scrollWidth: 60, clientWidth: 60 }));
+    vi.advanceTimersByTime(450);
+    expect(tipState.tip?.text).toBe("Hidden name · known from your match\nBind · Sep 12, 2026"); // fits: the plain tip
+    hideTip();
+
+    over(trigger(attrs, rect(100, 100, 100, 20), { scrollWidth: 190, clientWidth: 150 }));
+    vi.advanceTimersByTime(450);
+    expect(tipState.tip?.text).toBe("Hidden name · known from your match\nBind · Sep 12, 2026\nWWWWWWWWWWWWWWWW#WWWWW");
+  });
+
+  it("`data-tip-cut` with no name span (nothing to measure) shows the plain tip", () => {
+    over(trigger({ "data-tip": "Hidden name", "data-tip-cut": "X#Y" }, rect(100, 100, 100, 20)));
+    vi.advanceTimersByTime(450);
+    expect(tipState.tip?.text).toBe("Hidden name");
   });
 
   it("a text starting with wl: that does not parse shows nothing", () => {

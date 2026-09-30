@@ -8,7 +8,12 @@ export type TipView = { text: string; x: number; top: number; transform: string 
 /** The tip on screen, or null. */
 export const tipState = $state<{ tip: TipView | null }>({ tip: null });
 
-export type TipArg = string | { text: string; overflowOnly: true };
+/**
+ * `overflowOnly`: the tip shows only while the trigger's first span is cut off (a visible Riot ID).
+ * `ifCut`: the tip always shows, and this line is added under it only while that span is cut off (a remembered name:
+ * its own tip, then the full `Name#TAG`).
+ */
+export type TipArg = string | { text: string; overflowOnly: true } | { text: string; ifCut: string };
 
 const DELAY_MS = 450;
 
@@ -52,17 +57,21 @@ export function tipOver(target: Element | null, root: Element): void {
   if (!el) return;
   if (!el.getAttribute("data-tip")) return;
   current = el;
-  if (el.getAttribute("data-tip-ov") === "1") {
-    // Overflow-only (a Riot ID name): the trigger's first span must actually be cut off.
+  /** The trigger's first span (the name) is cut off by its ellipsis. */
+  const cut = () => {
     const s = el.querySelector("span");
-    if (!s || s.scrollWidth <= s.clientWidth) return;
-  }
+    return !!s && s.scrollWidth > s.clientWidth;
+  };
+  // Overflow-only (a Riot ID name): the trigger's first span must actually be cut off.
+  if (el.getAttribute("data-tip-ov") === "1" && !cut()) return;
   timer = setTimeout(() => {
     if (current !== el) return;
     // Read at fire time, as the design does (v8:525): a trigger whose text changed during the delay shows the
     // new string, and one that went empty or malformed shows nothing.
-    const text = el.getAttribute("data-tip");
+    let text = el.getAttribute("data-tip");
     if (!text || (text.startsWith("wl:") && !parseWl(text))) return;
+    const more = el.getAttribute("data-tip-cut");
+    if (more && cut()) text = `${text}\n${more}`;
     tipState.tip = { text, ...tipPosition(el.getBoundingClientRect(), root.getBoundingClientRect()) };
   }, DELAY_MS);
 }
@@ -87,14 +96,17 @@ export function attachTooltips(root: HTMLElement): () => void {
 }
 
 /**
- * `use:tip={text}` or `use:tip={{ text, overflowOnly: true }}`. It only sets attributes; the engine does the rest.
- * An empty text leaves an empty `data-tip`, which shows nothing (and, as in the design, shadows an outer trigger).
+ * `use:tip={text}`, `use:tip={{ text, overflowOnly: true }}` or `use:tip={{ text, ifCut }}`. It only sets attributes;
+ * the engine does the rest. An empty text leaves an empty `data-tip`, which shows nothing (and, as in the design,
+ * shadows an outer trigger).
  */
 export function tip(node: HTMLElement, arg: TipArg): { update(a: TipArg): void; destroy(): void } {
   const set = (a: TipArg) => {
     node.setAttribute("data-tip", typeof a === "string" ? a : a.text);
-    if (typeof a !== "string" && a.overflowOnly) node.setAttribute("data-tip-ov", "1");
+    if (typeof a !== "string" && "overflowOnly" in a) node.setAttribute("data-tip-ov", "1");
     else node.removeAttribute("data-tip-ov");
+    if (typeof a !== "string" && "ifCut" in a) node.setAttribute("data-tip-cut", a.ifCut);
+    else node.removeAttribute("data-tip-cut");
   };
   set(arg);
   return {
@@ -102,6 +114,7 @@ export function tip(node: HTMLElement, arg: TipArg): { update(a: TipArg): void; 
     destroy() {
       node.removeAttribute("data-tip");
       node.removeAttribute("data-tip-ov");
+      node.removeAttribute("data-tip-cut");
       if (current === node) hideTip();
     },
   };

@@ -143,18 +143,23 @@ test("geometry: ingame", async ({ page }) => {
   const slot = await rel(".encslot");
   near(slot.x, 261, "⟲ slot x");
   near(slot.r, 297, "⟲ slot right");
-  // The design-ref gate hides the ⟲ glyph (the design draws a system-font character) and compares only the count,
-  // whose colour and nudges are a few dozen pixels: the badge's own look is pinned here instead (spec §3.5).
+  // The design-ref gate hides the ⟲ glyph (a system-font character; Linux has no Segoe UI Symbol, so the two renders
+  // would only compare the same fallback glyph) and compares only the count, whose colour and nudges are a few dozen
+  // pixels: the badge's own look is pinned here instead (spec §3.5). The glyph is the design's own span (v8:73).
   const enc = mara.locator(".enc");
   near((await rel(".enc")).r, 297, "⟲ badge right-aligned in its slot");
-  const glyph = await rel(".enc svg");
-  near(glyph.w, 12, "⟲ glyph w");
-  near(glyph.h, 12, "⟲ glyph h");
+  const glyph = enc.locator(".glyph");
+  await expect(enc.locator("svg")).toHaveCount(0);
+  await expect(glyph).toHaveText("⟲");
+  expect(await css(glyph, "font-family")).toBe('"Segoe UI Symbol", "Segoe UI", sans-serif');
+  expect(await css(glyph, "font-weight")).toBe("400");
+  expect(await css(glyph, "font-size")).toBe("13px");
+  expect(await css(glyph, "color")).toBe(await varRgb(page, "--text2"));
   expect(await css(enc, "color")).toBe(await varRgb(page, "--text2"));
   expect(await css(enc, "font-size")).toBe("13px");
   expect(await css(enc, "font-weight")).toBe("600");
   expect(await css(enc, "column-gap")).toBe("3px");
-  await expect(enc).toHaveText("3");
+  await expect(enc).toHaveText("⟲3");
   const tab = await rel(".ptab");
   near(tab.x, 464, "party tab x");
   near(tab.r, 485, "party tab right");

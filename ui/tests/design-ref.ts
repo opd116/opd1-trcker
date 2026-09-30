@@ -166,11 +166,14 @@ async function clickStep(page: Page, step: DesignStep): Promise<void> {
 }
 
 /**
- * Both renders hide the ⟲ glyph, and only the glyph: the design draws it as a Segoe UI Symbol character (a system
- * font, so whatever the machine falls back to), we draw the spec §3.5 SVG. The count beside it is compared: the
- * same font, right-aligned in the same 36px slot, so it lands on the same pixels.
+ * Both renders hide the ⟲ glyph, and only the glyph. Since v0.2.0 (R92) we draw the same character in the same
+ * `'Segoe UI Symbol','Segoe UI',sans-serif` span as the design, so on Windows the two glyphs are identical. This
+ * comparison runs on Linux, which has no Segoe UI Symbol: each render would fall back to whatever font the machine
+ * happens to have for U+27F2, which proves nothing about the app, so the glyph stays out of the pixel diff (its
+ * own look is pinned by fit-live's badge test). The count beside it is compared: the same font, right-aligned in
+ * the same 36px slot, so it lands on the same pixels.
  */
-export const COMPARE_STYLE = '[style*="Segoe UI Symbol"], .enc svg{visibility:hidden!important}';
+export const COMPARE_STYLE = '[style*="Segoe UI Symbol"], .enc .glyph{visibility:hidden!important}';
 
 /**
  * R125 (a user-delegated change to the design; spec §3.6 and §8.4): the card's Prev row reads icon · Prev · name,

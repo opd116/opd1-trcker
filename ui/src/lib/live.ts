@@ -42,6 +42,9 @@ export function liveColumns(s: LiveState | null): { left: SlotItem[]; right: Slo
         left: column(selfFirst(s.players.filter((p) => p.team === "ally"))),
         right: column(s.players.filter((p) => p.team === "enemy")),
       };
+    default:
+      // A stage this UI does not know (a contract drift): a quiet empty grid, never a throw.
+      return { left: fill("none"), right: fill("none") };
   }
 }
 

@@ -2,7 +2,8 @@
   A player's display name (spec §3.4): visible, remembered, hidden agent, Hidden Player, missing (—) or loading.
   Sizes: card 16px (§3.4), hero 22px (§6.2), row 14px (§6.7, §6.10). Only the name part of a Riot ID truncates; the
   tag never does. `wrap` (Top 3, §6.7): full names wrap and never truncate. A hidden player's name never reaches the
-  DOM: the backend never sends it (R18, R96).
+  DOM: the backend never sends it (R18, R96). The player-chosen name spans are `dir="auto"` (an Arabic or Hebrew
+  name runs right to left inside its own span); the tag and the agent names are Latin and stay as they are.
 -->
 <script lang="ts">
   import { agentName } from "../lib/meta";
@@ -32,7 +33,10 @@
   const tipArg: TipArg = $derived.by(() => {
     if (tipMode === "none" || !name) return "";
     const text = nameTip(name, $meta);
-    return name.kind === "visible" ? { text, overflowOnly: true } : text;
+    if (name.kind === "visible") return { text, overflowOnly: true };
+    // A remembered name is cut like a visible one: its own tip always shows, and the full Name#TAG joins it when cut.
+    if (name.kind === "remembered") return { text, ifCut: `${name.name}#${name.tag}` };
+    return text;
   });
 
   const eye = $derived(size === "hero" ? 16 : 14);
@@ -49,10 +53,10 @@
   {:else if name === null}
     <span class="dash">—</span>
   {:else if name.kind === "visible"}
-    <span class="n" data-ellipsis={ellipsis}>{name.name}</span><span class="t">#{name.tag}</span>
+    <span class="n" dir="auto" data-ellipsis={ellipsis}>{name.name}</span><span class="t">#{name.tag}</span>
   {:else if name.kind === "remembered"}
     <!-- `wrap`: the eye rides inside the name, so it stays on the name's first line when the name wraps. -->
-    {#if !wrap}<EyeOff size={eye} />{/if}<span class={["n rem", wrap && "eyed"]} data-ellipsis={ellipsis}
+    {#if !wrap}<EyeOff size={eye} />{/if}<span class={["n rem", wrap && "eyed"]} dir="auto" data-ellipsis={ellipsis}
       >{#if wrap}<span class="eye"><EyeOff size={eye} /></span>{/if}{name.name}</span
     ><span class="t">#{name.tag}</span>
   {:else}
@@ -201,7 +205,7 @@
 
   .eye {
     position: absolute;
-    left: 0;
+    inset-inline-start: 0;
     top: 0;
     display: flex;
     align-items: center;

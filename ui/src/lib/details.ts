@@ -2,7 +2,7 @@
 // come through meta.ts (R95), never looked up here twice; tooltip strings live in tips.ts.
 import { agentName, isRankedTier } from "./meta";
 import { DASH, dateLong, dateShort, durationMin, rrDelta, time12 } from "./format";
-import type { DisplayName, LiveState, MatchDetailsView, MatchSummary, Meta, WeaponSkin } from "./types";
+import type { DisplayName, LiveState, MatchDetailsView, MatchSummary, Meta, PlayerCard, PlayerDetails, WeaponSkin } from "./types";
 
 /** Rows shown before Show more, and the most Show more reveals (spec §6.4, §6.5). */
 const COLLAPSED = 3;
@@ -31,6 +31,69 @@ export function shortName(n: DisplayName, meta: Meta | null): string | undefined
       return a === undefined ? undefined : (a ?? DASH);
     }
   }
+}
+
+/**
+ * The Details page after `player_details` failed twice: the settled empty state (spec §6.9, the `details-empty`
+ * look), so the skeleton ends. The hero keeps what the live card knows, with every still-loading field settled to
+ * null (a bar that would never fill becomes `—`); every section is empty. No live card for that puuid: an all-null one.
+ */
+export function settledDetails(puuid: string, card: PlayerCard | undefined): PlayerDetails {
+  const base: PlayerCard = {
+    puuid,
+    name: null,
+    level: null,
+    cardId: "",
+    agentId: null,
+    rank: null,
+    prevActTier: null,
+    peak: null,
+    kd: null,
+    hsPct: null,
+    actWinrate: null,
+    actWins: null,
+    actGames: null,
+    last5: null,
+    party: null,
+    encounters: null,
+    team: "ally",
+    isSelfParty: false,
+    isSelf: false,
+  };
+  const settled: PlayerCard = card
+    ? {
+        ...card,
+        name: card.name ?? null,
+        level: card.level ?? null,
+        rank: card.rank ?? null,
+        prevActTier: card.prevActTier ?? null,
+        peak: card.peak ?? null,
+        kd: card.kd ?? null,
+        hsPct: card.hsPct ?? null,
+        actWinrate: card.actWinrate ?? null,
+        actWins: card.actWins ?? null,
+        actGames: card.actGames ?? null,
+        last5: card.last5 ?? null,
+      }
+    : base;
+  return {
+    card: settled,
+    recent: [],
+    topTeammates: [],
+    loadout: { vandal: null, phantom: null, operator: null, sheriff: null },
+    encounters: [],
+    heroKd: null,
+    heroHs: null,
+    heroMatches: 0,
+  };
+}
+
+/**
+ * The Match page after `match_details` failed twice: a view with no teams, so the header reads `—` (no map, no
+ * score, no chip, no halves, no date line) and the scoreboard keeps only its column header row. Nothing invented.
+ */
+export function emptyMatch(matchId: string): MatchDetailsView {
+  return { matchId, mapId: "", queueId: "", startMs: 0, durationMs: null, perspective: "focus", teams: [] };
 }
 
 /** A row that opens its match (Recent, Encounters): Enter or Space does what a click does, without scrolling the page. */

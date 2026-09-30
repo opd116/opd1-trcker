@@ -404,6 +404,25 @@ const sceneOf = (scene: string | null): Scene | undefined =>
 
 const never = <T>() => new Promise<T>(() => {});
 
+/** How many more calls of each command the URL says must fail (`?fail=details:2,match:1`), counted down as they do. */
+const failsLeft = new Map<string, number>();
+
+/**
+ * DEV retry tests: `?fail=details:N` makes the first N `player_details` calls reject, `?fail=match:N` the first N
+ * `match_details` calls (N = 1 succeeds on the 1s retry, N = 2 settles the page on its empty state).
+ */
+function failNow(cmd: "details" | "match"): boolean {
+  if (!failsLeft.has(cmd)) {
+    const param = typeof location === "undefined" ? "" : (new URLSearchParams(location.search).get("fail") ?? "");
+    const m = new RegExp(`(?:^|,)${cmd}:(\\d+)`).exec(param);
+    failsLeft.set(cmd, m ? Number(m[1]) : 0);
+  }
+  const n = failsLeft.get(cmd)!;
+  if (n <= 0) return false;
+  failsLeft.set(cmd, n - 1);
+  return true;
+}
+
 /**
  * `player_details` for the DEV browser. A scene's own entry wins as authored ('pending' never resolves); any
  * roster player without one gets the roster details built with the scene's live card, and a Top 3 row for a
@@ -411,6 +430,7 @@ const never = <T>() => new Promise<T>(() => {});
  * to mutate.
  */
 export async function resolveDetails(scene: string | null, puuid: string): Promise<PlayerDetails> {
+  if (failNow("details")) throw new Error("demo: player_details failed");
   const s = sceneOf(scene);
   const own = s?.details?.[puuid];
   if (own === "pending") return never();
@@ -426,6 +446,7 @@ export async function resolveDetails(scene: string | null, puuid: string): Promi
  * match id whose rows follow the scene's live hidden names, never the raw roster names (R93).
  */
 export async function resolveMatch(scene: string | null, matchId: string, _focusPuuid: string): Promise<MatchDetailsView> {
+  if (failNow("match")) throw new Error("demo: match_details failed");
   const s = sceneOf(scene);
   const own = s?.matches?.[matchId];
   if (own === "pending") return never();

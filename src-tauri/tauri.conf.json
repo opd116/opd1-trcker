@@ -19,7 +19,8 @@
         "resizable": false,
         "maximizable": false,
         "alwaysOnTop": true,
-        "center": true
+        "center": true,
+        "backgroundColor": "#0e1013"
       }
     ],
     "security": {

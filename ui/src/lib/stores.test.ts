@@ -22,6 +22,25 @@ describe("stores", () => {
     expect(get(openDetails)).toBeNull();
   });
 
+  it("now is the wall clock when a subscription starts, not the module-load time (Minor 1)", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(new Date("2026-09-29T10:00:00Z"));
+      const { now } = await load();
+      // Hours pass with nobody subscribed (VALORANT closed, no card mounted): no tick ever ran.
+      vi.setSystemTime(new Date("2026-09-29T15:30:00Z"));
+      const seen: number[] = [];
+      const off = now.subscribe((v) => seen.push(v));
+      expect(seen[seen.length - 1]).toBe(new Date("2026-09-29T15:30:00Z").getTime());
+      // ...and the 30s tick still moves it on.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(seen[seen.length - 1]).toBe(new Date("2026-09-29T15:30:30Z").getTime());
+      off();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("applyLive stores the state", async () => {
     const { live, applyLive } = await load();
     applyLive(state("menus"));

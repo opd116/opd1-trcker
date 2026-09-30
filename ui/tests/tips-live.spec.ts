@@ -96,7 +96,8 @@ test("tips: ingame-longnames", async ({ page }) => {
   await runItems(page, [
     { what: "visible name, truncated (self)", trigger: (p) => p.locator(".live .card").first().locator(".nm"), text: `${W}#WWWWW` },
     { what: "visible name, truncated (enemy)", trigger: (p) => p.locator(".live .col").nth(1).locator(".card").first().locator(".nm"), text: `${W}#WWWWW` },
-    { what: "remembered long name", trigger: (p) => p.locator(".live .card").filter({ has: p.locator(".nm svg") }).filter({ has: p.locator(".nm .t") }).locator(".nm"), text: "Hidden name · known from your match\nSplit · Aug 30, 2026" },
+    // A cut remembered name: its own tip, then the full Name#TAG under it (v0.2.0 polish). Rook, not cut, has the plain tip (ingame).
+    { what: "remembered long name (cut)", trigger: (p) => p.locator(".live .card").filter({ has: p.locator(".nm svg") }).filter({ has: p.locator(".nm .t") }).locator(".nm"), text: `Hidden name · known from your match\nSplit · Aug 30, 2026\n${W}#WWWWW` },
     { what: "3-digit ⟲", trigger: (p) => p.locator(".live .enc", { hasText: "123" }), text: "70 with · 53 against" },
     { what: "peak V26 A4", trigger: (p) => p.locator(".live .card").first().locator(".pgroup"), text: A4 },
     { what: "peak E10 A3", trigger: (p) => p.locator(".live .card").filter({ has: p.locator(".pgroup", { hasText: "E10 A3" }) }).locator(".pgroup"), text: "Episode 10 · Act 3\nMar 5 – Apr 30, 2025" },

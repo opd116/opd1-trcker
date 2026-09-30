@@ -85,6 +85,14 @@ describe("app.css", () => {
     expect(fallback!.toLowerCase()).toBe(TONES[DEFAULT_THEME.tone].bg.toLowerCase());
   });
 
+  it("the Tauri window's backgroundColor is the default tone's --bg, so there is no white flash before first paint", () => {
+    const conf = JSON.parse(readFileSync(new URL("../../../src-tauri/tauri.conf.json", import.meta.url), "utf8")) as {
+      app: { windows: { backgroundColor?: string }[] };
+    };
+    expect(conf.app.windows).toHaveLength(1);
+    expect(conf.app.windows[0]!.backgroundColor?.toLowerCase()).toBe(TONES[DEFAULT_THEME.tone].bg.toLowerCase());
+  });
+
   it("has the keyboard-only focus ring (R106) and nothing that shows on mouse focus", () => {
     expect(css).toMatch(/:focus-visible\s*\{[^}]*outline:\s*1px solid[^}]*outline-offset:\s*2px/);
     expect(css).toMatch(/var\(--accent\)/);

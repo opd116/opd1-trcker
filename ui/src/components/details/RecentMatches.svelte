@@ -115,6 +115,16 @@
     background: var(--hover-row);
   }
 
+  /* R106 focus ring, inset: the panel is overflow:hidden, so the global 2px-outside ring would be clipped. The last
+     row takes the panel's 8px corners, so its ring follows them instead of being cut by the panel's clip. */
+  .rrow:focus-visible {
+    outline-offset: -2px;
+  }
+
+  .rrow:last-child {
+    border-radius: 0 0 8px 8px;
+  }
+
   .rrow.sk-row,
   .rrow.none {
     cursor: default;

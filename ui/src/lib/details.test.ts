@@ -2,12 +2,14 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   CONTENT_TIERS,
+  emptyMatch,
   halvesText,
   liveTeammate,
   pmText,
   queueLabel,
   recentShown,
   rowKeydown,
+  settledDetails,
   shortName,
   teamLabel,
   weaponState,
@@ -282,5 +284,76 @@ describe("rowKeydown (Recent and Encounters rows, one handler for both)", () => 
       expect(open, k).not.toHaveBeenCalled();
       expect(e.preventDefault, k).not.toHaveBeenCalled();
     }
+  });
+});
+
+describe("settledDetails (a player_details that failed twice: the settled empty state, never a skeleton)", () => {
+  const live: PlayerCard = {
+    puuid: "p1",
+    name: { kind: "visible", name: "Mara", tag: "1177" },
+    cardId: "card-1",
+    agentId: JETT,
+    // Still loading on the live card: `undefined` would keep a skeleton bar in the hero forever.
+    level: undefined,
+    rank: { tier: 21, rr: 40 },
+    party: null,
+    encounters: { with: 1, against: 2 },
+    team: "enemy",
+    isSelfParty: false,
+    isSelf: false,
+  };
+
+  it("takes the hero from the live card and settles every still-loading field to null (—)", () => {
+    const d = settledDetails("p1", live);
+    expect(d.card.puuid).toBe("p1");
+    expect(d.card.name).toEqual(live.name);
+    expect(d.card.rank).toEqual({ tier: 21, rr: 40 });
+    expect(d.card.cardId).toBe("card-1");
+    for (const k of ["level", "prevActTier", "peak", "kd", "hsPct", "actWinrate", "actWins", "actGames", "last5"] as const) {
+      expect(d.card[k], k).toBeNull();
+      expect(k in d.card, k).toBe(true);
+    }
+  });
+
+  it("without a live card: an all-null card for that puuid (— everywhere, never a name it does not know)", () => {
+    const d = settledDetails("p9", undefined);
+    expect(d.card.puuid).toBe("p9");
+    expect(d.card.name).toBeNull();
+    expect(d.card.cardId).toBe("");
+    expect(d.card.isSelf).toBe(false);
+    expect(d.card.party).toBeNull();
+    expect(d.card.encounters).toBeNull();
+    for (const k of ["level", "rank", "prevActTier", "peak", "kd", "hsPct", "actWinrate", "actWins", "actGames", "last5"] as const) {
+      expect(d.card[k], k).toBeNull();
+    }
+  });
+
+  it("every section is the empty one: no rows, no teammates, no encounters, four null weapons, no hero stats", () => {
+    for (const d of [settledDetails("p1", live), settledDetails("p9", undefined)]) {
+      expect(d.recent).toEqual([]);
+      expect(d.topTeammates).toEqual([]);
+      expect(d.encounters).toEqual([]);
+      expect(d.loadout).toEqual({ vandal: null, phantom: null, operator: null, sheriff: null });
+      expect(d.heroKd).toBeNull();
+      expect(d.heroHs).toBeNull();
+      expect(d.heroMatches).toBe(0);
+    }
+  });
+
+  it("does not mutate the live card", () => {
+    const before = structuredClone(live);
+    settledDetails("p1", live);
+    expect(live).toEqual(before);
+  });
+});
+
+describe("emptyMatch (a match_details that failed twice)", () => {
+  it("is a well-formed view with no teams: the header reads — and the scoreboard shows only its header row", () => {
+    const v = emptyMatch("m1");
+    expect(v.matchId).toBe("m1");
+    expect(v.mapId).toBe("");
+    expect(v.teams).toEqual([]);
+    expect(v.durationMs).toBeNull();
+    expect(halvesText(v)).toBeNull();
   });
 });

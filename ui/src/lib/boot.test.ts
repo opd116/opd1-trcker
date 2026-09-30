@@ -1,11 +1,15 @@
 import { get } from "svelte/store";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  DETAILS_RETRY_MS,
   META_RETRY_FIRST_MS,
   META_RETRY_MAX_MS,
+  browserKeyBlocked,
   detailsSlot,
+  installReleaseGuards,
   keyAction,
   loadMeta,
+  retryOnce,
   runKeyAction,
   startLive,
   type Bridge,
@@ -93,6 +97,149 @@ describe("keyAction", () => {
     expect(keyAction(k("L", { ctrlKey: true, shiftKey: true, metaKey: true }))).toBeNull();
     expect(keyAction(k("K", { ctrlKey: true, shiftKey: true }))).toBeNull();
     expect(keyAction(k("1"))).toBeNull();
+  });
+});
+
+describe("browserKeyBlocked (release-only guards, v0.2.0 polish)", () => {
+  const k = (key: string, mods: Partial<Record<"ctrlKey" | "shiftKey" | "altKey" | "metaKey", boolean>> = {}) => ({
+    key,
+    ctrlKey: false,
+    shiftKey: false,
+    altKey: false,
+    metaKey: false,
+    ...mods,
+  });
+
+  it("blocks reload, print, find, view-source and caret browsing: F5, Ctrl+R, Ctrl+Shift+R, Ctrl+P, Ctrl+F, Ctrl+U, F7", () => {
+    expect(browserKeyBlocked(k("F5"))).toBe(true);
+    expect(browserKeyBlocked(k("F5", { ctrlKey: true }))).toBe(true); // Ctrl+F5 is a hard reload
+    expect(browserKeyBlocked(k("F5", { shiftKey: true }))).toBe(true);
+    expect(browserKeyBlocked(k("r", { ctrlKey: true }))).toBe(true);
+    expect(browserKeyBlocked(k("R", { ctrlKey: true, shiftKey: true }))).toBe(true);
+    expect(browserKeyBlocked(k("p", { ctrlKey: true }))).toBe(true);
+    expect(browserKeyBlocked(k("f", { ctrlKey: true }))).toBe(true);
+    expect(browserKeyBlocked(k("u", { ctrlKey: true }))).toBe(true);
+    expect(browserKeyBlocked(k("F7"))).toBe(true);
+  });
+
+  it("is case-insensitive (Caps Lock, Shift)", () => {
+    expect(browserKeyBlocked(k("R", { ctrlKey: true }))).toBe(true);
+    expect(browserKeyBlocked(k("P", { ctrlKey: true }))).toBe(true);
+    expect(browserKeyBlocked(k("F", { ctrlKey: true }))).toBe(true);
+    expect(browserKeyBlocked(k("U", { ctrlKey: true }))).toBe(true);
+  });
+
+  it("never blocks the app's own Ctrl+Shift+L (copy log) and Ctrl+Shift+D (dump raw)", () => {
+    for (const key of ["L", "l", "D", "d"]) {
+      const e = k(key, { ctrlKey: true, shiftKey: true });
+      expect(keyAction(e), key).not.toBeNull();
+      expect(browserKeyBlocked(e), key).toBe(false);
+    }
+  });
+
+  it("leaves everything else alone: plain letters, other F keys, Tab/Enter/Space (keyboard use of the UI), AltGr chords", () => {
+    for (const key of ["r", "p", "f", "u", "F", "Tab", "Enter", " ", "Escape", "F1", "F4", "F6", "F8", "F11", "F12", "ArrowDown"]) {
+      expect(browserKeyBlocked(k(key)), key).toBe(false);
+    }
+    expect(browserKeyBlocked(k("r", { shiftKey: true }))).toBe(false);
+    expect(browserKeyBlocked(k("s", { ctrlKey: true }))).toBe(false);
+    expect(browserKeyBlocked(k("a", { ctrlKey: true }))).toBe(false);
+    expect(browserKeyBlocked(k("c", { ctrlKey: true }))).toBe(false);
+    // AltGr arrives as Ctrl+Alt on Windows: never swallow a layout's own character.
+    expect(browserKeyBlocked(k("f", { ctrlKey: true, altKey: true }))).toBe(false);
+    expect(browserKeyBlocked(k("r", { ctrlKey: true, metaKey: true }))).toBe(false);
+  });
+});
+
+describe("installReleaseGuards", () => {
+  function fakeTarget() {
+    const handlers = new Map<string, (e: unknown) => void>();
+    return {
+      target: { addEventListener: (type: string, cb: (e: unknown) => void) => handlers.set(type, cb) } as unknown as Pick<Window, "addEventListener">,
+      fire: (type: string, e: Record<string, unknown>) => {
+        const preventDefault = vi.fn();
+        handlers.get(type)?.({ ...e, preventDefault });
+        return preventDefault;
+      },
+      types: () => [...handlers.keys()].sort(),
+    };
+  }
+  const key = (k: string, mods: Record<string, boolean> = {}) => ({ key: k, ctrlKey: false, shiftKey: false, altKey: false, metaKey: false, ...mods });
+
+  it("listens for contextmenu and keydown only", () => {
+    const f = fakeTarget();
+    installReleaseGuards(f.target);
+    expect(f.types()).toEqual(["contextmenu", "keydown"]);
+  });
+
+  it("the context menu is always prevented", () => {
+    const f = fakeTarget();
+    installReleaseGuards(f.target);
+    expect(f.fire("contextmenu", {})).toHaveBeenCalledOnce();
+  });
+
+  it("a blocked key is prevented, the copy-log and dump shortcuts and plain keys are not", () => {
+    const f = fakeTarget();
+    installReleaseGuards(f.target);
+    expect(f.fire("keydown", key("F5"))).toHaveBeenCalledOnce();
+    expect(f.fire("keydown", key("r", { ctrlKey: true }))).toHaveBeenCalledOnce();
+    expect(f.fire("keydown", key("L", { ctrlKey: true, shiftKey: true }))).not.toHaveBeenCalled();
+    expect(f.fire("keydown", key("D", { ctrlKey: true, shiftKey: true }))).not.toHaveBeenCalled();
+    expect(f.fire("keydown", key("Enter"))).not.toHaveBeenCalled();
+    expect(f.fire("keydown", key("Tab"))).not.toHaveBeenCalled();
+  });
+});
+
+describe("retryOnce", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("a first success is returned with no retry and no delay", async () => {
+    const call = vi.fn(async () => "ok");
+    await expect(retryOnce(call, 1_000)).resolves.toBe("ok");
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it("a rejection is retried once after the delay and the retry's answer is returned", async () => {
+    vi.useFakeTimers();
+    let n = 0;
+    const call = vi.fn(async () => {
+      if (n++ === 0) throw new Error("busy");
+      return "second";
+    });
+    const done = retryOnce(call, 1_000);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(call).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(done).resolves.toBe("second");
+    expect(call).toHaveBeenCalledTimes(2);
+  });
+
+  it("a second rejection propagates (the second error), with exactly two calls", async () => {
+    vi.useFakeTimers();
+    let n = 0;
+    const call = vi.fn(async () => {
+      throw new Error(`fail ${++n}`);
+    });
+    const done = retryOnce(call, 1_000);
+    const seen = expect(done).rejects.toThrow("fail 2");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await seen;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(call).toHaveBeenCalledTimes(2);
+  });
+
+  it("no retry once nobody wants the answer any more: the first error propagates and the call is not repeated", async () => {
+    vi.useFakeTimers();
+    let wanted = true;
+    const call = vi.fn(async () => {
+      throw new Error("first");
+    });
+    const done = retryOnce(call, 1_000, () => wanted);
+    const seen = expect(done).rejects.toThrow("first");
+    wanted = false;
+    await vi.advanceTimersByTimeAsync(1_000);
+    await seen;
+    expect(call).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -211,6 +358,109 @@ describe("detailsSlot (spec §2.4, §6.9: the open Player Details)", () => {
     const slot = detailsSlot();
     await expect(slot.open("p1", async () => Promise.reject(new Error("offline")))).rejects.toThrow("offline");
     expect(now(slot)).toBeNull();
+  });
+
+  describe("retry and settle (v0.2.0 polish: a rejected player_details retries once after 1s, then settles on the empty state)", () => {
+    afterEach(() => vi.useRealTimers());
+    const settle = (puuid: string) => details(puuid, "settled");
+
+    it("the retry delay is 1s", () => {
+      expect(DETAILS_RETRY_MS).toBe(1_000);
+    });
+
+    it("a rejection is retried once after the delay, and the retry's answer shows", async () => {
+      vi.useFakeTimers();
+      const slot = detailsSlot();
+      let n = 0;
+      const fetch = vi.fn(async (p: string) => {
+        if (n++ === 0) throw new Error("db busy");
+        return details(p, "retried");
+      });
+      const done = slot.open("p1", fetch, { retryMs: DETAILS_RETRY_MS, settle });
+      await vi.advanceTimersByTimeAsync(DETAILS_RETRY_MS - 1);
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(now(slot)).toBeNull(); // still the skeleton while waiting
+      await vi.advanceTimersByTimeAsync(1);
+      await done;
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(now(slot)?.marker).toBe("retried");
+    });
+
+    it("two rejections settle the slot on the empty state (the skeleton ends) and still reject for the log", async () => {
+      vi.useFakeTimers();
+      const slot = detailsSlot();
+      const fetch = vi.fn(async () => {
+        throw new Error("unknown player");
+      });
+      const done = slot.open("p1", fetch, { retryMs: DETAILS_RETRY_MS, settle });
+      const seen = expect(done).rejects.toThrow("unknown player");
+      await vi.advanceTimersByTimeAsync(DETAILS_RETRY_MS);
+      await seen;
+      expect(fetch).toHaveBeenCalledTimes(2); // once, not forever
+      expect(now(slot)?.marker).toBe("settled");
+      expect(now(slot)?.card.puuid).toBe("p1");
+    });
+
+    it("a later details event replaces the settled state in place", async () => {
+      vi.useFakeTimers();
+      const slot = detailsSlot();
+      const done = slot.open("p1", () => Promise.reject(new Error("x")), { retryMs: 10, settle });
+      const seen = expect(done).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(10);
+      await seen;
+      slot.event(details("p1", "real"));
+      expect(now(slot)?.marker).toBe("real");
+    });
+
+    it("a details event during the wait supersedes the retry: no second call, nothing settled over it", async () => {
+      vi.useFakeTimers();
+      const slot = detailsSlot();
+      const fetch = vi.fn(async () => {
+        throw new Error("x");
+      });
+      const done = slot.open("p1", fetch, { retryMs: DETAILS_RETRY_MS, settle });
+      const seen = expect(done).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(10);
+      slot.event(details("p1", "event"));
+      await vi.advanceTimersByTimeAsync(DETAILS_RETRY_MS);
+      await seen;
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(now(slot)?.marker).toBe("event");
+    });
+
+    it("leaving (close) or opening another player during the wait drops the retry and settles nothing", async () => {
+      vi.useFakeTimers();
+      const slot = detailsSlot();
+      const fetch = vi.fn(async () => {
+        throw new Error("x");
+      });
+      const a = slot.open("p1", fetch, { retryMs: DETAILS_RETRY_MS, settle });
+      const seenA = expect(a).rejects.toThrow();
+      slot.close();
+      await vi.advanceTimersByTimeAsync(DETAILS_RETRY_MS);
+      await seenA;
+      expect(fetch).toHaveBeenCalledTimes(1);
+      expect(now(slot)).toBeNull();
+
+      const b = slot.open("p2", fetch, { retryMs: DETAILS_RETRY_MS, settle });
+      const seenB = expect(b).rejects.toThrow();
+      const c = slot.open("p3", async (p) => details(p, "c"));
+      await c;
+      await vi.advanceTimersByTimeAsync(DETAILS_RETRY_MS);
+      await seenB;
+      expect(now(slot)?.marker).toBe("c");
+    });
+
+    it("the same player's payload already on screen (Back from Match) is kept when the refetch fails twice", async () => {
+      vi.useFakeTimers();
+      const slot = detailsSlot();
+      await slot.open("p1", async () => details("p1", "first"));
+      const done = slot.open("p1", () => Promise.reject(new Error("x")), { retryMs: 10, settle });
+      const seen = expect(done).rejects.toThrow();
+      await vi.advanceTimersByTimeAsync(10);
+      await seen;
+      expect(now(slot)?.marker).toBe("first");
+    });
   });
 });
 

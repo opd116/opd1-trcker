@@ -54,7 +54,7 @@
 {#if details && card}
   <div class="hero">
     <div class="hart">
-      <div class="hart-img" style:background-image={`url("${assetUrl("cardLarge", card.cardId)}")`}></div>
+      <div class="hart-img" style:background-image={card.cardId ? `url("${assetUrl("cardLarge", card.cardId)}")` : undefined}></div>
       <div class="hart-fade"></div>
     </div>
     {#if card.agentId}

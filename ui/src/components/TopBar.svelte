@@ -63,9 +63,11 @@
     align-items: center;
   }
 
+  /* 4px of padding, taken back by a -4px margin (the layout is unchanged), so the inset focus ring below has room and
+     never runs through the letters. */
   button.tab {
-    margin: 0;
-    padding: 0;
+    margin: 0 -4px;
+    padding: 0 4px;
     border: 0;
     background: none;
     color: inherit;
@@ -73,6 +75,12 @@
     font-size: 14px;
     font-weight: 600;
     cursor: pointer;
+  }
+
+  /* R106 focus ring, inset: this tab touches the top edge of #app (overflow hidden), where the global 2px-outside
+     ring would be cut off. Keyboard focus only; the mouse look is untouched. */
+  button.tab:focus-visible {
+    outline-offset: -2px;
   }
 
   .off {
@@ -84,8 +92,8 @@
 
   .ind {
     position: absolute;
-    left: 0;
-    right: 0;
+    left: 4px;
+    right: 4px;
     bottom: -1px;
     height: 2px;
     border-radius: 1px;

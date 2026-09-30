@@ -1,14 +1,18 @@
-<!-- ⟲ + count of past matches shared with the user (spec §3.5; hero §6.2). Visibility: `showEncounters` (live.ts). -->
+<!--
+  ⟲ + count of past matches shared with the user (spec §3.5; hero §6.2). Visibility: `showEncounters` (live.ts).
+  The glyph is the design's own (v8:73, v8:196): the ⟲ character in Segoe UI Symbol, at the badge's size and colour.
+  The app is Windows-only, so that system font is always there (R92 over the earlier inline Lucide icon); nothing is
+  downloaded.
+-->
 <script lang="ts">
   import { encounterTip } from "../lib/tips";
   import { tip } from "../lib/tooltip.svelte";
   import type { EncounterCount } from "../lib/types";
-  import Rewind from "./icons/Rewind.svelte";
 
   let { enc, size }: { enc: EncounterCount; size: "card" | "hero" } = $props();
 </script>
 
-<span class={["enc", `size-${size}`]} use:tip={encounterTip(enc)}><Rewind size={size === "hero" ? 13 : 12} />{enc.with + enc.against}</span>
+<span class={["enc", `size-${size}`]} use:tip={encounterTip(enc)}><span class="glyph">⟲</span>{enc.with + enc.against}</span>
 
 <style>
   .enc {
@@ -19,6 +23,12 @@
     font-weight: 600;
     color: var(--text2);
     font-variant-numeric: tabular-nums;
+  }
+
+  /* v8:73: the design's own glyph span; the size and colour are the badge's. */
+  .glyph {
+    font-family: "Segoe UI Symbol", "Segoe UI", sans-serif;
+    font-weight: 400;
   }
 
   /* [C] 3+ digit counts only: the card's slot is min-width 36px and right-aligned, so this margin is absorbed

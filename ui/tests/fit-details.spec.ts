@@ -72,7 +72,7 @@ test("details: 3 recent rows + Show more, then 8 and no button; encounter header
   await expect(page.locator(".details .more")).toHaveCount(0);
   expect(await page.locator(".details .encs .ehead > *").allInnerTexts()).toEqual(["Map", "Mara", "", "You", "Your result", ""]);
   await expect(page.locator(".details .encs .erow")).toHaveCount(3);
-  await expect(page.locator(".details .hero .enc")).toHaveText("3");
+  await expect(page.locator(".details .hero .enc")).toHaveText("⟲3");
   const mates = page.locator(".details .mate");
   await expect(mates).toHaveCount(3);
   await expect(mates.locator(".mlive")).toHaveCount(1);

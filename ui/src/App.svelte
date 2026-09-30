@@ -1,9 +1,11 @@
 <script lang="ts">
   import { isTauri } from "@tauri-apps/api/core";
+  import type { Attachment } from "svelte/attachments";
   import Tooltip from "./components/Tooltip.svelte";
   import TopBar from "./components/TopBar.svelte";
   import { tauriBridge } from "./lib/api";
   import { keyAction, runKeyAction } from "./lib/boot";
+  import { cardOpenGuard } from "./lib/clickGuard";
   import { router, scrollHost } from "./lib/router.svelte";
   import { live } from "./lib/stores";
   import Details from "./screens/Details.svelte";
@@ -19,23 +21,59 @@
       console.error(`${action} failed`, err),
     );
   }
+
+  // A card click opens Details; the second click of a double-click must not land on the page that replaced the grid
+  // (Back sits where the top-left card was). Capture phase, so it is gone before any handler on the new page sees it.
+  function swallowDoubleClick(e: MouseEvent) {
+    if (!cardOpenGuard.swallows()) return;
+    e.stopPropagation();
+    e.preventDefault();
+  }
+
+  /** One boundary per page: a crash on one page never follows the user to the next. "Show more" stays on its page. */
+  const pageKey = $derived(
+    router.route.name === "live"
+      ? "live"
+      : router.route.name === "details"
+        ? `details:${router.route.puuid}`
+        : `match:${router.route.matchId}`,
+  );
+
+  /** A crashed page tries again on the next live update (the likeliest cause is one bad payload). */
+  const retryOnNextLive =
+    (reset: () => void): Attachment =>
+    () => {
+      let first = true;
+      return live.subscribe(() => {
+        if (first) first = false; // the subscription's own first call: the state that crashed
+        else reset();
+      });
+    };
 </script>
 
-<svelte:window {onkeydown} />
+<svelte:window {onkeydown} onclickcapture={swallowDoubleClick} />
 
 <TopBar route={router.route} live={$live} />
-{#if router.route.name === "live"}
-  <Live live={$live} />
-{:else}
-  <!-- One scroll container for Details and Match (spec §6.1); `go` resets it to the top. -->
-  <div class="scroll" use:scrollHost>
-    {#if router.route.name === "details"}
-      <Details puuid={router.route.puuid} more={router.route.more} />
+{#key pageKey}
+  <svelte:boundary onerror={(err) => console.error("page crashed", err)}>
+    {#if router.route.name === "live"}
+      <Live live={$live} />
     {:else}
-      <Match matchId={router.route.matchId} focusPuuid={router.route.focusPuuid} from={router.route.from} />
+      <!-- One scroll container for Details and Match (spec §6.1); `go` resets it to the top. -->
+      <div class="scroll" use:scrollHost>
+        {#if router.route.name === "details"}
+          <Details puuid={router.route.puuid} more={router.route.more} />
+        {:else}
+          <Match matchId={router.route.matchId} focusPuuid={router.route.focusPuuid} from={router.route.from} />
+        {/if}
+      </div>
     {/if}
-  </div>
-{/if}
+    <!-- A quiet empty page: no text, no status. The top bar (and its Live tab) stay. -->
+    {#snippet failed(_error, reset)}
+      <div class="blank" {@attach retryOnNextLive(reset)}></div>
+    {/snippet}
+  </svelte:boundary>
+{/key}
 <Tooltip />
 
 <style>
@@ -51,6 +89,11 @@
     display: flex;
     flex-direction: column;
     -webkit-font-smoothing: antialiased;
+  }
+
+  .blank {
+    flex: 1;
+    min-height: 0;
   }
 
   .scroll {

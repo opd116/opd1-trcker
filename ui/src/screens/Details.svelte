@@ -3,7 +3,8 @@
   Encounters on the left, Top 3 Teammates and Loadout on the right. It scrolls vertically inside App's one scroll
   container. The data is `invoke('player_details')`, kept in the `openDetails` slot (boot.ts) so a `details` event for
   the same player replaces it in place (spec §2.4), keeping `more` and the scroll position; an event always wins over
-  an answer still in flight, and leaving for Live forgets the payload.
+  an answer still in flight, and leaving for Live forgets the payload. A rejected call is retried once after 1s; when
+  that fails too the page settles on its empty state (`settledDetails`: `—` values, no text) and stops being busy.
 -->
 <script lang="ts">
   import BackButton from "../components/details/BackButton.svelte";
@@ -12,8 +13,10 @@
   import Loadout from "../components/details/Loadout.svelte";
   import RecentMatches from "../components/details/RecentMatches.svelte";
   import TopTeammates from "../components/details/TopTeammates.svelte";
+  import { get } from "svelte/store";
   import { getPlayerDetails } from "../lib/api";
-  import { recentShown, type MatchFrom } from "../lib/details";
+  import { DETAILS_RETRY_MS } from "../lib/boot";
+  import { recentShown, settledDetails, type MatchFrom } from "../lib/details";
   import { go } from "../lib/router.svelte";
   import { live, openDetails } from "../lib/stores";
 
@@ -26,7 +29,13 @@
   // Fetch on open and whenever the player changes. Details already open for this player (Back from Match) stay on
   // screen and are replaced in place when the answer comes; another player's are cleared first (the skeleton shows).
   $effect(() => {
-    openDetails.open(puuid, getPlayerDetails).catch((err: unknown) => console.error("player_details failed", err));
+    openDetails
+      .open(puuid, getPlayerDetails, {
+        retryMs: DETAILS_RETRY_MS,
+        // The hero keeps what the live card knew at that moment (read then, so this effect never depends on `live`).
+        settle: (p) => settledDetails(p, get(live)?.players.find((c) => c.puuid === p)),
+      })
+      .catch((err: unknown) => console.error("player_details failed", err));
   });
 
   const openMatch = (from: MatchFrom) => (matchId: string) =>

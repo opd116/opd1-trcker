@@ -14,8 +14,13 @@ export const meta = writable<Meta | null>(null);
 /** The Player Details currently open (boot.ts: Details opens it, a `details` event replaces it, Live closes it). */
 export { openDetails };
 
-/** Wall clock for "time since" labels; one tick every 30s is plenty. */
+/**
+ * Wall clock for "time since" labels; one tick every 30s is plenty. A subscription starting sets the clock at once:
+ * `readable` keeps the last value, so with no subscriber for hours (VALORANT closed, no card mounted) the first
+ * card to mount would otherwise read module-load time until the first tick.
+ */
 export const now = readable(Date.now(), (set) => {
+  set(Date.now());
   const id = setInterval(() => set(Date.now()), 30_000);
   return () => clearInterval(id);
 });

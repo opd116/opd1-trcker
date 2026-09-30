@@ -2,7 +2,9 @@
   Match Details header (spec §6.10, v8:365-378): the map, `{mode} · {date} · {time} · {duration}` (the date has no year
   for a current-year match opened from an encounter row, R140), then team 0's result
   chip, the score and the halves (tooltip `First half · Second half`). A no-team mode (Deathmatch) has no chip, `—` for
-  the score and no halves. `view: null` = the loading header (a 150×56 box and a 120×18 bar).
+  the score and no halves. `view: null` = the loading header (a 150×56 box and a 120×18 bar). A view with no team at
+  all (`emptyMatch`, the call failed twice) is the settled empty header: the map box, `—` for the map, the date line
+  and the score, nothing invented.
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
@@ -29,7 +31,7 @@
     {#if view.mapId}<img class="mmap" src={assetUrl("mapList", view.mapId)} alt="" />{:else}<div class="mmap"></div>{/if}
     <div class="mtext">
       <span class="mtitle">{#if map === undefined}<Skel w={120} h={18} />{:else}{map ?? "—"}{/if}</span>
-      <span class="mwhen">{whenText(view, from, $now)}</span>
+      <span class="mwhen">{view.teams.length === 0 ? "—" : whenText(view, from, $now)}</span>
     </div>
     <div class="mres">
       {#if teams?.a.result}<ResultChip result={teams.a.result} size={28} />{/if}

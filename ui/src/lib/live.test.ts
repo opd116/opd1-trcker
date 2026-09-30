@@ -44,6 +44,14 @@ describe("liveColumns", () => {
     expect(col(right)).toEqual(NONE5);
   });
 
+  it("an unknown stage (a contract drift) → 5 + 5 empty slots, never a throw and never undefined", () => {
+    const { left, right } = liveColumns({ stage: "champselect", mapId: null, players: [c("a")] } as unknown as LiveState);
+    expect(col(left)).toEqual(NONE5);
+    expect(col(right)).toEqual(NONE5);
+    expect(left).toHaveLength(5);
+    expect(right).toHaveLength(5);
+  });
+
   it("menus with players [] → 1 skeleton in slot 1", () => {
     expect(col(liveColumns(st("menus", [])).left)).toEqual(["skeleton", "none", "none", "none", "none"]);
   });

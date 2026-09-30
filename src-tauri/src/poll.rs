@@ -7,8 +7,8 @@
 //!   │  (fail → back off 5s,10s,20s,40s,60s; a rewritten    │ 5 presence errors /
 //!   │   lockfile retries at once — R47)                    │ VALORANT (re)started
 //!   ▼                                                      │ under a game-less
-//! Connected: own Riot ID from /chat/v1/session (R43),      │ session (R46)
-//!   own loadout once (R90)                                 │
+//! Connected: own Riot ID from /chat/v1/session (R43)       │ session (R46)
+//!   own loadout once, at the first VALORANT presence (R90) │
 //!   presence (local) every 2s (5s while closed) ───────────┘
 //!   │  own VALORANT presence absent twice → stage Closed (own card from DB)
 //!   │  view_stage(sessionLoopState, queueId) change → plan_transition():
@@ -17,8 +17,9 @@
 //!   │                               ally skins until a valid answer, R83)
 //!   │     INGAME  → both teams + loadouts
 //!   │     PREGAME/INGAME in a free-for-all queue → stays MENUS (R41)
-//!   │     INGAME→MENUS = match end: back to Lobby + post-match follow-up,
-//!   │        and the own-history backfill starts (R101; also on connect)
+//!   │     INGAME→MENUS = match end: back to Lobby + post-match follow-up
+//!   │        (kept through a quick requeue, R48), and the own-history
+//!   │        backfill starts (R101; also on connect)
 //!   └─ roster → cached-first cards (DB) → emit → worker syncs
 //!      self → party → allies → enemies, re-emitting after each player
 //! ```
@@ -98,6 +99,9 @@ pub(crate) struct Poller {
     presence_stage: Stage,
     /// VALORANT's own presence under this session (R46).
     game: GameWatch,
+    /// The user's own loadout was asked for under this session (R90: once
+    /// per connect, at the first presence that shows VALORANT running).
+    self_loadout_asked: bool,
     /// The presence `queueId` while in a match — decides the post-match
     /// check for the match that just ended (R48).
     match_queue: Option<String>,
@@ -136,6 +140,7 @@ impl Poller {
             stage: Stage::Closed,
             presence_stage: Stage::Closed,
             game: GameWatch::default(),
+            self_loadout_asked: false,
             match_queue: None,
             presence_errors: 0,
             party_key: None,
@@ -236,6 +241,7 @@ impl Poller {
                 live.self_roster = None;
                 live.self_name = None;
                 live.self_loadout = None;
+                live.seen_hidden.clear();
                 // R101: the previous account's run (and its cursor) is not
                 // this account's.
                 live.backfill = None;
@@ -260,16 +266,12 @@ impl Poller {
         self.st.set_session(Some(session.clone()));
         self.session = Some(session.clone());
         self.game = GameWatch::default();
+        // R90: asked at this session's first presence showing VALORANT.
+        self.self_loadout_asked = false;
         self.presence_errors = 0;
         self.next_presence = Instant::now();
         // R43: the user's own Riot ID, from the local chat session.
         let _ = crate::sync::fetch_self_name(&self.st, &session).await;
-        // R90: the user's own equipped skins, once per connect (one
-        // read-only call; a failure waits for the next connect).
-        let (st, s) = (self.st.clone(), session.clone());
-        tauri::async_runtime::spawn(async move {
-            let _ = crate::sync::fetch_self_loadout(&st, &s).await;
-        });
 
         // One cheap /v1/version check per client start (new patch → new
         // tables); the tables themselves only download when it changed.
@@ -378,7 +380,7 @@ impl Poller {
         sleep_until(next).await;
     }
 
-    async fn presence_tick(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
+    pub(crate) async fn presence_tick(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
         let presences = match session.presences().await {
             Ok(p) => {
                 self.presence_errors = 0;
@@ -403,7 +405,7 @@ impl Poller {
         let decoded = private.as_deref().and_then(decode_presence);
 
         match self.game.on_presence(decoded.is_some()) {
-            GameVerdict::Present => {}
+            GameVerdict::Present => self.read_self_loadout_once(session),
             // The session was built (or has lived) while VALORANT wasn't
             // running: stale shards / fallback client version. Rebuild it
             // now that the game is up — first launch or relaunch (R46).
@@ -420,6 +422,10 @@ impl Poller {
         let Some(presence) = decoded else {
             return Ok(());
         };
+        // R137: the raw presence, not the view — a free-for-all match keeps
+        // the Lobby view (R41) but is still a match. Set before any stage
+        // change below starts a worker.
+        lock(&self.st.live).in_match = matches!(presence.stage, Stage::Pregame | Stage::Ingame);
 
         if presence.stage == Stage::Ingame {
             self.match_queue = presence.queue_id.clone();
@@ -457,7 +463,25 @@ impl Poller {
         Ok(())
     }
 
-    fn stop_worker(&mut self) {
+    /// R90: the user's own equipped skins, once per connect (one read-only
+    /// pd call; a failure waits for the next connect) — at the first
+    /// presence that shows VALORANT running, like the backfill (R137): a
+    /// session built while the game is closed is stale and rebuilt when it
+    /// starts (R46), and a connect that never sees VALORANT (the Riot Client
+    /// alone, or a presence that keeps failing and reconnecting) asks
+    /// nothing.
+    fn read_self_loadout_once(&mut self, session: &Arc<RiotSession>) {
+        if self.self_loadout_asked {
+            return;
+        }
+        self.self_loadout_asked = true;
+        let (st, s) = (self.st.clone(), session.clone());
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::sync::fetch_self_loadout(&st, &s).await;
+        });
+    }
+
+    pub(crate) fn stop_worker(&mut self) {
         if let Some((handle, _)) = self.worker.take() {
             handle.abort();
         }
@@ -530,7 +554,17 @@ impl Poller {
                 due: Instant::now() + POST_MATCH_DELAYS[0],
                 attempt: 0,
             }),
-            _ => None,
+            // The next match end replaces a pending follow-up (or ends it,
+            // when that match's id is unknown).
+            (true, None) => None,
+            // VALORANT closed: nothing to re-sync.
+            _ if next == Stage::Closed => None,
+            // R48: a quick requeue (Lobby -> Agent Select -> In Game, or a
+            // dodge back) keeps a pending follow-up: the user and party are
+            // still `synced` from a Lobby sync that may predate Riot
+            // publishing the match, and nothing else re-syncs them before
+            // the next match ends.
+            _ => self.post_match.take(),
         };
         self.stage = next;
         self.party_key = key;
@@ -599,12 +633,34 @@ impl Poller {
     }
 
     /// Best-effort own-party refresh outside the lobby (e.g. the app was
-    /// started mid-match and never saw the lobby).
-    async fn refresh_self_party(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
+    /// started mid-match and never saw the lobby). The roster isn't
+    /// re-fetched mid-match, so the cards on screen get the new own-party
+    /// flags here (no stripe and no ⟲ badge for the user's party) and are
+    /// republished when one changed.
+    pub(crate) async fn refresh_self_party(
+        &mut self,
+        session: &Arc<RiotSession>,
+    ) -> Result<(), Stop> {
         let me = session.self_puuid().to_string();
         match self.party_response(session, &me).await {
             Ok(party) => {
                 self.self_party = party.members.iter().map(|m| m.subject.clone()).collect();
+                let changed = {
+                    let mut live = lock(&self.st.live);
+                    let mut changed = false;
+                    for slot in &mut live.slots {
+                        let p = &slot.roster.puuid;
+                        let in_party = *p == me || self.self_party.contains(p);
+                        if slot.roster.is_self_party != in_party {
+                            slot.roster.is_self_party = in_party;
+                            changed = true;
+                        }
+                    }
+                    changed
+                };
+                if changed {
+                    self.st.publish();
+                }
                 Ok(())
             }
             Err(RiotError::ClientGone) => Err(Stop::Reconnect("Riot client closed")),
@@ -720,6 +776,9 @@ impl Poller {
             // Presence had no usable queueId, but everyone is on their own
             // team: free-for-all keeps the lobby view (R41).
             log::info!("free-for-all roster: keeping the lobby view");
+            // The Lobby roster goes on screen as Menus, but this is still a
+            // match (R137): no backfill until it ends.
+            lock(&self.st.live).in_match = true;
             return self.fetch_party(session, me).await;
         }
         let roster = from_coregame(&m, me, &self.self_party);
@@ -750,7 +809,7 @@ impl Poller {
     /// Players already on screen keep their DB bundle; only new ones are
     /// read (and get a `players` row upsert), plus the user's own row when
     /// their level is new or changed (R100).
-    async fn apply_roster(
+    pub(crate) async fn apply_roster(
         &mut self,
         session: &Arc<RiotSession>,
         stage: Stage,
@@ -829,6 +888,7 @@ impl Poller {
             live.stage = stage;
             live.map_path = map_path;
             live.slots = slots;
+            live.note_hidden();
         }
         self.st.publish();
         self.ensure_worker(session);
@@ -883,6 +943,7 @@ impl Poller {
         {
             let mut live = lock(&self.st.live);
             live.stage = Stage::Closed;
+            live.in_match = false;
             live.map_path = None;
             live.map_id = None;
             live.coregame_match_id = None;
@@ -894,17 +955,17 @@ impl Poller {
 
     /// A match ended: once Riot has published it, the user's party needs a
     /// re-sync (their last-5/RR changed). Checks whether the ended match
-    /// is in the DB yet; if not, re-syncs the party and tries again later.
+    /// is in the DB yet; if not, re-syncs the user and their party (in
+    /// whatever stage is shown: a quick requeue carries the check into Agent
+    /// Select and In Game, R48) and tries again later.
     async fn post_match_check(&mut self, session: &Arc<RiotSession>) {
         let Some(pm) = self.post_match.take() else {
             return;
         };
-        if self.stage != Stage::Menus {
-            return;
-        }
         let Some(me) = lock(&self.st.live).self_puuid.clone() else {
             return;
         };
+        let me_now = me.clone();
         let (id, competitive) = (pm.match_id.clone(), pm.competitive);
         let landed = self
             .st
@@ -923,7 +984,7 @@ impl Poller {
             let party: Vec<String> = live
                 .slots
                 .iter()
-                .filter(|s| s.roster.is_self_party)
+                .filter(|s| s.roster.is_self_party || s.roster.puuid == me_now)
                 .map(|s| s.roster.puuid.clone())
                 .collect();
             for p in party {
@@ -994,6 +1055,304 @@ mod tests {
             .with_priority(1)
             .mount(&h.server)
             .await;
+    }
+
+    /// Like [`mock_presence`], but the presence can be switched mid-test:
+    /// the returned cell holds the `(sessionLoopState, queueId)` served.
+    async fn switchable_presence(
+        h: &Harness,
+        state: &str,
+        queue: &str,
+    ) -> Arc<std::sync::Mutex<(String, String)>> {
+        let cell = Arc::new(std::sync::Mutex::new((
+            state.to_string(),
+            queue.to_string(),
+        )));
+        let served = cell.clone();
+        Mock::given(method("GET"))
+            .and(path("/chat/v4/presences"))
+            .respond_with(move |_: &wiremock::Request| {
+                let (state, queue) = served.lock().unwrap().clone();
+                let private = BASE64.encode(
+                    json!({"sessionLoopState": state, "queueId": queue, "partyId": "party-1"})
+                        .to_string(),
+                );
+                ResponseTemplate::new(200).set_body_json(json!({
+                    "presences": [{"puuid": ME, "product": "valorant", "private": private}]
+                }))
+            })
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+        cell
+    }
+
+    /// The party key the mocked presence carries (so a tick sees no party
+    /// change).
+    fn mocked_party_key() -> Option<PartyKey> {
+        Some(PartyKey {
+            party_id: Some("party-1".into()),
+            size: None,
+        })
+    }
+
+    /// `/match-details/` requests so far.
+    async fn details_requests(h: &Harness) -> usize {
+        requests(&h.server)
+            .await
+            .iter()
+            .filter(|r| r.url.path().starts_with("/match-details/"))
+            .count()
+    }
+
+    /// The user's own card on screen in the Lobby, already synced: only
+    /// the backfill is left to do.
+    fn synced_lobby(h: &Harness) {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Menus;
+        live.slots = vec![Slot {
+            roster: roster(ME, false),
+            db: PlayerDb::default(),
+        }];
+        live.self_roster = Some(roster(ME, false));
+        live.synced.insert(ME.into());
+    }
+
+    #[tokio::test]
+    async fn a_deathmatch_pauses_the_backfill_run_until_it_ends() {
+        // R137 with R41: a free-for-all keeps the Lobby view for the whole
+        // match, but the raw presence is in a match — a run under way stops
+        // at the next id, keeps its cursor, and resumes when the match ends.
+        let h = harness().await;
+        let mut feed = Feed::new(60);
+        feed.details_delay = Some(Duration::from_millis(30));
+        mount_feed(&h.server, feed).await;
+        let presence = switchable_presence(&h, "MENUS", "deathmatch").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.presence_stage = Stage::Menus;
+        poller.party_key = mocked_party_key();
+        synced_lobby(&h);
+        crate::sync::start_backfill_run(&h.st).await;
+        poller.ensure_worker(&h.session);
+        for _ in 0..250 {
+            if details_requests(&h).await >= 3 {
+                break;
+            }
+            sleep(Duration::from_millis(10)).await;
+        }
+        assert!(details_requests(&h).await >= 3, "the run is under way");
+
+        // The Deathmatch starts: the view stays the Lobby.
+        *presence.lock().unwrap() = ("INGAME".into(), "deathmatch".into());
+        poller.presence_tick(&h.session).await.unwrap();
+        assert_eq!(poller.stage, Stage::Menus, "R41: the Lobby view stays");
+        let paused_at = details_requests(&h).await;
+        sleep(Duration::from_millis(400)).await;
+        assert!(
+            details_requests(&h).await <= paused_at + 1,
+            "at most the one in-flight request after the match started: {} then {}",
+            paused_at,
+            details_requests(&h).await
+        );
+        assert!(run_active(&h.st), "the cursor waits for the match to end");
+        assert_eq!(stored_anchor(&h.st).await, None);
+
+        // The Deathmatch ends: the same run resumes and finishes.
+        *presence.lock().unwrap() = ("MENUS".into(), "deathmatch".into());
+        poller.presence_tick(&h.session).await.unwrap();
+        let anchor = wait_for_anchor(&h.st).await.expect("the run finished");
+        assert_eq!(anchor.0, crate::pipeline_tests::backfill::entry_id(0));
+        assert_eq!(details_requests(&h).await, 60, "every id once");
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn an_ffa_roster_fallback_never_starts_the_backfill_mid_match() {
+        // Presence has no queueId, so the view goes In Game; the core-game
+        // roster is free-for-all, so the Lobby roster is applied (R41) — as
+        // Menus, in the middle of a match. The queued run must still wait.
+        let h = harness().await;
+        mount_feed(&h.server, Feed::new(5)).await;
+        let identity = json!({"Incognito": false, "HideAccountLevel": false,
+                              "AccountLevel": 10, "PlayerCardID": "card"});
+        let get = |p: String, body: serde_json::Value| {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        };
+        get(
+            "/parties/v1/parties/party-1".into(),
+            json!({"ID": "party-1", "Members": [{"Subject": ME, "PlayerIdentity": identity}]}),
+        )
+        .mount(&h.server)
+        .await;
+        get(
+            format!("/core-game/v1/players/{ME}"),
+            json!({"Subject": ME, "MatchID": "cg-ffa"}),
+        )
+        .mount(&h.server)
+        .await;
+        let player = |puuid: &str| {
+            json!({"Subject": puuid, "TeamID": puuid, "CharacterID": "agent",
+                   "PlayerIdentity": identity})
+        };
+        get(
+            "/core-game/v1/matches/cg-ffa".into(),
+            json!({"MapID": "/Game/Maps/Ascent/Ascent",
+                   "Players": [player(ME), player("p2"), player("p3")]}),
+        )
+        .mount(&h.server)
+        .await;
+        mock_presence(&h, "INGAME", "").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.presence_stage = Stage::Menus;
+        poller.party_key = mocked_party_key();
+        synced_lobby(&h);
+        crate::sync::start_backfill_run(&h.st).await;
+
+        poller.presence_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(poller.stage, Stage::Ingame);
+        assert_eq!(
+            lock(&h.st.live).stage,
+            Stage::Menus,
+            "the FFA fallback applied the Lobby roster"
+        );
+        assert_eq!(backfill_pages(&h).await, 0, "no history page mid-match");
+        assert_eq!(details_requests(&h).await, 0, "no match-details mid-match");
+        assert!(run_active(&h.st), "the run waits for the match to end");
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_quick_requeue_keeps_the_post_match_follow_up() {
+        // R48: a competitive match ended and the Lobby sync ran before Riot
+        // published it. The user requeues before the 30 s check: the
+        // follow-up must still re-sync the user's card — in Agent Select, and
+        // still pending In Game — instead of being dropped.
+        let h = harness().await;
+        let comp = format!("/mmr/v1/players/{ME}/competitiveupdates");
+        let comp_calls =
+            |reqs: Vec<wiremock::Request>| reqs.iter().filter(|r| r.url.path() == comp).count();
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        synced_lobby(&h);
+        poller.post_match = Some(PostMatch {
+            match_id: "m-ended".into(),
+            competitive: true,
+            due: Instant::now(),
+            attempt: 0,
+        });
+
+        // Agent Select starts (this mock has no pregame roster: the user's
+        // own card only).
+        poller
+            .change_stage(&h.session, Stage::Pregame, None)
+            .await
+            .unwrap();
+        assert!(
+            poller.post_match.is_some(),
+            "the requeue keeps the follow-up"
+        );
+        assert!(lock(&h.st.live).synced.contains(ME), "still synced");
+
+        // The check comes due in Agent Select: the match is still not in the
+        // DB, so the user is re-synced there.
+        let before = comp_calls(requests(&h.server).await);
+        poller.post_match_check(&h.session).await;
+        for _ in 0..250 {
+            if lock(&h.st.live).synced.contains(ME) {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(lock(&h.st.live).synced.contains(ME), "re-synced");
+        assert_eq!(comp_calls(requests(&h.server).await), before + 1);
+        assert_eq!(
+            poller.post_match.as_ref().map(|p| p.attempt),
+            Some(1),
+            "the next check is scheduled"
+        );
+
+        // Agent Select -> In Game keeps it too; only Closed drops it.
+        poller
+            .change_stage(&h.session, Stage::Ingame, None)
+            .await
+            .unwrap();
+        assert!(poller.post_match.is_some(), "In Game keeps the follow-up");
+        poller
+            .change_stage(&h.session, Stage::Closed, None)
+            .await
+            .unwrap();
+        assert!(poller.post_match.is_none(), "Closed drops it");
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_mid_match_party_refresh_reaches_the_cards() {
+        // The app started mid-match and its one party fetch failed, so the
+        // duo was built as a stranger: a party-stripe candidate with a ⟲
+        // badge. A later party change refreshes the own-party set; the cards
+        // must follow it (the roster is not re-fetched In Game).
+        const DUO: &str = "dddddddd-0000-0000-0000-00000000000d";
+        let h = harness().await;
+        let identity = json!({"Incognito": false, "HideAccountLevel": false,
+                              "AccountLevel": 10, "PlayerCardID": "card"});
+        Mock::given(method("GET"))
+            .and(path("/parties/v1/parties/party-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ID": "party-1",
+                "Members": [{"Subject": ME, "PlayerIdentity": identity},
+                            {"Subject": DUO, "PlayerIdentity": identity}]
+            })))
+            .mount(&h.server)
+            .await;
+        let mut duo = roster(DUO, false);
+        duo.team = opd1_core::model::Team::Ally;
+        duo.team_id = "Blue".into();
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Ingame;
+            live.slots = vec![
+                Slot {
+                    roster: roster(ME, false),
+                    db: PlayerDb::default(),
+                },
+                Slot {
+                    roster: duo,
+                    db: PlayerDb {
+                        encounters: Some(opd1_core::model::EncounterCount {
+                            with: 3,
+                            against: 0,
+                        }),
+                        ..PlayerDb::default()
+                    },
+                },
+            ];
+        }
+        h.st.publish();
+        assert_eq!(card_json(&h.st, DUO)["encounters"]["with"], json!(3));
+
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Ingame;
+        poller.party_key = mocked_party_key();
+        poller.refresh_self_party(&h.session).await.unwrap();
+
+        assert!(poller.self_party.contains(DUO));
+        let duo_slot = lock(&h.st.live)
+            .slots
+            .iter()
+            .find(|s| s.roster.puuid == DUO)
+            .map(|s| s.roster.is_self_party);
+        assert_eq!(duo_slot, Some(true), "the slot follows the refresh");
+        assert_eq!(
+            card_json(&h.st, DUO)["encounters"],
+            serde_json::Value::Null,
+            "the user's party gets no badge, and the card was republished"
+        );
     }
 
     /// The `page` requests the backfill made (`endIndex=20`; a per-player

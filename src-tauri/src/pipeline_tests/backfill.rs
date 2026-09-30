@@ -18,8 +18,8 @@ use wiremock::matchers::path_regex;
 
 use super::*;
 use crate::sync::{
-    anchor_json, anchor_key, backfill_step, parse_anchor, start_backfill_run, store_details, Gone,
-    BACKFILL_FAILURES_KEY, BACKFILL_MAX_FAILURES, BACKFILL_PAGE,
+    anchor_json, anchor_key, backfill_step, failures_key, parse_anchor, start_backfill_run,
+    store_details, Gone, BACKFILL_MAX_FAILURES, BACKFILL_PAGE,
 };
 
 const DETAILS_FIXTURE: &str =
@@ -63,8 +63,12 @@ pub(crate) struct Feed {
     on_details: Option<Arc<dyn Fn(usize) + Send + Sync>>,
     /// History pages starting at or after this index answer 500.
     history_fails_from: Option<usize>,
-    /// Entry index -> the status its match-details answers instead of 200.
-    details_status: HashMap<usize, u16>,
+    /// Entry index -> the status its match-details answers instead of 200
+    /// (a 429 carries `Retry-After: 0`, so the session's retries are quick).
+    pub(crate) details_status: HashMap<usize, u16>,
+    /// Entry index -> how long its match-details answer takes (a slow link:
+    /// longer than a session's timeout makes it a network error).
+    pub(crate) details_slow: HashMap<usize, Duration>,
     /// A history page never holds more than this many entries, however many
     /// were asked for (a server-side page cap or clamping).
     pub(crate) page_cap: Option<usize>,
@@ -80,6 +84,7 @@ impl Feed {
             on_details: None,
             history_fails_from: None,
             details_status: HashMap::new(),
+            details_slow: HashMap::new(),
             page_cap: None,
             total: TotalMode::Entries,
         }
@@ -96,6 +101,7 @@ pub(crate) async fn mount_feed(server: &MockServer, feed: Feed) {
         on_details,
         history_fails_from,
         details_status,
+        details_slow,
         page_cap,
         total,
     } = feed;
@@ -143,7 +149,12 @@ pub(crate) async fn mount_feed(server: &MockServer, feed: Feed) {
             let id = req.url.path().rsplit('/').next().unwrap().to_string();
             let i: usize = id[2..].parse().unwrap();
             if let Some(status) = details_status.get(&i) {
-                return ResponseTemplate::new(*status);
+                let resp = ResponseTemplate::new(*status);
+                return if *status == 429 {
+                    resp.insert_header("Retry-After", "0")
+                } else {
+                    resp
+                };
             }
             let mut body: Value = serde_json::from_str(DETAILS_FIXTURE).unwrap();
             body["matchInfo"]["matchID"] = json!(id);
@@ -152,7 +163,7 @@ pub(crate) async fn mount_feed(server: &MockServer, feed: Feed) {
                 hook(served.fetch_add(1, Ordering::SeqCst) + 1);
             }
             let mut resp = ResponseTemplate::new(200).set_body_json(body);
-            if let Some(d) = details_delay {
+            if let Some(d) = details_slow.get(&i).copied().or(details_delay) {
                 resp = resp.set_delay(d);
             }
             resp
@@ -219,13 +230,19 @@ pub(crate) async fn store_anchor(st: &AppState, i: usize, base: i64) {
     store_anchor_for(st, ME, i, base).await;
 }
 
-/// The stored per-id failure counts (`{}` when none).
-async fn failure_counts(st: &AppState) -> std::collections::BTreeMap<String, u32> {
-    st.db(|repo| repo.get_state(BACKFILL_FAILURES_KEY))
+/// `puuid`'s stored per-id failure counts (`{}` when none).
+async fn failure_counts_of(st: &AppState, puuid: &str) -> std::collections::BTreeMap<String, u32> {
+    let key = failures_key(puuid);
+    st.db(move |repo| repo.get_state(&key))
         .await
         .flatten()
         .and_then(|raw| serde_json::from_str(&raw).ok())
         .unwrap_or_default()
+}
+
+/// ME's stored per-id failure counts.
+async fn failure_counts(st: &AppState) -> std::collections::BTreeMap<String, u32> {
+    failure_counts_of(st, ME).await
 }
 
 /// A match row the DB already has (`new_match_ids` must skip it).
@@ -949,7 +966,7 @@ async fn backfill_failure_counts_are_cleared_when_a_run_finishes() {
     let base = base_ms();
     mount_feed(&h.server, Feed::new(10)).await;
     store_anchor(&h.st, 9, base).await;
-    h.st.db(|repo| repo.set_state(BACKFILL_FAILURES_KEY, r#"{"bf004":2}"#))
+    h.st.db(|repo| repo.set_state(&failures_key(ME), r#"{"bf004":2}"#))
         .await
         .unwrap();
 
@@ -961,4 +978,189 @@ async fn backfill_failure_counts_are_cleared_when_a_run_finishes() {
         Some((entry_id(0), entry_start(base, 0)))
     );
     assert!(failure_counts(&h.st).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_finished_run_clears_only_its_own_accounts_failure_counts() {
+    // R137 keeps the anchors per account; the 3-strike counts too. Another
+    // account's finished run must not reset them, or alternating accounts
+    // would keep a systematically failing id below the skip for ever.
+    let h = harness().await;
+    let base = base_ms();
+    mount_feed(&h.server, Feed::new(10)).await;
+    store_anchor(&h.st, 9, base).await;
+    h.st.db(|repo| repo.set_state(&failures_key(OTHER), r#"{"x":2}"#))
+        .await
+        .unwrap();
+    h.st.db(|repo| repo.set_state(&failures_key(ME), r#"{"bf004":1}"#))
+        .await
+        .unwrap();
+
+    run_backfill(&h).await;
+
+    assert_eq!(stored_anchor(&h.st).await.map(|a| a.0), Some(entry_id(0)));
+    assert!(
+        failure_counts(&h.st).await.is_empty(),
+        "ME's run cleared ME's"
+    );
+    assert_eq!(
+        failure_counts_of(&h.st, OTHER).await.get("x"),
+        Some(&2),
+        "OTHER's counts survive ME's finished run"
+    );
+}
+
+/// Entry 4 of 10 fails the way `feed` sets up, in three runs on `session`:
+/// each ends at it without counting it and keeps the anchor (R139). Then it
+/// answers, and the fourth run stores it and finishes.
+async fn a_transient_failure_never_skips_the_id(
+    h: &Harness,
+    session: Arc<RiotSession>,
+    feed: Feed,
+    what: &str,
+) {
+    let base = base_ms();
+    mount_feed(&h.server, feed).await;
+    store_anchor(&h.st, 9, base).await;
+    let old = stored_anchor(&h.st).await;
+    let bad = entry_id(4);
+    for run in 1..=3 {
+        start_backfill_run(&h.st).await;
+        let id = lock(&h.st.live).try_start_worker().expect("run pending");
+        run_worker(h.st.clone(), session.clone(), id).await;
+        assert_eq!(
+            stored_anchor(&h.st).await,
+            old,
+            "{what}: run {run} keeps the anchor"
+        );
+        assert!(!run_active(&h.st), "{what}: run {run} ended");
+        assert!(
+            failure_counts(&h.st).await.is_empty(),
+            "{what}: run {run} counted nothing"
+        );
+        assert!(!is_stored(&h.st, bad.clone()).await);
+    }
+
+    // Riot answers it again: the run stores it and the anchor moves.
+    h.server.reset().await;
+    mock_riot(&h.server).await;
+    mount_feed(&h.server, Feed::new(10)).await;
+    start_backfill_run(&h.st).await;
+    let id = lock(&h.st.live).try_start_worker().expect("run pending");
+    run_worker(h.st.clone(), session, id).await;
+    assert!(
+        is_stored(&h.st, bad).await,
+        "{what}: never skipped, stored now"
+    );
+    assert_eq!(
+        stored_anchor(&h.st).await,
+        Some((entry_id(0), entry_start(base, 0)))
+    );
+}
+
+#[tokio::test]
+async fn backfill_a_rate_limited_id_is_never_counted() {
+    // A 429 storm (RateLimited after the session's retries) in three runs.
+    let h = harness().await;
+    let mut feed = Feed::new(10);
+    feed.details_status.insert(4, 429);
+    let session = h.session.clone();
+    a_transient_failure_never_skips_the_id(&h, session, feed, "429").await;
+}
+
+#[tokio::test]
+async fn backfill_an_auth_error_is_never_counted() {
+    // 403 again after the session's re-auth: the token, not the match.
+    let h = harness().await;
+    let mut feed = Feed::new(10);
+    feed.details_status.insert(4, 403);
+    let session = h.session.clone();
+    a_transient_failure_never_skips_the_id(&h, session, feed, "403").await;
+}
+
+#[tokio::test]
+async fn backfill_a_network_error_is_never_counted() {
+    // A slow link: the (large, uncompressed) body takes longer than the
+    // session's timeout, three runs in a row.
+    let h = harness().await;
+    let session = Arc::new(
+        RiotSession::connect_with_overrides(
+            h._dir.path(),
+            ConnectOverrides {
+                pd_base: Some(h.server.uri()),
+                glz_base: Some(h.server.uri()),
+                valorant_api_base: Some(h.server.uri()),
+                remote_timeout: Some(Duration::from_millis(300)),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("connect to the mock client")
+        .with_global_rate(1_000.0),
+    );
+    let mut feed = Feed::new(10);
+    feed.details_slow.insert(4, Duration::from_secs(2));
+    a_transient_failure_never_skips_the_id(&h, session, feed, "timeout").await;
+}
+
+// ---------------------------------------------------------------------
+// Whole-branch review W6: one download per match-details in flight
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn concurrent_fetches_of_the_same_matches_download_each_once() {
+    // A Details sync and the worker's sync of the same player both see the
+    // same competitive ids as missing. Each match-details is downloaded
+    // once; the second caller waits for the first and returns only once
+    // they are stored (so its rebuild already has them).
+    let h = harness().await;
+    let mut feed = Feed::new(5);
+    feed.details_delay = Some(Duration::from_millis(200));
+    mount_feed(&h.server, feed).await;
+    let ids: Vec<String> = (0..3).map(entry_id).collect();
+    let all_stored = || async {
+        for id in (0..3).map(entry_id) {
+            if !is_stored(&h.st, id).await {
+                return false;
+            }
+        }
+        true
+    };
+    let fetch = || async {
+        let res = crate::sync::fetch_missing_details(&h.st, &h.session, ids.clone()).await;
+        (res, all_stored().await)
+    };
+
+    let ((first, first_saw), (second, second_saw)) = tokio::join!(fetch(), fetch());
+
+    assert_eq!((first, second), (Ok(()), Ok(())));
+    assert!(
+        first_saw && second_saw,
+        "each caller returns with them stored"
+    );
+    let mut asked = details_asked(&requests(&h.server).await);
+    asked.sort();
+    assert_eq!(asked, ids, "one request per match");
+}
+
+#[tokio::test]
+async fn the_backfill_waits_for_a_match_the_live_sync_is_fetching() {
+    // The same for the backfill: an id the live sync is downloading right
+    // now is not downloaded a second time.
+    let h = harness().await;
+    let mut feed = Feed::new(3);
+    feed.details_delay = Some(Duration::from_millis(200));
+    mount_feed(&h.server, feed).await;
+    let live_sync = crate::sync::fetch_missing_details(&h.st, &h.session, vec![entry_id(0)]);
+    let backfill = async {
+        // Let the live sync's request go out first.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        run_backfill(&h).await;
+    };
+    let (res, ()) = tokio::join!(live_sync, backfill);
+    assert_eq!(res, Ok(()));
+    let mut asked = details_asked(&requests(&h.server).await);
+    asked.sort();
+    assert_eq!(asked, (0..3).map(entry_id).collect::<Vec<_>>());
+    assert_eq!(stored_anchor(&h.st).await.map(|a| a.0), Some(entry_id(0)));
 }

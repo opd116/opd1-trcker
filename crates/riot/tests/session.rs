@@ -412,6 +412,62 @@ async fn session_remote_call_times_out_when_server_never_responds() {
 }
 
 #[tokio::test]
+async fn a_network_error_never_carries_the_url() {
+    // The user shares copy-log (CLAUDE.md), and ids there are shortened: a
+    // timeout on a puuid-bearing path (match history, mmr, a player's
+    // pregame/core-game/party path) must not print the full puuid through
+    // reqwest's " for url (...)" suffix. The caller already knows which
+    // endpoint failed.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    mount_sessions_with_version(&server, "v1").await;
+    let base = server.uri();
+    let session = RiotSession::connect_with_overrides(
+        tmp.path(),
+        ConnectOverrides {
+            pd_base: Some(base.clone()),
+            glz_base: Some(base.clone()),
+            valorant_api_base: Some(base),
+            local_timeout: Some(Duration::from_millis(100)),
+            remote_timeout: Some(Duration::from_millis(100)),
+        },
+    )
+    .await
+    .expect("connect should succeed");
+    let history = format!("/match-history/v1/history/{SELF_PUUID}");
+    for p in [history.as_str(), "/chat/v4/presences"] {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_secs(2))
+                    .set_body_json(json!({})),
+            )
+            .mount(&server)
+            .await;
+    }
+
+    let remote = session
+        .pd::<Value>(&format!("{history}?startIndex=0&endIndex=20"))
+        .await
+        .unwrap_err();
+    let local = session
+        .local::<Value>("/chat/v4/presences")
+        .await
+        .unwrap_err();
+
+    for (err, p) in [(remote, "/match-history/"), (local, "/chat/")] {
+        let msg = err.to_string();
+        assert!(matches!(err, RiotError::Http(_)), "{msg}");
+        assert!(!msg.contains(SELF_PUUID), "no full puuid: {msg}");
+        assert!(!msg.contains(p), "no url: {msg}");
+    }
+}
+
+#[tokio::test]
 async fn session_debug_output_redacts_secrets() {
     // Fix-round item 4: the user shares in-app logs, so a `{:?}` of a live
     // session (e.g. in a panic message) must never leak the lockfile

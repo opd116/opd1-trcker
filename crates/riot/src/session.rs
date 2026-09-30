@@ -287,12 +287,12 @@ impl RiotSession {
             .danger_accept_invalid_certs(true)
             .timeout(local_timeout)
             .build()
-            .map_err(|e| RiotError::Http(e.to_string()))?;
+            .map_err(http_error)?;
         let remote_client = Client::builder()
             .timeout(remote_timeout)
             .connect_timeout(REMOTE_CONNECT_TIMEOUT)
             .build()
-            .map_err(|e| RiotError::Http(e.to_string()))?;
+            .map_err(http_error)?;
 
         let pd_base =
             pd_base_override.unwrap_or_else(|| format!("https://pd.{}.a.pvp.net", shards.pd));
@@ -439,10 +439,7 @@ impl RiotSession {
         if let Some(b) = body {
             req = req.json(b);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| RiotError::Http(e.to_string()))?;
+        let resp = req.send().await.map_err(http_error)?;
         let captured = buffer_response(resp).await?;
         // Fix-round item 9 / R36: only a 2xx body is ever recorded — an
         // error body (a 401 before re-auth, a transient 500, etc.) isn't
@@ -488,10 +485,7 @@ impl RiotSession {
         if let Some(b) = body {
             req = req.json(b);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| RiotError::Http(e.to_string()))?;
+        let resp = req.send().await.map_err(http_error)?;
         let captured = buffer_response(resp).await?;
         // See `call_local`'s matching comment: only 2xx bodies are ever
         // recorded (fix-round item 9 / R36) — this also means a 401 (pre
@@ -584,11 +578,7 @@ struct CapturedResponse {
 async fn buffer_response(resp: Response) -> Result<CapturedResponse, RiotError> {
     let status = resp.status();
     let headers = resp.headers().clone();
-    let body = resp
-        .bytes()
-        .await
-        .map_err(|e| RiotError::Http(e.to_string()))?
-        .to_vec();
+    let body = resp.bytes().await.map_err(http_error)?.to_vec();
     Ok(CapturedResponse {
         status,
         headers,
@@ -606,9 +596,18 @@ async fn fetch_entitlements(
         .header(AUTHORIZATION, basic_auth)
         .send()
         .await
-        .map_err(|e| RiotError::Http(e.to_string()))?;
+        .map_err(http_error)?;
     let captured = buffer_response(resp).await?;
     parse_json(&captured).map_err(|e| RiotError::AuthFailed(e.to_string()))
+}
+
+/// A reqwest failure as [`RiotError::Http`], without the request URL:
+/// reqwest's `Display` appends ` for url (…)`, and a pd path carries a full
+/// puuid (match history, mmr, a player's pregame/core-game/party path) —
+/// the user shares copy-log, where ids are shortened. The caller knows
+/// which endpoint failed.
+fn http_error(e: reqwest::Error) -> RiotError {
+    RiotError::Http(e.without_url().to_string())
 }
 
 fn parse_json<T: DeserializeOwned>(resp: &CapturedResponse) -> Result<T, RiotError> {

@@ -22,7 +22,7 @@
 //! "attempted" rule, never a stuck skeleton. `ClientGone` aborts the whole
 //! run — the poll loop notices the client is gone on its own next tick.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -36,7 +36,10 @@ use opd1_riot::{RiotError, RiotSession, VisiblePuuid};
 
 use crate::logbuf::short;
 use crate::roster::{extract_loadouts, extract_player_loadout};
-use crate::state::{lock, now_ms, AppState, BackfillRun, Job};
+use crate::state::{
+    lock, now_ms, wait_for_details_fetch, AppState, BackfillRun, DetailsClaim, DetailsFetchGuard,
+    Job,
+};
 use crate::store::{mmr_refresh_needed, save_player, trim_mmr, PlayerUpdate, SELF_LOADOUT_KEY};
 
 /// Match-details requests in flight at once. They're large responses
@@ -78,14 +81,44 @@ pub fn anchor_key(puuid: &str) -> String {
     format!("{ANCHOR_KEY_PREFIX}:{puuid}")
 }
 
-/// R137: the `app_state` key holding the per-match failure counts of the
-/// backfill, JSON `{"<match id>": N}`: how many runs in a row ended at that
-/// id because its match-details failed. Cleared when a run finishes.
-pub const BACKFILL_FAILURES_KEY: &str = "self_history_failures";
+/// The `app_state` key prefix of the backfill failure counts (see
+/// [`failures_key`]).
+const FAILURES_KEY_PREFIX: &str = "self_history_failures";
+
+/// R137: the `app_state` key holding `puuid`'s per-match failure counts of
+/// the backfill, JSON `{"<match id>": N}`: how many runs in a row ended at
+/// that id because its match-details failed ([`counts_toward_skip`]). One
+/// key per account, like [`anchor_key`], so another account's finished run
+/// never resets them. Cleared when that account's run finishes. (The
+/// pre-fix single key `self_history_failures` is no longer read.)
+pub fn failures_key(puuid: &str) -> String {
+    format!("{FAILURES_KEY_PREFIX}:{puuid}")
+}
 
 /// R137: a match whose match-details failed in this many runs in a row
-/// (any error except a 404) is skipped, logged, and the anchor passes it.
+/// (with a failure that [`counts_toward_skip`]) is skipped, logged, and the
+/// anchor passes it.
 pub const BACKFILL_MAX_FAILURES: u32 = 3;
+
+/// R139: whether a failed match-details fetch says something about the id
+/// itself, and so counts toward the [`BACKFILL_MAX_FAILURES`] skip: a Riot
+/// status other than 404 (skipped at once) and 429 (the rate limit), or a
+/// body that doesn't decode. Rate-limit (`RateLimited`), network (`Http`)
+/// and auth errors (`AuthFailed`, and a 401/403 still there after the
+/// session's re-auth) — and `ShardsUnavailable` / `ClientGone` — end the run
+/// without counting: a network outage across three runs must not skip ids
+/// for good (the gap R101 forbids).
+pub fn counts_toward_skip(e: &RiotError) -> bool {
+    match e {
+        RiotError::Status(code) => !matches!(code, 401 | 403 | 404 | 429),
+        RiotError::Decode(_) => true,
+        RiotError::ClientGone
+        | RiotError::ShardsUnavailable
+        | RiotError::AuthFailed(_)
+        | RiotError::RateLimited
+        | RiotError::Http(_) => false,
+    }
+}
 
 /// The Riot client went away mid-sync.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,7 +236,10 @@ pub async fn store_details(st: &Arc<AppState>, details: MatchDetailsResponse) ->
 }
 
 /// Fetches match-details for every id the DB doesn't have yet and stores
-/// the compact rows.
+/// the compact rows. An id another task is downloading right now (a
+/// Details sync and the worker's sync of the same player, the backfill,
+/// Match Details) is not downloaded again: this call waits for that
+/// download instead, so it still returns with the rows stored.
 pub async fn fetch_missing_details(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
@@ -219,9 +255,24 @@ pub async fn fetch_missing_details(
     if missing.is_empty() {
         return Ok(());
     }
-    log::debug!("fetching {} match details", missing.len());
+    let mut claimed: HashMap<String, DetailsFetchGuard> = HashMap::new();
+    let mut busy = Vec::new();
+    for id in missing {
+        match st.claim_details_fetch(&id) {
+            DetailsClaim::Mine(guard) => {
+                claimed.insert(id, guard);
+            }
+            DetailsClaim::Busy(waiter) => busy.push(waiter),
+        }
+    }
+    log::debug!(
+        "fetching {} match details ({} already in flight)",
+        claimed.len(),
+        busy.len()
+    );
+    let mine: Vec<String> = claimed.keys().cloned().collect();
 
-    let mut pending = missing.into_iter();
+    let mut pending = mine.into_iter();
     let mut set = JoinSet::new();
     let spawn_next = |set: &mut JoinSet<_>, pending: &mut std::vec::IntoIter<String>| {
         if let Some(id) = pending.next() {
@@ -239,24 +290,34 @@ pub async fn fetch_missing_details(
     let mut gone = false;
     while let Some(joined) = set.join_next().await {
         match joined {
-            Ok((_, Ok(details))) => {
+            Ok((id, Ok(details))) => {
                 // A failed write is logged; the live sync goes on.
                 store_details(st, details).await;
+                // Stored: whoever waits on this id can read it now.
+                claimed.remove(&id);
             }
             Ok((_, Err(RiotError::ClientGone))) => {
                 gone = true;
                 break;
             }
-            Ok((id, Err(e))) => log::warn!("match details {} failed: {e}", short(&id)),
+            Ok((id, Err(e))) => {
+                log::warn!("match details {} failed: {e}", short(&id));
+                claimed.remove(&id);
+            }
             Err(e) => log::warn!("match details task failed: {e}"),
         }
         spawn_next(&mut set, &mut pending);
     }
+    // Released before any wait below: two calls waiting on each other's
+    // ids never hold their own.
+    drop(claimed);
     if gone {
-        Err(Gone)
-    } else {
-        Ok(())
+        return Err(Gone);
     }
+    for waiter in busy {
+        wait_for_details_fetch(waiter).await;
+    }
+    Ok(())
 }
 
 /// The full per-player sync (see the module docs for the call order).
@@ -633,13 +694,13 @@ async fn finish_backfill(st: &Arc<AppState>, me: &str) {
     if let Some(newest) = newest.filter(|n| Some(n) != anchor.as_ref()) {
         // The account's own key: a write that lands after an account switch
         // is still that account's finished run, so it needs no guard.
-        let (key, raw) = (anchor_key(me), anchor_json(&newest));
+        let (key, raw, failures) = (anchor_key(me), anchor_json(&newest), failures_key(me));
         let written = st
             .db(move |repo| {
                 repo.set_state(&key, &raw)?;
                 // Every id of the run is stored, known or skipped by now:
-                // no failure count is still needed.
-                repo.delete_state(BACKFILL_FAILURES_KEY)
+                // no failure count of this account is still needed.
+                repo.delete_state(&failures)
             })
             .await;
         if written.is_some() {
@@ -659,14 +720,15 @@ async fn finish_backfill(st: &Arc<AppState>, me: &str) {
 }
 
 /// R137: counts a failed match-details fetch of `id` (this run ends at it)
-/// in `app_state`, and returns how many runs in a row have failed at it,
-/// this one included. At [`BACKFILL_MAX_FAILURES`] the count is reset: the
-/// caller skips the id. `None`: SQLite failed (the caller ends the run).
-async fn record_details_failure(st: &Arc<AppState>, id: &str) -> Option<u32> {
-    let id = id.to_string();
+/// in `me`'s `app_state` counts, and returns how many runs in a row have
+/// failed at it, this one included. At [`BACKFILL_MAX_FAILURES`] the count
+/// is reset: the caller skips the id. `None`: SQLite failed (the caller ends
+/// the run).
+async fn record_details_failure(st: &Arc<AppState>, me: &str, id: &str) -> Option<u32> {
+    let (id, key) = (id.to_string(), failures_key(me));
     st.db(move |repo| {
         let mut counts: BTreeMap<String, u32> = repo
-            .get_state(BACKFILL_FAILURES_KEY)?
+            .get_state(&key)?
             .and_then(|raw| serde_json::from_str(&raw).ok())
             .unwrap_or_default();
         let failed = counts.get(&id).copied().unwrap_or(0) + 1;
@@ -676,10 +738,10 @@ async fn record_details_failure(st: &Arc<AppState>, id: &str) -> Option<u32> {
             counts.insert(id, failed);
         }
         if counts.is_empty() {
-            repo.delete_state(BACKFILL_FAILURES_KEY)?;
+            repo.delete_state(&key)?;
         } else {
             let raw = serde_json::to_string(&counts).unwrap_or_default();
-            repo.set_state(BACKFILL_FAILURES_KEY, &raw)?;
+            repo.set_state(&key, &raw)?;
         }
         Ok(failed)
     })
@@ -696,7 +758,8 @@ async fn record_details_failure(st: &Arc<AppState>, id: &str) -> Option<u32> {
 /// anchor (the gap is retried from it next time), a decode error included
 /// (schema drift is systematic: skipping would lose every match for good).
 /// Two exceptions (R137): a match Riot no longer has (404) is skipped at
-/// once, since retrying can never succeed; and a match that failed in
+/// once, since retrying can never succeed; and a match whose failures say
+/// something about the id itself ([`counts_toward_skip`], R139) in
 /// [`BACKFILL_MAX_FAILURES`] runs in a row is skipped (logged), so the
 /// anchor can't be stuck behind it forever.
 ///
@@ -704,8 +767,15 @@ async fn record_details_failure(st: &Arc<AppState>, id: &str) -> Option<u32> {
 /// that is no longer the current one.
 pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Result<(), Gone> {
     let me = session.self_puuid();
-    if lock(&st.live).self_puuid.as_deref() != Some(me) {
-        return Err(Gone);
+    {
+        let live = lock(&st.live);
+        if live.self_puuid.as_deref() != Some(me) {
+            return Err(Gone);
+        }
+        // A match started since the job was handed out: not even a page.
+        if !live.backfill_ready() {
+            return Ok(());
+        }
     }
     let Some(page_at) = with_run(st, me, |run| {
         (run.pending.is_empty() && !run.done).then_some(run.next_index)
@@ -719,8 +789,13 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
     }
 
     loop {
-        if lock(&st.live).live_job_pending() {
-            return Ok(());
+        {
+            // Yield at every id: to a live job, and to a match that started
+            // meanwhile (R137; a free-for-all one never changes the view).
+            let live = lock(&st.live);
+            if live.live_job_pending() || !live.backfill_ready() {
+                return Ok(());
+            }
         }
         let Some(next) = with_run(st, me, |run| run.pending.front().cloned()) else {
             return Ok(());
@@ -741,6 +816,15 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
             pop(st);
             continue;
         }
+        // Another task is downloading it right now: wait, then look again
+        // (stored: popped above; failed there: claimed and fetched here).
+        let _claim = match st.claim_details_fetch(&id) {
+            DetailsClaim::Mine(guard) => guard,
+            DetailsClaim::Busy(waiter) => {
+                wait_for_details_fetch(waiter).await;
+                continue;
+            }
+        };
         match session.match_details(&id).await {
             Ok(details) => {
                 if store_details(st, details).await.is_none() {
@@ -757,7 +841,17 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
                 log::warn!("backfill: match {} skipped: {e}", short(&id));
                 pop(st);
             }
-            Err(e) => match record_details_failure(st, &id).await {
+            // R139: rate-limit, network and auth errors say nothing about
+            // the id — the run ends, uncounted, and the next one retries it.
+            Err(e) if !counts_toward_skip(&e) => {
+                log::warn!(
+                    "backfill: match {} failed: {e}; the backfill stops",
+                    short(&id)
+                );
+                end_run(st, me);
+                return Ok(());
+            }
+            Err(e) => match record_details_failure(st, me, &id).await {
                 Some(failed) if failed >= BACKFILL_MAX_FAILURES => {
                     log::warn!(
                         "backfill: match {} failed in {failed} runs in a row ({e}); skipped",
@@ -835,6 +929,8 @@ async fn sync_step(
     }
     log::debug!("synced {}", short(&puuid));
     st.publish();
+    // R23: an open Details of this player shows the settled card too.
+    crate::details::refresh(st, &puuid).await;
     Ok(())
 }
 
@@ -884,6 +980,10 @@ async fn names_step(
     log::debug!("names: {} of {} resolved", learned.len(), asked.len());
     save_names(st, learned).await;
     st.publish();
+    // R23: an open Details of one of them shows the name (or `—`) too.
+    if let Some(open) = asked.iter().find(|p| st.details_open_for(p)) {
+        crate::details::refresh(st, open).await;
+    }
     Ok(())
 }
 
@@ -956,7 +1056,8 @@ pub async fn fetch_self_name(st: &Arc<AppState>, session: &RiotSession) -> Resul
     Ok(())
 }
 
-/// R90: the user's own equipped skins, read once per connect from
+/// R90: the user's own equipped skins, read once per connect (at the
+/// first presence showing VALORANT, `Poller::read_self_loadout_once`) from
 /// `pd .../personalization/v2/players/{self}/playerloadout` (a read-only
 /// `GET`, always the user's own puuid): kept in the live model for their
 /// Details, and in `app_state` (only when it changed) so it still shows
@@ -966,14 +1067,33 @@ pub async fn fetch_self_loadout(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
 ) -> Result<(), Gone> {
+    let me = session.self_puuid().to_string();
     let resp = match session.player_loadout().await {
         Ok(resp) => resp,
-        Err(e) => return check(e, "player loadout", session.self_puuid()),
+        Err(e) => return check(e, "player loadout", &me),
     };
     let loadout = extract_player_loadout(&resp);
     let stored = serde_json::to_string(&loadout).unwrap_or_default();
-    lock(&st.live).self_loadout = Some(loadout);
+    {
+        // The answer can land after an account switch (a slow read, a 429
+        // hold): it is only this session's account's loadout.
+        let mut live = lock(&st.live);
+        if live.self_puuid.as_deref() != Some(me.as_str()) {
+            log::debug!("own loadout of a previous account dropped");
+            return Ok(());
+        }
+        live.self_loadout = Some(loadout);
+    }
+    let owner = st.clone();
     st.db(move |repo| {
+        // Checked again under the DB lock: an account switch updates the
+        // live model first and then deletes the stored copy under this same
+        // lock, so a write for the previous account lands before that
+        // delete or not at all. (Lock order: the repo, then the live model;
+        // nothing takes the repo while holding the live model.)
+        if lock(&owner.live).self_puuid.as_deref() != Some(me.as_str()) {
+            return Ok(());
+        }
         if repo.get_state(SELF_LOADOUT_KEY)?.as_deref() != Some(stored.as_str()) {
             repo.set_state(SELF_LOADOUT_KEY, &stored)?;
         }
@@ -999,6 +1119,45 @@ mod tests {
             map_id: None,
             start_ms,
         }
+    }
+
+    #[test]
+    fn only_per_id_failures_count_toward_the_skip() {
+        // R139: only an answer about the id itself counts — a Riot status
+        // other than 404 (skipped at once) and 429 (rate limit), or a body
+        // that doesn't decode. Rate-limit, network and auth errors say
+        // nothing about the id: they end the run uncounted.
+        for counted in [
+            RiotError::Status(500),
+            RiotError::Status(502),
+            RiotError::Status(400),
+            RiotError::Decode("missing field".into()),
+        ] {
+            assert!(counts_toward_skip(&counted), "{counted:?} counts");
+        }
+        for uncounted in [
+            RiotError::Status(404),
+            RiotError::Status(429),
+            RiotError::RateLimited,
+            RiotError::Http("operation timed out".into()),
+            RiotError::AuthFailed("no token".into()),
+            RiotError::Status(401),
+            RiotError::Status(403),
+            RiotError::ShardsUnavailable,
+            RiotError::ClientGone,
+        ] {
+            assert!(
+                !counts_toward_skip(&uncounted),
+                "{uncounted:?} is not counted"
+            );
+        }
+    }
+
+    #[test]
+    fn failure_counts_are_kept_per_account() {
+        // Like the anchors (R137): one key per account.
+        assert_eq!(failures_key("a"), "self_history_failures:a");
+        assert_ne!(failures_key("a"), failures_key("b"));
     }
 
     #[test]

@@ -785,6 +785,34 @@ fn fixture_loadout() -> (RawLoadout, Value) {
     (raw, body)
 }
 
+/// `/chat/v4/presences`: the user's VALORANT presence in the Lobby when
+/// `running`, else none at all (VALORANT closed under a running Riot
+/// Client).
+async fn mock_valorant_presence(h: &Harness, running: bool) {
+    use base64::Engine as _;
+    let presences = if running {
+        let private = base64::engine::general_purpose::STANDARD.encode(
+            json!({"sessionLoopState": "MENUS", "queueId": "unrated", "partyId": "party-1"})
+                .to_string(),
+        );
+        json!([{"puuid": ME, "product": "valorant", "private": private}])
+    } else {
+        json!([])
+    };
+    Mock::given(method("GET"))
+        .and(path("/chat/v4/presences"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"presences": presences})))
+        .mount(&h.server)
+        .await;
+}
+
+/// What the poll loop does on a connect: `on_connected`, then the first
+/// presence tick (VALORANT is running: its presence is mocked).
+async fn connect_with_valorant(poller: &mut Poller, h: &Harness) {
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+}
+
 async fn playerloadout_requests(h: &Harness) -> Vec<String> {
     h.server
         .received_requests()
@@ -818,10 +846,11 @@ async fn self_loadout_fetched_once_per_connect() {
     let vandal = raw.vandal.clone().unwrap();
     mount_skin(&h.assets_server, &vandal.skin_id, &vandal.chroma_id).await;
     lobby_with(&h, ME).await;
+    mock_valorant_presence(&h, true).await;
 
-    // The connect asks once.
+    // The connect asks once, at the first presence showing VALORANT.
     let mut poller = Poller::new(h.st.clone());
-    poller.on_connected(h.session.clone()).await;
+    connect_with_valorant(&mut poller, &h).await;
     wait_for_playerloadouts(&h, 1).await;
     assert_eq!(
         playerloadout_requests(&h).await,
@@ -851,21 +880,78 @@ async fn self_loadout_fetched_once_per_connect() {
         assert_eq!(event["loadout"][weapon], Value::Null, "{weapon}");
     }
 
-    // More activity (publishes, another open) asks for nothing more.
+    // More activity (publishes, another open, more presence ticks) asks
+    // for nothing more.
     h.st.publish();
     crate::commands::player_details_for(&h.st, ME)
         .await
         .unwrap();
+    poller.presence_tick(&h.session).await.unwrap();
+    poller.presence_tick(&h.session).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert_eq!(playerloadout_requests(&h).await.len(), 1);
+    poller.stop_worker();
 
     // A reconnect asks once more, and only ever for the user.
-    poller.on_connected(h.session.clone()).await;
+    connect_with_valorant(&mut poller, &h).await;
     wait_for_playerloadouts(&h, 2).await;
+    poller.stop_worker();
     assert_eq!(
         playerloadout_requests(&h).await,
         [own_path.clone(), own_path]
     );
+}
+
+#[tokio::test]
+async fn self_loadout_waits_for_valorant_and_is_read_once_per_connect() {
+    // R90's one call per connect, on a session that is not stale (R46): a
+    // connect while VALORANT is closed asks nothing (that session is rebuilt
+    // when the game starts), nor do the ticks that find no VALORANT
+    // presence. The first tick that shows it asks once; later ticks don't.
+    let h = harness().await;
+    let (_, body) = fixture_loadout();
+    get(
+        &h.server,
+        &format!("/personalization/v2/players/{ME}/playerloadout"),
+        body,
+    )
+    .await;
+    mock_valorant_presence(&h, false).await;
+    let mut poller = Poller::new(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    for _ in 0..3 {
+        poller.presence_tick(&h.session).await.unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        playerloadout_requests(&h).await.is_empty(),
+        "no own-loadout call while VALORANT is closed"
+    );
+
+    // VALORANT is up under a fresh session (what the R46 rebuild does).
+    h.server.reset().await;
+    mock_riot(&h.server).await;
+    let (_, body) = fixture_loadout();
+    get(
+        &h.server,
+        &format!("/personalization/v2/players/{ME}/playerloadout"),
+        body,
+    )
+    .await;
+    mock_valorant_presence(&h, true).await;
+    lobby_with(&h, ME).await;
+    connect_with_valorant(&mut poller, &h).await;
+    wait_for_playerloadouts(&h, 1).await;
+    for _ in 0..3 {
+        poller.presence_tick(&h.session).await.unwrap();
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(
+        playerloadout_requests(&h).await.len(),
+        1,
+        "once per connect"
+    );
+    poller.stop_worker();
 }
 
 #[tokio::test]
@@ -881,10 +967,12 @@ async fn self_loadout_kept_in_app_state() {
     let vandal = raw.vandal.clone().unwrap();
     mount_skin(&h.assets_server, &vandal.skin_id, &vandal.chroma_id).await;
     lobby_with(&h, ME).await;
+    mock_valorant_presence(&h, true).await;
 
     let mut poller = Poller::new(h.st.clone());
-    poller.on_connected(h.session.clone()).await;
+    connect_with_valorant(&mut poller, &h).await;
     wait_for_playerloadouts(&h, 1).await;
+    poller.stop_worker();
     // The four skins are kept in `app_state`.
     let stored =
         h.st.db(|repo| repo.get_state("self_loadout"))
@@ -1030,9 +1118,11 @@ async fn account_switch_forgets_the_previous_users_loadout() {
 
     // ME connects (the playerloadout mock isn't mounted: the read fails and
     // is not retried): the previous account's loadout is gone everywhere.
+    mock_valorant_presence(&h, true).await;
     let mut poller = Poller::new(h.st.clone());
-    poller.on_connected(h.session.clone()).await;
+    connect_with_valorant(&mut poller, &h).await;
     wait_for_playerloadouts(&h, 1).await;
+    poller.stop_worker();
     assert_eq!(lock(&h.st.live).self_puuid.as_deref(), Some(ME));
     assert_eq!(lock(&h.st.live).self_loadout, None);
     let kept =
@@ -1055,4 +1145,222 @@ async fn account_switch_forgets_the_previous_users_loadout() {
         Some(ME.into()),
     );
     assert_eq!(lock(&restarted.live).self_loadout, None);
+}
+
+// ---------------------------------------------------------------------
+// Whole-branch review W3: open Details follow the worker's sync (R23)
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn open_details_follow_the_workers_sync_of_that_player() {
+    // R23: a skeleton never outlives the attempt. The hero card of an open
+    // Details is the live card at open time; when the worker then names and
+    // syncs that player, a `details` event carries the settled card. No
+    // session here, so no Details sync runs: only the worker can settle it.
+    let h = harness().await;
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.slots = vec![
+            Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            },
+            Slot {
+                roster: roster(OTHER, false),
+                db: PlayerDb::default(),
+            },
+        ];
+        live.synced.insert(ME.into());
+    }
+    h.st.publish();
+    let opened = crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    assert!(opened.card.rank.is_loading(), "not synced yet: a skeleton");
+    assert!(opened.card.name.is_loading(), "not named yet: a skeleton");
+    let seen = details_events(&h.rec);
+
+    let id = lock(&h.st.live).try_start_worker().expect("work pending");
+    run_worker(h.st.clone(), h.session.clone(), id).await;
+
+    // OTHER's own calls all fail in this mock: the rank settles to `null`,
+    // and name-service named them.
+    let event = details_event_after(&h.rec, seen, OTHER, |d| {
+        d["card"].get("rank") == Some(&Value::Null)
+    })
+    .await;
+    assert_eq!(
+        event["card"]["name"],
+        json!({"kind": "visible", "name": "Other", "tag": "OTH"})
+    );
+    // Nothing else was open: no event for anyone else.
+    assert!(h
+        .rec
+        .details
+        .lock()
+        .unwrap()
+        .iter()
+        .skip(seen)
+        .all(|d| d.card.puuid == OTHER));
+}
+
+// ---------------------------------------------------------------------
+// Whole-branch review W12/W14: a hidden player who left the screen
+// ---------------------------------------------------------------------
+
+/// HIDDEN in the user's Agent Select, incognito, with `selection` as their
+/// agent state.
+fn hidden_ally(selection: &str) -> RosterPlayer {
+    let mut p = roster(HIDDEN, true);
+    p.team = Team::Ally;
+    p.team_id = "Blue".into();
+    p.selection_state = selection.into();
+    p
+}
+
+/// Applies `roster` as the stage's roster through the real poll path, then
+/// stops the worker it starts (these tests look at Details only).
+async fn show(poller: &mut Poller, h: &Harness, stage: Stage, roster: Vec<RosterPlayer>) {
+    poller.apply_roster(&h.session, stage, None, roster).await;
+    poller.stop_worker();
+}
+
+#[tokio::test]
+async fn a_hidden_player_who_left_the_screen_stays_hidden_in_details() {
+    // HIDDEN was visible in an earlier match, so the `players` row holds the
+    // name name-service gave then. Today they are incognito in the user's
+    // Agent Select; the user opens their Details, then a dodge takes them
+    // off the screen before a rebuild. The rebuilt card must keep the card
+    // rule (Hidden Player / the agent / the remembered name) — never the
+    // name-service name in the visible style.
+    let h = harness().await;
+    let now = now_ms();
+    h.st.db(move |repo| {
+        save_player(
+            repo.conn(),
+            &PlayerUpdate {
+                puuid: HIDDEN.into(),
+                name: Some(("RealName".into(), "OLD".into())),
+                account_level: 40,
+                card_id: "card".into(),
+            },
+            now,
+        )
+    })
+    .await
+    .unwrap();
+    let mut poller = Poller::new(h.st.clone());
+    let leaks = |d: &PlayerDetails| serde_json::to_string(d).unwrap().contains("RealName");
+
+    // Before the lock: Hidden Player, on screen and after the dodge.
+    show(
+        &mut poller,
+        &h,
+        Stage::Pregame,
+        vec![roster(ME, false), hidden_ally("")],
+    )
+    .await;
+    let on_screen = crate::details::build(&h.st, HIDDEN).await.unwrap();
+    assert_eq!(on_screen.card.name, Field::Value(DisplayName::HiddenPlayer));
+    show(&mut poller, &h, Stage::Menus, vec![roster(ME, false)]).await;
+    let off_screen = crate::details::build(&h.st, HIDDEN).await.unwrap();
+    assert_eq!(
+        off_screen.card.name,
+        Field::Value(DisplayName::HiddenPlayer)
+    );
+    assert!(!leaks(&off_screen), "no name-service name off screen");
+
+    // Locked: the agent name.
+    show(
+        &mut poller,
+        &h,
+        Stage::Pregame,
+        vec![roster(ME, false), hidden_ally("locked")],
+    )
+    .await;
+    show(&mut poller, &h, Stage::Menus, vec![roster(ME, false)]).await;
+    let off_screen = crate::details::build(&h.st, HIDDEN).await.unwrap();
+    assert_eq!(
+        off_screen.card.name,
+        Field::Value(DisplayName::HiddenAgent {
+            agent_id: "agent".into()
+        })
+    );
+    assert!(!leaks(&off_screen));
+
+    // A name the user learned in their own finished match: the remembered
+    // style, still never the name-service one.
+    store_split_match(&h.st).await;
+    let off_screen = crate::details::build(&h.st, HIDDEN).await.unwrap();
+    assert!(
+        matches!(
+            off_screen.card.name,
+            Field::Value(DisplayName::Remembered { ref name, .. }) if name == "SecretName"
+        ),
+        "{:?}",
+        off_screen.card.name
+    );
+    assert!(!leaks(&off_screen));
+
+    // Seen visible later: the stored name, as before.
+    show(
+        &mut poller,
+        &h,
+        Stage::Pregame,
+        vec![roster(ME, false), {
+            let mut p = hidden_ally("locked");
+            p.incognito = false;
+            p
+        }],
+    )
+    .await;
+    show(&mut poller, &h, Stage::Menus, vec![roster(ME, false)]).await;
+    let off_screen = crate::details::build(&h.st, HIDDEN).await.unwrap();
+    assert_eq!(
+        off_screen.card.name,
+        Field::Value(DisplayName::Visible {
+            name: "RealName".into(),
+            tag: "OLD".into()
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_late_own_loadout_answer_never_lands_on_another_account() {
+    // The read of account A's loadout is still in flight (a slow answer, a
+    // 429 hold) when the user signs into account B. A's answer must not be
+    // written for B: not in memory, not in the copy kept for restarts.
+    let h = harness().await;
+    let (raw, body) = fixture_loadout();
+    get(
+        &h.server,
+        &format!("/personalization/v2/players/{ME}/playerloadout"),
+        body,
+    )
+    .await;
+    lock(&h.st.live).self_puuid = Some("another-account".into());
+
+    crate::sync::fetch_self_loadout(&h.st, &h.session)
+        .await
+        .unwrap();
+
+    assert_eq!(lock(&h.st.live).self_loadout, None, "not in memory");
+    let kept =
+        h.st.db(|repo| repo.get_state("self_loadout"))
+            .await
+            .unwrap();
+    assert_eq!(kept, None, "not in app_state");
+
+    // Control: while ME is the account, both are written.
+    lock(&h.st.live).self_puuid = Some(ME.into());
+    crate::sync::fetch_self_loadout(&h.st, &h.session)
+        .await
+        .unwrap();
+    assert_eq!(lock(&h.st.live).self_loadout, Some(raw));
+    let kept =
+        h.st.db(|repo| repo.get_state("self_loadout"))
+            .await
+            .unwrap();
+    assert!(kept.is_some());
 }

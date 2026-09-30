@@ -3,7 +3,9 @@
 //!
 //! Locking rules: every `std::sync` lock here is held only for short,
 //! synchronous work (never across an `.await`); SQLite work always goes
-//! through [`AppState::db`] (`spawn_blocking`).
+//! through [`AppState::db`] (`spawn_blocking`). Order: a DB closure may
+//! take the `live` lock (`sync::fetch_self_loadout`'s account check), so
+//! nothing takes the repo while holding `live`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -35,6 +37,11 @@ const TABLES_RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// Player Details re-syncs the same player at most this often.
 const DETAILS_RESYNC_AFTER: Duration = Duration::from_secs(120);
+
+/// How long a task waits for a match-details another task is downloading
+/// ([`AppState::claim_details_fetch`]) before it goes on without it. The
+/// download itself is bounded (the session's timeout and 429 retries).
+const DETAILS_WAIT_MAX: Duration = Duration::from_secs(30);
 
 pub fn now_ms() -> i64 {
     SystemTime::now()
@@ -77,7 +84,8 @@ pub enum Job {
     Sync(String),
     /// One step of the own-history backfill (R101): only handed out when no
     /// `Names` or `Sync` job is left, so it is always behind live cards, and
-    /// only in Menus or Closed (R137), never during a match.
+    /// only in Menus or Closed (R137), never during a match — a free-for-all
+    /// one included (`LiveModel::in_match`).
     Backfill,
 }
 
@@ -116,7 +124,13 @@ pub struct BackfillRun {
 /// The live stage/roster plus the session-scoped bookkeeping the sync
 /// worker and the card builder share.
 pub struct LiveModel {
+    /// The stage being *shown* (`roster::view_stage`): a free-for-all match
+    /// keeps the Lobby view, `Menus` (R41).
     pub stage: Stage,
+    /// The raw presence is in a match (Agent Select or In Game), whatever
+    /// the view shows: a free-for-all match keeps `stage` at `Menus` (R41),
+    /// yet it is a match — R137 keeps the own-history backfill out of it.
+    pub in_match: bool,
     /// Riot's `MapID` path for the current match (Agent Select / In Game).
     pub map_path: Option<String>,
     /// `map_path` as a valorant-api uuid — resolved at publish time (the
@@ -150,6 +164,13 @@ pub struct LiveModel {
     pub self_roster: Option<RosterPlayer>,
     /// Names from `names()` this run (visible, non-self players only).
     pub known_names: HashMap<String, (String, String)>,
+    /// Players whose card showed them hidden the last time they were on
+    /// screen this run, with the agent it showed (once locked, R99) — see
+    /// [`Self::note_hidden`]. Player Details builds such a player's card
+    /// off screen by the same hidden-name rule (after a dodge or the match
+    /// end), never with a name-service name from an earlier visible
+    /// sighting. Cleared when the account changes.
+    pub seen_hidden: HashMap<String, Option<String>>,
     /// Players a `names()` call was attempted for (since the last reset):
     /// a visible name still unknown after that is Missing, not Loading.
     pub names_attempted: HashSet<String>,
@@ -179,6 +200,7 @@ impl LiveModel {
     pub fn new(self_puuid: Option<String>) -> Self {
         Self {
             stage: Stage::Closed,
+            in_match: false,
             map_path: None,
             map_id: None,
             slots: Vec::new(),
@@ -190,6 +212,7 @@ impl LiveModel {
             self_name_attempted: false,
             self_roster: None,
             known_names: HashMap::new(),
+            seen_hidden: HashMap::new(),
             names_attempted: HashSet::new(),
             synced: HashSet::new(),
             party_ready: HashSet::new(),
@@ -393,6 +416,27 @@ impl LiveModel {
             .collect()
     }
 
+    /// Records who is shown hidden on screen right now (see
+    /// [`Self::seen_hidden`]): every incognito player but the user, with
+    /// the agent their card shows; a player shown visible now is dropped.
+    /// Called whenever a roster is installed.
+    pub fn note_hidden(&mut self) {
+        let hidden = self.hidden_players();
+        let self_id = self.self_id().to_string();
+        for s in &self.slots {
+            let p = &s.roster.puuid;
+            match hidden.get(p) {
+                Some(agent) => {
+                    self.seen_hidden.insert(p.clone(), agent.clone());
+                }
+                None if *p != self_id => {
+                    self.seen_hidden.remove(p);
+                }
+                None => {}
+            }
+        }
+    }
+
     /// Players to send to name-service: never the user (R43 — their name
     /// comes from the chat session), never anyone whose `Incognito` is
     /// true, only names not known and not yet asked for.
@@ -426,9 +470,13 @@ impl LiveModel {
     /// R137: the own-history backfill runs only between matches (Lobby, or
     /// Closed), never in Agent Select or In Game: a first run is tens of MB
     /// of match-details and a 429 it triggers would hold the rate bucket the
-    /// live cards need. The run's cursor survives the pause.
-    fn backfill_ready(&self) -> bool {
-        self.backfill.is_some() && matches!(self.stage, Stage::Menus | Stage::Closed)
+    /// live cards need. A free-for-all match counts too, although its view
+    /// stays the Lobby (R41): the raw presence (`in_match`) decides. The
+    /// run's cursor survives the pause.
+    pub fn backfill_ready(&self) -> bool {
+        self.backfill.is_some()
+            && !self.in_match
+            && matches!(self.stage, Stage::Menus | Stage::Closed)
     }
 
     pub fn has_pending_work(&self) -> bool {
@@ -601,6 +649,18 @@ pub struct AppState {
     /// weapons are still "resolving" (absent keys); once it leaves, an
     /// unknown name is `null`.
     skins_inflight: Mutex<HashMap<String, usize>>,
+    /// The Player Details the UI asked for last (`player_details`), as it
+    /// was last given to the UI (the answer, or the last `details` event).
+    /// A rebuild is emitted only for this player and only when it differs:
+    /// the UI shows one Details at a time and drops events for any other.
+    /// The worker refreshes it after syncing that player, so a hero card
+    /// opened while still loading resolves (R23) without a reopen.
+    open_details: Mutex<Option<PlayerDetails>>,
+    /// Match ids whose match-details a task is downloading right now, each
+    /// with the sender its waiters watch ([`Self::claim_details_fetch`]):
+    /// the live sync, a Details sync, Match Details and the backfill can all
+    /// want the same match at once, and it is downloaded once.
+    details_inflight: Mutex<HashMap<String, tokio::sync::watch::Sender<()>>>,
     /// `app_data_dir()/debug` — where `dump_raw` writes.
     pub debug_dir: PathBuf,
 }
@@ -647,6 +707,8 @@ impl AppState {
             tables: tokio::sync::Mutex::new(TablesStatus::default()),
             details_synced: Mutex::new(HashMap::new()),
             skins_inflight: Mutex::new(HashMap::new()),
+            open_details: Mutex::new(None),
+            details_inflight: Mutex::new(HashMap::new()),
             debug_dir,
         }
     }
@@ -791,8 +853,33 @@ impl AppState {
         live.current = state;
     }
 
-    pub fn emit_details(&self, details: &PlayerDetails) {
-        self.sink.details(details);
+    /// Records `details` as the open Player Details, as the UI was just
+    /// given them (the `player_details` answer).
+    pub fn set_open_details(&self, details: &PlayerDetails) {
+        *lock(&self.open_details) = Some(details.clone());
+    }
+
+    /// `puuid`'s Player Details is the one the UI asked for last.
+    pub fn details_open_for(&self, puuid: &str) -> bool {
+        lock(&self.open_details)
+            .as_ref()
+            .is_some_and(|d| d.card.puuid == puuid)
+    }
+
+    /// Emits `fresh` as a `"details"` event when it is the open Player
+    /// Details and differs from what the UI was last given; `true` when it
+    /// was emitted. Compare, emit and record happen under one lock, so two
+    /// rebuilds can't both emit the same change.
+    pub fn emit_details_if_changed(&self, fresh: PlayerDetails) -> bool {
+        let mut open = lock(&self.open_details);
+        match open.as_ref() {
+            Some(last) if last.card.puuid == fresh.card.puuid && *last != fresh => {
+                self.sink.details(&fresh);
+                *open = Some(fresh);
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn live_state(&self) -> LiveState {
@@ -853,6 +940,23 @@ impl AppState {
         }
     }
 
+    /// Claims the download of `match_id`'s match-details: `Mine` when no
+    /// other task is downloading it (the guard releases the claim when
+    /// dropped — after the rows are stored, on a failure, or when the task
+    /// is aborted), else `Busy` with a handle to [`wait_for_details_fetch`]
+    /// on. Keeps one download per match however many tasks want it.
+    pub fn claim_details_fetch(self: &Arc<Self>, match_id: &str) -> DetailsClaim {
+        let mut inflight = lock(&self.details_inflight);
+        if let Some(tx) = inflight.get(match_id) {
+            return DetailsClaim::Busy(tx.subscribe());
+        }
+        inflight.insert(match_id.to_string(), tokio::sync::watch::channel(()).0);
+        DetailsClaim::Mine(DetailsFetchGuard {
+            st: self.clone(),
+            match_id: match_id.to_string(),
+        })
+    }
+
     /// `true` (and records now) when `puuid`'s Player Details data hasn't
     /// been synced in the last [`DETAILS_RESYNC_AFTER`].
     pub fn claim_details_sync(&self, puuid: &str) -> bool {
@@ -866,6 +970,35 @@ impl AppState {
         log::debug!("details sync claimed for {}", short(puuid));
         true
     }
+}
+
+/// See [`AppState::claim_details_fetch`].
+pub enum DetailsClaim {
+    /// This task downloads it; drop the guard once the rows are stored.
+    Mine(DetailsFetchGuard),
+    /// Another task is downloading it.
+    Busy(tokio::sync::watch::Receiver<()>),
+}
+
+/// A claimed match-details download ([`AppState::claim_details_fetch`]);
+/// dropping it releases the claim and wakes every task waiting on it.
+pub struct DetailsFetchGuard {
+    st: Arc<AppState>,
+    match_id: String,
+}
+
+impl Drop for DetailsFetchGuard {
+    fn drop(&mut self) {
+        // Dropping the sender closes the channel: the waiters wake.
+        lock(&self.st.details_inflight).remove(&self.match_id);
+    }
+}
+
+/// Waits (at most [`DETAILS_WAIT_MAX`]) until the task that claimed a
+/// match-details download has finished it, stored or not.
+pub async fn wait_for_details_fetch(mut busy: tokio::sync::watch::Receiver<()>) {
+    // Nothing is ever sent: `changed` returns once the sender is dropped.
+    let _ = tokio::time::timeout(DETAILS_WAIT_MAX, busy.changed()).await;
 }
 
 /// A running skin-name fetch's mark on its puuid
@@ -1440,6 +1573,37 @@ mod tests {
             let id = m.try_start_worker().expect("the run is work");
             assert_eq!(m.next_job(id), Some(Job::Backfill), "{stage:?}");
         }
+    }
+
+    #[test]
+    fn backfill_waits_for_a_free_for_all_match_too() {
+        // R137 with R41: a Deathmatch keeps the Lobby view (`stage` stays
+        // Menus) for the whole match; the raw presence (`in_match`) still
+        // keeps the backfill out of it.
+        let mut m = model(vec![slot("me", false)]);
+        m.synced.insert("me".into());
+        m.stage = Stage::Menus;
+        m.in_match = true;
+        m.start_backfill(None, None);
+        assert!(
+            m.try_start_worker().is_none(),
+            "a run alone is no work during a free-for-all match"
+        );
+
+        // A worker that claimed before the match started.
+        m.in_match = false;
+        let id = m
+            .try_start_worker()
+            .expect("between matches: the run is work");
+        m.in_match = true;
+        assert_eq!(m.next_job(id), None, "never Backfill mid-match");
+        assert!(!m.worker_running(), "the claim is released");
+        assert!(m.backfill.is_some(), "the cursor waits");
+
+        // The match ended: the same run resumes.
+        m.in_match = false;
+        let id = m.try_start_worker().expect("the run is work again");
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
     }
 
     #[test]

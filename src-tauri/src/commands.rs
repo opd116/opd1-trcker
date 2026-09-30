@@ -5,8 +5,9 @@
 //! - `meta()` — agent/map/tier names + tier colors (R21).
 //! - `live_state()` — the last emitted `LiveState` (the UI calls it once on
 //!   start so it never misses the first snapshot).
-//! - `player_details(puuid)` — cached details now; a background sync then
-//!   emits `"details"` if it found more.
+//! - `player_details(puuid)` — cached details now; a background sync (and
+//!   the worker's sync of that player) then emits `"details"` if it found
+//!   more.
 //! - `match_details(matchId, focusPuuid)` — one match as the Match Details
 //!   scoreboard, from the DB (fetched once when it isn't stored yet).
 //! - `my_stats()` — the user's My Stats for the current act, from the DB
@@ -23,7 +24,6 @@ use tauri::State;
 use opd1_core::model::{LiveState, MatchDetailsView, MyStats, PlayerDetails};
 use opd1_riot::assets::Meta;
 
-use crate::logbuf::short;
 use crate::state::{lock, now_ms, AppState};
 
 type AppStateRef<'a> = State<'a, Arc<AppState>>;
@@ -73,7 +73,8 @@ pub async fn player_details(
 
 /// `player_details` without the Tauri wrapper: the cached details now, with
 /// two background jobs behind them, each emitting `"details"` when it
-/// changed the result:
+/// changed the result (and the worker refreshes them after syncing this
+/// player, `details::refresh`):
 /// - the Riot sync ([`crate::sync::sync_details`]), at most every 120s per
 ///   player (`claim_details_sync`);
 /// - the skin-name fetch (R83, R97), whenever a loadout skin's name isn't
@@ -97,20 +98,22 @@ pub(crate) async fn player_details_for(
     let resolving =
         crate::details::skins_pending(&st, &puuid).then(|| st.begin_skin_resolve(&puuid));
     let details = crate::details::build(&st, &puuid).await?;
+    // The open view: every later rebuild of it (the jobs below, and the
+    // worker's sync of this player, R23) is emitted only when it changed.
+    st.set_open_details(&details);
 
     if let Some(guard) = resolving {
-        let (st, puuid, before) = (st.clone(), puuid.clone(), details.clone());
+        let (st, puuid) = (st.clone(), puuid.clone());
         tauri::async_runtime::spawn(async move {
             crate::details::resolve_skins(&st, &puuid).await;
             // Ended before the rebuild, so a name still unknown is `null`.
             drop(guard);
-            rebuild_and_emit(&st, &puuid, &before).await;
+            crate::details::refresh(&st, &puuid).await;
         });
     }
 
     if let Some(session) = st.session() {
         if st.claim_details_sync(&puuid) {
-            let before = details.clone();
             let puuid = puuid.clone();
             let st = st.clone();
             tauri::async_runtime::spawn(async move {
@@ -122,24 +125,11 @@ pub(crate) async fn player_details_for(
                 }
                 // The card on screen may have gained matches too.
                 st.reload_slot(&puuid).await;
-                rebuild_and_emit(&st, &puuid, &before).await;
+                crate::details::refresh(&st, &puuid).await;
             });
         }
     }
     Ok(details)
-}
-
-/// Rebuilds `puuid`'s details and emits them when they differ from
-/// `before` (what the UI was last given).
-async fn rebuild_and_emit(st: &Arc<AppState>, puuid: &str, before: &PlayerDetails) {
-    match crate::details::build(st, puuid).await {
-        Ok(fresh) if fresh != *before => {
-            log::debug!("details for {} updated", short(puuid));
-            st.emit_details(&fresh);
-        }
-        Ok(_) => {}
-        Err(e) => log::warn!("details rebuild failed: {e}"),
-    }
 }
 
 #[tauri::command]

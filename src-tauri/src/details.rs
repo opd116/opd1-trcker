@@ -182,13 +182,26 @@ fn encounter_row(e: EncounterRow, lookup: &dyn Fn(&str) -> Option<String>) -> En
 }
 
 /// A card for a player that isn't on screen: identity from the `players`
-/// row (as the Closed stage does for the user), data from the DB.
+/// row (as the Closed stage does for the user), data from the DB. A player
+/// whose card showed them hidden when last on screen (`seen_hidden`: the
+/// Details was opened in Agent Select, then a dodge or the match end took
+/// them off screen) keeps that card's rule — Hidden Player, the agent, or
+/// the name remembered from the user's own finished match — never the
+/// `players` row name, which name-service gave at an earlier visible
+/// sighting.
 fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Option<PlayerCard> {
     let mut slot: Slot = closed_self_slot(puuid, db)?;
     let live = lock(&st.live);
     let is_self = live.self_puuid.as_deref() == Some(puuid);
+    let hidden = (!is_self).then(|| live.seen_hidden.get(puuid)).flatten();
     slot.roster = RosterPlayer {
         is_self_party: is_self,
+        incognito: hidden.is_some(),
+        character_id: hidden.cloned().flatten().unwrap_or_default(),
+        selection_state: match hidden {
+            Some(Some(_)) => "locked".into(),
+            _ => String::new(),
+        },
         ..slot.roster
     };
     let acts = st.acts();
@@ -200,6 +213,24 @@ fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Opt
     // Nothing is being fetched for it right now: unknown means `—`.
     crate::state::settle_card(&mut card, true, true);
     Some(card)
+}
+
+/// Rebuilds `puuid`'s details and emits them (`"details"`) when they are
+/// the open Player Details and changed since the UI was last given them
+/// (`AppState::emit_details_if_changed`). A no-op for anyone else, so the
+/// worker can call it after every player it syncs.
+pub async fn refresh(st: &Arc<AppState>, puuid: &str) {
+    if !st.details_open_for(puuid) {
+        return;
+    }
+    match build(st, puuid).await {
+        Ok(fresh) => {
+            if st.emit_details_if_changed(fresh) {
+                log::debug!("details for {} updated", short(puuid));
+            }
+        }
+        Err(e) => log::warn!("details rebuild failed: {e}"),
+    }
 }
 
 /// Everything cached for `puuid`'s details view.

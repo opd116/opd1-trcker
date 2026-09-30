@@ -232,7 +232,7 @@ Rule for the added colours:
   - Route `live`.
   - `await listen('live')`, then `invoke('live_state')`. Apply the invoke result only if no event has arrived.
   - `invoke('meta')`.
-  - `listen('details')`: replace the open details only when `payload.card.puuid` matches.
+  - `listen('details')`: replace the open details when `payload.card.puuid` is the player open or opening. An event always wins over a `player_details` answer still in flight. Navigating to `live` forgets the open details (Match and Back keep them).
 - Keys (no UI): Ctrl+Shift+L → `invoke('copy_log')` then `navigator.clipboard.writeText`. Ctrl+Shift+D → `invoke('dump_raw')`.
 
 ---
@@ -666,12 +666,13 @@ Map names, agent names (hidden-agent cards, Details `shortName`, Top-3 and toolt
 
 ### 6.7 Top 3 Teammates (v8:317-335)
 
-- Row: `display:flex; align-items:center; gap:10px; min-height:46px; padding:0 14px`, with the §6.3 separators. Rows are not clickable.
+- Row: `display:flex; align-items:center; gap:10px; min-height:30px; padding:8px 14px` **[C]** (a one-line row is the design's 46px), with the §6.3 separators. Rows are not clickable.
 - Name block: `flex:1; min-width:0; display:flex; align-items:baseline; gap:5px; flex-wrap:wrap`. Full names wrap; they never truncate.
   - **[C]** The name span also gets `overflow-wrap:anywhere` (the design has none). A 16-char name with no spaces is 192–208px at 14/600, and the block is only ~132px wide beside the live icons (54) and the count (62); without it the name overflows under them. Short names render exactly as the design.
   - `visible`: name 14px/600, tag `#TAG` 13px/500 `--text2`.
   - `remembered`: eye-off 14, name 14px/600 dotted underline (offset 4), tag.
   - `hiddenAgent` / `hiddenPlayer`: eye-off 14, then the agent name or `Hidden Player` at 14px/500 italic `--text-soft`.
+  - In the wrapping block the eye opens the name's first line (the first line is indented 19px and the eye sits in the indent), and a wrapped `remembered` name has line-height 1.3 so its underline clears the next line **[C]**.
   - The backend already applies R18. No tooltips on names here.
 - Live indicator (v8:325-330):
   - Shown when the teammate's puuid is a card in the current `LiveState.players` whose `name.kind === 'visible'` (self counts as visible).
@@ -714,7 +715,7 @@ Map names, agent names (hidden-agent cards, Details `shortName`, Top-3 and toolt
 - Self: no Encounters section and no ⟲. Top 3 is shown.
 - Hidden or remembered player: the hero name uses the §3.4 variants. Everything else is shown normally.
 - Loading (after the click, before `player_details` resolves) **[C]**:
-  - Back, plus the hero box with: a 56×56 `--skel` radius-7 agent box, a 160×18 bar, a 48×10 bar, a 48-circle and 90×13 bar, a 28-circle and 90×13 bar, a 24-circle and 90×13 bar for Prev **[C]**, a 154×26 bar for the last-5 row **[C]** (both keep the hero grid's columns), and five 44×27 bars in the stats strip;
+  - Back, plus the hero box with: a 56×56 `--skel` radius-7 agent box, a 160×18 bar, a 48×10 bar, a 48-circle and 90×13 bar, a 28-circle and 90×13 bar, a 24-circle and 90×13 bar for Prev **[C]**, a 154×26 bar for the last-5 row **[C]** (both keep the hero grid's columns), and five 44×27 bars in the stats strip, each under an empty 14px label line, so the skeleton hero is 160px like the loaded one **[C]**;
   - Recent: the header row plus 3 rows, each with a 64×36 map box and a 90×13 bar;
   - Top 3: 3 rows with a 120×13 bar;
   - Loadout: 4 rows with a 124×48 `--skel` well and a 90×13 bar.
@@ -778,7 +779,7 @@ Container and Back as §6.1. Back → details.
   - otherwise, a match the user played → names as match-details gives them;
   - otherwise (a match the user didn't play) → players with no stored name are `hiddenAgent` (or `remembered` if the user's own finished match knows them).
   - This replaces audit §2.12's "any player flagged incognito in that match": match-details carries no incognito flag (`endpoints.rs` `MatchPlayer`), so that rule can't be implemented.
-  - Known risk: if Riot's match-details returns real names for players who were incognito in that match, a match the user didn't play would show them for players not on the live screen now. The plan Task 19 check settles it (the user's DB compared with the core-game dump, R94). If it happens, the follow-up hides every name in matches the user didn't play, and every Top 3 name learned only from such matches (R94), except players visible on the live screen now.
+  - Names from matches the user didn't play (R143, user 2026-09-30): if Riot's match-details returns real names for players who were incognito in that match, those names may show here, off the live screen (Match Details, Top 3, encounter rows). This is allowed, not a risk to be closed. R94 checks on the user's PC whether Riot returns such names at all (the user's DB compared with the core-game dump); if it doesn't, those players stay as the agent name, as above. During the live stages nothing changes: a hidden player shows `Hidden Player` or the agent name, or the remembered style only from the user's own finished matches.
 - **No-team modes** (Deathmatch): a single team block. The team header shows no chip, `—` for rounds, and the label `Players`. The header chip is omitted, the score is `—`, and halves are hidden.
 - **Loading [C]:** the header box with a 150×56 `--skel` radius-5 box and a 120×18 bar; the scoreboard header row; 2 team headers with 5 rows each (28-box, 22-circle, 120×13 bar, and 30×13 bars aligned as each column's numbers are; the K / D / A bar is centred, as that column is in the design).
 

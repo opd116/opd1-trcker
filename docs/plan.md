@@ -1794,7 +1794,7 @@ Done before Phase 2 started (R87): the review was Approved, the math review ran,
   export function weaponState(w: WeaponSkin | null | undefined): 'loading' | 'none' | WeaponSkin; // R97: absent → 'loading', null → 'none', value → the skin
   export function liveTeammate(puuid: string, live: LiveState | null): { agentId: string | null; tier: number | null } | null; // only visible live cards
   export function queueLabel(queueId: string): string;                     // spec §6.10 table
-  export function whenText(v: MatchDetailsView): string;                   // '{queueLabel} · {dateLong} · {time12} · {durationMin}'
+  export function whenText(v: MatchDetailsView, from: MatchFrom, nowMs: number): string; // '{queueLabel} · {date} · {time12} · {durationMin}'; date = dateShort from an encounter row, dateLong from a recent row (R140)
   export function halvesText(v: MatchDetailsView): string | null;          // null when firstHalf null or no-team
   export function teamLabel(v: MatchDetailsView, i: number, focusShort: string): string; // 'Your team' | "{name}'s team" | 'Opponents' | 'Players'
   export function pmText(k: number, d: number): { text: string; tone: 'win' | 'loss' | 'flat' }; // '+N' / '−N' / '0'
@@ -1834,7 +1834,7 @@ Done before Phase 2 started (R87): the review was Approved, the math review ran,
     - `design-ref: details (top)` and `details (bottom)`: the design after clicking Mara, ours at `?scene=details`. The bottom shot sets the scroll container's `scrollTop = scrollHeight` in both.
     - `design-ref: details-more (top/bottom)`: adds `[data-tip$=" AM"],[data-tip$=" PM"]{visibility:hidden!important}`, because the design mock's rows 4–8 have `ago` labels that don't match their own dates (v8:451 vs v8:472).
     - `design-ref: match (top/bottom)`: from recent row 0.
-    - `match-enc` is NOT pixel-compared. The design writes that header as `Sep 12 · 11:18 PM · 41 min` with no year (v8:642, v8:685), while spec §6.10 uses `dateLong`. It is covered by the §8.5 assertions instead.
+    - `match-enc` is pixel-compared too (top only, it fits the window). The design writes that header as `Sep 12 · 11:18 PM · 41 min` with no year (v8:642, v8:685), and the Match header opened from an encounter row uses `dateShort` (R140), which prints no year in the current year. (An earlier draft of this step said spec §6.10 uses `dateLong` and left `match-enc` out of the comparison; R140 corrected that.) A match opened from a recent row keeps `dateLong`.
     - Threshold and hide-style rule as in Task 17.
 - [ ] **Step 2:** Run `cd /home/project-1/.worktrees/ui && npm --prefix ui run test` and `cd /home/project-1/.worktrees/ui/ui && npx playwright test fit-details tips-details interaction visual-details`. Expected: FAIL (stubs).
 - [ ] **Step 3:** Implement per the spec sections.

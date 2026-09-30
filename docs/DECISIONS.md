@@ -1,9 +1,9 @@
 # Decisions
 
-Every ruling made while building OPD1 TRCKER, in number order (R1 to R144). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
+Every ruling made while building OPD1 TRCKER, in number order (R1 to R147). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.
-- Rulings come from the working ledger (R1 to R73 and R87 to R144) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
+- Rulings come from the working ledger (R1 to R73 and R87 to R147) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
 - Precedence when rules disagree (R92): `docs/requirements-raw.md` (newest dated block) > the design file > older `CLAUDE.md` visual rules. `docs/design-spec.md` outranks the design file only for the R74 to R86 gap-fills.
 - The user's own words are in `docs/requirements-raw.md`; the [user decisions index](#user-decisions-index) at the end maps each dated block to a summary.
 
@@ -726,7 +726,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R144). Each
 - **What:** Implementers, fix rounds 1–3 and scoped re-reviews run on Sonnet 5.5. Every first task review, diverse-lens review and the final whole-branch review run on Opus 5.5. Fix rounds 4–5 run on Opus. If a Sonnet-built task draws a Critical in its first review, that task type switches back to Opus implementers.
 - **Why:** The user asked to try Sonnet 5.5 only if quality is untouched, and the Opus review gate keeps quality equal.
 - **Cost:** Extra fix rounds.
-- **Status:** active
+- **Status:** superseded by R147
 
 ### R104 — Ultrareview finding on requirements-raw.md:66
 
@@ -838,7 +838,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R144). Each
 - **What:** The UI screen tasks (17, 18) use Opus implementers. Sonnet stays for backend, docs and fix rounds (R103).
 - **Why:** Design fidelity is the user's top concern, and these are design-judgment tasks (the skill's Model Selection).
 - **Cost:** More tokens, same or better quality.
-- **Status:** active
+- **Status:** superseded by R147
 
 ### R120 — heroHs is a 0..1 fraction
 
@@ -971,7 +971,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R144). Each
 - **What:** Drop `panic = "abort"` from `[profile.release]` and keep unwind. Done in Task 19b, which also updates the ARCHITECTURE line and re-checks the ARCHITECTURE Ctrl+Shift+L/D line after the merge.
 - **Why:** The code's panic containment (the JoinSet "task failed" logging, the R97 skin-resolve drop guard) assumes unwinding. With abort, any stray panic in a background task kills the tracker mid-match. The size gain is a few hundred KB against a 2.6 MB installer and a 10 MB cap, so robustness wins over a negligible lightness gain.
 - **Cost:** About 200 KB.
-- **Status:** active (the change lands in Task 19b)
+- **Status:** active (landed in Task 19b; `[profile.release]` has no `panic` key, and the ARCHITECTURE line says unwind)
 
 ### R139 — The 3-strike skip counts only per-id failures
 
@@ -1012,6 +1012,27 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R144). Each
 
 - **What:** One Opus batch on `ui-lane` now, then a preview CI on `ui-lane`. The Windows path bug: `scenes.test.ts:711` builds a file path from `URL.pathname`; use `fileURLToPath` and sweep every test for the same pattern. The Task 18 minors: clear `openDetails` on leaving Details and drop stale payloads (no old-name flash for a now-hidden player); a details event newer than the in-flight `getPlayerDetails` answer wins; the skeleton hero height equals the loaded one (no 15px jump); the Top 3 remembered-name wrap keeps the eye with the name; wrapped `TopTeammates` names get vertical padding; the unknown-map `—` in the value's own colour; a Hero stat `kind` instead of the label sentinel; a `plural(n, word)` export; the `scrolls()` check matches the real scroll host; `details-nostats` fixture consistency; the Nova check-9 test uses shapes the backend sends; the visual bottom cases really scroll or are removed, plus a hidden-name Details design-ref state; the shared `.sec` and `.panel` styles deduplicated.
 - **Why:** The preview CI 36661819503 failed on `windows-latest` on a Windows-only test bug that the Linux runs could not see (`'/D:/a/...'` became `'D:\D:\a\...'`).
+- **Cost:** None recorded.
+- **Status:** active
+
+### R145 — A hidden player's name is remembered from any source the DB knows
+
+- **What:** User decision 2026-09-30 (the question «من أي مكان نعرفه»). During live stages a hidden player's name shows in the remembered style (eye-off icon and dotted underline) whenever the DB knows it from any source: the user's own finished matches, name-service answers from a time the player was visible, or match-details of matches the user did not play (if Riot returns names there). Still never request a hidden player's name. The tooltip is `Hidden name · known from your match` + map · date when the source match is the user's, `Hidden name · known from a past match` + map · date otherwise, and `Hidden name · seen before` when the name came from a name-service answer with no match. Implemented after the backend whole-branch fix lands: the backend known-name lookup, the contract and its tests, and the UI tips. The docs (CLAUDE.md Hidden names, requirements-raw, DECISIONS, spec §3.4 and §4.2) change in the same pass. Supersedes the source restriction of the line-47 exception and R74's store-only-own-match rule.
+- **Why:** The user's answer when asked where a remembered name may come from (`من أي مكان نعرفه`, from any place we know it).
+- **Cost:** One query filter.
+- **Status:** active (targeted at v0.2.1; not in v0.2.0)
+
+### R146 — The fast path: v0.2.0 tags before the UI whole-branch review ends
+
+- **What:** User decision 2026-09-30, the fast path. (1) The preview `Setup.exe` link goes to the user as soon as the `ui-lane` Windows CI is green. (2) v0.2.0 is Task 19b, right after the backend whole-branch fix lands and the `ui-lane` minors batch is green: merge `ui-lane`, full suites, CI, tag. The UI whole-branch review runs in parallel and does not block the tag; its findings ship in v0.2.1. (3) R145 ships in v0.2.1 right after.
+- **Why:** The user asked for speed. Per-task Opus reviews and the user's own testing cover the gap.
+- **Cost:** Residual UI risk for a few hours.
+- **Status:** active
+
+### R147 — Every subagent runs on Sonnet
+
+- **What:** User decision 2026-09-30. From now on every subagent runs on Sonnet (effort high where a workflow allows it), and only the controller is Opus. The two agents already running on Opus (the backend whole-branch fix phase and the `ui-lane` minors batch) finish rather than restart. Supersedes R103 and R119, and the skill's most-capable-final-review rule.
+- **Why:** The user's call; no reason is recorded. The two running Opus agents finish because restarting them would lose their progress and the speed the user asked for.
 - **Cost:** None recorded.
 - **Status:** active
 

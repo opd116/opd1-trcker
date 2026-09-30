@@ -1,9 +1,10 @@
 // The tooltip catalogue (spec §4.2): pure strings. Names from meta come through meta.ts; a pending or
 // missing part is dropped (spec §5.8), so no tip ever contains "undefined" or "null".
 //
-// Built so far: the name wrapper, peak, win, last-5 tile, encounter badge, party and average-party-rank rows.
-// The rest of §4.2 lands HERE as pure functions with tests, never inline in a screen (Tasks 17 and 18):
-//   - "Last 5 competitive" (K/D, HS%) and "This act" (Games, W/L blocks)
+// Built so far: every card and top-bar row (name wrapper, ⟲, party, peak, K/D + HS%, win, last-5 tile,
+// average party rank). The Details and Match rows land HERE as pure functions with tests, never inline in a
+// screen (Task 18):
+//   - hero K/D + HS% "Last {N} competitive · this act" (R116) and "This act" (Games, W/L blocks)
 //   - recent-row time text and rank-icon tier name; encounter map cell ({Mon D} · {h:mm AM/PM} · {N min})
 //   - top-3 live icons: "In this match · {Agent}", or "In this match" when the agent is unknown or the
 //     meta lookup is pending or missing (§5.8: the part is dropped)
@@ -29,6 +30,9 @@ export function nameTip(n: DisplayName, meta: Meta | null): string {
       return "Hidden name";
   }
 }
+
+/** K/D and HS% blocks on the card: their scope (spec §3.7 [bound]). */
+export const LAST5_SCOPE = "Last 5 competitive";
 
 /** Peak group: a past act shows its full title, the current act its label. Always with the dates. */
 export function peakTip(p: Peak): string {

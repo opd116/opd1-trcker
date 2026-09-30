@@ -1,7 +1,12 @@
-<!-- Top bar (spec §2.2): wordmark and tabs. The right group (map, average party rank) arrives with the Live
-     screen (Task 17): it is rendered on the Live grid route only and left out on Details and Match. -->
+<!-- Top bar (spec §2.2–§2.3): wordmark, tabs and, on the Live grid route only, the right group: the Average
+     Party Rank in the Lobby (2+ players), the map in Agent Select and In Game. Empty on Details and Match. -->
 <script lang="ts">
-  import { go } from "../lib/router.svelte";
+  import { go, type Route } from "../lib/router.svelte";
+  import type { LiveState } from "../lib/types";
+  import AvgPartyRank from "./AvgPartyRank.svelte";
+  import MapGroup from "./MapGroup.svelte";
+
+  let { route, live }: { route: Route; live: LiveState | null } = $props();
 </script>
 
 <header class="bar">
@@ -15,6 +20,17 @@
     <span class="tab off">My Stats</span>
   </nav>
   <div class="spacer"></div>
+  {#if route.name === "live"}
+    <div class="right">
+      {#if live?.stage === "menus"}
+        {#if live.players.length >= 2}
+          <AvgPartyRank players={live.players} />
+        {/if}
+      {:else if live?.stage === "pregame" || live?.stage === "ingame"}
+        <MapGroup mapId={live.mapId} />
+      {/if}
+    </div>
+  {/if}
 </header>
 
 <style>
@@ -78,5 +94,11 @@
 
   .spacer {
     flex: 1;
+  }
+
+  .right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
   }
 </style>

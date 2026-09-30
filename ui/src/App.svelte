@@ -5,6 +5,7 @@
   import { tauriBridge } from "./lib/api";
   import { keyAction, runKeyAction } from "./lib/boot";
   import { router, scrollHost } from "./lib/router.svelte";
+  import { live } from "./lib/stores";
   import Details from "./screens/Details.svelte";
   import Live from "./screens/Live.svelte";
   import Match from "./screens/Match.svelte";
@@ -22,9 +23,9 @@
 
 <svelte:window {onkeydown} />
 
-<TopBar />
+<TopBar route={router.route} live={$live} />
 {#if router.route.name === "live"}
-  <Live />
+  <Live live={$live} />
 {:else}
   <!-- One scroll container for Details and Match (spec §6.1); `go` resets it to the top. -->
   <div class="scroll" use:scrollHost>

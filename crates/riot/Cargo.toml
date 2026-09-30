@@ -45,6 +45,12 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # the measured dependency count.
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 
+[features]
+# Test hooks other crates' tests need (`RiotSession::with_global_rate`). Never
+# a default feature, and only ever enabled from a `[dev-dependencies]` entry
+# (`src-tauri`), so a normal or release build cannot reach them (R132).
+test-support = []
+
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }
 wiremock = "0.6"

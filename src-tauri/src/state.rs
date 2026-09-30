@@ -94,7 +94,8 @@ pub struct BackfillRun {
     /// The current act's start, first run only (`None` when the act tables
     /// aren't loaded; each page looks it up again until it is known).
     pub act_start_ms: Option<i64>,
-    /// The next match-history `startIndex`.
+    /// The next match-history `startIndex`: the last page's start plus the
+    /// entries it actually held (a short page mid-history leaves no gap).
     pub next_index: u32,
     /// History entries looked at so far (the first run's cap).
     pub scanned: u32,
@@ -105,6 +106,10 @@ pub struct BackfillRun {
     /// The last page reached a stop (the anchor, the act start, the cap, or
     /// the end of the history); the run finishes once `pending` is empty.
     pub done: bool,
+    /// The history's `Total` from the latest page (`None` until a page
+    /// answered, or when Riot omits it). It tells the last page from a short
+    /// one, and the finish log line shows it.
+    pub total: Option<u32>,
 }
 
 /// The live stage/roster plus the session-scoped bookkeeping the sync
@@ -435,6 +440,7 @@ impl LiveModel {
             newest: None,
             pending: VecDeque::new(),
             done: false,
+            total: None,
         });
     }
 
@@ -1414,6 +1420,7 @@ mod tests {
             assert_eq!(run.act_start_ms, Some(500));
             assert_eq!((run.next_index, run.scanned), (0, 0));
             assert!(run.pending.is_empty() && run.newest.is_none() && !run.done);
+            assert_eq!(run.total, None);
             // The run made progress…
             run.next_index = 40;
             run.scanned = 37;

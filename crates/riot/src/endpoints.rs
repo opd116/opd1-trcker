@@ -311,6 +311,13 @@ pub struct MatchHistoryResponse {
     pub subject: String,
     #[serde(rename = "History")]
     pub history: Vec<MatchHistoryEntry>,
+    /// How many matches the history holds in all (for the requested queue
+    /// filter), not just on this page: the fixture shows `"EndIndex": 2,
+    /// "Total": 214`. It is how a pager tells the last page from a short one
+    /// (clamping or a server-side page cap). Optional so a payload without
+    /// it can't fail the whole decode.
+    #[serde(rename = "Total", default)]
+    pub total: Option<u32>,
 }
 
 // match-details is camelCase, unlike every other pd/glz endpoint.

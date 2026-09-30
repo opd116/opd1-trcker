@@ -39,6 +39,10 @@ base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
 [dev-dependencies]
+# `test-support`: `RiotSession::with_global_rate` for the pipeline tests (a
+# 200-match backfill can't wait out the production 10 rps). A dev-dependency
+# feature: resolver 2 leaves it out of every non-test build (R132).
+opd1-riot = { path = "../crates/riot", features = ["test-support"] }
 # `pipeline_tests.rs`: drive the real sync pipeline against a mock Riot
 # (same wiremock/tokio/tempfile opd1-riot's own tests use — no new crates).
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time"] }

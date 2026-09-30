@@ -5,7 +5,8 @@
 //!
 //! The mock's pd side serves ME's `match-history` from a list of synthetic
 //! entries (newest first, one minute apart, honouring `startIndex` /
-//! `endIndex`), and answers `match-details` with a copy of
+//! `endIndex`, with Riot's `Total` — see [`TotalMode`] and `page_cap` for the
+//! short-page and missing-`Total` cases), and answers `match-details` with a copy of
 //! `crates/riot/tests/fixtures/match_details.json` carrying the requested id.
 //! Requests are counted per path (`count`) or read in arrival order.
 
@@ -40,6 +41,18 @@ pub(crate) fn base_ms() -> i64 {
     *BASE.get_or_init(|| now_ms() - 3_600_000)
 }
 
+/// What the mock's `match-history` says for `Total`.
+#[derive(Clone, Copy)]
+pub(crate) enum TotalMode {
+    /// The whole synthetic history, as Riot does (the fixture shows
+    /// `"Total": 214` next to `"EndIndex": 2`).
+    Entries,
+    /// No `Total` field at all.
+    Absent,
+    /// A fixed claim, right or wrong.
+    Fixed(usize),
+}
+
 /// What the mock serves. `on_details` runs with the 1-based count of
 /// match-details requests the mock has answered, inside the responder.
 pub(crate) struct Feed {
@@ -51,6 +64,10 @@ pub(crate) struct Feed {
     history_fails_from: Option<usize>,
     /// Entry index -> the status its match-details answers instead of 200.
     details_status: HashMap<usize, u16>,
+    /// A history page never holds more than this many entries, however many
+    /// were asked for (a server-side page cap or clamping).
+    pub(crate) page_cap: Option<usize>,
+    pub(crate) total: TotalMode,
 }
 
 impl Feed {
@@ -62,6 +79,8 @@ impl Feed {
             on_details: None,
             history_fails_from: None,
             details_status: HashMap::new(),
+            page_cap: None,
+            total: TotalMode::Entries,
         }
     }
 }
@@ -76,6 +95,8 @@ pub(crate) async fn mount_feed(server: &MockServer, feed: Feed) {
         on_details,
         history_fails_from,
         details_status,
+        page_cap,
+        total,
     } = feed;
     Mock::given(method("GET"))
         .and(path(format!("/match-history/v1/history/{ME}")))
@@ -91,14 +112,24 @@ pub(crate) async fn mount_feed(server: &MockServer, feed: Feed) {
             if history_fails_from.is_some_and(|from| start >= from) {
                 return ResponseTemplate::new(500);
             }
-            let end = num("endIndex", start + BACKFILL_PAGE as usize);
-            let history: Vec<Value> = (start..end.min(entries))
+            let mut end = num("endIndex", start + BACKFILL_PAGE as usize).min(entries);
+            if let Some(cap) = page_cap {
+                end = end.min(start + cap);
+            }
+            let history: Vec<Value> = (start..end.max(start))
                 .map(|i| {
                     json!({"MatchID": entry_id(i), "GameStartTime": entry_start(base, i),
                            "QueueID": "unrated"})
                 })
                 .collect();
-            ResponseTemplate::new(200).set_body_json(json!({"Subject": ME, "History": history}))
+            let mut body = json!({"Subject": ME, "BeginIndex": start, "EndIndex": end.max(start),
+                                  "History": history});
+            match total {
+                TotalMode::Entries => body["Total"] = json!(entries),
+                TotalMode::Fixed(n) => body["Total"] = json!(n),
+                TotalMode::Absent => {}
+            }
+            ResponseTemplate::new(200).set_body_json(body)
         })
         .with_priority(1)
         .mount(server)
@@ -132,6 +163,20 @@ pub(crate) async fn mount_feed(server: &MockServer, feed: Feed) {
 
 pub(crate) async fn requests(server: &MockServer) -> Vec<Request> {
     server.received_requests().await.unwrap()
+}
+
+/// The `startIndex` of every history request, in arrival order.
+fn history_starts(reqs: &[Request]) -> Vec<String> {
+    reqs.iter()
+        .filter(|r| r.url.path() == history_path())
+        .map(|r| {
+            r.url
+                .query_pairs()
+                .find(|(k, _)| k == "startIndex")
+                .map(|(_, v)| v.into_owned())
+                .unwrap()
+        })
+        .collect()
 }
 
 /// The `bf###` ids `match-details` was asked for, in arrival order.
@@ -212,24 +257,10 @@ async fn backfill_stops_at_first_known_id() {
     // Two pages (0..20, 20..40), the second ending at the anchor.
     assert_eq!(count(&h.server, "GET", &history_path()).await, 2);
     let reqs = requests(&h.server).await;
-    let history: Vec<_> = reqs
-        .iter()
-        .filter(|r| r.url.path() == history_path())
-        .collect();
-    let starts: Vec<String> = history
-        .iter()
-        .map(|r| {
-            r.url
-                .query_pairs()
-                .find(|(k, _)| k == "startIndex")
-                .map(|(_, v)| v.into_owned())
-                .unwrap()
-        })
-        .collect();
-    assert_eq!(starts, ["0", "20"]);
+    assert_eq!(history_starts(&reqs), ["0", "20"]);
     assert!(
-        history
-            .iter()
+        reqs.iter()
+            .filter(|r| r.url.path() == history_path())
             .all(|r| r.url.query_pairs().all(|(k, _)| k != "queue")),
         "all queues are paged, Deathmatch included"
     );
@@ -640,6 +671,11 @@ async fn a_run_in_progress_keeps_going_when_another_trigger_fires() {
         (run.next_index, run.scanned, run.pending.len())
     };
     assert_eq!(cursor(&h.st), (BACKFILL_PAGE, BACKFILL_PAGE, 20));
+    assert_eq!(
+        lock(&h.st.live).backfill.as_ref().unwrap().total,
+        Some(50),
+        "the run remembers the history's Total"
+    );
     assert!(
         details_asked(&requests(&h.server).await).is_empty(),
         "yielded before any match-details request"
@@ -649,4 +685,122 @@ async fn a_run_in_progress_keeps_going_when_another_trigger_fires() {
     start_backfill_run(&h.st).await;
     assert_eq!(cursor(&h.st), (BACKFILL_PAGE, BACKFILL_PAGE, 20));
     assert_eq!(count(&h.server, "GET", &history_path()).await, 1);
+}
+
+/// Sets the stored anchor to an entry that isn't in the history (`gone`),
+/// older than every entry the mock serves: a run can never meet it.
+async fn store_unreachable_anchor(st: &AppState, base: i64) {
+    let raw = crate::sync::anchor_json(&("gone".to_string(), entry_start(base, 10_000)));
+    st.db(move |repo| repo.set_state(BACKFILL_ANCHOR_KEY, &raw))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn backfill_a_short_page_mid_history_does_not_end_the_run() {
+    // Riot answers with 15 entries per page although 20 were asked for, in a
+    // 40-match history whose `Total` says so. A short page is not the end:
+    // the cursor advances by what the page held (0, 15, 30) and nothing
+    // behind a short page is skipped — a gap the anchor would make permanent.
+    let base = base_ms();
+
+    // A later run: the anchor is entry 35.
+    let h = harness().await;
+    let mut feed = Feed::new(40);
+    feed.page_cap = Some(15);
+    mount_feed(&h.server, feed).await;
+    store_anchor(&h.st, 35, base).await;
+    run_backfill(&h).await;
+    let reqs = requests(&h.server).await;
+    assert_eq!(history_starts(&reqs), ["0", "15", "30"]);
+    let mut asked = details_asked(&reqs);
+    asked.sort();
+    assert_eq!(asked, (0..35).map(entry_id).collect::<Vec<_>>());
+    assert!(
+        !is_stored(&h.st, entry_id(35)).await,
+        "the anchor and older are not fetched"
+    );
+    assert_eq!(
+        stored_anchor(&h.st).await,
+        Some((entry_id(0), entry_start(base, 0)))
+    );
+    assert!(!run_active(&h.st));
+
+    // A first run (the act covers all 40): the history's end, by `Total`,
+    // stops it — after the page holding the last entry, with no extra one.
+    let h = harness().await;
+    let mut feed = Feed::new(40);
+    feed.page_cap = Some(15);
+    mount_feed(&h.server, feed).await;
+    run_backfill(&h).await;
+    let reqs = requests(&h.server).await;
+    assert_eq!(history_starts(&reqs), ["0", "15", "30"]);
+    assert_eq!(details_asked(&reqs).len(), 40);
+    assert_eq!(
+        stored_anchor(&h.st).await,
+        Some((entry_id(0), entry_start(base, 0)))
+    );
+    assert!(!run_active(&h.st));
+}
+
+#[tokio::test]
+async fn backfill_without_total_falls_back_to_the_short_page_rule() {
+    // No `Total` in the answer: a page shorter than the page size is the end
+    // (the second page holds the last 10 of 30).
+    let h = harness().await;
+    let base = base_ms();
+    let mut feed = Feed::new(30);
+    feed.total = TotalMode::Absent;
+    mount_feed(&h.server, feed).await;
+    run_backfill(&h).await;
+    let reqs = requests(&h.server).await;
+    assert_eq!(history_starts(&reqs), ["0", "20"]);
+    assert_eq!(details_asked(&reqs).len(), 30);
+    assert_eq!(
+        stored_anchor(&h.st).await,
+        Some((entry_id(0), entry_start(base, 0)))
+    );
+    assert!(!run_active(&h.st));
+}
+
+#[tokio::test]
+async fn backfill_an_anchor_that_left_the_history_is_bounded_by_total() {
+    // The anchor is older than everything Riot still holds and its id is
+    // gone: nothing on the pages ever matches it. The history's `Total` is
+    // what bounds the run — the page that reaches it is the last, so there
+    // is no extra request for an empty page (40 = two full pages).
+    let h = harness().await;
+    let base = base_ms();
+    mount_feed(&h.server, Feed::new(40)).await;
+    store_unreachable_anchor(&h.st, base).await;
+    run_backfill(&h).await;
+    let reqs = requests(&h.server).await;
+    assert_eq!(history_starts(&reqs), ["0", "20"]);
+    assert_eq!(details_asked(&reqs).len(), 40);
+    assert_eq!(
+        stored_anchor(&h.st).await,
+        Some((entry_id(0), entry_start(base, 0)))
+    );
+    assert!(!run_active(&h.st));
+}
+
+#[tokio::test]
+async fn backfill_a_total_that_claims_too_much_still_ends_on_an_empty_page() {
+    // `Total` says 100 but Riot holds 30: the empty page past the end stops
+    // the run (three requests: 0, 20, 30) instead of paging on.
+    let h = harness().await;
+    let base = base_ms();
+    let mut feed = Feed::new(30);
+    feed.total = TotalMode::Fixed(100);
+    mount_feed(&h.server, feed).await;
+    store_unreachable_anchor(&h.st, base).await;
+    run_backfill(&h).await;
+    let reqs = requests(&h.server).await;
+    assert_eq!(history_starts(&reqs), ["0", "20", "30"]);
+    assert_eq!(details_asked(&reqs).len(), 30);
+    assert_eq!(
+        stored_anchor(&h.st).await,
+        Some((entry_id(0), entry_start(base, 0)))
+    );
+    assert!(!run_active(&h.st));
 }

@@ -343,8 +343,14 @@ impl RiotSession {
 
     /// Replaces the global remote bucket's burst and refill rate, so a test
     /// that fires hundreds of requests at a mock server doesn't wait out the
-    /// production 10 rps. Not meant for production use.
-    #[doc(hidden)]
+    /// production 10 rps.
+    ///
+    /// Test-only at compile time (R132): it exists in this crate's own unit
+    /// tests, and for other crates only when they enable the `test-support`
+    /// feature — `src-tauri` does so from `[dev-dependencies]` alone, which
+    /// resolver 2 keeps out of a normal or release build. No production code
+    /// can raise the 10 rps bucket that keeps the app under Riot's 429s.
+    #[cfg(any(test, feature = "test-support"))]
     pub fn with_global_rate(mut self, rps: f64) -> Self {
         self.global_throttle = Throttle::new(rps, rps);
         self

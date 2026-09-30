@@ -211,6 +211,20 @@ fn match_history_deserializes() {
     assert_eq!(parsed.history.len(), 2);
     assert_eq!(parsed.history[0].queue_id, "competitive");
     assert_eq!(parsed.history[0].game_start_time, 1758970000000);
+    // The page holds 2 of the 214 matches: `Total` is the whole history.
+    assert_eq!(parsed.total, Some(214));
+}
+
+#[test]
+fn match_history_without_total_still_deserializes() {
+    // A payload that lacks (or nulls) `Total` must not fail the decode: the
+    // backfill then falls back to "a short page is the last one".
+    let bare = r#"{"Subject": "s", "History": []}"#;
+    let parsed: MatchHistoryResponse = serde_json::from_str(bare).unwrap();
+    assert_eq!(parsed.total, None);
+    let null = r#"{"Subject": "s", "Total": null, "History": []}"#;
+    let parsed: MatchHistoryResponse = serde_json::from_str(null).unwrap();
+    assert_eq!(parsed.total, None);
 }
 
 #[test]

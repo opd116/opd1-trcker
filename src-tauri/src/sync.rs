@@ -55,8 +55,11 @@ pub const RECENT_COUNT: u32 = 8;
 pub const TEAMMATE_WINDOW: u32 = 20;
 
 /// R101: match-history's default page (techchrism `MatchHistory.ts`:
-/// `endIndex` defaults to 20); the backfill walks the history in pages of
-/// this size.
+/// `endIndex` defaults to 20); the backfill requests pages of this size.
+/// Riot may answer with fewer entries, so the cursor advances by what a page
+/// actually held, and only `Total` (or an empty page) ends the history — a
+/// short page counts as the end only when `Total` is missing
+/// ([`history_ended`]).
 pub const BACKFILL_PAGE: u32 = 20;
 
 /// R101: the first run's cap on history entries looked at, when the current
@@ -376,17 +379,44 @@ pub struct BackfillTake {
     pub done: bool,
 }
 
-/// Pure: which entries of `page` (newest first) a backfill run takes.
+/// The history's `Total` for a log line.
+fn show_total(total: Option<u32>) -> String {
+    total.map_or_else(|| "unknown".to_string(), |t| t.to_string())
+}
+
+/// Pure: whether the page of `page_len` entries that began at `index` was
+/// the last of the history.
+///
+/// An empty page always is (nothing more can be read, whatever `Total`
+/// claims). With `total` (Riot's whole-history count) it is the last page
+/// once `index + page_len` reaches it; a page shorter than requested but
+/// short of `total` is not the end (clamping, a server-side page cap), so
+/// the entries behind it are still read. Only without `total` does a page
+/// shorter than [`BACKFILL_PAGE`] stand in for the end.
+pub fn history_ended(index: u32, page_len: usize, total: Option<u32>) -> bool {
+    if page_len == 0 {
+        return true;
+    }
+    match total {
+        Some(total) => u64::from(index) + page_len as u64 >= u64::from(total),
+        None => page_len < BACKFILL_PAGE as usize,
+    }
+}
+
+/// Pure: which entries of `page` (newest first, read from `index` of a
+/// history holding `total` matches) a backfill run takes.
 /// Takes entries until, exclusive:
 /// - with an anchor: the anchor's match id, or the first entry older than
 ///   the anchor's start (the anchor match may have left the history);
 /// - without one (first run): the first entry older than `act_start_ms`, or
 ///   once `scanned` + taken reaches [`BACKFILL_FIRST_RUN_MAX`].
 ///
-/// `done` when one of those stops was hit, or the page is shorter than
-/// [`BACKFILL_PAGE`] (the history ended).
+/// `done` when one of those stops was hit, or the history ended
+/// ([`history_ended`]).
 pub fn backfill_take(
     page: &[HistoryEntry],
+    index: u32,
+    total: Option<u32>,
     anchor: Option<&(String, i64)>,
     act_start_ms: Option<i64>,
     scanned: u32,
@@ -412,7 +442,7 @@ pub fn backfill_take(
     if anchor.is_none() && scanned as usize + entries.len() >= cap {
         done = true;
     }
-    if page.len() < BACKFILL_PAGE as usize {
+    if history_ended(index, page.len(), total) {
         done = true;
     }
     BackfillTake { entries, done }
@@ -488,6 +518,7 @@ async fn backfill_page(
         }
     };
     let page = history_entries(&resp);
+    let total = resp.total;
     let Some((anchor, act_start_ms, scanned)) =
         with_run(st, me, |r| (r.anchor.clone(), r.act_start_ms, r.scanned))
     else {
@@ -500,7 +531,26 @@ async fn backfill_page(
         None if anchor.is_none() => st.current_act().map(|a| a.start_ms),
         known => known,
     };
-    let take = backfill_take(&page, anchor.as_ref(), act_start_ms, scanned);
+    let take = backfill_take(&page, index, total, anchor.as_ref(), act_start_ms, scanned);
+    log::debug!(
+        "own history page {index}: {} entries, history total {}{}",
+        page.len(),
+        show_total(total),
+        if take.done {
+            ", last page of the run"
+        } else {
+            ""
+        }
+    );
+    if page.is_empty() && total.is_some_and(|t| t > index) {
+        // The one way `Total` and the pager disagree: it ends the run (an
+        // empty page can't be paged past), but say so in the log.
+        log::warn!(
+            "own history page {index} came back empty although the history total is {}; \
+             the backfill treats the history as ended",
+            show_total(total)
+        );
+    }
 
     let (p, taken) = (me.to_string(), take.entries.clone());
     let unknown = st
@@ -523,7 +573,10 @@ async fn backfill_page(
             run.newest = page.first().map(|e| (e.match_id.clone(), e.start_ms));
         }
         run.scanned += take.entries.len() as u32;
-        run.next_index = index + BACKFILL_PAGE;
+        // By what the page held, not by what was asked for: a short page
+        // mid-history must not skip the entries behind it.
+        run.next_index = index + page.len() as u32;
+        run.total = total;
         run.pending = unknown.into();
         run.done = take.done;
         true
@@ -534,11 +587,12 @@ async fn backfill_page(
 /// The run is done and everything it found is stored: writes the anchor (the
 /// newest entry page 0 showed) and drops the run.
 async fn finish_backfill(st: &Arc<AppState>, me: &str) {
-    let Some((anchor, newest, scanned)) =
-        with_run(st, me, |r| (r.anchor.clone(), r.newest.clone(), r.scanned))
-    else {
+    let Some((anchor, newest, scanned, total)) = with_run(st, me, |r| {
+        (r.anchor.clone(), r.newest.clone(), r.scanned, r.total)
+    }) else {
         return;
     };
+    let total = show_total(total);
     if let Some(newest) = newest.filter(|n| Some(n) != anchor.as_ref()) {
         let (raw, owner) = (anchor_json(&newest), me.to_string());
         let written = st
@@ -557,12 +611,14 @@ async fn finish_backfill(st: &Arc<AppState>, me: &str) {
             .await;
         if written == Some(true) {
             log::info!(
-                "own history backfill finished: {scanned} matches looked at, anchor {}",
+                "own history backfill finished: {scanned} matches looked at of {total} in the history, anchor {}",
                 short(&newest.0)
             );
         }
     } else {
-        log::debug!("own history backfill finished: nothing new ({scanned} looked at)");
+        log::debug!(
+            "own history backfill finished: nothing new ({scanned} looked at of {total} in the history)"
+        );
     }
     // Written first, cleared second: an abort in between just finishes the
     // same run again.
@@ -945,7 +1001,7 @@ mod tests {
     fn backfill_take_stops_at_anchor_id() {
         let page = entries(20);
         let anchor = ("e12".to_string(), BASE - 12 * 60_000);
-        let t = backfill_take(&page, Some(&anchor), None, 0);
+        let t = backfill_take(&page, 0, None, Some(&anchor), None, 0);
         assert_eq!(t.entries.len(), 12, "entries 0..12, the anchor excluded");
         assert_eq!(t.entries[11].match_id, "e11");
         assert!(t.done);
@@ -957,7 +1013,7 @@ mod tests {
         // entries 15+ are older than its start.
         let page = entries(20);
         let anchor = ("gone".to_string(), BASE - 15 * 60_000 + 1);
-        let t = backfill_take(&page, Some(&anchor), None, 0);
+        let t = backfill_take(&page, 0, None, Some(&anchor), None, 0);
         assert_eq!(t.entries.len(), 15);
         assert_eq!(t.entries[14].match_id, "e14");
         assert!(t.done);
@@ -968,7 +1024,7 @@ mod tests {
         // The act starts between entries 7 and 8: entry 7 is in, 8 is older.
         let page = entries(20);
         let act_start = BASE - 7 * 60_000 - 30_000;
-        let t = backfill_take(&page, None, Some(act_start), 0);
+        let t = backfill_take(&page, 0, None, None, Some(act_start), 0);
         assert_eq!(t.entries.len(), 8);
         assert_eq!(t.entries[7].match_id, "e7");
         assert!(t.done);
@@ -978,37 +1034,103 @@ mod tests {
     fn backfill_take_first_run_caps_at_200() {
         let page = entries_from(190, 20);
         let act_start = BASE - 10_000 * 60_000; // far back: all inside
-        let t = backfill_take(&page, None, Some(act_start), 190);
+        let t = backfill_take(&page, 190, None, None, Some(act_start), 190);
         assert_eq!(t.entries.len(), 10, "190 scanned + 10 = the cap");
         assert!(t.done);
         // A full page that lands exactly on the cap is done at once — no
         // 11th history request for an empty page.
         let page = entries_from(180, 20);
-        let t = backfill_take(&page, None, Some(act_start), 180);
+        let t = backfill_take(&page, 180, None, None, Some(act_start), 180);
         assert_eq!(t.entries.len(), 20);
         assert!(t.done);
         // Below the cap, a full page in the act just continues.
-        let t = backfill_take(&entries(20), None, Some(act_start), 0);
+        let t = backfill_take(&entries(20), 0, None, None, Some(act_start), 0);
         assert_eq!(t.entries.len(), 20);
         assert!(!t.done);
         // No act tables: the cap alone bounds the first run.
-        let t = backfill_take(&entries(20), None, None, 0);
+        let t = backfill_take(&entries(20), 0, None, None, None, 0);
         assert!(!t.done);
-        let t = backfill_take(&entries(20), None, None, 190);
+        let t = backfill_take(&entries_from(190, 20), 190, None, None, None, 190);
         assert_eq!(t.entries.len(), 10);
         assert!(t.done);
     }
 
     #[test]
     fn backfill_take_short_page_is_done() {
+        // `Total` absent: a page shorter than the page size stands in for
+        // the end of the history.
         let page = entries(6);
         let anchor = ("e99".to_string(), BASE - 99 * 60_000);
-        let t = backfill_take(&page, Some(&anchor), None, 0);
+        let t = backfill_take(&page, 0, None, Some(&anchor), None, 0);
         assert_eq!(ids(&t), ["e0", "e1", "e2", "e3", "e4", "e5"]);
         assert!(t.done, "the history ended");
         // A full page with no stop hit is not done; an empty one is.
-        assert!(!backfill_take(&entries(20), Some(&anchor), None, 0).done);
-        assert!(backfill_take(&[], Some(&anchor), None, 0).done);
+        assert!(!backfill_take(&entries(20), 0, None, Some(&anchor), None, 0).done);
+        assert!(backfill_take(&[], 0, None, Some(&anchor), None, 0).done);
+    }
+
+    #[test]
+    fn backfill_take_short_page_before_the_total_is_not_done() {
+        // Riot answered with 15 entries of a 40-match history (clamping or a
+        // server-side page cap): the entries behind the page are still to
+        // read, so the run goes on — a gap here would be permanent.
+        let page = entries(15);
+        let anchor = ("e99".to_string(), BASE - 99 * 60_000);
+        let t = backfill_take(&page, 0, Some(40), Some(&anchor), None, 0);
+        assert_eq!(t.entries.len(), 15, "the whole page is taken");
+        assert!(!t.done, "a short page short of Total is not the end");
+        // The same for a first run.
+        let act_start = BASE - 10_000 * 60_000;
+        let t = backfill_take(&page, 0, Some(40), None, Some(act_start), 0);
+        assert_eq!(t.entries.len(), 15);
+        assert!(!t.done);
+        // A short page in the middle, and an exactly-full page short of Total.
+        let t = backfill_take(&entries_from(15, 15), 15, Some(40), Some(&anchor), None, 15);
+        assert!(!t.done, "15 + 15 = 30 < 40");
+        let t = backfill_take(&entries(20), 0, Some(40), Some(&anchor), None, 0);
+        assert!(!t.done, "20 < 40");
+    }
+
+    #[test]
+    fn backfill_take_reaching_the_total_is_done() {
+        let anchor = ("e99".to_string(), BASE - 99 * 60_000);
+        // The last page holds the last 10 of 40 (index 30 + 10 = Total).
+        let t = backfill_take(&entries_from(30, 10), 30, Some(40), Some(&anchor), None, 30);
+        assert_eq!(t.entries.len(), 10);
+        assert!(t.done);
+        // A full page that ends exactly on Total is the last one too: no
+        // empty extra request.
+        let t = backfill_take(&entries_from(20, 20), 20, Some(40), Some(&anchor), None, 20);
+        assert_eq!(t.entries.len(), 20);
+        assert!(t.done);
+        // A short page that reaches Total is done, and so is one past it
+        // (Total lower than the index: the history shrank meanwhile).
+        let t = backfill_take(&entries_from(25, 15), 25, Some(40), Some(&anchor), None, 25);
+        assert!(t.done);
+        let t = backfill_take(&entries_from(45, 5), 45, Some(40), Some(&anchor), None, 45);
+        assert!(t.done);
+        // An empty page ends the run whatever Total claims, or it would page
+        // forever past the end.
+        assert!(backfill_take(&[], 30, Some(99), Some(&anchor), None, 30).done);
+    }
+
+    #[test]
+    fn history_ended_rules() {
+        // With Total: only reaching it ends the history.
+        assert!(!history_ended(0, 15, Some(40)));
+        assert!(!history_ended(20, 19, Some(40)));
+        assert!(history_ended(20, 20, Some(40)));
+        assert!(history_ended(25, 15, Some(40)));
+        assert!(history_ended(0, 20, Some(20)));
+        assert!(history_ended(0, 5, Some(0)), "a zero Total is the end");
+        // No overflow at the top of the range.
+        assert!(history_ended(u32::MAX, 20, Some(u32::MAX)));
+        // Without Total: a short page is the end, a full one is not.
+        assert!(history_ended(0, 19, None));
+        assert!(!history_ended(0, 20, None));
+        // An empty page is always the end.
+        assert!(history_ended(0, 0, None));
+        assert!(history_ended(0, 0, Some(99)));
     }
 
     #[test]

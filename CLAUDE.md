@@ -15,7 +15,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 ## Working with the user
 
 - The user doesn't code. Talk to them in Arabic (Gulf dialect is fine), short and plain, no jargon walls. Use `/archify` diagrams when a picture explains better.
-- The user tests on their Windows PC with VALORANT. Claude works on a Linux VPS with no game client. Anything touching the real Riot client is verified by the user. Ask for their result or the in-app "copy log" output.
+- The user tests on their Windows PC with VALORANT. Claude works on a Linux VPS with no game client. Anything touching the real Riot client is verified by the user. Ask for their result or the in-app "copy log" output (Ctrl+Shift+L). Ctrl+Shift+D writes the redacted raw answers to a folder, now with `log.txt` and the error bodies (`<endpoint>.error.json`) of failed calls (R158).
 - Before a task a skill could help with, search for the best-in-class skill (including community skills via `npx skills find`) and load it.
 - Use `graft` for codebase context once code exists (`npx @nanonets/graft init --agents claude`).
 - Before context gets long, or at the end of a phase, ask the user to run `/handoff` (it's user-invoked only) so nothing important is lost. Keep `docs/requirements-raw.md` updated with every new decision as it's made.
@@ -68,7 +68,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Riot ID with the Tag visually distinct
 - Long names: only the name part truncates with `…`; the tag is never cut; the ⟲ badge has a fixed reserved slot; hovering a truncated name shows the full `Name#TAG` (tooltip only when truncated).
 - Account Level
-- Current Rank: icon + tier name + exact RR
+- Current Rank: icon + tier name + exact RR. When Riot's MMR request gives no answer, the rank comes from the player's stored competitive updates (exact RR) or, failing that, from the tier of a stored current-act match (RR shows `—`) (R154, user 2026-09-30).
 - Previous Act Rank: icon + tier name (`—` if none)
 - Peak Rank: icon + tier name + the act it was reached in (`V26 A4 · 1mo`, `E9 A3 · 1y`); time is since that act ended, not the day the peak was hit. Current act → `This Act`. Hover shows the full act name and dates (the design's tooltip shows dates only — add the act name). If the peak tier was reached in several acts, show the most recent (R7).
 - K/D and HS% from the last 5 Competitive matches
@@ -167,6 +167,8 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
   - `X-Riot-Entitlements-JWT`
   - `X-Riot-ClientPlatform`
   - `X-Riot-ClientVersion`
+  - `User-Agent` (Scout's value, `ShooterGame/13 Windows/10.0.19043.1.256.64bit`; remote calls only) (R159)
+- **Client version:** from the game's own presence first (`partyClientVersion`), then valorant-api, then `ShooterGame.log`, then `release-09.00`, in Scout's order (R159, supersedes R17). Never `/product-session/v1/external-sessions`. Its source is logged once.
 - **Region/shard:** parse the `pd.` and `glz-` URLs from `%LOCALAPPDATA%\VALORANT\Saved\Logs\ShooterGame.log`.
 - **Stage:** comes from the `/chat/v4/presences` private blob (`sessionLoopState`), confirmed by the `pregame/v1/players/{puuid}` and `core-game/v1/players/{puuid}` endpoints.
 - **Endpoints:**

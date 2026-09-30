@@ -1,9 +1,9 @@
 # Decisions
 
-Every ruling made while building OPD1 TRCKER, in number order (R1 to R157). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
+Every ruling made while building OPD1 TRCKER, in number order (R1 to R159). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.
-- Rulings come from the working ledger (R1 to R73 and R87 to R157) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
+- Rulings come from the working ledger (R1 to R73 and R87 to R159) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
 - Precedence when rules disagree (R92): `docs/requirements-raw.md` (newest dated block) > the design file > older `CLAUDE.md` visual rules. `docs/design-spec.md` outranks the design file only for the R74 to R86 gap-fills.
 - The user's own words are in `docs/requirements-raw.md`; the [user decisions index](#user-decisions-index) at the end maps each dated block to a summary.
 
@@ -124,7 +124,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R157). Each
 - **What:** The client version comes from the local `/product-session/v1/external-sessions`, with valorant-api `/v1/version` as the fallback. Scout's presence `partyClientVersion` is an acceptable middle fallback.
 - **Why:** The plan text wins, and Scout shows presence also works.
 - **Cost:** None.
-- **Status:** active
+- **Status:** superseded by R159 (the source order is now Scout's: presence, valorant-api, `ShooterGame.log`, `release-09.00`; external-sessions is no longer asked)
 
 ### R18 — Live hidden-name protection covers Top 3 Teammates
 
@@ -1078,6 +1078,20 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R157). Each
 - **Cost:** Between matches, name-service receives the puuids of players who were incognito in the match that just ended.
 - **Status:** active
 
+### R154 — The rank comes from stored data when MMR has no answer
+
+- **What:** User decision 2026-09-30. When a player has no MMR snapshot (the `mmr` request failed or was skipped), the card's Current Rank is the newest current-act competitive-updates row in the DB (tier and exact RR), else the tier of the newest stored current-act competitive match (no RR), else it stays missing (`—`). MMR stays the authority whenever a snapshot exists, including a snapshot that says "no rank this act". Only the current rank falls back: Peak, Prev, Win%, Games and W / L stay loading, then `—`. `rank.rr` becomes nullable (`RankInfo.rr: Option<u16>`, on the wire `"rr": <n>` or `"rr": null`, the key always present); the UI shows `— RR` under the tier name when it is null, same markup and positions. The fallback is one indexed query (`Repo::newest_ranked_match_tier`, asserted by a plan test) and costs no request. The Player Details hero, the off-screen card and the Closed-stage own card go through the same `card_for`, so they get it too.
+- **Why:** The user's test of the preview: the own card and the Details hero showed `—` for Rank, Peak, Prev, Win%, Games and W / L while K/D, HS%, last 5 and level showed. The matches and competitive updates were already stored, so the rank could be shown from them.
+- **Cost:** One contract field (`rr` nullable, the golden `live_state.json` carries one card with an `rr` number and one with `rr: null`).
+- **Status:** active
+
+### R155 — A failed rank sync is retried, bounded
+
+- **What:** Ruling 2026-09-30. A per-player sync whose `comp_updates` or `mmr` call failed (any error but `ClientGone`) is run again: at most twice, the first no sooner than 20 s after the failure and the second no sooner than 60 s after the first retry failed, so a round is at most 3 syncs per player. Only for a player still on the live roster (the user's own Lobby card counts), never while the stage is Closed, and the worker never waits for one: `next_job` hands a due retry out after the first-pass syncs and before the names fill and the backfill, and the poll loop's 2-second tick starts a worker when one comes due. A retry is counted when it is handed out, so one cut short by a stage change still uses its turn, and a retry never starts a round of its own. A later MMR answer replaces the fallback of R154. The schedule is `src-tauri/src/rank_retry.rs` (a pure module that takes the time as an argument); tests move time with a `#[cfg(test)]` clock offset on `LiveModel`, never with real waits.
+- **Why:** The cause of the failures was unknown when this was ruled (a 429 or a 4xx); bounded retries help the first and cost little in the second. The user's later log showed a 500 on every `mmr` call (R159 targets that), which a retry does not fix.
+- **Cost:** At most 2 extra syncs per player over about 80 s (20 for a full In Game roster that keeps failing), through the same throttle. A retry runs the whole `sync_player` again (comp updates, history, unknown match details, then `mmr`). Retries also run in Agent Select and In Game.
+- **Status:** active
+
 ### R156 — Encounters count competitive matches only
 
 - **What:** User decision 2026-09-30. The ⟲ badge and the Player Details encounter list count only shared competitive matches, with or against. Deathmatch, unrated, spike rush, swiftplay and every other queue do not count. This supersedes CLAUDE.md's "Count every past match shared with the user". Party detection (any mode, Deathmatch included), the known-name lookup (any match) and Top 3 Teammates (already competitive) are unchanged. `Repo::encounter_counts` and `Repo::encounters` join `matches` on `queue_id = 'competitive'`, and a plan test asserts they stay index-backed.
@@ -1091,6 +1105,20 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R157). Each
 - **Why:** The user: "same way as the other players".
 - **Cost:** None.
 - **Status:** dropped (withdrawn by the user, 2026-09-30)
+
+### R158 — The diagnostics explain themselves
+
+- **What:** Ruling 2026-09-30. (1) `dump_raw` (Ctrl+Shift+D) also writes `log.txt`, exactly what `copy_log` returns (Ctrl+Shift+L), even with no session or nothing captured, since the log is what explains why. (2) The client version and where it came from are logged once per session (`client version X (from Y)`, with `Y` one of `presence`, `valorant-api`, `log`, `fallback`); an empty, whitespace-only or unsendable version from a source is no answer and falls through to the next. (3) Every failed remote call logs its status and Riot's `errorCode` in the warn line: `RiotError::Status` is now `Status(u16, String)` carrying a log-safe excerpt of the answer (redacted, one line, full uuids shortened to 8 characters, at most 200 characters), and a transport or decode error names its kind (`timeout`, `connect`, `body`, `decode`, `request`, `builder`, `other`). (4) `dump_raw` writes the last non-2xx answer of each endpoint as `<key>.error.json` or `<key>.error.txt` (status and redacted body, at most 4 KB, full puuids shortened, a JWT quoted inside a longer string redacted too), from a store apart from the 2xx captures; the error files of an earlier dump are removed on each dump.
+- **Why:** The user could not deliver the clipboard log, and the first dumps had no `mmr.json` because only 2xx bodies were captured, so the cause of the failing `mmr` calls was invisible. The user's log then showed HTTP 500 for every `mmr` call.
+- **Cost:** None. `dump_raw` no longer errors without a session; it writes the log alone.
+- **Status:** active
+
+### R159 — Client version and requests as Scout sends them
+
+- **What:** User decision 2026-09-30: «سو مثل سكوت» (do it like Scout). (1) The client version comes from, in order: the user's own VALORANT presence `partyClientVersion`, valorant-api `/v1/version` `riotClientVersion`, the `CI server version:` line of `ShooterGame.log`, then the literal `release-09.00`. The external-sessions source is dropped (supersedes R17). (2) A session built before the game's presence existed is corrected once, at the first VALORANT presence, from the blob the poll tick already read (no request); a presence with no usable version leaves the lower value in place and is tried again on a later tick. (3) Every remote (pd/glz) call sends Scout's `User-Agent: ShooterGame/13 Windows/10.0.19043.1.256.64bit`; local calls send none. (4) gzip is on for the remote client and the two valorant-api asset clients, and off for the local client (`127.0.0.1`, where compression only costs CPU). reqwest decodes before the body is buffered, so captures and error excerpts see plain JSON.
+- **Why:** The user's log showed HTTP 500 on `mmr` for every player while `competitiveupdates`, history and match-details worked. Our version source and the missing User-Agent were the two differences from Scout that could explain a per-endpoint failure, but that cause is an inference until the user's next test: R158 logs the version, its source and each failure's `errorCode`.
+- **Cost:** If `mmr` still fails, R154 still shows the rank and the next log says more. gzip adds `async-compression` and friends to `Cargo.lock` (all on the existing tokio/reqwest stack).
+- **Status:** active
 
 ## User decisions index
 
@@ -1108,4 +1136,4 @@ Each row is a dated block of `docs/requirements-raw.md`, in file order. That fil
 | 2026-09-27 to 2026-09-28 | `قرارات أثناء التنفيذ` | GitHub Actions works; the user must approve the design before the screens; Claude orchestrates and agents implement; the Peak tip shows the full act name and dates; design v1 rejected; last 5 shows W/L/draw only with RR and time on hover; design rounds 2 and 3 not liked; new direction "easy on the eye" (one system for type, numbers, spacing); party-detection details; a trial round on two screens; three refinement passes; obsolete files archived to `ارشيف/`. |
 | 2026-09-28 | `ملاحظات المستخدم على تصميم v7.1` | Nine points: the card is crowded, secondary text is too faint, each statistic's scope must be clear (shown without hovering: superseded, see the marker), long names truncate but the tag never does, one meaning per indicator, last 5 must be clearer, Peak names the tier, shared-match results read `Your result`, hidden means the name only. |
 | 2026-09-28 | `ملاحظات المستخدم على v8` | Remove the printed scope headings (tooltip only); numbers and last-5 results look off; the palette looks AI-made; the user said the design pleases them (to confirm). |
-| 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. Later 2026-09-29 line: Player Details hero K/D and HS% from the last 20 act matches (R116). Later 2026-09-30 lines: names Riot returns for matches the user did not play may show off the live screen (R143); a hidden player's name shows in the remembered style from any source the DB knows (R145); name-service may be asked off the live stages (R150); names are captured after each match because the game's own Match History shows them; Encounters count competitive matches only (R156); friends' names come like everyone else's (R157, withdrawn). |
+| 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. Later 2026-09-29 line: Player Details hero K/D and HS% from the last 20 act matches (R116). Later 2026-09-30 lines: names Riot returns for matches the user did not play may show off the live screen (R143); a hidden player's name shows in the remembered style from any source the DB knows (R145); name-service may be asked off the live stages (R150); names are captured after each match because the game's own Match History shows them; Encounters count competitive matches only (R156); friends' names come like everyone else's (R157, withdrawn); when the rank request fails the rank shows from the player's matches (R154); build the requests the way Scout does (R159). |

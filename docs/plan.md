@@ -192,6 +192,7 @@ ui/
 - [ ] **Step 3:** Implement.
   - `reqwest` with `danger_accept_invalid_certs` **only** for the `127.0.0.1` client.
   - Client version from `/product-session/v1/external-sessions` (local), with a fallback to valorant-api `/v1/version`.
+    - *Superseded 2026-09-30 (R159, `docs/DECISIONS.md`): the version now comes from the game's own presence, then valorant-api, then the `CI server version:` line of `ShooterGame.log`, then `release-09.00`, as Valorant-Scout does. external-sessions is no longer used. The plan text above is left as it was written.*
   - Client platform is the standard base64 blob from Scout.
 - [ ] **Step 4:** Run `cargo test -p riot`. Expected: PASS.
 - [ ] **Step 5: Commit** `feat(riot): session, throttling, typed endpoints`.

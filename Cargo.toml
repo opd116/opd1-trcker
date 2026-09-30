@@ -13,3 +13,12 @@ members = [
 # in `crates/core/Cargo.toml`) since Task 5/6/9 in `src-tauri` will also
 # need to open/pass around `rusqlite::Connection`.
 rusqlite = { version = "0.40", features = ["bundled"] }
+
+# Release profile (R2): smallest installer and lowest RAM are the priority
+# (CLAUDE.md: lightness first). `panic = "abort"` drops the unwinding tables.
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

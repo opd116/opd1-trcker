@@ -162,7 +162,8 @@ export const shapes = {
     topTeammates: { kinds: ["array"], shape: "TeammateSummary" },
     loadout: { kinds: ["object"], shape: "Loadout" },
     encounters: { kinds: ["array"], shape: "EncounterDetailRow" },
-    // R116 / R120: over the newest <= 20 current-act competitive matches; null when there are none.
+    // R116 / R120: over the newest <= 20 current-act competitive matches; null when there are none (heroHs also
+    // when those matches landed no shot, as Rust's hs_pct returns None).
     heroKd: numOrNull,
     heroHs: { kinds: ["number", "null"], fraction: true },
     heroMatches: num,

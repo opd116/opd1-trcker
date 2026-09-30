@@ -43,6 +43,27 @@ type DescFlags<S> = {
   };
 };
 
+/** The JSON kind(s) a TS value type serializes as (task 16b review minor 2). Distributes over unions. */
+type KindOf<T> = T extends null
+  ? "null"
+  : T extends string
+    ? "string"
+    : T extends number
+      ? "number"
+      : T extends boolean
+        ? "boolean"
+        : T extends readonly unknown[]
+          ? "array"
+          : T extends object
+            ? "object"
+            : never;
+
+/** What a TS type says each key's JSON kinds are (an absent optional key is not a kind). */
+type Kinds<X> = { [K in keyof X]-?: KindOf<Exclude<X[K], undefined>> };
+
+/** What a descriptor says each key's JSON kinds are. */
+type DescKinds<S> = { [K in keyof S]: S[K] extends { kinds: readonly (infer E)[] } ? E : never };
+
 test("every descriptor has exactly the keys of its TS type", () => {
   expectTypeOf<keyof typeof shapes.Rank>().toEqualTypeOf<keyof Rank>();
   expectTypeOf<keyof typeof shapes.Peak>().toEqualTypeOf<keyof Peak>();
@@ -93,6 +114,29 @@ test("nullable and optional agree per key (R23 tri-state, R102, R124)", () => {
   expectTypeOf<DescFlags<typeof displayNameShapes.hiddenAgent>>().toEqualTypeOf<Flags<Variant<"hiddenAgent">>>();
 });
 
+test("the base kinds agree per key: a number field is a number on the wire, an array an array (16b review minor 2)", () => {
+  expectTypeOf<DescKinds<typeof shapes.Rank>>().toEqualTypeOf<Kinds<Rank>>();
+  expectTypeOf<DescKinds<typeof shapes.Peak>>().toEqualTypeOf<Kinds<Peak>>();
+  expectTypeOf<DescKinds<typeof shapes.Last5Entry>>().toEqualTypeOf<Kinds<Last5Entry>>();
+  expectTypeOf<DescKinds<typeof shapes.PartyMark>>().toEqualTypeOf<Kinds<PartyMark>>();
+  expectTypeOf<DescKinds<typeof shapes.EncounterCount>>().toEqualTypeOf<Kinds<EncounterCount>>();
+  expectTypeOf<DescKinds<typeof shapes.PlayerCard>>().toEqualTypeOf<Kinds<PlayerCard>>();
+  expectTypeOf<DescKinds<typeof shapes.LiveState>>().toEqualTypeOf<Kinds<LiveState>>();
+  expectTypeOf<DescKinds<typeof shapes.MatchSummary>>().toEqualTypeOf<Kinds<MatchSummary>>();
+  expectTypeOf<DescKinds<typeof shapes.WeaponSkin>>().toEqualTypeOf<Kinds<WeaponSkin>>();
+  expectTypeOf<DescKinds<typeof shapes.Loadout>>().toEqualTypeOf<Kinds<Loadout>>();
+  expectTypeOf<DescKinds<typeof shapes.EncounterDetailRow>>().toEqualTypeOf<Kinds<EncounterDetailRow>>();
+  expectTypeOf<DescKinds<typeof shapes.TeammateSummary>>().toEqualTypeOf<Kinds<TeammateSummary>>();
+  expectTypeOf<DescKinds<typeof shapes.PlayerDetails>>().toEqualTypeOf<Kinds<PlayerDetails>>();
+  expectTypeOf<DescKinds<typeof shapes.ScoreRow>>().toEqualTypeOf<Kinds<ScoreRow>>();
+  expectTypeOf<DescKinds<typeof shapes.MatchTeamView>>().toEqualTypeOf<Kinds<MatchTeamView>>();
+  expectTypeOf<DescKinds<typeof shapes.MatchDetailsView>>().toEqualTypeOf<Kinds<MatchDetailsView>>();
+  expectTypeOf<DescKinds<typeof displayNameShapes.visible>>().toEqualTypeOf<Kinds<Variant<"visible">>>();
+  expectTypeOf<DescKinds<typeof displayNameShapes.remembered>>().toEqualTypeOf<Kinds<Variant<"remembered">>>();
+  expectTypeOf<DescKinds<typeof displayNameShapes.hiddenPlayer>>().toEqualTypeOf<Kinds<Variant<"hiddenPlayer">>>();
+  expectTypeOf<DescKinds<typeof displayNameShapes.hiddenAgent>>().toEqualTypeOf<Kinds<Variant<"hiddenAgent">>>();
+});
+
 test("the closed string sets are the TS unions", () => {
   expectTypeOf<(typeof enums.stage)[number]>().toEqualTypeOf<Stage>();
   expectTypeOf<(typeof enums.result)[number]>().toEqualTypeOf<Result>();
@@ -110,4 +154,12 @@ test("the guard can fail: a descriptor missing a key, or with an extra one, does
   // The flags catch what the key set cannot: `kills` claimed non-null on the wire while TS says nullable.
   type Wrong = Omit<typeof shapes.MatchSummary, "kills"> & { kills: { kinds: "number"[] } };
   expectTypeOf<DescFlags<Wrong>>().not.toEqualTypeOf<Flags<MatchSummary>>();
+
+  // The kinds catch what the flags cannot: `startMs` sent as a string, or `players` as one object, not an array.
+  type AsString = Omit<typeof shapes.Last5Entry, "startMs"> & { startMs: { kinds: "string"[] } };
+  expectTypeOf<DescKinds<AsString>>().not.toEqualTypeOf<Kinds<Last5Entry>>();
+  type AsObject = Omit<typeof shapes.LiveState, "players"> & { players: { kinds: "object"[] } };
+  expectTypeOf<DescKinds<AsObject>>().not.toEqualTypeOf<Kinds<LiveState>>();
+  // And a TS type that drifts the other way: a result that may be null where the descriptor says it never is.
+  expectTypeOf<DescKinds<typeof shapes.Last5Entry>>().not.toEqualTypeOf<Kinds<Omit<Last5Entry, "result"> & { result: Last5Entry["result"] | null }>>();
 });

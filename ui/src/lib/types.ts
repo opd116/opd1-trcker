@@ -161,7 +161,10 @@ export interface PlayerDetails {
   encounters: EncounterDetailRow[];
   /** R116: K/D over the newest (up to 20) current-act competitive matches that have stats; null when there are none. */
   heroKd: number | null;
-  /** R116, R120: HS% over the same matches, a 0..1 fraction like every other HS% field; null when there are none. */
+  /**
+   * R116, R120: HS% over the same matches, a 0..1 fraction like every other HS% field; null when there are none, or
+   * when those matches landed no shot (so it may be null while heroMatches > 0).
+   */
   heroHs: number | null;
   /** R116: how many matches heroKd / heroHs use (0..20). Feeds the hero tooltip. */
   heroMatches: number;

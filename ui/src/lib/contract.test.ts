@@ -101,6 +101,25 @@ function scorelessProblems(row: object): string[] {
   return SCORELESS_NULL_KEYS.filter((k) => r[k] !== null).map((k) => `${k} is ${JSON.stringify(r[k])}, not null, on a row with no kills`);
 }
 
+/** The name kinds drawn in a hidden style: the Riot ID is hidden (or remembered), nothing else is. */
+const HIDDEN_KINDS = ["hiddenPlayer", "hiddenAgent", "remembered"];
+
+/** Every value a card shows besides the name. */
+const CARD_STAT_KEYS = ["level", "rank", "prevActTier", "peak", "kd", "hsPct", "actWinrate", "actWins", "actGames", "last5"] as const;
+
+/**
+ * Two Rust invariants the card relies on (task 16b review minor 3): the user's own card is self-party
+ * (`state.rs`: `r.is_self_party || is_self`), and a self-party card never carries a party mark or an encounter
+ * count (`model.rs`; CLAUDE.md "The user and their own party members get no party stripe and no encounter badge").
+ */
+function selfPartyProblems(c: Card): string[] {
+  const out: string[] = [];
+  if (c.isSelf && !c.isSelfParty) out.push("isSelf but not isSelfParty");
+  if (c.isSelfParty && c.party !== null) out.push(`isSelfParty with party ${JSON.stringify(c.party)}`);
+  if (c.isSelfParty && c.encounters !== null) out.push(`isSelfParty with encounters ${JSON.stringify(c.encounters)}`);
+  return out;
+}
+
 // ── the guard itself ─────────────────────────────────────────────────────────────
 describe("the walker can fail (a check that cannot fail proves nothing)", () => {
   const rank = { tier: 15, rr: 42 };
@@ -162,6 +181,16 @@ describe("the walker can fail (a check that cannot fail proves nothing)", () => 
     ]);
     // With kills the row is not held to it: adr is null when the damage alone is unknown.
     expect(scorelessProblems({ kills: 12, deaths: 9, assists: 3, acs: 240, adr: null, hsPct: 0.3, tier: 15 })).toEqual([]);
+  });
+
+  it("the self-party invariants can fail: self without the self-party flag, a self-party mark or ⟲ count", () => {
+    const self = LIVE.players.find((c) => c.isSelf === true) as unknown as Card;
+    expect(selfPartyProblems(self)).toEqual([]);
+    expect(selfPartyProblems({ ...self, isSelfParty: false })).toEqual(["isSelf but not isSelfParty"]);
+    expect(selfPartyProblems({ ...self, party: { group: 0, confirmed: true }, encounters: { with: 1, against: 0 } })).toEqual([
+      'isSelfParty with party {"group":0,"confirmed":true}',
+      'isSelfParty with encounters {"with":1,"against":0}',
+    ]);
   });
 
   it("every `shape` a descriptor names exists", () => {
@@ -243,17 +272,27 @@ describe("golden invariants the UI relies on", () => {
     expect((DETAILS.recent as unknown[]).length).toBeGreaterThan(2);
   });
 
-  it("a hidden player's card keeps its rank and stats: only the Riot ID is hidden", () => {
-    const hidden = LIVE.players.filter((c) => (c.name as Obj | undefined)?.kind === "hiddenPlayer");
-    expect(hidden).toHaveLength(1);
-    for (const k of ["rank", "prevActTier", "peak", "kd", "hsPct", "actWinrate", "actWins", "actGames", "last5", "level"]) {
-      expect(hidden[0]![k], k).not.toBeNull();
-      expect(hidden[0]![k], k).not.toBeUndefined();
+  it("a card in any hidden-name style keeps its rank and stats: only the Riot ID is hidden", () => {
+    const kind = (c: Obj) => (c.name as Obj | null | undefined)?.kind;
+    const hidden = LIVE.players.filter((c) => HIDDEN_KINDS.includes(kind(c) as string));
+    expect(new Set(hidden.map(kind))).toEqual(new Set(HIDDEN_KINDS));
+    for (const c of hidden) {
+      for (const k of CARD_STAT_KEYS) {
+        expect(c[k], `${String(c.puuid)}.${k}`).not.toBeNull();
+        expect(c[k], `${String(c.puuid)}.${k}`).not.toBeUndefined();
+      }
+      if (kind(c) === "hiddenPlayer") expect(c.agentId).toBeNull(); // R99: no agent before the lock
+      if (kind(c) === "hiddenAgent") expect((c.name as Obj).agentId).toBe(c.agentId); // the name is the locked agent
     }
-    expect(hidden[0]!.agentId).toBeNull(); // R99: no agent before the lock
   });
 
-  it("heroKd and heroHs are null exactly when no act match has stats; heroHs is a fraction (R116, R120)", () => {
+  it("the user's card is self-party, and a self-party card carries no party mark and no encounter count", () => {
+    const cards = [...LIVE.players, DETAILS.card as Obj];
+    expect(cards.some((c) => c.isSelf === true)).toBe(true);
+    for (const c of cards) expect(selfPartyProblems(c as unknown as Card), String(c.puuid)).toEqual([]);
+  });
+
+  it("hero stats: 1–20 counted act matches, so heroKd is set; heroHs is a 0..1 fraction (R116, R120)", () => {
     expect(DETAILS.heroMatches).toBeGreaterThan(0);
     expect(DETAILS.heroMatches).toBeLessThanOrEqual(20);
     expect(DETAILS.heroKd).not.toBeNull();
@@ -289,7 +328,7 @@ describe("golden invariants the UI relies on", () => {
     for (const p of (dm.teams as Obj[])[0]!.players as Obj[]) expect(p).toMatchObject({ tier: null, adr: null });
   });
 
-  it("a remembered name in a scoreboard row is on a player hidden live; a hidden agent's name is the agent id", () => {
+  it("scoreboard rows carry visible, remembered and hiddenAgent names; a hidden agent's name is the agent id", () => {
     const rows = MATCHES.flatMap((m) => (m.teams as Obj[]).flatMap((t) => t.players as Obj[]));
     const kinds = new Set(rows.map((r) => (r.name as Obj).kind));
     expect(kinds).toEqual(new Set(["visible", "remembered", "hiddenAgent"]));
@@ -356,7 +395,7 @@ describe("the demo fixtures follow the golden contract", () => {
       try {
         return [[mid, matchFor(mid)] as const];
       } catch (e) {
-        if (!/^demo: /.test((e as Error).message)) throw e;
+        if (!/^demo: \S+ has no (recent row|encounter) /.test((e as Error).message)) throw e;
         return []; // the roster player has fewer rows than the index
       }
     })),
@@ -399,27 +438,38 @@ describe("the demo fixtures follow the golden contract", () => {
     for (const [n, c] of liveCards) if (c.last5) expect(desc(c.last5.map((e) => e.startMs)), n).toBe(true);
   });
 
-  it("hero stats: null exactly when there is no counted match, heroHs a fraction, at most 20 matches (R116, R120)", () => {
+  it("hero stats: heroKd null exactly when no match is counted, heroHs null then too (and when no shot landed), at most 20 (R116, R120)", () => {
     for (const [n, d] of allDetails) {
       expect((d.heroKd === null) === (d.heroMatches === 0), `${n} heroKd null iff heroMatches 0`).toBe(true);
-      expect((d.heroHs === null) === (d.heroMatches === 0), `${n} heroHs null iff heroMatches 0`).toBe(true);
+      // Rust's hs_pct is also None for counted matches that landed no shot, so heroHs may be null with heroMatches > 0.
+      if (d.heroMatches === 0) expect(d.heroHs, `${n} heroHs null when heroMatches 0`).toBeNull();
       expect(d.heroMatches, n).toBeLessThanOrEqual(20);
     }
     expect(allDetails.some(([, d]) => d.heroMatches > 0)).toBe(true);
     expect(allDetails.some(([, d]) => d.heroMatches === 0)).toBe(true);
   });
 
-  it("a hidden player's card keeps its rank and stats in every scene (only the Riot ID is hidden)", () => {
-    const hidden = liveCards.filter(([, c]) => c.name?.kind === "hiddenPlayer");
-    expect(hidden.length).toBeGreaterThan(0);
+  it("a card in any hidden-name style keeps its rank and stats in every scene (only the Riot ID is hidden)", () => {
+    const hidden = liveCards.filter(([, c]) => HIDDEN_KINDS.includes(c.name?.kind as string));
+    expect(new Set(hidden.map(([, c]) => c.name!.kind))).toEqual(new Set(HIDDEN_KINDS));
+    const design = new Map(roster().map((c) => [c.puuid, c]));
     for (const [n, c] of hidden) {
-      if (n.startsWith("pregame")) {
-        for (const k of ["level", "rank", "prevActTier", "peak", "kd", "hsPct", "actWinrate", "last5"] as const) {
-          expect(c[k], `${n}.${k}`).not.toBeUndefined();
-        }
+      const loadingScene = /-(partial|loading)$/.test(n.split(".")[0]!);
+      for (const k of CARD_STAT_KEYS) {
+        // Null only where the design's own roster has none (Nova has no previous-act rank, v8:481): hiding a name never
+        // blanks a value.
+        if (design.get(c.puuid)?.[k] !== null) expect(c[k], `${n}.${k}`).not.toBeNull();
+        if (!loadingScene) expect(c[k], `${n}.${k}`).not.toBeUndefined();
       }
-      expect(c.agentId, n).toBeNull(); // R99
+      if (c.name!.kind === "hiddenPlayer") expect(c.agentId, n).toBeNull(); // R99
+      if (c.name!.kind === "hiddenAgent") expect(c.agentId, n).toBe(c.name!.agentId);
     }
+  });
+
+  it("the user's card is self-party, and a self-party card carries no party mark and no encounter count", () => {
+    const cards = [...liveCards, ...allDetails.map(([n, d]) => [`${n}.card`, d.card] as const)];
+    expect(cards.some(([, c]) => c.isSelf)).toBe(true);
+    for (const [n, c] of cards) expect(selfPartyProblems(c), n).toEqual([]);
   });
 
   it("a stat line that is null is null as a whole; a scoreboard sorts by ACS, null last", () => {

@@ -225,7 +225,9 @@ pub struct LiveModel {
     /// [`Self::note_hidden`]. Player Details builds such a player's card
     /// off screen by the same hidden-name rule (after a dodge or the match
     /// end), never with a name-service name from an earlier visible
-    /// sighting. Cleared when the account changes.
+    /// sighting. Cleared when the account changes. It does not limit the
+    /// names fill: a player hidden in a finished match is asked about after
+    /// it (R153).
     pub seen_hidden: HashMap<String, Option<String>>,
     /// Players a `names()` call was attempted for (since the last reset):
     /// a visible name still unknown after that is Missing, not Loading.
@@ -565,15 +567,16 @@ impl LiveModel {
     }
 
     /// R150: queues asks for the names fill, one per puuid. Asks
-    /// [`Self::fill_allowed`] refuses (the user, anyone shown hidden) are not
-    /// queued at all — and are checked again when taken. Asked twice, the
-    /// newer match's ask stays (an ask raised by a finished match covers a
-    /// puuid asked before; an on-demand one never overrides it). A full queue
-    /// ([`NAME_FILL_QUEUE_MAX`]) takes no new puuid.
+    /// [`Self::fill_allowed`] refuses (the user, an empty id) are not queued
+    /// at all — and are checked again when taken. Asks are accepted at any
+    /// stage, a match included: they wait in the queue until it is over
+    /// ([`Self::take_fill`]). Asked twice, the newer match's ask stays (an ask
+    /// raised by a finished match covers a puuid asked before; an on-demand
+    /// one never overrides it). A full queue ([`NAME_FILL_QUEUE_MAX`]) takes
+    /// no new puuid.
     pub fn queue_name_fill(&mut self, asks: impl IntoIterator<Item = NameAsk>) {
-        let hidden = self.hidden_players();
         for ask in asks {
-            if !self.fill_allowed_in(&hidden, &ask.puuid) {
+            if !self.fill_allowed(&ask.puuid) {
                 continue;
             }
             if let Some(queued) = self.name_fill.iter_mut().find(|q| q.puuid == ask.puuid) {
@@ -585,36 +588,42 @@ impl LiveModel {
         }
     }
 
-    /// R150 with R16: whether the names fill may ask about `puuid` at all. Not
-    /// the user (their name comes from the chat session, R43), not an empty
-    /// id, and never a player shown hidden on the live screen now
-    /// (`hidden_players`) or earlier this run (`seen_hidden`). Riot's
-    /// name-service answers blank for anyone hiding their name, but the
-    /// question itself is not sent (CLAUDE.md "Never request a hidden
-    /// player's name").
+    /// R150, R153 (user, 2026-09-30) with R16: whether the names fill may ask
+    /// about `puuid` at all: not the user (their name comes from the chat
+    /// session, R43) and not an empty id. Whether *someone was hidden* is not
+    /// a reason to refuse: after a match, the game's own Match History shows
+    /// the real names of the players who hid theirs during it, and the fill
+    /// exists to capture those names (stored by puuid, shown later in the
+    /// remembered style, R145) — so a player shown hidden in the match that
+    /// just ended, or earlier this run ([`Self::seen_hidden`]), is asked
+    /// about like anyone else.
+    ///
+    /// The one hard guard is the stage, not the player: nothing is ever sent
+    /// while a match is running — Agent Select, In Game, a free-for-all
+    /// match ([`Self::between_matches`]). It is enforced where asks leave
+    /// the queue ([`Self::take_fill`]) and again right before the request
+    /// (`sync::fill_names_step`), and the live-stage lookup
+    /// (`names_needed` -> `Job::Names`) still never asks for an incognito
+    /// player (CLAUDE.md "Never request a hidden player's name").
     pub fn fill_allowed(&self, puuid: &str) -> bool {
-        self.fill_allowed_in(&self.hidden_players(), puuid)
+        !puuid.is_empty() && puuid != self.self_id()
     }
 
-    fn fill_allowed_in(&self, hidden: &HashMap<String, Option<String>>, puuid: &str) -> bool {
-        !puuid.is_empty()
-            && puuid != self.self_id()
-            && !hidden.contains_key(puuid)
-            && !self.seen_hidden.contains_key(puuid)
-    }
-
-    /// R150: takes up to `n` asks off the queue, oldest first. Asks that
+    /// R150: takes up to `n` asks off the queue, oldest first — **none while a
+    /// match is running** ([`Self::between_matches`]): the asks stay queued,
+    /// the fill is paused, and they go out after the match. Asks that
     /// [`Self::fill_allowed`] refuses are dropped on the way (and don't count
-    /// towards `n`); they are not kept for later — a later trigger asks again
-    /// if the puuid is fair game then.
+    /// towards `n`); they are not kept for later.
     pub fn take_fill(&mut self, n: usize) -> Vec<NameAsk> {
-        let hidden = self.hidden_players();
         let mut taken = Vec::new();
+        if !self.between_matches() {
+            return taken;
+        }
         while taken.len() < n {
             let Some(ask) = self.name_fill.pop_front() else {
                 break;
             };
-            if self.fill_allowed_in(&hidden, &ask.puuid) {
+            if self.fill_allowed(&ask.puuid) {
                 taken.push(ask);
             }
         }
@@ -2067,11 +2076,12 @@ mod tests {
     }
 
     #[test]
-    fn take_fill_never_hands_out_the_user_or_anyone_hidden() {
-        // R150 with R16: a puuid shown hidden on the live screen now
-        // (`hidden_players`), one shown hidden earlier this run
-        // (`seen_hidden`), the user, and an empty id are dropped from the
-        // queue — never asked, and not kept for later.
+    fn take_fill_hands_out_hidden_players_but_never_the_user_or_an_empty_id() {
+        // R153: a puuid shown hidden on the live screen now
+        // (`hidden_players`) or earlier this run (`seen_hidden`) is asked
+        // about between matches like anyone else — the game's Match History
+        // shows their real names after the match. The user and an empty id
+        // are dropped from the queue, and not kept for later.
         let mut m = model(vec![
             slot("me", false),
             slot("live-hidden", true),
@@ -2079,8 +2089,7 @@ mod tests {
         ]);
         m.stage = Stage::Menus;
         m.seen_hidden.insert("was-hidden".into(), None);
-        // Straight into the queue: it is `take_fill` that is under test (the
-        // player may have turned hidden after the ask was queued).
+        // Straight into the queue: it is `take_fill` that is under test.
         m.name_fill.extend([
             ask("live-hidden", Some(1)),
             ask("was-hidden", Some(1)),
@@ -2090,17 +2099,54 @@ mod tests {
             ask("stranger", None),
         ]);
         let taken: Vec<String> = m.take_fill(10).into_iter().map(|a| a.puuid).collect();
-        assert_eq!(taken, ["visible", "stranger"]);
-        assert!(m.name_fill.is_empty(), "the hidden asks are dropped");
+        assert_eq!(taken, ["live-hidden", "was-hidden", "visible", "stranger"]);
+        assert!(
+            m.name_fill.is_empty(),
+            "the user's and empty asks are dropped"
+        );
         // The same rule as a check, for the last look before a request.
-        assert!(!m.fill_allowed("live-hidden"));
-        assert!(!m.fill_allowed("was-hidden"));
+        assert!(m.fill_allowed("live-hidden"));
+        assert!(m.fill_allowed("was-hidden"));
         assert!(!m.fill_allowed("me"));
+        assert!(!m.fill_allowed(""));
         assert!(m.fill_allowed("stranger"));
     }
 
     #[test]
-    fn hidden_players_are_not_even_queued() {
+    fn take_fill_hands_out_nothing_while_a_match_runs() {
+        // R153: the stage is the guard. Agent Select, In Game and a
+        // free-for-all match (Lobby view, raw presence in a match): no ask
+        // leaves the queue — not even one for a player shown hidden on the
+        // roster — and none is lost; they go out once the match is over.
+        for (stage, in_match) in [
+            (Stage::Pregame, true),
+            (Stage::Ingame, true),
+            (Stage::Menus, true),
+        ] {
+            let mut m = model(vec![slot("me", false), slot("live-hidden", true)]);
+            m.stage = stage;
+            m.in_match = in_match;
+            m.seen_hidden.insert("was-hidden".into(), None);
+            m.queue_name_fill([
+                ask("live-hidden", Some(1)),
+                ask("was-hidden", Some(1)),
+                ask("stranger", None),
+            ]);
+            assert!(
+                m.take_fill(10).is_empty(),
+                "{stage:?}/{in_match}: nothing is taken"
+            );
+            assert_eq!(m.name_fill.len(), 3, "{stage:?}/{in_match}: all kept");
+
+            m.stage = Stage::Menus;
+            m.in_match = false;
+            let taken: Vec<String> = m.take_fill(10).into_iter().map(|a| a.puuid).collect();
+            assert_eq!(taken, ["live-hidden", "was-hidden", "stranger"]);
+        }
+    }
+
+    #[test]
+    fn hidden_players_are_queued_like_anyone_else_but_not_the_user() {
         let mut m = model(vec![slot("me", false), slot("live-hidden", true)]);
         m.seen_hidden.insert("was-hidden".into(), None);
         m.queue_name_fill(vec![
@@ -2110,12 +2156,20 @@ mod tests {
             ask("", None),
             ask("visible", None),
         ]);
-        assert_eq!(queued(&m), [("visible", None)]);
+        assert_eq!(
+            queued(&m),
+            [
+                ("live-hidden", None),
+                ("was-hidden", Some(1)),
+                ("visible", None)
+            ]
+        );
     }
 
     #[test]
     fn take_fill_takes_at_most_n_in_arrival_order() {
         let mut m = model(vec![]);
+        m.stage = Stage::Menus;
         m.queue_name_fill((0..5).map(|i| ask(&format!("p{i}"), None)));
         let first: Vec<String> = m.take_fill(2).into_iter().map(|a| a.puuid).collect();
         assert_eq!(first, ["p0", "p1"]);

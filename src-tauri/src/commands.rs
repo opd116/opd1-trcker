@@ -133,17 +133,29 @@ pub(crate) async fn player_details_for(
 }
 
 /// R150: the names a Player Details page lacks: the hero's own (a card with
-/// no name at all) and the Top 3 teammates shown as Hidden Player (no name in
-/// any stored match or `players` row). On demand — only puuids never asked
-/// before. Players hidden on the live screen are dropped when queued
-/// (`LiveModel::queue_name_fill`).
+/// no name at all, or one shown hidden without a remembered name) and the
+/// Top 3 teammates shown as Hidden Player or by their agent (no name in any
+/// stored match or `players` row). On demand — only puuids never asked
+/// before. Queued at any stage and sent between matches only; a player shown
+/// hidden is asked too (R153), and whatever comes back still shows in the
+/// hidden style (remembered), never as a plain name (R18).
 fn details_asks(details: &PlayerDetails) -> Vec<NameAsk> {
-    let hero = (details.card.name == Field::Missing && !details.card.is_self)
-        .then(|| details.card.puuid.clone());
+    let unnamed = |name: &DisplayName| {
+        matches!(
+            name,
+            DisplayName::HiddenPlayer | DisplayName::HiddenAgent { .. }
+        )
+    };
+    let hero_unnamed = match &details.card.name {
+        Field::Missing => true,
+        Field::Value(name) => unnamed(name),
+        _ => false,
+    };
+    let hero = (hero_unnamed && !details.card.is_self).then(|| details.card.puuid.clone());
     let mates = details
         .top_teammates
         .iter()
-        .filter(|t| t.name == DisplayName::HiddenPlayer)
+        .filter(|t| unnamed(&t.name))
         .map(|t| t.puuid.clone());
     hero.into_iter()
         .chain(mates)

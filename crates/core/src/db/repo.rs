@@ -818,13 +818,15 @@ impl Repo {
     /// rule): a hidden player's name may be *shown* whenever the DB knows it
     /// from any of these sources — on the live screen in the remembered
     /// style, off it as a plain name. What never changes is what is
-    /// *requested*: no endpoint is ever asked for a hidden player's name;
-    /// name-service is only called with a `VisiblePuuid` — during a match for
-    /// the visible players of the roster, and between matches (R150, the
-    /// names fill) for players not shown hidden on the live screen, and Riot
-    /// answers blank for anyone hiding their name — so the `players` table
-    /// only ever holds names Riot gave for a player who was not hiding it at
-    /// that moment. This function reads; it fetches nothing.
+    /// *requested* during a match: no endpoint is ever asked for a hidden
+    /// player's name in a live stage — during a match name-service is only
+    /// called with a `VisiblePuuid` for the visible players of the roster.
+    /// R153 (user, 2026-09-30): *between* matches the names fill (R150) does
+    /// ask about players who were hidden in the match that just ended, because
+    /// the game's own Match History shows their real names after it; Riot
+    /// answers blank for anyone still hiding, so the `players` table only
+    /// holds names Riot gave after the match. This function reads; it fetches
+    /// nothing.
     ///
     /// One indexed query: seeks on `idx_match_players_puuid`, the primary
     /// keys of `matches` and `match_players`, and `players` (see
@@ -930,8 +932,8 @@ impl Repo {
     /// again, and there is no timer. An on-demand ask (`None`) is dropped by
     /// any marker: it only covers puuids never asked before.
     ///
-    /// This decides only what is *worth* asking. Who may be asked at all
-    /// (never a puuid hidden on the live screen, R16) is the caller's rule.
+    /// This decides only what is *worth* asking. Who may be asked at all (not
+    /// the user; nothing during a match, R153) is the caller's rule.
     pub fn names_to_ask(&self, asks: &[NameAsk]) -> Result<Vec<NameAsk>> {
         let mut stmt = self.conn.prepare(NAMES_TO_ASK_SQL)?;
         let mut out = Vec::new();

@@ -15,7 +15,7 @@ use opd1_core::db::repo::NameAsk;
 use opd1_riot::endpoints::MatchDetailsResponse;
 
 use super::*;
-use crate::state::NAME_FILL_QUEUE_MAX;
+use crate::state::{Job, NAME_FILL_QUEUE_MAX};
 use crate::sync::{fill_names_step, store_details, NAME_BATCH_MAX};
 
 /// A valid uuid for test player `i`.
@@ -296,70 +296,141 @@ async fn only_the_match_that_just_ended_and_that_the_user_played_queues_a_fill()
 }
 
 // ---------------------------------------------------------------------
-// privacy: R16 stays
+// R153: players hidden during the match are asked after it
 // ---------------------------------------------------------------------
 
+/// The roster of a running match: the user, `hidden` incognito, everyone in
+/// `visible` not — and `note_hidden`, as every roster install does.
+async fn match_roster(h: &Harness, stage: Stage, hidden: &[&str], visible: &[&str]) {
+    let mut slots = vec![slot_for(&h.st, ME, false).await];
+    for p in hidden {
+        slots.push(slot_for(&h.st, p, true).await);
+    }
+    for p in visible {
+        slots.push(slot_for(&h.st, p, false).await);
+    }
+    let mut live = lock(&h.st.live);
+    live.stage = stage;
+    live.in_match = true;
+    // Every card synced and named: the names fill is the only work there
+    // could be.
+    live.synced
+        .extend(slots.iter().map(|s| s.roster.puuid.clone()));
+    live.names_attempted
+        .extend(slots.iter().map(|s| s.roster.puuid.clone()));
+    live.slots = slots;
+    live.note_hidden();
+}
+
+/// The match is over: the Lobby, with `party_hidden` (a puuid of the match)
+/// still queueing with the user, hidden — or nobody. Arms the match-end fill
+/// as the poll loop does.
+async fn back_to_the_lobby(h: &Harness, party_hidden: Option<&str>) {
+    let mut slots = vec![slot_for(&h.st, ME, false).await];
+    if let Some(p) = party_hidden {
+        slots.push(slot_for(&h.st, p, true).await);
+    }
+    let mut live = lock(&h.st.live);
+    live.stage = Stage::Menus;
+    live.in_match = false;
+    live.slots = slots;
+    live.synced.insert(ME.into());
+    if let Some(p) = party_hidden {
+        live.synced.insert(p.into());
+    }
+    live.note_hidden();
+    live.match_end_ms = Some(now_ms());
+}
+
 #[tokio::test]
-async fn a_player_hidden_on_the_live_screen_is_never_asked() {
+async fn a_player_hidden_in_the_match_that_just_ended_is_asked_and_remembered_next_time() {
+    // The user's requirement (R153): after a match the game's Match History
+    // shows the real names of the players who hid theirs, and the fill exists
+    // to capture exactly those names, by puuid.
+    //
+    // Twice: the hidden player left after the match, and the hidden player
+    // is still in the user's Lobby party, shown hidden there.
+    for party_hidden in [false, true] {
+        let h = harness().await;
+        let (start, others) = (
+            now_ms() - 30 * 60_000,
+            vec![HIDDEN.to_string(), STRANGER.to_string(), pid(1)],
+        );
+        mount_match(&h.server, "m-hid", "competitive", start, &others).await;
+        mount_name_service(
+            &h.server,
+            &[
+                (HIDDEN.to_string(), "Real", "HID"),
+                (STRANGER.to_string(), "Other", "STR"),
+                (pid(1), "Plain", "VIS"),
+            ],
+        )
+        .await;
+
+        // In Game: HIDDEN and STRANGER are shown hidden, pid(1) visible.
+        match_roster(&h, Stage::Ingame, &[HIDDEN, STRANGER], &[&pid(1)]).await;
+        assert!(lock(&h.st.live).seen_hidden.contains_key(HIDDEN));
+        assert!(lock(&h.st.live).seen_hidden.contains_key(STRANGER));
+        assert!(puts(&h.server).await.is_empty(), "nothing during the match");
+
+        // The match ends; the details of the match that just ended arrive.
+        back_to_the_lobby(&h, party_hidden.then_some(HIDDEN)).await;
+        {
+            let live = lock(&h.st.live);
+            assert!(live.seen_hidden.contains_key(HIDDEN), "still on record");
+            assert_eq!(live.hidden_players().contains_key(HIDDEN), party_hidden);
+        }
+        store_match(&h, "m-hid").await;
+        assert_eq!(lock(&h.st.live).name_fill.len(), 3, "all three are queued");
+
+        run_fill(&h).await;
+
+        // The hidden players are in the match-end PUT (never the user).
+        let sent = puts(&h.server).await;
+        assert_eq!(sent.len(), 1, "party_hidden={party_hidden}");
+        assert_eq!(sent[0], others);
+        assert!(sent[0].iter().any(|p| p == HIDDEN));
+        assert!(sent[0].iter().any(|p| p == STRANGER));
+        assert!(!sent[0].iter().any(|p| p == ME));
+
+        // The names answered are stored, keyed by puuid.
+        assert_eq!(
+            seen(&h.st, HIDDEN.to_string()).await,
+            Some(("Real".to_string(), "HID".to_string()))
+        );
+        assert_eq!(
+            seen(&h.st, STRANGER.to_string()).await,
+            Some(("Other".to_string(), "STR".to_string()))
+        );
+
+        // The next match: both are hidden again. Their cards show the stored
+        // name in the remembered style, source `seen`; nothing is sent.
+        match_roster(&h, Stage::Ingame, &[HIDDEN, STRANGER], &[&pid(1)]).await;
+        h.st.publish();
+        for (p, name, tag) in [(HIDDEN, "Real", "HID"), (STRANGER, "Other", "STR")] {
+            let shown = card_json(&h.st, p)["name"].clone();
+            assert_eq!(shown["kind"], "remembered", "{p}");
+            assert_eq!(shown["name"], name);
+            assert_eq!(shown["tag"], tag);
+            assert_eq!(shown["source"], "seen");
+            assert_eq!(shown["fromMapId"], Value::Null);
+        }
+        assert_eq!(puts(&h.server).await.len(), 1, "no request mid-match");
+    }
+}
+
+#[tokio::test]
+async fn the_user_and_an_empty_id_are_never_asked() {
     let h = harness().await;
     lobby(&h);
     mount_name_service(&h.server, &[]).await;
-    {
-        let mut live = lock(&h.st.live);
-        // HIDDEN is in the Lobby party, incognito; STRANGER was hidden in
-        // the match that just ended and is on no roster now.
-        live.slots.push(Slot {
-            roster: roster(HIDDEN, true),
-            db: PlayerDb::default(),
-        });
-        live.synced.insert(HIDDEN.into());
-        live.seen_hidden.insert(STRANGER.into(), None);
-    }
-    lock(&h.st.live).queue_name_fill([
-        ask(HIDDEN, Some(1)),
-        ask(STRANGER, Some(1)),
-        ask(OTHER, Some(1)),
-        ask(&pid(1), None),
-    ]);
+    lock(&h.st.live).queue_name_fill([ask(ME, Some(1)), ask("", Some(1)), ask(OTHER, Some(1))]);
 
     run_fill(&h).await;
 
     let sent = puts(&h.server).await;
-    assert_eq!(sent.len(), 1);
-    assert_eq!(sent[0], [OTHER.to_string(), pid(1)]);
-    let body = sent[0].join(",");
-    assert!(
-        !body.contains(HIDDEN) && !body.contains(STRANGER) && !body.contains(ME),
-        "never a hidden player, never the user: {body}"
-    );
-    // Nothing is stored about the ones that weren't asked.
-    assert_eq!(marker(&h.st, HIDDEN.to_string()).await, None);
-    assert_eq!(marker(&h.st, STRANGER.to_string()).await, None);
-
-    // Only hidden players asked for: not even queued, so no request at all.
-    lock(&h.st.live).queue_name_fill([ask(HIDDEN, None), ask(STRANGER, None)]);
-    assert!(lock(&h.st.live).name_fill.is_empty());
-    assert!(lock(&h.st.live).try_start_worker().is_none());
-    assert_eq!(puts(&h.server).await.len(), 1, "no second request");
-}
-
-#[tokio::test]
-async fn a_player_who_turns_hidden_before_the_request_is_not_asked() {
-    // The queue is checked again at the last moment before the request.
-    let h = harness().await;
-    lobby(&h);
-    mount_name_service(&h.server, &[]).await;
-    lock(&h.st.live).queue_name_fill([ask(OTHER, Some(1))]);
-    // OTHER joins the party hidden after the ask was queued.
-    lock(&h.st.live).slots.push(Slot {
-        roster: roster(OTHER, true),
-        db: PlayerDb::default(),
-    });
-    lock(&h.st.live).synced.insert(OTHER.into());
-
-    fill_names_step(&h.st, &h.session).await.unwrap();
-
-    assert!(puts(&h.server).await.is_empty());
+    assert_eq!(sent, [vec![OTHER.to_string()]]);
+    assert_eq!(marker(&h.st, ME.to_string()).await, None);
 }
 
 // ---------------------------------------------------------------------
@@ -402,6 +473,148 @@ async fn the_fill_never_runs_in_agent_select_in_game_or_a_free_for_all_match() {
     }
     run_fill(&h).await;
     assert_eq!(puts(&h.server).await, [vec![pid(1)]]);
+}
+
+#[tokio::test]
+async fn a_queued_fill_pauses_when_the_next_match_starts_and_sends_nothing_for_its_hidden_players()
+{
+    // R153: the guard is the stage. Asks queued after one match (players who
+    // were hidden in it) wait while the next one runs — Agent Select and In
+    // Game, with a puuid of that very roster shown hidden — and go out at its
+    // end.
+    let h = harness().await;
+    mount_name_service(&h.server, &[(HIDDEN.to_string(), "Real", "HID")]).await;
+    back_to_the_lobby(&h, None).await;
+    lock(&h.st.live).seen_hidden.insert(STRANGER.into(), None);
+    lock(&h.st.live).queue_name_fill([
+        ask(HIDDEN, Some(1)),
+        ask(STRANGER, Some(1)),
+        ask(OTHER, Some(1)),
+    ]);
+    assert_eq!(lock(&h.st.live).name_fill.len(), 3);
+
+    // The next match starts before the fill ran: HIDDEN is on its roster,
+    // shown hidden.
+    for stage in [Stage::Pregame, Stage::Ingame] {
+        match_roster(&h, stage, &[HIDDEN], &[&pid(1)]).await;
+        assert!(lock(&h.st.live).hidden_players().contains_key(HIDDEN));
+        assert!(
+            lock(&h.st.live).try_start_worker().is_none(),
+            "{stage:?}: a fill alone starts no worker"
+        );
+        // Even a fill step already on its way sends nothing…
+        fill_names_step(&h.st, &h.session).await.unwrap();
+        assert!(puts(&h.server).await.is_empty(), "{stage:?}: no request");
+        // …and it takes nothing off the queue.
+        assert_eq!(lock(&h.st.live).name_fill.len(), 3, "{stage:?}: kept");
+    }
+
+    // A worker that had claimed the fill before the match began: its next job
+    // is never the fill either.
+    back_to_the_lobby(&h, None).await;
+    let id = lock(&h.st.live)
+        .try_start_worker()
+        .expect("between matches");
+    match_roster(&h, Stage::Pregame, &[HIDDEN], &[]).await;
+    assert_eq!(lock(&h.st.live).next_job(id), None::<Job>, "never a fill");
+    assert!(puts(&h.server).await.is_empty());
+
+    // The match is over: everything queued goes out, in one request.
+    back_to_the_lobby(&h, None).await;
+    run_fill(&h).await;
+    assert_eq!(
+        puts(&h.server).await,
+        [vec![
+            HIDDEN.to_string(),
+            STRANGER.to_string(),
+            OTHER.to_string()
+        ]]
+    );
+    assert_eq!(
+        seen(&h.st, HIDDEN.to_string()).await,
+        Some(("Real".to_string(), "HID".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn a_match_that_starts_between_taking_the_asks_and_the_request_sends_nothing() {
+    // R153: the stage is checked where asks leave the queue (`take_fill`) and
+    // once more under the `live` lock right before the request is built. The
+    // window between the two is the DB read (`names_to_ask`): a match that
+    // starts in it must send nothing and keep the asks.
+    let h = harness().await;
+    mount_name_service(&h.server, &[(HIDDEN.to_string(), "Real", "HID")]).await;
+    back_to_the_lobby(&h, None).await;
+    lock(&h.st.live).queue_name_fill([ask(HIDDEN, Some(1)), ask(OTHER, Some(1))]);
+    // The next match's roster, read from the DB now: the DB is held below.
+    let roster_of_the_next_match = vec![
+        slot_for(&h.st, ME, false).await,
+        slot_for(&h.st, HIDDEN, true).await,
+        slot_for(&h.st, &pid(1), false).await,
+    ];
+
+    // Hold the DB: the step's `names_to_ask` waits behind this, i.e. after
+    // `take_fill` (the queue is empty by then) and before the request.
+    let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let st = h.st.clone();
+    let holder = std::thread::spawn(move || {
+        st.db_blocking(|_| {
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        })
+    });
+    held_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("the DB is held");
+    let step = tokio::spawn({
+        let (st, session) = (h.st.clone(), h.session.clone());
+        async move { fill_names_step(&st, &session).await }
+    });
+    for _ in 0..1000 {
+        if lock(&h.st.live).name_fill.is_empty() {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        lock(&h.st.live).name_fill.is_empty(),
+        "the step took the asks and is waiting for the DB"
+    );
+
+    // The match starts now, with HIDDEN on its roster shown hidden.
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Pregame;
+        live.in_match = true;
+        live.slots = roster_of_the_next_match;
+        live.note_hidden();
+    }
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    step.await.unwrap().unwrap();
+
+    assert!(puts(&h.server).await.is_empty(), "nothing is sent");
+    let mut want = vec![(HIDDEN.to_string(), Some(1)), (OTHER.to_string(), Some(1))];
+    want.sort();
+    assert_eq!(queue_of(&h), want, "the asks are back in the queue");
+    assert_eq!(seen(&h.st, HIDDEN.to_string()).await, None);
+
+    // The match is over: the same asks go out.
+    back_to_the_lobby(&h, None).await;
+    run_fill(&h).await;
+    let sent = puts(&h.server).await;
+    assert_eq!(sent.len(), 1);
+    let mut got = sent[0].clone();
+    got.sort();
+    let mut want_ids = vec![HIDDEN.to_string(), OTHER.to_string()];
+    want_ids.sort();
+    assert_eq!(got, want_ids);
+    assert_eq!(
+        seen(&h.st, HIDDEN.to_string()).await,
+        Some(("Real".to_string(), "HID".to_string()))
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -686,7 +899,10 @@ async fn player_details_asks_for_the_names_it_lacks_and_refreshes_when_they_arri
 }
 
 #[tokio::test]
-async fn details_never_asks_for_a_teammate_hidden_on_the_live_screen() {
+async fn details_asks_for_a_teammate_hidden_now_too_and_shows_the_answer_hidden() {
+    // R153: a teammate shown hidden in the Lobby is asked about between
+    // matches like anyone else; what comes back is a remembered name, never a
+    // plain one (R18).
     let h = harness().await;
     lobby(&h);
     store_unnamed_match(&h.st, "n-team", &[OTHER, HIDDEN, &pid(1)], &[]).await;
@@ -704,7 +920,7 @@ async fn details_never_asks_for_a_teammate_hidden_on_the_live_screen() {
     })
     .await
     .unwrap();
-    mount_name_service(&h.server, &[]).await;
+    mount_name_service(&h.server, &[(HIDDEN.to_string(), "Mate", "HID")]).await;
     {
         let mut live = lock(&h.st.live);
         live.slots.push(Slot {
@@ -718,13 +934,135 @@ async fn details_never_asks_for_a_teammate_hidden_on_the_live_screen() {
         .await
         .unwrap();
     assert_eq!(d.top_teammates.len(), 2);
-    assert!(
-        !queue_of(&h).iter().any(|(p, _)| p == HIDDEN),
-        "a teammate shown hidden is not even queued"
-    );
+    let mut want = vec![(HIDDEN.to_string(), None), (pid(1), None)];
+    want.sort();
+    assert_eq!(queue_of(&h), want, "the hidden teammate is queued too");
+
     run_fill(&h).await;
-    let sent = puts(&h.server).await;
-    assert_eq!(sent, [vec![pid(1)]], "only the visible teammate is asked");
+
+    let mut sent = puts(&h.server).await;
+    assert_eq!(sent.len(), 1);
+    sent[0].sort();
+    assert_eq!(sent[0], [HIDDEN.to_string(), pid(1)]);
+    let events = h.rec.details.lock().unwrap().clone();
+    let last = events.last().expect("a details event after the fill");
+    let mate = last
+        .top_teammates
+        .iter()
+        .find(|t| t.puuid == HIDDEN)
+        .unwrap();
+    assert!(
+        matches!(&mate.name, DisplayName::Remembered { name, tag, .. } if name == "Mate" && tag == "HID"),
+        "shown in the remembered style: {:?}",
+        mate.name
+    );
+}
+
+#[tokio::test]
+async fn details_asks_for_a_hero_who_was_hidden_earlier_this_run() {
+    // R153: a player shown hidden in a match earlier this run (`seen_hidden`)
+    // has a Hidden Player card off screen. Their Details asks about them
+    // between matches, and the page shows the answer as a remembered name.
+    let h = harness().await;
+    lobby(&h);
+    h.st.db(|repo| {
+        save_player(
+            repo.conn(),
+            &PlayerUpdate {
+                puuid: STRANGER.into(),
+                name: None,
+                account_level: 42,
+                card_id: "card".into(),
+            },
+            1,
+        )
+    })
+    .await
+    .unwrap();
+    lock(&h.st.live).seen_hidden.insert(STRANGER.into(), None);
+    mount_name_service(&h.server, &[(STRANGER.to_string(), "Real", "STR")]).await;
+
+    let d = crate::commands::player_details_for(&h.st, STRANGER)
+        .await
+        .unwrap();
+    assert_eq!(d.card.name, Field::Value(DisplayName::HiddenPlayer));
+    assert_eq!(queue_of(&h), [(STRANGER.to_string(), None)]);
+
+    run_fill(&h).await;
+
+    assert_eq!(puts(&h.server).await, [vec![STRANGER.to_string()]]);
+    let events = h.rec.details.lock().unwrap().clone();
+    let last = events.last().expect("a details event after the fill");
+    assert!(
+        matches!(
+            &last.card.name,
+            Field::Value(DisplayName::Remembered { name, tag, .. }) if name == "Real" && tag == "STR"
+        ),
+        "{:?}",
+        last.card.name
+    );
+}
+
+#[tokio::test]
+async fn a_top_3_teammate_who_was_hidden_earlier_is_asked_and_the_open_page_refreshes() {
+    // R153: a Top 3 teammate shown as Hidden Player is queued when the page
+    // opens, also when that player was hidden in a match earlier this run
+    // (and is on no roster now); when the name arrives the open page is
+    // rebuilt and emitted with it (off the live screen a name shows plainly,
+    // R145).
+    let h = harness().await;
+    lobby(&h);
+    store_unnamed_match(&h.st, "n-team", &[OTHER, STRANGER, &pid(1)], &[]).await;
+    h.st.db(|repo| {
+        save_player(
+            repo.conn(),
+            &PlayerUpdate {
+                puuid: OTHER.into(),
+                name: Some(("Hero".into(), "HRO".into())),
+                account_level: 30,
+                card_id: "card".into(),
+            },
+            1,
+        )
+    })
+    .await
+    .unwrap();
+    lock(&h.st.live).seen_hidden.insert(STRANGER.into(), None);
+    mount_name_service(&h.server, &[(STRANGER.to_string(), "Mate", "STR")]).await;
+
+    let d = crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    let mate = |d: &PlayerDetails| {
+        d.top_teammates
+            .iter()
+            .find(|t| t.puuid == STRANGER)
+            .expect("a Top 3 row")
+            .name
+            .clone()
+    };
+    assert_eq!(mate(&d), DisplayName::HiddenPlayer);
+    assert!(
+        queue_of(&h).contains(&(STRANGER.to_string(), None)),
+        "queued on opening the page: {:?}",
+        queue_of(&h)
+    );
+
+    run_fill(&h).await;
+
+    assert!(puts(&h.server)
+        .await
+        .concat()
+        .contains(&STRANGER.to_string()));
+    let events = h.rec.details.lock().unwrap().clone();
+    let last = events.last().expect("a details event after the fill");
+    assert_eq!(
+        mate(last),
+        DisplayName::Visible {
+            name: "Mate".into(),
+            tag: "STR".into()
+        }
+    );
 }
 
 /// One scoreboard row's name.
@@ -799,7 +1137,10 @@ async fn match_details_asks_once_for_nine_unknown_players_and_refreshes() {
 }
 
 #[tokio::test]
-async fn match_details_never_asks_for_a_player_hidden_on_the_live_screen() {
+async fn match_details_asks_for_a_player_hidden_now_too() {
+    // R153: a row for a player shown hidden in the Lobby is queued like the
+    // others; the fill sends between matches, and the scoreboard shows the
+    // answer in the hidden style (remembered).
     let h = harness().await;
     lobby(&h);
     let others = vec![HIDDEN.to_string(), pid(1)];
@@ -812,7 +1153,7 @@ async fn match_details_never_asks_for_a_player_hidden_on_the_live_screen() {
     )
     .await;
     store_match(&h, "n-hid").await;
-    mount_name_service(&h.server, &[]).await;
+    mount_name_service(&h.server, &[(HIDDEN.to_string(), "Real", "HID")]).await;
     {
         let mut live = lock(&h.st.live);
         live.slots.push(Slot {
@@ -826,9 +1167,18 @@ async fn match_details_never_asks_for_a_player_hidden_on_the_live_screen() {
         .await
         .unwrap();
 
-    assert_eq!(queue_of(&h), [(pid(1), None)], "HIDDEN is not queued");
+    let mut want = vec![(HIDDEN.to_string(), None), (pid(1), None)];
+    want.sort();
+    assert_eq!(queue_of(&h), want);
     run_fill(&h).await;
-    assert_eq!(puts(&h.server).await, [vec![pid(1)]]);
+    assert_eq!(puts(&h.server).await, [others]);
+    let events = h.rec.matches.lock().unwrap().clone();
+    let last = events.last().expect("a match event after the fill");
+    assert!(
+        matches!(board_name(last, HIDDEN), DisplayName::Remembered { .. }),
+        "shown in the hidden style: {:?}",
+        board_name(last, HIDDEN)
+    );
 }
 
 #[tokio::test]

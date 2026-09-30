@@ -472,7 +472,7 @@ Shown only when `card.party && !card.isSelf && !card.isSelfParty`. `col = --part
 - `actTitle(actName)` **NEW**: `V26 ACT V` → `VALORANT 2026 · Act 5`; `EPISODE 9 ACT III` → `Episode 9 · Act 3` (roman I–VI → 1–6; `V{yy}` → `VALORANT 20{yy}`). If it can't parse, return the input.
 - Dates in local time, `en-US`:
   - `dateLong` = `Sep 29, 2026`;
-  - `dateShort` = `Sep 12` (plus `, YYYY` when not the current year);
+  - `dateShort` = `Sep 12` (plus `, YYYY` when not the current year). Used by the encounter rows, the encounter map tip and the Match header opened from an encounter row (R140, §6.10); a Match header opened from a recent row uses `dateLong`;
   - `time12` = `9:14 PM`;
   - `durationMin(ms)` = `Math.round(ms/60000) + ' min'`.
 - `tierLabel(meta, t)`: the existing function (title-cases `DIAMOND 2` → `Diamond 2`). Tier < 3 → null. Meta pending or a missing entry: §5.8.
@@ -714,7 +714,7 @@ Map names, agent names (hidden-agent cards, Details `shortName`, Top-3 and toolt
 - Self: no Encounters section and no ⟲. Top 3 is shown.
 - Hidden or remembered player: the hero name uses the §3.4 variants. Everything else is shown normally.
 - Loading (after the click, before `player_details` resolves) **[C]**:
-  - Back, plus the hero box with: a 56×56 `--skel` radius-7 agent box, a 160×18 bar, a 48×10 bar, a 48-circle and 90×13 bar, a 28-circle and 90×13 bar, and five 44×27 bars in the stats strip;
+  - Back, plus the hero box with: a 56×56 `--skel` radius-7 agent box, a 160×18 bar, a 48×10 bar, a 48-circle and 90×13 bar, a 28-circle and 90×13 bar, a 24-circle and 90×13 bar for Prev **[C]**, a 154×26 bar for the last-5 row **[C]** (both keep the hero grid's columns), and five 44×27 bars in the stats strip;
   - Recent: the header row plus 3 rows, each with a 64×36 map box and a 90×13 bar;
   - Top 3: 3 rows with a 120×13 bar;
   - Loadout: 4 rows with a 124×48 `--skel` well and a 90×13 bar.
@@ -730,7 +730,7 @@ Container and Back as §6.1. Back → details.
 - **Header** (v8:365-378):
   - Box: `display:flex; align-items:center; gap:16px; background:var(--card); border-radius:8px; padding:12px 22px 12px 12px; margin-bottom:14px`.
   - Map: `<img mapList>` 150×56 cover, radius 5, `flex:none`.
-  - Text column: `flex:1; min-width:0`, gap 3. Map name 20px/600. `when` 12px/500 `--text2` `nowrap` `tab` = `{queueLabel} · {dateLong} · {time12} · {durationMin}` (e.g. `Competitive · Sep 29, 2026 · 9:14 PM · 38 min`; the duration part is dropped when unknown).
+  - Text column: `flex:1; min-width:0`, gap 3. Map name 20px/600. `when` 12px/500 `--text2` `nowrap` `tab` = `{queueLabel} · {date} · {time12} · {durationMin}` (the duration part is dropped when unknown). **[R140]** The date follows the entry: a match opened from an encounter row uses `dateShort(startMs, now)` (`Sep 12`, plus `, YYYY` only for a previous year; the design strips the year, v8:642 and v8:685), e.g. `Competitive · Sep 12 · 11:18 PM · 41 min`; a match opened from a recent row keeps `dateLong` (v8:53), e.g. `Competitive · Sep 29, 2026 · 9:14 PM · 38 min`. Code: `whenText(v, from, nowMs)` in `ui/src/lib/details.ts`.
   - Right: flex, center, gap 14.
     - Chip 28×28, `box-sizing:border-box; border-radius:5px`, 14px/700; box = `teams[0].result`.
     - Column `align-items:flex-end`: score 28px/32px 600 `tab` = `score(teams[0].roundsWon, teams[1].roundsWon)`; halves 12px/500 `--text2` `tab` = `{a.firstHalf}–{b.firstHalf} · {a.roundsWon−a.firstHalf}–{b.roundsWon−b.firstHalf}` (tooltip `First half · Second half`; the second half includes overtime, as in v8:659). Halves are hidden when `firstHalf` is null.
@@ -780,7 +780,7 @@ Container and Back as §6.1. Back → details.
   - This replaces audit §2.12's "any player flagged incognito in that match": match-details carries no incognito flag (`endpoints.rs` `MatchPlayer`), so that rule can't be implemented.
   - Known risk: if Riot's match-details returns real names for players who were incognito in that match, a match the user didn't play would show them for players not on the live screen now. The plan Task 19 check settles it (the user's DB compared with the core-game dump, R94). If it happens, the follow-up hides every name in matches the user didn't play, and every Top 3 name learned only from such matches (R94), except players visible on the live screen now.
 - **No-team modes** (Deathmatch): a single team block. The team header shows no chip, `—` for rounds, and the label `Players`. The header chip is omitted, the score is `—`, and halves are hidden.
-- **Loading [C]:** the header box with a 150×56 `--skel` radius-5 box and a 120×18 bar; the scoreboard header row; 2 team headers with 5 rows each (28-box, 22-circle, 120×13 bar, and 30×13 bars right-aligned in the numeric columns).
+- **Loading [C]:** the header box with a 150×56 `--skel` radius-5 box and a 120×18 bar; the scoreboard header row; 2 team headers with 5 rows each (28-box, 22-circle, 120×13 bar, and 30×13 bars aligned as each column's numbers are; the K / D / A bar is centred, as that column is in the design).
 
 ---
 
@@ -1037,8 +1037,8 @@ The contract tests pin a no-stats `ScoreRow` as `kills`, `deaths`, `assists`, `a
 - Last-5 order: in `ingame`, Fahad `last5 = [W,L,W,W,L]` (newest first) renders left→right `L W W L W`, and the rightmost tile uses the newest style. A 2-match player renders 3 dashed tiles first.
 - `ingame-parties4`: 4 distinct stripe colours equal to `--party-0…3`. Likely stripes are gradients, confirmed ones solid. No stripe on self or self-party.
 - `ingame-longnames`: every name span is truncated with an ellipsis, every tag is intact, the ⟲ slot is not overlapped, the `123` count's rect does not intersect its tag's rect, no Peak row clips, and hovering a name shows the full `Name#TAG` after ≥450ms (none at 400ms).
-- `details-longnames`: the hero name truncates with the tag whole; each Top 3 name wraps inside its name block (the name rect doesn't intersect the live icons or the count); the encounters header name and the skin lines end in an ellipsis.
-- `match-longnames`: every scoreboard name truncates with the tag whole; no row is taller than 42px.
+- `details-longnames`: the hero name truncates with the tag whole; Top 3 names are never cut and the name rect doesn't intersect the live icons or the count, and the live teammate's long name wraps inside its name block; the encounters header name and the skin lines end in an ellipsis.
+- `match-longnames`: at the design's widths the scoreboard name box is about 490px (v8:381) and the longest Riot ID about 290px, so no name truncates: every name shows whole with its tag on one 42px line, and no row is taller than 42px. A name longer than the box would still take the ellipsis with the tag whole (§8.3 check 5).
 - `details-partial`: each absent hero field is a bar (§6.2), with no text inside. The absent loadout weapon is a `--skel` well and a 90×13 bar with no text; the `null` one is an empty raised well with the weapon name and `—` (R97).
 - Hover and click (interaction tests): a card's hover shadow is `inset 0 0 0 1px` in `--line-hover`; Back, recent rows, encounter rows and Show more change background on hover (§6.1, §6.4, §6.5); clicking a dashed slot, a skeleton card or the `My Stats` tab changes nothing (route unchanged, `cursor: default`); a click hides an open tooltip.
 - `tips`:

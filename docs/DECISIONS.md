@@ -1,9 +1,9 @@
 # Decisions
 
-Every ruling made while building OPD1 TRCKER, in number order (R1 to R134). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
+Every ruling made while building OPD1 TRCKER, in number order (R1 to R144). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.
-- Rulings come from the working ledger (R1 to R73 and R87 to R134) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
+- Rulings come from the working ledger (R1 to R73 and R87 to R144) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
 - Precedence when rules disagree (R92): `docs/requirements-raw.md` (newest dated block) > the design file > older `CLAUDE.md` visual rules. `docs/design-spec.md` outranks the design file only for the R74 to R86 gap-fills.
 - The user's own words are in `docs/requirements-raw.md`; the [user decisions index](#user-decisions-index) at the end maps each dated block to a summary.
 
@@ -945,6 +945,76 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R134). Each
 - **Cost:** None.
 - **Status:** active
 
+### R135 — Task 19 splits into 19a and 19b
+
+- **What:** Task 19 splits. 19a runs now on main, in parallel with Task 18: the release profile, CI check and size guards, the dist guard switched on only if main's pre-merge `ui/dist` passes it, versions 0.2.0, the ARCHITECTURE refresh, the Arabic test checklist (including the R114, R116 and R125 items), THIRD-PARTY-NOTICES as a bundle resource (R109), and the CHANGELOG backend lines. 19b runs after Task 18: merge `ui-lane`, full suites, screenshots and README, CHANGELOG `[0.2.0]`, the dist guard on, tag `v0.2.0`.
+- **Why:** Speed. The user OK'd more tokens for speed, and quality stays the same. The 19a files are disjoint from `ui-lane`.
+- **Cost:** A rebase.
+- **Status:** active
+
+### R136 — The final whole-branch review splits too
+
+- **What:** The final whole-branch review splits like Task 19. The backend whole-branch review (`c9ad7f4..main`, over `crates/`, `src-tauri/` and `.github/`) runs as soon as the Task 15b review lands, in parallel with Task 18. The final review after 19b then covers the UI, the integration and the backend delta only. Both use the most capable model.
+- **Why:** Speed. Same coverage, earlier.
+- **Cost:** None.
+- **Status:** active
+
+### R137 — Task 15b Minors batch
+
+- **What:** A Sonnet batch of the Task 15b Minors on `p2-backend`, then land. `Job::Backfill` is handed out only in Menus and Closed: it never downloads during Pregame or In Game, and never holds the shared bucket with a 429 while live cards need it. Decode errors end the run and keep the anchor (transient), and a per-id failure count in `app_state` skips an id only after 3 consecutive runs. The anchor is tied to its owner, and another owner's anchor counts as none (no delete on a switch); implemented as one key per account, `self_history_anchor:{puuid}`, which is cleaner than an owner field. `begin_backfill` starts the worker only once VALORANT is running, so a Closed start wastes no calls. The `store_details` helper is shared with `fetch_missing_details`, there is a `connect_mock_session` test helper, and the found act start is stored in the run.
+- **Why:** Lightness is priority #1, and R101 says the backfill runs behind live cards.
+- **Cost:** None recorded.
+- **Status:** active (R139 refines which failures count toward the 3-run skip)
+
+### R138 — The release profile keeps unwinding panics
+
+- **What:** Drop `panic = "abort"` from `[profile.release]` and keep unwind. Done in Task 19b, which also updates the ARCHITECTURE line and re-checks the ARCHITECTURE Ctrl+Shift+L/D line after the merge.
+- **Why:** The code's panic containment (the JoinSet "task failed" logging, the R97 skin-resolve drop guard) assumes unwinding. With abort, any stray panic in a background task kills the tracker mid-match. The size gain is a few hundred KB against a 2.6 MB installer and a 10 MB cap, so robustness wins over a negligible lightness gain.
+- **Cost:** About 200 KB.
+- **Status:** active (the change lands in Task 19b)
+
+### R139 — The 3-strike skip counts only per-id failures
+
+- **What:** The 3-strike skip of the backfill (R137) counts only per-id failures: a Status other than 404 or 429, and Decode. Rate-limit, network and auth errors end the run without counting. Fixed inside the backend whole-branch review's fix dispatch; the ARCHITECTURE and DECISIONS anchor-key wording is updated in 19b.
+- **Why:** Otherwise a 3-run network outage would skip ids for good and leave the gap R101 forbids.
+- **Cost:** One match arm.
+- **Status:** active
+
+### R140 — The encounter Match header date follows the design
+
+- **What:** The Match header opened from an encounter row prints the date without a year for a current-year match (`Sep 12`, the design's own form) and adds the year only for a previous year (`dateShort`). The header opened from a recent row keeps `dateLong`. Spec §6.10 and §4.2.
+- **Why:** The design wins where it covers the case, and older encounters need the year.
+- **Cost:** One format branch.
+- **Status:** active
+
+### R141 — Merge, build, review, fix, then tag
+
+- **What:** The order stays: merge `ui-lane`, build, the UI whole-branch review, fixes, then the `v0.2.0` tag. The merge only joins the branches so the full app can be built and tested. The tag is the release and comes last. A preview build for the user was dispatched on `ui-lane` in the meantime (CI run 36661819503, backend as of `d0f9fc6` plus the new UI).
+- **Why:** The user asked to test the current version even with known issues, and a preview build does that without releasing.
+- **Cost:** None recorded.
+- **Status:** active
+
+### R142 — After the user's own match, names show as match-details gives them
+
+- **What:** User correction 2026-09-30: after a match the user played ends, names show as match-details gives them (CLAUDE.md, "After a match ends"). No hiding. The only thing to prevent on the off-screen Details path was a hidden player's name learned solely from matches the user did not play (R74). During live stages the card rule holds: the remembered style comes only from the user's own finished matches. The backend whole-branch fix follows this exactly, and the controller checks the fix diff for over-hiding.
+- **Why:** The user's correction of an over-hiding reading of the hidden-name rules.
+- **Cost:** None recorded.
+- **Status:** narrowed by R143 (partly superseded: the "prevent names learned solely from matches the user did not play" part no longer applies off the live screen; the after-match rule and the live-stage rule stand)
+
+### R143 — Off the live screen, names Riot returns may be shown
+
+- **What:** User decision 2026-09-30. Names that Riot returns in match-details of matches the user did not play may be shown in the Player Details and Match Details views (off the live screen). Mid-match rules are unchanged (`requirements-raw.md` lines 16 and 47): during live stages a hidden player shows `Hidden Player` or the agent name, or the remembered style only from the user's own finished matches. This supersedes R142's "prevent names learned solely from matches the user did not play" for the off-live views, and CLAUDE.md's "Never take names from other players' match histories" for those views (CLAUDE.md updated). Whether Riot actually returns them is R94's check on the user's PC.
+- **Why:** The user's words: «ما منعته، دايم يمدي — بس هل يمدي أساساً؟» (he never forbade it, it's always possible, but is it possible at all?).
+- **Cost:** One filter.
+- **Status:** active
+
+### R144 — One UI batch: the Windows path bug and the Task 18 minors
+
+- **What:** One Opus batch on `ui-lane` now, then a preview CI on `ui-lane`. The Windows path bug: `scenes.test.ts:711` builds a file path from `URL.pathname`; use `fileURLToPath` and sweep every test for the same pattern. The Task 18 minors: clear `openDetails` on leaving Details and drop stale payloads (no old-name flash for a now-hidden player); a details event newer than the in-flight `getPlayerDetails` answer wins; the skeleton hero height equals the loaded one (no 15px jump); the Top 3 remembered-name wrap keeps the eye with the name; wrapped `TopTeammates` names get vertical padding; the unknown-map `—` in the value's own colour; a Hero stat `kind` instead of the label sentinel; a `plural(n, word)` export; the `scrolls()` check matches the real scroll host; `details-nostats` fixture consistency; the Nova check-9 test uses shapes the backend sends; the visual bottom cases really scroll or are removed, plus a hidden-name Details design-ref state; the shared `.sec` and `.panel` styles deduplicated.
+- **Why:** The preview CI 36661819503 failed on `windows-latest` on a Windows-only test bug that the Linux runs could not see (`'/D:/a/...'` became `'D:\D:\a\...'`).
+- **Cost:** None recorded.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.
@@ -961,4 +1031,4 @@ Each row is a dated block of `docs/requirements-raw.md`, in file order. That fil
 | 2026-09-27 to 2026-09-28 | `قرارات أثناء التنفيذ` | GitHub Actions works; the user must approve the design before the screens; Claude orchestrates and agents implement; the Peak tip shows the full act name and dates; design v1 rejected; last 5 shows W/L/draw only with RR and time on hover; design rounds 2 and 3 not liked; new direction "easy on the eye" (one system for type, numbers, spacing); party-detection details; a trial round on two screens; three refinement passes; obsolete files archived to `ارشيف/`. |
 | 2026-09-28 | `ملاحظات المستخدم على تصميم v7.1` | Nine points: the card is crowded, secondary text is too faint, each statistic's scope must be clear (shown without hovering: superseded, see the marker), long names truncate but the tag never does, one meaning per indicator, last 5 must be clearer, Peak names the tier, shared-match results read `Your result`, hidden means the name only. |
 | 2026-09-28 | `ملاحظات المستخدم على v8` | Remove the printed scope headings (tooltip only); numbers and last-5 results look off; the palette looks AI-made; the user said the design pleases them (to confirm). |
-| 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. Later 2026-09-29 line: Player Details hero K/D and HS% from the last 20 act matches (R116). |
+| 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. Later 2026-09-29 line: Player Details hero K/D and HS% from the last 20 act matches (R116). Later 2026-09-30 line: names Riot returns for matches the user did not play may show off the live screen (R143). |

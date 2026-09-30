@@ -173,15 +173,37 @@ const view = (v: Partial<MatchDetailsView> = {}): MatchDetailsView => ({
 const dm = () =>
   view({ queueId: "deathmatch", teams: [team({ teamId: "", result: null, roundsWon: null, firstHalf: null })], durationMs: 9 * 60_000 });
 
-describe("whenText (spec §6.10)", () => {
-  it("'{queueLabel} · {dateLong} · {time12} · {durationMin}'", () => {
-    expect(whenText(view())).toBe("Competitive · Sep 29, 2026 · 9:14 PM · 38 min");
-    expect(whenText(dm())).toBe("Deathmatch · Sep 29, 2026 · 9:14 PM · 9 min");
-    expect(whenText(view({ queueId: "" }))).toBe("Custom · Sep 29, 2026 · 9:14 PM · 38 min");
+describe("whenText (spec §6.10, R140)", () => {
+  // The page clock: Sep 30, 2026, so `view()` (Sep 29, 2026) is a current-year match.
+  const NOW = Date.UTC(2026, 8, 30, 12);
+
+  it("a match opened from a recent row: '{queueLabel} · {dateLong} · {time12} · {durationMin}'", () => {
+    expect(whenText(view(), "recent", NOW)).toBe("Competitive · Sep 29, 2026 · 9:14 PM · 38 min");
+    expect(whenText(dm(), "recent", NOW)).toBe("Deathmatch · Sep 29, 2026 · 9:14 PM · 9 min");
+    expect(whenText(view({ queueId: "" }), "recent", NOW)).toBe("Custom · Sep 29, 2026 · 9:14 PM · 38 min");
+  });
+
+  it("a match opened from an encounter row in the current year drops the year (v8:642, v8:685)", () => {
+    expect(whenText(view(), "encounter", NOW)).toBe("Competitive · Sep 29 · 9:14 PM · 38 min");
+    expect(whenText(dm(), "encounter", NOW)).toBe("Deathmatch · Sep 29 · 9:14 PM · 9 min");
+    expect(whenText(view({ startMs: Date.UTC(2026, 8, 12, 23, 18), durationMs: 41 * 60_000 }), "encounter", NOW)).toBe(
+      "Competitive · Sep 12 · 11:18 PM · 41 min",
+    );
+  });
+
+  it("a match opened from an encounter row in a previous year keeps the year", () => {
+    expect(whenText(view({ startMs: Date.UTC(2025, 11, 31, 10, 5) }), "encounter", NOW)).toBe("Competitive · Dec 31, 2025 · 10:05 AM · 38 min");
+    // The same match a year later: the current year moved on, so the year comes back.
+    expect(whenText(view(), "encounter", Date.UTC(2027, 0, 2))).toBe("Competitive · Sep 29, 2026 · 9:14 PM · 38 min");
+  });
+
+  it("the recent entry always has the year, whatever the clock", () => {
+    expect(whenText(view(), "recent", Date.UTC(2027, 0, 2))).toBe("Competitive · Sep 29, 2026 · 9:14 PM · 38 min");
   });
 
   it("whenText drops the duration when unknown", () => {
-    expect(whenText(view({ durationMs: null }))).toBe("Competitive · Sep 29, 2026 · 9:14 PM");
+    expect(whenText(view({ durationMs: null }), "recent", NOW)).toBe("Competitive · Sep 29, 2026 · 9:14 PM");
+    expect(whenText(view({ durationMs: null }), "encounter", NOW)).toBe("Competitive · Sep 29 · 9:14 PM");
   });
 });
 

@@ -14,7 +14,7 @@
   import RecentMatches from "../components/details/RecentMatches.svelte";
   import TopTeammates from "../components/details/TopTeammates.svelte";
   import { getPlayerDetails } from "../lib/api";
-  import { recentShown } from "../lib/details";
+  import { recentShown, type MatchFrom } from "../lib/details";
   import { go } from "../lib/router.svelte";
   import { live, openDetails } from "../lib/stores";
 
@@ -43,7 +43,7 @@
     };
   });
 
-  const openMatch = (from: "recent" | "encounter") => (matchId: string) =>
+  const openMatch = (from: MatchFrom) => (matchId: string) =>
     go({ name: "match", matchId, focusPuuid: puuid, from, back: { puuid, more } });
 </script>
 

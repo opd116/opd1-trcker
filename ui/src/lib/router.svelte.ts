@@ -1,4 +1,5 @@
 // Routes and navigation (spec §2.4). One `$state` object; every navigation goes through `go`.
+import type { MatchFrom } from "./details";
 import { hideTip } from "./tooltip.svelte";
 import type { Stage } from "./types";
 
@@ -9,7 +10,7 @@ export type Route =
       name: "match";
       matchId: string;
       focusPuuid: string;
-      from: "recent" | "encounter";
+      from: MatchFrom;
       /** The Details page Back returns to, with its "Show more" state. */
       back: { puuid: string; more: boolean };
     };

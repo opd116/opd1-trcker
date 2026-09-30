@@ -33,7 +33,7 @@ export type DesignProps = {
 };
 
 /** A user click inside the design: click, park the pointer at (5,5), wait 600ms (its tooltip timer is 450ms). */
-export type DesignStep = "mara" | "more" | "recent";
+export type DesignStep = "mara" | "more" | "recent" | "encounter";
 
 /** `OPD1_DESIGN_DIR`, else walk up from ui/ to `.superpowers/design/cd-v8/project`. null when absent. */
 export function findDesignDir(): string | null {
@@ -150,6 +150,10 @@ async function clickStep(page: Page, step: DesignStep): Promise<void> {
       break;
     case "recent":
       await app.getByText("45m ago", { exact: true }).click();
+      break;
+    case "encounter":
+      // Mara's first encounter row (Lotus, Against): its date span, as the only exact `Sep 12` on her Details page.
+      await app.getByText("Sep 12", { exact: true }).click();
       break;
   }
   await page.mouse.move(5, 5);

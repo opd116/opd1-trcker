@@ -1,6 +1,7 @@
 // DEV-only. The only scene registry (spec §8.2, R95): the feed, the DEV `api.ts` answers and the Playwright
 // suite all read SCENES. Scenes are built from the design's roster in cdv8.ts; nothing here is shipped
 // (it is reached only through a DEV-guarded dynamic import).
+import type { MatchFrom } from "../details";
 import type { Route } from "../router.svelte";
 import type {
   EncounterDetailRow,
@@ -149,7 +150,7 @@ function rosterDetails(): Record<string, PlayerDetails> {
 }
 
 const details = (puuid: string, more = false): Route => ({ name: "details", puuid, more });
-const matchRoute = (matchId: string, focusPuuid: string, from: "recent" | "encounter"): Route => ({
+const matchRoute = (matchId: string, focusPuuid: string, from: MatchFrom): Route => ({
   name: "match",
   matchId,
   focusPuuid,

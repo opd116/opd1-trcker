@@ -11,11 +11,12 @@
   import MatchSkeleton from "../components/match/MatchSkeleton.svelte";
   import Scoreboard from "../components/match/Scoreboard.svelte";
   import { getMatchDetails } from "../lib/api";
+  import type { MatchFrom } from "../lib/details";
   import type { MatchDetailsView } from "../lib/types";
 
-  // `from` (recent row or encounter row) is part of the route; the backend decides the perspective, so the page
-  // itself does not read it.
-  let { matchId, focusPuuid }: { matchId: string; focusPuuid: string; from: "recent" | "encounter" } = $props();
+  // `from` (recent row or encounter row) is part of the route. The backend decides the perspective; the page only
+  // hands `from` to the header, whose date reads differently for an encounter row (R140).
+  let { matchId, focusPuuid, from }: { matchId: string; focusPuuid: string; from: MatchFrom } = $props();
 
   const request = $derived(
     getMatchDetails(matchId, focusPuuid).catch((err: unknown) => {
@@ -29,7 +30,7 @@
   <div class="match" aria-busy={view === null}>
     <BackButton />
     {#if view}
-      <MatchHeader {view} />
+      <MatchHeader {view} {from} />
       <Scoreboard {view} />
     {:else}
       <MatchSkeleton />

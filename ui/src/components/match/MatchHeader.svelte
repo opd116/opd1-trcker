@@ -1,21 +1,23 @@
 <!--
-  Match Details header (spec §6.10, v8:365-378): the map, `{mode} · {date} · {time} · {duration}`, then team 0's result
+  Match Details header (spec §6.10, v8:365-378): the map, `{mode} · {date} · {time} · {duration}` (the date has no year
+  for a current-year match opened from an encounter row, R140), then team 0's result
   chip, the score and the halves (tooltip `First half · Second half`). A no-team mode (Deathmatch) has no chip, `—` for
   the score and no halves. `view: null` = the loading header (a 150×56 box and a 120×18 bar).
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
-  import { halvesText, whenText } from "../../lib/details";
+  import { halvesText, whenText, type MatchFrom } from "../../lib/details";
   import { score } from "../../lib/format";
   import { mapName } from "../../lib/meta";
-  import { meta } from "../../lib/stores";
+  import { meta, now } from "../../lib/stores";
   import { HALVES_TIP } from "../../lib/tips";
   import { tip } from "../../lib/tooltip.svelte";
   import type { MatchDetailsView } from "../../lib/types";
   import ResultChip from "../ResultChip.svelte";
   import Skel from "../Skel.svelte";
 
-  let { view }: { view: MatchDetailsView | null } = $props();
+  // `from` (the route's) picks the date form of the second line (R140); the loading header has no such line.
+  let { view, from = "recent" }: { view: MatchDetailsView | null; from?: MatchFrom } = $props();
 
   const teams = $derived(view && view.teams.length >= 2 ? { a: view.teams[0]!, b: view.teams[1]! } : null);
   const map = $derived(view ? mapName($meta, view.mapId) : null);
@@ -27,7 +29,7 @@
     {#if view.mapId}<img class="mmap" src={assetUrl("mapList", view.mapId)} alt="" />{:else}<div class="mmap"></div>{/if}
     <div class="mtext">
       <span class={["mtitle", map === null && "dash"]}>{#if map === undefined}<Skel w={120} h={18} />{:else}{map ?? "—"}{/if}</span>
-      <span class="mwhen">{whenText(view)}</span>
+      <span class="mwhen">{whenText(view, from, $now)}</span>
     </div>
     <div class="mres">
       {#if teams?.a.result}<ResultChip result={teams.a.result} size={28} />{/if}

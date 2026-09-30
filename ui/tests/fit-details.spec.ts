@@ -326,8 +326,19 @@ test("match-enc: `Your team`; one self frame and one focus bar, in different row
   await expect(page.locator(".match .srow .selfframe")).toHaveCount(1);
   await expect(page.locator(".match .srow .focusbar")).toHaveCount(1);
   await expect(page.locator(".match .srow").filter({ has: page.locator(".selfframe") }).filter({ has: page.locator(".focusbar") })).toHaveCount(0);
-  await expect(page.locator(".match .mwhen")).toHaveText("Competitive · Sep 12, 2026 · 11:18 PM · 41 min");
+  // R140: opened from an encounter row, the date has no year in the current year (v8:642, v8:685).
+  await expect(page.locator(".match .mwhen")).toHaveText("Competitive · Sep 12 · 11:18 PM · 41 min");
   expect(await css(page.locator(".match .selfframe"), "border-top-color")).toBe(await varRgb(page, "--self-frame"));
+});
+
+// R140, the other half: the year comes back once the match is not in the current year. The system time moves from
+// Sep 29, 2026 to Jan 27, 2027 and the header follows the next 30s tick of `now`.
+test("match-enc: the header date gets its year when the match is from a previous year (R140)", async ({ page }) => {
+  await openScene(page, "match-enc", {}, { clock: "manual" });
+  await expect(page.locator(".match .mwhen")).toHaveText("Competitive · Sep 12 · 11:18 PM · 41 min");
+  await page.clock.setSystemTime(new Date("2027-01-27T12:00:00Z"));
+  await page.clock.runFor(31_000);
+  await expect(page.locator(".match .mwhen")).toHaveText("Competitive · Sep 12, 2026 · 11:18 PM · 41 min");
 });
 
 // The user's own match (from their own Details): the user's row is both the focus and self; it gets the frame only.
@@ -479,6 +490,8 @@ test("Back paths: match → details (more kept) → live", async ({ page }) => {
     back: { puuid: MARA, more: true },
   });
   await expect(page.locator(".match .mtitle")).toHaveText("Bind");
+  // A recent row keeps the year in the header date (R140).
+  await expect(page.locator(".match .mwhen")).toHaveText(/^Competitive · [A-Z][a-z]{2} \d{1,2}, 2026 · \d{1,2}:\d{2} [AP]M · \d+ min$/);
   await page.locator(".match .back").click();
   await waitPage(page, "loaded");
   await expect(page.locator(".details .recent .rrow")).toHaveCount(8);
@@ -489,6 +502,8 @@ test("Back paths: match → details (more kept) → live", async ({ page }) => {
   await waitPage(page, "loaded");
   expect(await route(page)).toMatchObject({ name: "match", matchId: encounterMatchId("mara", 0), from: "encounter", back: { puuid: MARA, more: true } });
   await expect(page.locator(".match .thead .tlabel").first()).toHaveText("Your team");
+  // The route's `from` reaches the header: no year for this current-year encounter match (R140).
+  await expect(page.locator(".match .mwhen")).toHaveText("Competitive · Sep 12 · 11:18 PM · 41 min");
   await page.locator(".match .back").click();
   await waitPage(page, "loaded");
   await page.locator(".details .back").click();

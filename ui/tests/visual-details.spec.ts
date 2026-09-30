@@ -1,7 +1,8 @@
 // Player Details and Match Details against a reference render of the user's design file (tests/design-ref.ts), pixel
 // for pixel at a per-pixel YIQ threshold of 0.2, the same gate as visual-live. The design is clicked through like a
-// user (Mara's card, Show more, recent row 0); ours opens the matching scene. "Bottom" sets each page's scroll
-// container to scrollTop = scrollHeight in both renders. The reference PNGs are regenerated on every run (beforeAll).
+// user (Mara's card, Show more, recent row 0, encounter row 0); ours opens the matching scene. "Bottom" sets each
+// page's scroll container to scrollTop = scrollHeight in both renders. The reference PNGs are regenerated on every
+// run (beforeAll).
 //
 // What differs on purpose, and nothing else:
 //   - the ⟲ glyph (COMPARE_STYLE hides it in both renders; the count beside it is compared). In the hero the count
@@ -11,8 +12,8 @@
 //   - details-more: the recent rows' "time ago" labels, hidden in both renders. The design mock hard-codes
 //     `1d / 1d / 3d ago` for rows 4, 5 and 7 (v8:451), which its own dates (v8:472) do not give at the page clock:
 //     ours derive `22h / 23h / 2d ago` from the start times. The first three rows (all that `details` shows) agree.
-//   - match-enc is not compared: the design writes that header's date without the year (v8:642, v8:685), spec §6.10
-//     uses dateLong. fit-details asserts it instead.
+//   - match-enc (the Match page opened from Mara's first encounter row) is compared too, top only (it fits the window):
+//     the header date has no year in the current year, as the design writes it (v8:642, v8:685; R140).
 import { expect, test, type Page } from "@playwright/test";
 import { COMPARE_STYLE, ensureCdnCache, findDesignDir, openDesign, type DesignStep } from "./design-ref";
 import { openScene, settle } from "./harness";
@@ -33,6 +34,7 @@ const CASES: Case[] = [
   { label: "details-more (bottom)", file: "details-more-bottom", scene: "details-more", steps: ["mara", "more"], bottom: true, style: `${COMPARE_STYLE}\n${AGO_HIDE}` },
   { label: "match (top)", file: "match-top", scene: "match", steps: ["mara", "recent"], bottom: false, style: COMPARE_STYLE },
   { label: "match (bottom)", file: "match-bottom", scene: "match", steps: ["mara", "recent"], bottom: true, style: COMPARE_STYLE },
+  { label: "match-enc (top)", file: "match-enc-top", scene: "match-enc", steps: ["mara", "encounter"], bottom: false, style: COMPARE_STYLE },
 ];
 
 /** Scroll every rendered scroll container of the page (the design's raw <x-dc> template copy excluded) to its end. */

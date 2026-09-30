@@ -1,7 +1,7 @@
 // Player Details and Match Details helpers (spec §6). Pure: the screens render what these return. Names from meta
 // come through meta.ts (R95), never looked up here twice; tooltip strings live in tips.ts.
 import { agentName, isRankedTier } from "./meta";
-import { DASH, dateLong, durationMin, rrDelta, time12 } from "./format";
+import { DASH, dateLong, dateShort, durationMin, rrDelta, time12 } from "./format";
 import type { DisplayName, LiveState, MatchDetailsView, MatchSummary, Meta, WeaponSkin } from "./types";
 
 /** Rows shown before Show more, and the most Show more reveals (spec §6.4, §6.5). */
@@ -75,9 +75,18 @@ export function queueLabel(queueId: string): string {
     .join(" ");
 }
 
-/** `Competitive · Sep 29, 2026 · 9:14 PM · 38 min`; the duration part is dropped when it is unknown. */
-export function whenText(v: MatchDetailsView): string {
-  const parts = [queueLabel(v.queueId), dateLong(v.startMs), time12(v.startMs)];
+/** Which Details row opened the Match page (the route's `from`): a recent-match row or an encounter row. */
+export type MatchFrom = "recent" | "encounter";
+
+/**
+ * The Match header's second line, `Competitive · Sep 29, 2026 · 9:14 PM · 38 min`; the duration part is dropped when
+ * it is unknown. R140: the design writes the date of a match opened from an encounter row without the year
+ * (v8:642, v8:685: `Sep 12 · 11:18 PM · 41 min`), so that entry uses `dateShort` (the year only when it is not the
+ * current year, as the encounter rows do) and a match opened from a recent row keeps `dateLong` (v8:53).
+ */
+export function whenText(v: MatchDetailsView, from: MatchFrom, nowMs: number): string {
+  const date = from === "encounter" ? dateShort(v.startMs, nowMs) : dateLong(v.startMs);
+  const parts = [queueLabel(v.queueId), date, time12(v.startMs)];
   if (v.durationMs !== null) parts.push(durationMin(v.durationMs));
   return parts.join(" · ");
 }

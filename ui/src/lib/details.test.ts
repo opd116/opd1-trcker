@@ -1,5 +1,5 @@
 // Player Details and Match Details helpers (spec §6, Task 18). Pure functions; the screens only render them.
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   CONTENT_TIERS,
   halvesText,
@@ -7,6 +7,7 @@ import {
   pmText,
   queueLabel,
   recentShown,
+  rowKeydown,
   shortName,
   teamLabel,
   weaponState,
@@ -257,5 +258,29 @@ describe("CONTENT_TIERS (spec §6.8)", () => {
       "e046854e-406c-37f4-6607-19a9ba8426fc": { name: "Exclusive", color: "#f5955b" },
       "411e4a55-4e59-7757-41f0-86a53f101bb5": { name: "Ultra", color: "#fad663" },
     });
+  });
+});
+
+describe("rowKeydown (Recent and Encounters rows, one handler for both)", () => {
+  const key = (k: string) => ({ key: k, preventDefault: vi.fn() }) as unknown as KeyboardEvent & { preventDefault: ReturnType<typeof vi.fn> };
+
+  it("Enter and Space open the row as a click does, and keep the key from scrolling the page", () => {
+    for (const k of ["Enter", " "]) {
+      const open = vi.fn();
+      const e = key(k);
+      rowKeydown(open)(e);
+      expect(open, k).toHaveBeenCalledTimes(1);
+      expect(e.preventDefault, k).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("any other key does nothing", () => {
+    for (const k of ["Tab", "ArrowDown", "a", "Escape"]) {
+      const open = vi.fn();
+      const e = key(k);
+      rowKeydown(open)(e);
+      expect(open, k).not.toHaveBeenCalled();
+      expect(e.preventDefault, k).not.toHaveBeenCalled();
+    }
   });
 });

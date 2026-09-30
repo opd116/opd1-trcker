@@ -5,7 +5,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
-  import { shortName } from "../../lib/details";
+  import { rowKeydown, shortName } from "../../lib/details";
   import { dateShort, score } from "../../lib/format";
   import { isRankedTier, mapName, tierLabel } from "../../lib/meta";
   import { meta, now } from "../../lib/stores";
@@ -15,6 +15,7 @@
   import ChevronRight from "../icons/ChevronRight.svelte";
   import ResultChip from "../ResultChip.svelte";
   import Skel from "../Skel.svelte";
+  import Section from "./Section.svelte";
 
   interface Props {
     rows: EncounterDetailRow[];
@@ -26,12 +27,6 @@
   let { rows, name, onopen }: Props = $props();
 
   const short = $derived(name === undefined ? undefined : name === null ? "—" : shortName(name, $meta));
-
-  function onkeydown(e: KeyboardEvent, matchId: string) {
-    if (e.key !== "Enter" && e.key !== " ") return;
-    e.preventDefault();
-    onopen(matchId);
-  }
 </script>
 
 {#snippet side(agentId: string | null, tier: number | null)}
@@ -44,51 +39,31 @@
   </div>
 {/snippet}
 
-<section class="sec encs">
-  <div class="sech">Encounters</div>
-  <div class="panel">
-    <div class="ehead">
-      <span>Map</span><span class="ename" data-ellipsis>{#if short === undefined}<Skel w={60} h={10} />{:else}{short}{/if}</span><span
-      ></span><span>You</span><span>Your result</span><span></span>
-    </div>
-    {#each rows as e (e.matchId)}
-      {@const map = mapName($meta, e.mapId)}
-      <div class="erow" role="button" tabindex="0" onclick={() => onopen(e.matchId)} onkeydown={(ev) => onkeydown(ev, e.matchId)}>
-        <div class="emap" use:tip={encounterMapTip(e, $now)}>
-          {#if e.mapId}<img class="mimg" src={assetUrl("mapList", e.mapId)} alt="" />{:else}<div class="mimg"></div>{/if}
-          <div class="mcol">
-            <span class={["mname", map === null && "dash"]}>{#if map === undefined}<Skel w={60} h={10} />{:else}{map ?? "—"}{/if}</span>
-            <span class="date">{dateShort(e.startMs, $now)}</span>
-          </div>
-        </div>
-        {@render side(e.themAgentId, e.themTier)}
-        <span class="eside">{e.with ? "With" : "Against"}</span>
-        {@render side(e.selfAgentId, e.selfTier)}
-        <div class="eres"><ResultChip result={e.result} size={20} /><span class="sc">{score(e.roundsWon, e.roundsLost)}</span></div>
-        <ChevronRight />
-      </div>
-    {/each}
+<Section title="Encounters" name="encs">
+  <div class="ehead">
+    <span>Map</span><span class="ename" data-ellipsis>{#if short === undefined}<Skel w={60} h={10} />{:else}{short}{/if}</span><span
+    ></span><span>You</span><span>Your result</span><span></span>
   </div>
-</section>
+  {#each rows as e (e.matchId)}
+    {@const map = mapName($meta, e.mapId)}
+    <div class="erow" role="button" tabindex="0" onclick={() => onopen(e.matchId)} onkeydown={rowKeydown(() => onopen(e.matchId))}>
+      <div class="emap" use:tip={encounterMapTip(e, $now)}>
+        {#if e.mapId}<img class="mimg" src={assetUrl("mapList", e.mapId)} alt="" />{:else}<div class="mimg"></div>{/if}
+        <div class="mcol">
+          <span class="mname">{#if map === undefined}<Skel w={60} h={10} />{:else}{map ?? "—"}{/if}</span>
+          <span class="date">{dateShort(e.startMs, $now)}</span>
+        </div>
+      </div>
+      {@render side(e.themAgentId, e.themTier)}
+      <span class="eside">{e.with ? "With" : "Against"}</span>
+      {@render side(e.selfAgentId, e.selfTier)}
+      <div class="eres"><ResultChip result={e.result} size={20} /><span class="sc">{score(e.roundsWon, e.roundsLost)}</span></div>
+      <ChevronRight />
+    </div>
+  {/each}
+</Section>
 
 <style>
-  .sec {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .sech {
-    font-size: 14px;
-    font-weight: 600;
-  }
-
-  .panel {
-    background: var(--card);
-    border-radius: 8px;
-    overflow: hidden;
-  }
-
   .ehead,
   .erow {
     display: grid;
@@ -154,10 +129,6 @@
     font-size: 14px;
     font-weight: 600;
     white-space: nowrap;
-  }
-
-  .mname.dash {
-    color: var(--text2);
   }
 
   .date {

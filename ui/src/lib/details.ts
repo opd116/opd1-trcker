@@ -33,6 +33,15 @@ export function shortName(n: DisplayName, meta: Meta | null): string | undefined
   }
 }
 
+/** A row that opens its match (Recent, Encounters): Enter or Space does what a click does, without scrolling the page. */
+export function rowKeydown(open: () => void): (e: KeyboardEvent) => void {
+  return (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    open();
+  };
+}
+
 /** A loadout weapon's tri-state (R97): absent = its skin name is still resolving, null = none or unknown. */
 export function weaponState(w: WeaponSkin | null | undefined): "loading" | "none" | WeaponSkin {
   if (w === undefined) return "loading";

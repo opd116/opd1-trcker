@@ -33,7 +33,7 @@ export type DesignProps = {
 };
 
 /** A user click inside the design: click, park the pointer at (5,5), wait 600ms (its tooltip timer is 450ms). */
-export type DesignStep = "mara" | "more" | "recent" | "encounter";
+export type DesignStep = "mara" | "cypher" | "more" | "recent" | "encounter";
 
 /** `OPD1_DESIGN_DIR`, else walk up from ui/ to `.superpowers/design/cd-v8/project`. null when absent. */
 export function findDesignDir(): string | null {
@@ -144,6 +144,10 @@ async function clickStep(page: Page, step: DesignStep): Promise<void> {
     case "mara":
       // The only pointer div holding Mara's Riot ID is her card (the template's whitespace sits between name and tag).
       await app.locator("div[style*='cursor: pointer']").filter({ hasText: /Mara\s*#7788/ }).click();
+      break;
+    case "cypher":
+      // Cypher is hidden (v8:466): his card's name is the italic agent name, the only `Cypher` text on In Game.
+      await app.locator("div[style*='cursor: pointer']").filter({ has: page.getByText("Cypher", { exact: true }) }).click();
       break;
     case "more":
       await app.getByText("Show more", { exact: true }).click();

@@ -71,10 +71,15 @@ export function kd2(ratio: Num): string {
   return ratio.toFixed(2);
 }
 
+/** The word for `n` of it: "game" for 1, "games" otherwise. */
+export function plural(n: number, word: string): string {
+  return n === 1 ? word : `${word}s`;
+}
+
 /** "1 game", "0 games", "3 ranked players". */
 export function count(n: Num, word: string): string {
   if (!ok(n)) return DASH;
-  return n === 1 ? `${n} ${word}` : `${n} ${word}s`;
+  return `${n} ${plural(n, word)}`;
 }
 
 /** "13–9". */

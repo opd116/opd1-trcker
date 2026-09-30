@@ -7,6 +7,7 @@
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
   import { ago, kd2, pct0, score } from "../../lib/format";
+  import { rowKeydown } from "../../lib/details";
   import { isRankedTier, mapName } from "../../lib/meta";
   import { meta, now } from "../../lib/stores";
   import { rankTip, recentTimeTip } from "../../lib/tips";
@@ -15,6 +16,7 @@
   import ChevronRight from "../icons/ChevronRight.svelte";
   import ResultChip from "../ResultChip.svelte";
   import Skel from "../Skel.svelte";
+  import Section from "./Section.svelte";
   import ShowMore from "./ShowMore.svelte";
 
   interface Props {
@@ -26,77 +28,54 @@
   let { rows, showMore, onopen }: Props = $props();
 
   const num = (n: number | null) => (n === null ? "—" : String(n));
-
-  function onkeydown(e: KeyboardEvent, matchId: string) {
-    if (e.key !== "Enter" && e.key !== " ") return;
-    e.preventDefault();
-    onopen(matchId);
-  }
 </script>
 
-<section class="sec recent">
-  <div class="sech">Recent Competitive Matches</div>
-  <div class="panel">
-    <div class="rhead">
-      <span>Map</span><span></span><span></span><span>Score</span><span class="c">K / D / A</span><span class="r">K/D</span><span class="r">HS%</span><span></span>
-    </div>
-    {#if rows === null}
-      {#each [0, 1, 2] as i (i)}
-        <div class="rrow sk-row" aria-hidden="true">
-          <div class="rmap"><Skel w={64} h={36} r={4} block /><Skel w={90} h={13} block /></div>
-        </div>
-      {/each}
-    {:else if rows.length === 0}
-      <div class="rrow none"><span class="nodash">—</span></div>
-    {:else}
-      {#each rows as m (m.matchId)}
-        {@const map = mapName($meta, m.mapId)}
-        <div class="rrow" role="button" tabindex="0" onclick={() => onopen(m.matchId)} onkeydown={(e) => onkeydown(e, m.matchId)}>
-          <div class="rmap">
-            {#if m.mapId}<img class="mimg" src={assetUrl("mapList", m.mapId)} alt="" />{:else}<div class="mimg mbox"></div>{/if}
-            <div class="mcol">
-              <span class={["mname", !map && map !== undefined && "dash"]} data-ellipsis
-                >{#if map === undefined}<Skel w={60} h={10} />{:else}{map ?? "—"}{/if}</span
-              >
-              <span class="ago" use:tip={recentTimeTip(m.startMs)}>{ago(m.startMs, $now)}</span>
-            </div>
-          </div>
-          {#if m.agentId}<img class="ragent" src={assetUrl("agent", m.agentId)} alt="" />{:else}<div class="ragent"></div>{/if}
-          {#if isRankedTier(m.tier)}
-            <img class="rrank" src={assetUrl("tier", m.tier)} alt="" use:tip={rankTip($meta, m.tier)} />
-          {:else}
-            <div class="rrank"></div>
-          {/if}
-          <div class="rscore"><ResultChip result={m.result} size={20} /><span class="sc">{score(m.roundsWon, m.roundsLost)}</span></div>
-          <div class="kda"><span class="r">{num(m.kills)}</span><span class="sl">/</span><span class="c">{num(m.deaths)}</span><span class="sl">/</span><span>{num(m.assists)}</span></div>
-          <span class="rkd">{kd2(m.kd)}</span>
-          <span class="rhs">{pct0(m.hsPct)}</span>
-          <ChevronRight />
-        </div>
-      {/each}
-    {/if}
-  </div>
+{#snippet more()}
   {#if showMore}<ShowMore />{/if}
-</section>
+{/snippet}
+
+<Section title="Recent Competitive Matches" name="recent" after={more}>
+  <div class="rhead">
+    <span>Map</span><span></span><span></span><span>Score</span><span class="c">K / D / A</span><span class="r">K/D</span><span class="r">HS%</span><span></span>
+  </div>
+  {#if rows === null}
+    {#each [0, 1, 2] as i (i)}
+      <div class="rrow sk-row" aria-hidden="true">
+        <div class="rmap"><Skel w={64} h={36} r={4} block /><Skel w={90} h={13} block /></div>
+      </div>
+    {/each}
+  {:else if rows.length === 0}
+    <div class="rrow none"><span class="nodash">—</span></div>
+  {:else}
+    {#each rows as m (m.matchId)}
+      {@const map = mapName($meta, m.mapId)}
+      <div class="rrow" role="button" tabindex="0" onclick={() => onopen(m.matchId)} onkeydown={rowKeydown(() => onopen(m.matchId))}>
+        <div class="rmap">
+          {#if m.mapId}<img class="mimg" src={assetUrl("mapList", m.mapId)} alt="" />{:else}<div class="mimg mbox"></div>{/if}
+          <div class="mcol">
+            <span class="mname" data-ellipsis
+              >{#if map === undefined}<Skel w={60} h={10} />{:else}{map ?? "—"}{/if}</span
+            >
+            <span class="ago" use:tip={recentTimeTip(m.startMs)}>{ago(m.startMs, $now)}</span>
+          </div>
+        </div>
+        {#if m.agentId}<img class="ragent" src={assetUrl("agent", m.agentId)} alt="" />{:else}<div class="ragent"></div>{/if}
+        {#if isRankedTier(m.tier)}
+          <img class="rrank" src={assetUrl("tier", m.tier)} alt="" use:tip={rankTip($meta, m.tier)} />
+        {:else}
+          <div class="rrank"></div>
+        {/if}
+        <div class="rscore"><ResultChip result={m.result} size={20} /><span class="sc">{score(m.roundsWon, m.roundsLost)}</span></div>
+        <div class="kda"><span class="r">{num(m.kills)}</span><span class="sl">/</span><span class="c">{num(m.deaths)}</span><span class="sl">/</span><span>{num(m.assists)}</span></div>
+        <span class="rkd">{kd2(m.kd)}</span>
+        <span class="rhs">{pct0(m.hsPct)}</span>
+        <ChevronRight />
+      </div>
+    {/each}
+  {/if}
+</Section>
 
 <style>
-  .sec {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .sech {
-    font-size: 14px;
-    font-weight: 600;
-  }
-
-  .panel {
-    background: var(--card);
-    border-radius: 8px;
-    overflow: hidden;
-  }
-
   .rhead,
   .rrow {
     display: grid;
@@ -182,10 +161,6 @@
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-  }
-
-  .mname.dash {
-    color: var(--text2);
   }
 
   .ago {

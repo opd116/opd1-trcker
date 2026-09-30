@@ -1,4 +1,5 @@
 // Routes and navigation (spec §2.4). One `$state` object; every navigation goes through `go`.
+import { openDetails } from "./boot";
 import type { MatchFrom } from "./details";
 import { hideTip } from "./tooltip.svelte";
 import type { Stage } from "./types";
@@ -31,10 +32,14 @@ export function scrollHost(node: HTMLElement): { destroy(): void } {
   };
 }
 
-/** Navigate: clears the tooltip and resets the scroll container. */
+/**
+ * Navigate: clears the tooltip and resets the scroll container. Going to Live also forgets the open Player Details
+ * (a Match page and Back keep them): a reopen then starts from the skeleton, never from an older answer.
+ */
 export function go(r: Route): void {
   hideTip();
   if (scroller) scroller.scrollTop = 0;
+  if (r.name === "live") openDetails.close();
   router.route = r;
 }
 

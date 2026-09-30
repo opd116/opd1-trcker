@@ -1,5 +1,8 @@
+import { get } from "svelte/store";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { openDetails } from "./boot";
 import { back, go, onStage, router, scrollHost, showMore, type Route } from "./router.svelte";
+import type { PlayerDetails } from "./types";
 import { hideTip, tipOver, tipState } from "./tooltip.svelte";
 
 const LIVE: Route = { name: "live" };
@@ -58,6 +61,24 @@ describe("router", () => {
     expect(router.route).toEqual(LIVE);
     back();
     expect(router.route).toEqual(LIVE);
+  });
+
+  it("leaving for Live forgets the open details; Match and Back keep them (Task 18 review, Minor 1)", async () => {
+    const mara = { card: { puuid: "p1" } } as unknown as PlayerDetails;
+    go(details("p1"));
+    await openDetails.open("p1", async () => mara);
+    go({ name: "match", matchId: "m1", focusPuuid: "p1", from: "recent", back: { puuid: "p1", more: false } });
+    expect(get(openDetails)).toBe(mara);
+    back();
+    expect(get(openDetails)).toBe(mara); // Back from Match shows them at once
+    back(); // Details → Live
+    expect(get(openDetails)).toBeNull();
+    // Entering Agent Select from a Match page forgets them too.
+    go(details("p1"));
+    await openDetails.open("p1", async () => mara);
+    go({ name: "match", matchId: "m1", focusPuuid: "p1", from: "recent", back: { puuid: "p1", more: false } });
+    onStage("menus", "pregame");
+    expect(get(openDetails)).toBeNull();
   });
 
   it("showMore only applies to details", () => {

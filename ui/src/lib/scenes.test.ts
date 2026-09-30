@@ -1,5 +1,7 @@
 /// <reference types="node" />
 import { readFileSync, readdirSync } from "node:fs";
+import { basename } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { writable } from "svelte/store";
 import demoMeta from "./demo/meta.json";
@@ -93,7 +95,7 @@ describe("registry", () => {
       }
       for (const m of Object.values(s.matches ?? {})) {
         if (m === "pending") continue;
-        maps.add(m.mapId);
+        if (m.mapId) maps.add(m.mapId); // "" (unknown) as above: the nostats Against encounter's match
         m.teams.forEach((t) =>
           t.players.forEach((p) => {
             if (p.agentId) agents.add(p.agentId);
@@ -340,15 +342,18 @@ describe("details scenes", () => {
     expect(SCENES["details-loading"].details![r.puuid]).toBe("pending");
   });
 
-  it("details-longnames: W names, three W teammates with one live, long skin lines", () => {
+  it("details-longnames: W names; Top 3 = a live W teammate, a long remembered name and a hidden agent; long skin lines", () => {
     const r = routeOf("details-longnames", "details");
     const d = detailsOf("details-longnames", r.puuid);
     expect(d.card.name).toMatchObject({ kind: "visible", name: W16, tag: "WWWWW" });
     expect(d.encounters.length).toBeGreaterThan(0);
     expect(d.topTeammates).toHaveLength(3);
-    for (const t of d.topTeammates) expect(t.name).toMatchObject({ kind: "visible", name: W16 });
+    // Task 18 review, Minor 4: the Top 3 hidden variants (spec §6.7) at their widest.
+    expect(d.topTeammates.map((t) => t.name.kind)).toEqual(["visible", "remembered", "hiddenAgent"]);
+    for (const t of d.topTeammates.slice(0, 2)) expect(t.name).toMatchObject({ name: W16 });
     const live = players("details-longnames");
     expect(d.topTeammates.filter((t) => live.some((c) => c.puuid === t.puuid && c.name?.kind === "visible"))).toHaveLength(1);
+    expect(d.topTeammates.filter((t) => live.some((c) => c.puuid === t.puuid))).toHaveLength(1); // the hidden two are off the live screen
     for (const w of ["vandal", "phantom", "operator", "sheriff"] as const) {
       expect(d.loadout[w]).toMatchObject({ skinName: "Protocol 781-A", chromaName: "Sunrise" });
     }
@@ -383,6 +388,23 @@ describe("details scenes", () => {
     expect(d.loadout).toEqual({ vandal: null, phantom: null, operator: null, sheriff: null });
     // Every row opens a match the scene can serve.
     for (const id of [d.recent[0]!.matchId, ...d.encounters.map((e) => e.matchId)]) expect(SCENES["details-nostats"].matches?.[id]).toBeDefined();
+  });
+
+  it("details-nostats: each encounter row agrees with the match it opens (side, result, rounds, map, start) (Task 18 review, Minor 10)", () => {
+    const r = routeOf("details-nostats", "details");
+    const d = detailsOf("details-nostats", r.puuid);
+    expect(d.encounters.map((e) => e.with)).toEqual([false, true]); // one Against, one With
+    for (const e of d.encounters) {
+      const m = SCENES["details-nostats"].matches![e.matchId] as MatchDetailsView;
+      const [us, them] = m.teams as [MatchDetailsView["teams"][0], MatchDetailsView["teams"][0]];
+      expect(m.perspective, e.matchId).toBe("self");
+      expect(us.players.some((p) => p.isSelf), `${e.matchId}: the user is in team 0`).toBe(true);
+      expect(us.players.some((p) => p.isFocus), `${e.matchId}: ${e.with ? "With" : "Against"}`).toBe(e.with);
+      expect(them.players.some((p) => p.isFocus), `${e.matchId}: focus on the other team when Against`).toBe(!e.with);
+      expect([us.result, us.roundsWon, them.roundsWon], `${e.matchId}: the user's result and score`).toEqual([e.result, e.roundsWon, e.roundsLost]);
+      expect(them.result).toBe(({ win: "loss", loss: "win", draw: "draw" } as const)[e.result]);
+      expect([m.mapId, m.startMs, m.durationMs], `${e.matchId}: map, start, duration`).toEqual([e.mapId, e.startMs, e.durationMs]);
+    }
   });
 
   it("loadout skins carry chroma, name and tier", () => {
@@ -516,18 +538,21 @@ describe("resolvers (DEV api)", () => {
     // pregame: Nova is a hidden player who has not locked. Her own recent match must not print `Nova#3341`.
     const nova = PUUID.nova!;
     expect(players("pregame").find((c) => c.puuid === nova)?.name).toEqual({ kind: "hiddenPlayer" });
+    // As the backend sends it (matchview.rs `hidden_style`, R93): the row's own agent, never `hiddenPlayer` in a match row.
     const hidden = await resolveMatch("pregame", recentMatchId("nova", 0), nova);
-    expect(rowOf(hidden, nova).name).toEqual({ kind: "hiddenPlayer" });
+    expect(rowOf(hidden, nova).name).toEqual({ kind: "hiddenAgent", agentId: rowOf(hidden, nova).agentId });
+    expect(rowOf(hidden, nova).agentId).toBeTruthy();
     expect(JSON.stringify(hidden)).not.toMatch(/Nova|3341/);
     // The same match where she is visible keeps her name.
     expect(rowOf(await resolveMatch("ingame", recentMatchId("nova", 0), nova), nova).name).toEqual({
       kind: "visible", name: "Nova", tag: "3341",
     });
-    // Cypher (hiddenAgent) and Rook (remembered) show as their live cards do.
+    // Cypher (hiddenAgent) shows as the agent he played in that match; Rook (remembered) by his remembered name.
     const cypher = PUUID.cypher!;
     const rook = PUUID.rook!;
     const live = (id: string) => players("ingame").find((c) => c.puuid === id)!.name;
-    expect(rowOf(await resolveMatch("ingame", recentMatchId("cypher", 0), cypher), cypher).name).toEqual(live(cypher));
+    const cy = rowOf(await resolveMatch("ingame", recentMatchId("cypher", 0), cypher), cypher);
+    expect(cy.name).toEqual({ kind: "hiddenAgent", agentId: cy.agentId });
     expect(rowOf(await resolveMatch("ingame", recentMatchId("rook", 0), rook), rook).name).toEqual(live(rook));
   });
 
@@ -535,11 +560,12 @@ describe("resolvers (DEV api)", () => {
     const kilo = PUUID.kilo!;
     const live = roster();
     live.find((c) => c.puuid === kilo)!.name = { kind: "hiddenAgent", agentId: "hidden-agent-id" };
-    // Kilo is on Mara's team in her recent match, and is her top teammate.
+    // Kilo is on Mara's team in her recent match, and is her top teammate. A match row takes the agent of that row
+    // (matchview.rs `hidden_style`), not the live card's.
     const m = matchFor(recentMatchId("mara", 0), live);
-    expect(m.teams.flatMap((t) => t.players).find((p) => p.puuid === kilo)?.name).toEqual({
-      kind: "hiddenAgent", agentId: "hidden-agent-id",
-    });
+    const kiloRow = m.teams.flatMap((t) => t.players).find((p) => p.puuid === kilo)!;
+    expect(kiloRow.name).toEqual({ kind: "hiddenAgent", agentId: kiloRow.agentId });
+    expect(kiloRow.agentId).not.toBe("hidden-agent-id");
     expect(JSON.stringify(m)).not.toContain("Kilo");
     const d = detailsFor("mara", undefined, live);
     expect(d.topTeammates[0]).toMatchObject({ puuid: kilo, count: 14, name: { kind: "hiddenAgent", agentId: "hidden-agent-id" } });
@@ -548,7 +574,11 @@ describe("resolvers (DEV api)", () => {
     live.find((c) => c.puuid === PUUID.mara)!.name = { kind: "hiddenAgent", agentId: "hidden-agent-id" };
     const dm = matchFor("mdemo:mara:dm", live);
     expect(dm.queueId).toBe("deathmatch");
-    expect(dm.teams[0]!.players.find((p) => p.isFocus)?.name).toEqual({ kind: "hiddenAgent", agentId: "hidden-agent-id" });
+    const focus = dm.teams[0]!.players.find((p) => p.isFocus)!;
+    expect(focus.name).toEqual({ kind: "hiddenAgent", agentId: focus.agentId });
+    // A remembered live name stays remembered in the match row.
+    live.find((c) => c.puuid === kilo)!.name = { kind: "remembered", name: "Kilo", tag: "2210", fromMapId: null, fromStartMs: null };
+    expect(matchFor(recentMatchId("mara", 0), live).teams.flatMap((t) => t.players).find((p) => p.puuid === kilo)?.name).toMatchObject({ kind: "remembered" });
     // Without live cards the rows are the roster's own.
     expect(detailsFor("mara").topTeammates[0]!.name).toMatchObject({ kind: "visible", name: "Kilo" });
     expect(JSON.stringify(matchFor(recentMatchId("mara", 0)))).toContain("Kilo");
@@ -706,13 +736,14 @@ describe("hygiene", () => {
 
   it("the demo roster names live only in demo/cdv8.ts (they must never reach dist)", () => {
     const dir = new URL("./", import.meta.url);
+    // Real file paths (fileURLToPath), never a URL's pathname: that is `/D:/…` on Windows, and fs cannot open it.
     const walk = (u: URL): string[] =>
       readdirSync(u, { withFileTypes: true }).flatMap((e) =>
-        e.isDirectory() ? walk(new URL(`${e.name}/`, u)) : [new URL(e.name, u).pathname],
+        e.isDirectory() ? walk(new URL(`${e.name}/`, u)) : [fileURLToPath(new URL(e.name, u))],
       );
     const hits = walk(new URL("../", dir))
       .filter((f) => /\.(ts|svelte)$/.test(f) && !f.endsWith(".test.ts"))
       .filter((f) => /VesperUnbreakabl|Vantablack/.test(readFileSync(f, "utf8")));
-    expect(hits.map((h) => h.split("/").pop())).toEqual(["cdv8.ts"]);
+    expect(hits.map((h) => basename(h))).toEqual(["cdv8.ts"]);
   });
 });

@@ -51,13 +51,16 @@
   {:else if name.kind === "visible"}
     <span class="n" data-ellipsis={ellipsis}>{name.name}</span><span class="t">#{name.tag}</span>
   {:else if name.kind === "remembered"}
-    <EyeOff size={eye} /><span class="n rem" data-ellipsis={ellipsis}>{name.name}</span><span class="t">#{name.tag}</span>
+    <!-- `wrap`: the eye rides inside the name, so it stays on the name's first line when the name wraps. -->
+    {#if !wrap}<EyeOff size={eye} />{/if}<span class={["n rem", wrap && "eyed"]} data-ellipsis={ellipsis}
+      >{#if wrap}<span class="eye"><EyeOff size={eye} /></span>{/if}{name.name}</span
+    ><span class="t">#{name.tag}</span>
   {:else}
-    <EyeOff size={eye} />
+    {#if !wrap || hidden === undefined}<EyeOff size={eye} />{/if}
     {#if hidden === undefined}
       <span class="line"><Skel w={120} h={13} /></span>
     {:else}
-      <span class="hid">{hidden ?? "—"}</span>
+      <span class={["hid", wrap && "eyed"]}>{#if wrap}<span class="eye"><EyeOff size={eye} /></span>{/if}{hidden ?? "—"}</span>
     {/if}
   {/if}
 </div>
@@ -174,8 +177,34 @@
     overflow-wrap: anywhere;
   }
 
-  /* A wrapping name has no clip box for the underline to escape. */
+  /* A wrapping name has no clip box for the underline to escape. [C] Its lines are 1.3 apart, not `normal`: the dotted
+     underline hangs 4px under each line, and at `normal` it touches the cap tops of the line below (Archivo at 150%). */
   .wrap .rem {
     overflow: visible;
+    line-height: 1.3;
+  }
+
+  /* Top 3 hidden variants (Task 18 review, Minor 4): the eye opens the name's first line and never sits alone above
+     it. The first line is indented by the eye and the row's 5px gap, and the eye is laid in that indent, centred on
+     the line as the flex row centres it. Out of the text flow it is no break opportunity (an inline icon is one, so
+     a long name would break right after it) and takes no underline. */
+  .wrap .hid {
+    white-space: normal;
+    overflow: visible;
+    overflow-wrap: anywhere;
+  }
+
+  .eyed {
+    position: relative;
+    text-indent: 19px;
+  }
+
+  .eye {
+    position: absolute;
+    left: 0;
+    top: 0;
+    display: flex;
+    align-items: center;
+    height: 1lh;
   }
 </style>

@@ -13,6 +13,7 @@ import {
   level,
   pct0,
   peakLabel,
+  plural,
   rr,
   rrDelta,
   score,
@@ -110,6 +111,14 @@ describe("pct0, kd2, count, score", () => {
     expect(count(53, "game")).toBe("53 games");
     expect(count(1, "ranked player")).toBe("1 ranked player");
     expect(count(3, "ranked player")).toBe("3 ranked players");
+  });
+
+  it("plural is the word alone, as count spells it (Top 3 draws the number in its own span)", () => {
+    expect(plural(1, "game")).toBe("game");
+    expect(plural(0, "game")).toBe("games");
+    expect(plural(14, "game")).toBe("games");
+    expect(plural(3, "ranked player")).toBe("ranked players");
+    for (const n of [0, 1, 2, 53]) expect(count(n, "game")).toBe(`${n} ${plural(n, "game")}`);
   });
 
   it("score joins two numbers with U+2013", () => {

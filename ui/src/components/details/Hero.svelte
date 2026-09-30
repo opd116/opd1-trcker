@@ -36,16 +36,17 @@
     return { w, l: w !== null && g !== null ? g - w : null };
   });
 
-  type Stat = { label: string; loading: boolean; text: string; tip: string };
+  /** A stats-strip cell: `plain` prints `text`; `wl` is the W / L pair, drawn from `wl` in its win and loss colours. */
+  type Stat = { label: string; loading: boolean; tip: string } & ({ kind: "plain"; text: string } | { kind: "wl" });
   const stats: Stat[] = $derived.by(() => {
     if (!details || !card) return [];
     const n = details.heroMatches;
     return [
-      { label: "K/D", loading: false, text: kd2(details.heroKd), tip: heroStatTip(details.heroKd, n) },
-      { label: "HS%", loading: false, text: pct0(details.heroHs), tip: heroStatTip(details.heroHs, n) },
-      { label: "Win%", loading: card.actWinrate === undefined, text: pct0(card.actWinrate), tip: winTip(card) },
-      { label: "Games", loading: card.actGames === undefined, text: level(card.actGames), tip: actScopeTip(card.actGames) },
-      { label: "W / L", loading: wl === undefined, text: "", tip: wl === undefined ? "" : actScopeTip(card.actGames) },
+      { kind: "plain", label: "K/D", loading: false, text: kd2(details.heroKd), tip: heroStatTip(details.heroKd, n) },
+      { kind: "plain", label: "HS%", loading: false, text: pct0(details.heroHs), tip: heroStatTip(details.heroHs, n) },
+      { kind: "plain", label: "Win%", loading: card.actWinrate === undefined, text: pct0(card.actWinrate), tip: winTip(card) },
+      { kind: "plain", label: "Games", loading: card.actGames === undefined, text: level(card.actGames), tip: actScopeTip(card.actGames) },
+      { kind: "wl", label: "W / L", loading: wl === undefined, tip: wl === undefined ? "" : actScopeTip(card.actGames) },
     ];
   });
 </script>
@@ -132,8 +133,8 @@
             <span class="k">{s.label}</span>
             {#if s.loading}
               <Skel w={44} h={27} block />
-            {:else if s.label === "W / L" && wl}
-              <span class="v"><span class="w">{wl.w ?? "—"}</span><span class="sep">{" / "}</span><span class="l">{wl.l ?? "—"}</span></span>
+            {:else if s.kind === "wl"}
+              <span class="v"><span class="w">{wl?.w ?? "—"}</span><span class="sep">{" / "}</span><span class="l">{wl?.l ?? "—"}</span></span>
             {:else}
               <span class="v">{s.text}</span>
             {/if}
@@ -154,8 +155,9 @@
       <div class="hprev"><Skel w={24} h={24} r="50%" block /><Skel w={90} h={13} block /></div>
     </div>
     <div class="hstats">
+      <!-- Each cell keeps the 14px label line (empty: no text while loading), so the hero is as tall as when loaded. -->
       {#each [0, 1, 2, 3, 4] as i (i)}
-        <div class="hstat"><Skel w={44} h={27} block /></div>
+        <div class="hstat"><div class="hcol"><span class="klane"></span><Skel w={44} h={27} block /></div></div>
       {/each}
       <div class="hl5"><Skel w={154} h={26} r={4} block /></div>
     </div>
@@ -385,6 +387,11 @@
     line-height: 14px;
     font-weight: 500;
     color: var(--text2);
+  }
+
+  /* The skeleton's empty label line: the loaded label's 14px line box. */
+  .klane {
+    height: 14px;
   }
 
   .hcol .v {

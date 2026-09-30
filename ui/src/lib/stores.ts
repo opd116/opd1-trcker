@@ -1,7 +1,7 @@
 import { isTauri } from "@tauri-apps/api/core";
 import { readable, writable } from "svelte/store";
 import { tauriBridge } from "./api";
-import { applyDetailsEvent, loadMeta, startLive } from "./boot";
+import { loadMeta, openDetails, startLive } from "./boot";
 import { onStage } from "./router.svelte";
 import type { LiveState, Meta, PlayerDetails, Stage } from "./types";
 
@@ -11,8 +11,8 @@ export const live = writable<LiveState | null>(null);
 /** Names and colors for agents, maps and tiers (`invoke("meta")`). null = still pending (spec §5.8). */
 export const meta = writable<Meta | null>(null);
 
-/** The Player Details currently open (set by the Details screen; a `details` event replaces it in place). */
-export const openDetails = writable<PlayerDetails | null>(null);
+/** The Player Details currently open (boot.ts: Details opens it, a `details` event replaces it, Live closes it). */
+export { openDetails };
 
 /** Wall clock for "time since" labels; one tick every 30s is plenty. */
 export const now = readable(Date.now(), (set) => {
@@ -60,7 +60,7 @@ export async function startFeeds(): Promise<void> {
   await Promise.all([
     startLive(tauriBridge, applyLive).catch(failed("live feed")),
     tauriBridge
-      .listen<PlayerDetails>("details", (e) => openDetails.update((open) => applyDetailsEvent(open, e.payload)))
+      .listen<PlayerDetails>("details", (e) => openDetails.event(e.payload))
       .catch(failed("details listener")),
   ]);
 }

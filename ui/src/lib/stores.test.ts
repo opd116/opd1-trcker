@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
-import type { LiveState, Meta } from "./types";
+import type { LiveState, Meta, PlayerDetails } from "./types";
 
 const state = (stage: LiveState["stage"]): LiveState => ({ stage, mapId: null, players: [] });
 
@@ -75,12 +75,29 @@ describe("stores", () => {
         }
         throw new Error(`unexpected ${cmd}`);
       });
-      const listen = vi.fn(async () => () => {});
+      const handlers = new Map<string, (e: { payload: unknown }) => void>();
+      const listen = vi.fn(async (ev: string, cb: (e: { payload: unknown }) => void) => {
+        handlers.set(ev, cb);
+        return () => {};
+      });
       vi.doMock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
       vi.doMock("./api", () => ({ tauriBridge: { invoke, listen } }));
       vi.spyOn(console, "error").mockImplementation(() => {});
-      return { ...(await load()), invoke, metaCalls: () => metaCalls };
+      const emit = (ev: string, payload: unknown) => handlers.get(ev)!({ payload });
+      return { ...(await load()), invoke, emit, metaCalls: () => metaCalls };
     }
+
+    it("a details event reaches the open-details slot and wins over the answer in flight (Task 18 review, Minor 2)", async () => {
+      const { startFeeds, openDetails, emit } = await underTauri(0);
+      await startFeeds();
+      const d = (marker: string) => ({ card: { puuid: "p1" }, marker }) as unknown as PlayerDetails;
+      let answer!: (v: PlayerDetails) => void;
+      const done = openDetails.open("p1", () => new Promise<PlayerDetails>((res) => (answer = res)));
+      emit("details", d("event"));
+      answer(d("snapshot"));
+      await done;
+      expect(get(openDetails)).toEqual(d("event"));
+    });
 
     it("a rejected meta() does not leave meta pending: EMPTY_META now, the real tables on a retry", async () => {
       vi.useFakeTimers();

@@ -319,6 +319,17 @@ function hiddenName(live: readonly PlayerCard[] | undefined, puuid: string): Dis
   return n && n.kind !== "visible" ? { ...n } : null;
 }
 
+/**
+ * R93 in a match row, as the backend builds it (matchview.rs `hidden_style`): a player hidden on the live screen shows
+ * by the remembered name when the live card has one, else as the agent of that row (else `Hidden Player`, for a row
+ * with no agent). Never the live card's `hiddenPlayer` or its live agent. null when the live cards do not hide them.
+ */
+function hiddenRowName(live: readonly PlayerCard[] | undefined, row: ScoreRow): DisplayName | null {
+  const n = hiddenName(live, row.puuid);
+  if (!n || n.kind === "remembered") return n;
+  return row.agentId ? { kind: "hiddenAgent", agentId: row.agentId } : { kind: "hiddenPlayer" };
+}
+
 function mates(r: Raw, live?: readonly PlayerCard[]): TeammateSummary[] {
   return (MATES[r.id] ?? MATES_DEFAULT).map(([name, tag, count]) => {
     const onRoster = ROSTER_RAW.find((x) => x.name === name && x.tag === tag);
@@ -415,7 +426,7 @@ const FAHAD_ROW: RowIn = {
  */
 export function matchFor(matchId: string, live?: readonly PlayerCard[]): MatchDetailsView {
   const view = buildMatch(matchId);
-  for (const t of view.teams) for (const p of t.players) p.name = hiddenName(live, p.puuid) ?? p.name;
+  for (const t of view.teams) for (const p of t.players) p.name = hiddenRowName(live, p) ?? p.name;
   return view;
 }
 

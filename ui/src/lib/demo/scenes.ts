@@ -169,10 +169,12 @@ function detailsLongnames(): Record<string, PlayerDetails> {
   const mara = longnames()[5]!;
   const d = detailsFor("mara", mara);
   const w = (tag: string) => ({ kind: "visible", name: LONGEST_NAME, tag }) as const;
+  // Spec §6.7's three name styles at their widest: a live visible teammate (the narrowest block), a remembered name
+  // (eye + 16 W's + tag, so it wraps), and a hidden agent (Task 18 review, Minor 4).
   d.topTeammates = [
     { puuid: PUUID.kilo!, name: w(LONGEST_TAG), count: 14 }, // on the live roster
-    { puuid: "d0000000-0000-4000-8000-000000000001", name: w("WWWWV"), count: 9 },
-    { puuid: "d0000000-0000-4000-8000-000000000002", name: w("WWWWU"), count: 6 },
+    { puuid: "d0000000-0000-4000-8000-000000000001", name: { kind: "remembered", name: LONGEST_NAME, tag: "WWWWV", ...REMEMBERED }, count: 9 },
+    { puuid: "d0000000-0000-4000-8000-000000000002", name: { kind: "hiddenAgent", agentId: AG.Brimstone }, count: 6 },
   ];
   const lo = loadout();
   for (const k of ["vandal", "phantom", "operator", "sheriff"] as const) {
@@ -222,6 +224,21 @@ const ZEPHYR = PUUID.zephyr!;
 const NOSTATS_MATCH = recentMatchId("zephyr", 0);
 const NOSTATS_ENCOUNTERS = [encounterMatchId("zephyr", 0), encounterMatchId("zephyr", 1)];
 
+/** Zephyr's two encounter rows (an Against draw with nothing known, a With win); the matches they open follow them. */
+function nostatsEncounters(): EncounterDetailRow[] {
+  const enc = (i: number, e: Omit<EncounterDetailRow, "matchId">): EncounterDetailRow => ({ matchId: NOSTATS_ENCOUNTERS[i]!, ...e });
+  return [
+    enc(0, {
+      mapId: "", startMs: Date.UTC(2026, 8, 12, 23, 18), with: false, result: "draw", roundsWon: null, roundsLost: null,
+      durationMs: null, themAgentId: null, themTier: null, selfAgentId: null, selfTier: null,
+    }),
+    enc(1, {
+      mapId: MAPS.Split, startMs: Date.UTC(2026, 7, 30, 22, 31), with: true, result: "win", roundsWon: 13, roundsLost: 10,
+      durationMs: null, themAgentId: AG.Viper, themTier: 0, selfAgentId: AG.Jett, selfTier: null,
+    }),
+  ];
+}
+
 /**
  * Details where every value that can be unknown is (R102, R124, R133): the hero's cells, the recent stat lines (one row
  * also with no map, score, agent or rank), the encounter ranks, scores, agents and durations, an empty Top 3 and a
@@ -237,17 +254,7 @@ function detailsNostats(): Record<string, PlayerDetails> {
     ...(i === 1 ? { mapId: "", roundsWon: null, roundsLost: null, agentId: null, tier: null } : {}),
     ...(i === 2 ? { tier: 0 } : {}), // unranked in that match: the empty box, like null
   }));
-  const enc = (i: number, e: Omit<EncounterDetailRow, "matchId">): EncounterDetailRow => ({ matchId: NOSTATS_ENCOUNTERS[i]!, ...e });
-  d.encounters = [
-    enc(0, {
-      mapId: "", startMs: Date.UTC(2026, 8, 12, 23, 18), with: false, result: "draw", roundsWon: null, roundsLost: null,
-      durationMs: null, themAgentId: null, themTier: null, selfAgentId: null, selfTier: null,
-    }),
-    enc(1, {
-      mapId: MAPS.Split, startMs: Date.UTC(2026, 7, 30, 22, 31), with: true, result: "win", roundsWon: 13, roundsLost: 10,
-      durationMs: null, themAgentId: AG.Viper, themTier: 0, selfAgentId: AG.Jett, selfTier: null,
-    }),
-  ];
+  d.encounters = nostatsEncounters();
   d.topTeammates = [];
   d.loadout = { vandal: null, phantom: null, operator: null, sheriff: null };
   d.heroKd = null;
@@ -258,12 +265,15 @@ function detailsNostats(): Record<string, PlayerDetails> {
 
 const byAcsDesc = (x: ScoreRow, y: ScoreRow) => (y.acs ?? -1) - (x.acs ?? -1);
 
+const OPPOSITE = { win: "loss", loss: "win", draw: "draw" } as const;
+
 /**
  * Zephyr's recent match with every scoreboard `—` (R124, R133): no duration, no rounds and no halves, and rows with no
  * stats row whose rank still shows (R81), one with no rank and no agent either, one that lost only its damage (ADR).
- * `self`: the user played it (the encounter rows), so team 0 holds the user's own row.
+ * With an encounter row `enc`, it is that row's match, which the user played: the self perspective, team 0 the user's
+ * (Zephyr's team for With, the other for Against), and the row's result, score, map, start and duration.
  */
-function matchNostats(matchId: string, perspective: "focus" | "self"): MatchDetailsView {
+function matchNostats(matchId: string, enc?: EncounterDetailRow): MatchDetailsView {
   const m = matchFor(NOSTATS_MATCH, unrankedLive.players);
   m.matchId = matchId;
   m.durationMs = null;
@@ -280,10 +290,17 @@ function matchNostats(matchId: string, perspective: "focus" | "self"): MatchDeta
   Object.assign(mate2!, { adr: null }); // only the damage is unknown
   Object.assign(b.players.find((p) => p.name.kind === "hiddenAgent")!, none);
   Object.assign(b.players.find((p) => p.name.kind === "visible")!, none, { tier: 0 });
-  if (perspective === "self") {
+  if (enc) {
     m.perspective = "self";
     const self = roster().find((c) => c.isSelf)!;
-    Object.assign(mate0!, { puuid: self.puuid, name: structuredClone(self.name!), isSelf: true });
+    // With: a teammate's row becomes the user's. Against: an opponent's that still has its stats.
+    const host = enc.with ? mate0! : b.players.find((p) => p.kills !== null)!;
+    Object.assign(host, { puuid: self.puuid, name: structuredClone(self.name!), isSelf: true });
+    const [us, them] = enc.with ? [a, b] : [b, a];
+    Object.assign(us, { result: enc.result, roundsWon: enc.roundsWon });
+    Object.assign(them, { result: OPPOSITE[enc.result], roundsWon: enc.roundsLost });
+    m.teams = [us, them];
+    Object.assign(m, { mapId: enc.mapId, startMs: enc.startMs, durationMs: enc.durationMs });
   }
   for (const t of m.teams) t.players.sort(byAcsDesc);
   return m;
@@ -291,8 +308,8 @@ function matchNostats(matchId: string, perspective: "focus" | "self"): MatchDeta
 
 function nostatsMatches(): Record<string, MatchDetailsView> {
   return {
-    [NOSTATS_MATCH]: matchNostats(NOSTATS_MATCH, "focus"),
-    ...Object.fromEntries(NOSTATS_ENCOUNTERS.map((id) => [id, matchNostats(id, "self")])),
+    [NOSTATS_MATCH]: matchNostats(NOSTATS_MATCH),
+    ...Object.fromEntries(nostatsEncounters().map((e) => [e.matchId, matchNostats(e.matchId, e)])),
   };
 }
 

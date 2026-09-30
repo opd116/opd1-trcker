@@ -79,14 +79,18 @@ async function checkVertical(page: Page): Promise<string[]> {
     const out: string[] = [];
     const app = document.getElementById("app")!;
     /**
-     * A scroll container (`overflow-y: auto | scroll`, the Details/Match `.scroll`) does not clip its content: what lies
-     * past its edge is reached by scrolling. Its ancestors clip the container's own box, never that content, so the
-     * walk up from a text stops there (task 17 re-review: `auto` used to count as a clip, and every text below the
-     * fold of a Details page was reported as cut by `.scroll`, then by `#app`).
+     * The page's one scroll container (the Details/Match `.scroll`, App.svelte's child of #app) does not clip its
+     * content: what lies past its edge is reached by scrolling. Its ancestors clip the container's own box, never that
+     * content, so the walk up from a text stops there (task 17 re-review: `auto` used to count as a clip, and every
+     * text below the fold of a Details page was reported as cut by `.scroll`, then by `#app`). Only that element: an
+     * element with only `overflow-x: hidden` computes `overflow-y: auto` too, and a cut under it must still count
+     * (Task 18 review, Minor 9; check 3 reports any other element that scrolls).
      */
+    const host = app.querySelector(":scope > .scroll");
     const scrolls = (el: HTMLElement) => {
+      if (el !== host) return false;
       const y = getComputedStyle(el).overflowY;
-      return y === "auto" || y === "scroll";
+      return y === "auto" || y === "scroll"; // made non-scrolling (a test does), it clips like any box
     };
     /** Where `el` stops painting its content, or null when it does not clip in y. */
     const clipBox = (el: HTMLElement): { top: number; bottom: number } | null => {

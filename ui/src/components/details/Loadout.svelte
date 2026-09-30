@@ -12,6 +12,7 @@
   import { tip } from "../../lib/tooltip.svelte";
   import type { Loadout } from "../../lib/types";
   import Skel from "../Skel.svelte";
+  import Section from "./Section.svelte";
 
   let { loadout }: { loadout: Loadout | null } = $props();
 
@@ -33,51 +34,31 @@
   }
 </script>
 
-<section class="sec loadout">
-  <div class="sech">Loadout</div>
-  <div class="panel">
-    {#each WEAPONS as w (w.key)}
-      {@const st = loadout === null ? "loading" : weaponState(loadout[w.key])}
-      <div class="wrow">
-        {#if st === "loading"}
-          <Skel w={124} h={48} r={5} block />
-          <div class="wtext"><Skel w={90} h={13} block /></div>
-        {:else if st === "none"}
-          <div class="well"></div>
-          <div class="wtext"><span class="wname">{w.label}</span><span class="wskin dash">—</span></div>
-        {:else}
-          <div class="well" style={wellStyle(st.tierId)} use:tip={loadoutTip(st.tierId)}>
-            {#if st.tierId}<img class="wtier" src={assetUrl("contentTier", st.tierId)} alt="" />{/if}
-            <img class="wimg" src={assetUrl("chroma", st.chromaId)} alt="" />
-          </div>
-          <div class="wtext">
-            <span class="wname">{w.label}</span>
-            <span class="wskin" data-ellipsis>{st.skinName}{#if st.chromaName}<span class="wch">{` · ${st.chromaName}`}</span>{/if}</span>
-          </div>
-        {/if}
-      </div>
-    {/each}
-  </div>
-</section>
+<Section title="Loadout" name="loadout">
+  {#each WEAPONS as w (w.key)}
+    {@const st = loadout === null ? "loading" : weaponState(loadout[w.key])}
+    <div class="wrow">
+      {#if st === "loading"}
+        <Skel w={124} h={48} r={5} block />
+        <div class="wtext"><Skel w={90} h={13} block /></div>
+      {:else if st === "none"}
+        <div class="well"></div>
+        <div class="wtext"><span class="wname">{w.label}</span><span class="wskin dash">—</span></div>
+      {:else}
+        <div class="well" style={wellStyle(st.tierId)} use:tip={loadoutTip(st.tierId)}>
+          {#if st.tierId}<img class="wtier" src={assetUrl("contentTier", st.tierId)} alt="" />{/if}
+          <img class="wimg" src={assetUrl("chroma", st.chromaId)} alt="" />
+        </div>
+        <div class="wtext">
+          <span class="wname">{w.label}</span>
+          <span class="wskin" data-ellipsis>{st.skinName}{#if st.chromaName}<span class="wch">{` · ${st.chromaName}`}</span>{/if}</span>
+        </div>
+      {/if}
+    </div>
+  {/each}
+</Section>
 
 <style>
-  .sec {
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
-  }
-
-  .sech {
-    font-size: 14px;
-    font-weight: 600;
-  }
-
-  .panel {
-    background: var(--card);
-    border-radius: 8px;
-    overflow: hidden;
-  }
-
   .wrow {
     display: flex;
     align-items: center;

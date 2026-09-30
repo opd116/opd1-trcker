@@ -1,8 +1,9 @@
+import { get } from "svelte/store";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   META_RETRY_FIRST_MS,
   META_RETRY_MAX_MS,
-  applyDetailsEvent,
+  detailsSlot,
   keyAction,
   loadMeta,
   runKeyAction,
@@ -113,19 +114,103 @@ describe("runKeyAction", () => {
   });
 });
 
-describe("applyDetailsEvent", () => {
+describe("detailsSlot (spec §2.4, §6.9: the open Player Details)", () => {
   const details = (puuid: string, marker: string) => ({ card: { puuid }, marker }) as unknown as PlayerDetails;
+  const now = (slot: ReturnType<typeof detailsSlot>) => get(slot) as (PlayerDetails & { marker: string }) | null;
+  /** A `player_details` call held open until the test answers it. */
+  function deferred() {
+    let answer!: (d: PlayerDetails) => void;
+    const calls: string[] = [];
+    const fetch = (puuid: string) => {
+      calls.push(puuid);
+      return new Promise<PlayerDetails>((res) => (answer = res));
+    };
+    return { fetch, calls, answer: (d: PlayerDetails) => answer(d) };
+  }
 
-  it("applyDetailsEvent replaces only the matching puuid", () => {
-    const open = details("p1", "old");
-    const same = details("p1", "new");
-    expect(applyDetailsEvent(open, same)).toBe(same);
-    const other = details("p2", "other");
-    expect(applyDetailsEvent(open, other)).toBe(open);
+  it("open fetches the player's details and shows the answer", async () => {
+    const slot = detailsSlot();
+    const f = deferred();
+    const done = slot.open("p1", f.fetch);
+    expect(f.calls).toEqual(["p1"]);
+    expect(now(slot)).toBeNull();
+    f.answer(details("p1", "a"));
+    await done;
+    expect(now(slot)?.marker).toBe("a");
   });
 
-  it("ignores events while nothing is open", () => {
-    expect(applyDetailsEvent(null, details("p1", "x"))).toBeNull();
+  it("a details event for the player being opened wins over the older answer still in flight", async () => {
+    const slot = detailsSlot();
+    const f = deferred();
+    const done = slot.open("p1", f.fetch);
+    slot.event(details("p1", "event")); // Rust's sync finished before the invoke answer landed
+    expect(now(slot)?.marker).toBe("event");
+    f.answer(details("p1", "snapshot"));
+    await done;
+    expect(now(slot)?.marker).toBe("event");
+  });
+
+  it("Back from Match: the same player's details stay on screen, and an event during the refetch still wins", async () => {
+    const slot = detailsSlot();
+    await slot.open("p1", async () => details("p1", "first"));
+    const f = deferred();
+    const done = slot.open("p1", f.fetch);
+    expect(now(slot)?.marker).toBe("first"); // no skeleton flash on Back
+    slot.event(details("p1", "event"));
+    f.answer(details("p1", "refetch"));
+    await done;
+    expect(now(slot)?.marker).toBe("event");
+  });
+
+  it("without an event, the refetch answer replaces the details in place", async () => {
+    const slot = detailsSlot();
+    await slot.open("p1", async () => details("p1", "first"));
+    await slot.open("p1", async () => details("p1", "second"));
+    expect(now(slot)?.marker).toBe("second");
+  });
+
+  it("an event for another player, or while nothing is open, changes nothing", async () => {
+    const slot = detailsSlot();
+    slot.event(details("p1", "early"));
+    expect(now(slot)).toBeNull();
+    await slot.open("p1", async () => details("p1", "a"));
+    slot.event(details("p2", "other"));
+    expect(now(slot)?.marker).toBe("a");
+  });
+
+  it("opening another player clears the old details at once, and the old answer never lands", async () => {
+    const slot = detailsSlot();
+    const f1 = deferred();
+    const first = slot.open("p1", f1.fetch);
+    await slot.open("p2", async () => details("p2", "b"));
+    f1.answer(details("p1", "late"));
+    await first;
+    expect(now(slot)?.marker).toBe("b");
+    const f3 = deferred();
+    void slot.open("p3", f3.fetch);
+    expect(now(slot)).toBeNull();
+  });
+
+  it("close forgets the details (a reopen starts from the skeleton) and drops an answer still in flight", async () => {
+    const slot = detailsSlot();
+    await slot.open("p1", async () => details("p1", "a"));
+    slot.close();
+    expect(now(slot)).toBeNull();
+    const f = deferred();
+    const done = slot.open("p1", f.fetch);
+    expect(now(slot)).toBeNull(); // not the old payload: a now-hidden player's old name never flashes
+    slot.close();
+    f.answer(details("p1", "late"));
+    await done;
+    expect(now(slot)).toBeNull();
+    slot.event(details("p1", "after close"));
+    expect(now(slot)).toBeNull();
+  });
+
+  it("a failed call rejects and leaves the slot as it was", async () => {
+    const slot = detailsSlot();
+    await expect(slot.open("p1", async () => Promise.reject(new Error("offline")))).rejects.toThrow("offline");
+    expect(now(slot)).toBeNull();
   });
 });
 

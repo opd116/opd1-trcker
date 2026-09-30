@@ -1,7 +1,7 @@
 // Player Details and Match Details fit and per-scene assertions (spec §8.3, §8.5, §6) at exactly 1000×800, DPR 1,
 // against the DEV demo feed. Both pages scroll vertically only; everything else is as strict as Live.
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { encounterMatchId, PUUID, recentMatchId } from "../src/lib/demo/cdv8";
+import { AG, encounterMatchId, matchFor, PUUID, recentMatchId } from "../src/lib/demo/cdv8";
 import { checkClipping, checkHiddenIntegrity, detailsChecks, hiddenRealNames } from "./checks";
 import { FONTS, fontSlug, openScene, pointerAway, shotFull, varRgb, waitPage } from "./harness";
 
@@ -79,6 +79,8 @@ test("details: 3 recent rows + Show more, then 8 and no button; encounter header
   await expect(mates.filter({ hasText: "Kilo" }).locator(".mlive img")).toHaveCount(2);
   // The number is its own span, 4px from the word (v8:332), as `count` writes it: `14 games`, `1 game`.
   expect(await mates.nth(0).locator(".mcount").evaluate((el) => [el.firstElementChild!.textContent, el.lastChild!.textContent])).toEqual(["14", "games"]);
+  // One-line rows are the design's 46px (v8:321); the wrap padding (Task 18 review, Minor 5) never adds to them.
+  for (let i = 0; i < 3; i++) expect(await mates.nth(i).evaluate((el) => el.clientHeight), `Top 3 row ${i} (inside its separator)`).toBe(46);
   // The hero reads the design's values for Mara (v8:480) and R116's K/D and HS%.
   expect(await page.locator(".details .hero .hstat .v").allInnerTexts()).toEqual(["1.52", "29%", "63%", "65", "41 / 24"]);
   expect(await text(page.locator(".details .hero .hlv"))).toBe("Lv 402");
@@ -152,6 +154,10 @@ test("details-longnames: hero name truncates (tag whole); Top 3 names wrap insid
     for (let i = 0; i < 3; i++) {
       const m = mates.nth(i);
       const name = await box(m.locator(".nm"));
+      // Task 18 review, Minor 5: a wrapped name keeps 8px from the row lines and the panel edge.
+      const row = await box(m);
+      expect(name.y - row.y, `mate ${i} top padding [${font}]`).toBeGreaterThanOrEqual(7.5);
+      expect(row.y + row.height - (name.y + name.height), `mate ${i} bottom padding [${font}]`).toBeGreaterThanOrEqual(7.5);
       // Never cut: the name and the tag lie whole inside the block (a line of their own when they must).
       const whole = await m.locator(".nm").evaluate((el) => {
         const b = el.getBoundingClientRect();
@@ -164,6 +170,25 @@ test("details-longnames: hero name truncates (tag whole); Top 3 names wrap insid
       expect(hit(name, await box(m.locator(".mcount"))), `mate ${i} name vs count [${font}]`).toBe(false);
       if ((await m.locator(".mlive").count()) > 0) expect(hit(name, await box(m.locator(".mlive"))), `mate ${i} name vs icons [${font}]`).toBe(false);
     }
+    // Task 18 review, Minor 4: the eye-off icon stays on the first line of the name it marks, never alone above it.
+    // Row 1 is a remembered 16-W name (it wraps), row 2 a hidden agent.
+    for (const i of [1, 2]) {
+      const eye = await mates.nth(i).locator(".nm").evaluate((el) => {
+        const svg = el.querySelector("svg")!.getBoundingClientRect();
+        const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+        let t = walker.nextNode();
+        while (t && !t.textContent?.trim()) t = walker.nextNode();
+        const range = document.createRange();
+        range.selectNodeContents(t!);
+        const line = range.getClientRects()[0]!;
+        return { mid: svg.top + svg.height / 2, lineTop: line.top, lineBottom: line.bottom, eyeRight: svg.right, textLeft: line.left };
+      });
+      expect(eye.mid, `mate ${i} eye on the name's first line [${font}]`).toBeGreaterThanOrEqual(eye.lineTop);
+      expect(eye.mid, `mate ${i} eye on the name's first line [${font}]`).toBeLessThanOrEqual(eye.lineBottom);
+      expect(eye.eyeRight, `mate ${i} eye before the name [${font}]`).toBeLessThanOrEqual(eye.textLeft + 0.5);
+    }
+    expect(await mates.nth(1).locator(".nm .n").evaluate((el) => el.getClientRects().length > 1 || el.getBoundingClientRect().height > 20), `remembered name wraps [${font}]`).toBe(true);
+    await expect(mates.nth(2).locator(".nm .hid")).toHaveText("Brimstone");
     // The live teammate's block is the narrowest (the icons take 54px): its 16-character name has to wrap.
     const live = mates.filter({ has: page.locator(".mlive") });
     await expect(live).toHaveCount(1);
@@ -216,6 +241,22 @@ test("details-partial: absent hero fields are text-free bars; an absent weapon i
   await expect(rows.nth(0).locator(".well img")).toHaveCount(2); // the content-tier icon and the skin
 });
 
+test("loading → loaded: the hero and the sections below it do not move (Task 18 review, Minor 3)", async ({ page }) => {
+  for (const font of FONTS) {
+    const at = async (scene: string) => {
+      await openScene(page, scene, { font });
+      const d = page.locator(".details");
+      return { hero: await box(d.locator(".hero")), recent: await box(d.locator(".recent .sech")), mates: await box(d.locator(".mates .sech")) };
+    };
+    const loading = await at("details-loading");
+    const loaded = await at("details");
+    near(loaded.hero.height, 160, `loaded hero [${font}]`);
+    near(loading.hero.height, loaded.hero.height, `hero height [${font}]`);
+    near(loading.recent.y, loaded.recent.y, `Recent header y [${font}]`);
+    near(loading.mates.y, loaded.mates.y, `Top 3 header y [${font}]`);
+  }
+});
+
 test("details-loading: the §6.9 skeleton, section labels only, no other text", async ({ page }) => {
   await openScene(page, "details-loading");
   const d = page.locator(".details");
@@ -228,6 +269,14 @@ test("details-loading: the §6.9 skeleton, section labels only, no other text", 
   expect(await css(agent, "border-radius")).toBe("7px");
   expect(await css(agent, "background-color")).toBe(await varRgb(page, "--skel"));
   await expect(d.locator(".hero .hstat .sk")).toHaveCount(5);
+  // Task 18 review, Minor 3: the skeleton hero is as tall as the loaded one (160px), so nothing jumps when the answer
+  // comes. Each stat cell keeps the 14px label line above its 44×27 bar, as the loaded cell's label sits above its value.
+  near((await box(d.locator(".hero"))).height, 160, "skeleton hero height");
+  for (let i = 0; i < 5; i++) {
+    const cell = await box(d.locator(".hero .hstat").nth(i));
+    const bar = await box(d.locator(".hero .hstat").nth(i).locator(".sk"));
+    near(bar.y - cell.y, 12 + 14, `stat ${i} bar below the label line`);
+  }
   await expect(d.locator(".recent .rrow")).toHaveCount(3);
   await expect(d.locator(".mate")).toHaveCount(3);
   await expect(d.locator(".wrow")).toHaveCount(4);
@@ -281,6 +330,18 @@ test("details-nostats: every unknown value is —, and every unknown image an em
 
   expect(await text(page.locator(".details .mate"))).toBe("—");
   expect(await page.locator(".details .wskin").allInnerTexts()).toEqual(["—", "—", "—", "—"]);
+
+  // Task 18 review, Minor 6: an unknown map's — sits in the map name's own colour slot (spec §5.5), not --text2.
+  const textRgb = await varRgb(page, "--text");
+  expect(await css(r1.locator(".mname"), "color"), "recent row map —").toBe(textRgb);
+  expect(await css(enc.nth(0).locator(".emap .mname"), "color"), "encounter row map —").toBe(textRgb);
+  // Its match (the Against draw the row reads) has no map either: the header's — too.
+  await enc.nth(0).click();
+  await waitPage(page, "loaded");
+  expect(await text(page.locator(".match .mtitle"))).toBe("—");
+  expect(await css(page.locator(".match .mtitle"), "color"), "match header map —").toBe(textRgb);
+  await expect(page.locator(".match .thead .tlabel").first()).toHaveText("Your team");
+  expect(await text(page.locator(".match .mres"))).toBe("D —");
 });
 
 // ── spec §8.5, Match ────────────────────────────────────────────────────────────────────────────────────────────
@@ -454,9 +515,9 @@ test("details event updates in place keeping more and scroll", async ({ page }) 
   // A `details` event for the open player (Rust emits one after its sync), through the app's own reducer.
   await fromApp(
     page,
-    `Promise.all([import("/src/lib/stores.ts"), import("/src/lib/boot.ts")]).then(([s, b]) => {
+    `import("/src/lib/stores.ts").then((s) => {
       let open; s.openDetails.subscribe((v) => (open = v))();
-      s.openDetails.update((o) => b.applyDetailsEvent(o, { ...structuredClone(open), heroKd: 1.99, loadout: { ...open.loadout, vandal: null } }));
+      s.openDetails.event({ ...structuredClone(open), heroKd: 1.99, loadout: { ...open.loadout, vandal: null } });
     })`,
   );
   await expect(page.locator(".details .hero .hstat .v").first()).toHaveText("1.99");
@@ -468,13 +529,29 @@ test("details event updates in place keeping more and scroll", async ({ page }) 
   // An event for another player leaves the page alone.
   await fromApp(
     page,
-    `Promise.all([import("/src/lib/stores.ts"), import("/src/lib/boot.ts")]).then(([s, b]) => {
+    `import("/src/lib/stores.ts").then((s) => {
       let open; s.openDetails.subscribe((v) => (open = v))();
       const other = structuredClone(open); other.card.puuid = "a0000000-0000-4000-8000-000000000002"; other.heroKd = 7.77;
-      s.openDetails.update((o) => b.applyDetailsEvent(o, other));
+      s.openDetails.event(other);
     })`,
   );
   await expect(page.locator(".details .hero .hstat .v").first()).toHaveText("1.99");
+});
+
+// Task 18 review, Minor 1: leaving Details for Live forgets the payload, so a reopen never shows the old one while the
+// new answer is on its way (a player hidden now must never flash the name an older answer had).
+test("Back to Live forgets the details: reopening the same player shows the skeleton, not the old payload", async ({ page }) => {
+  await openScene(page, "details");
+  await expect(page.locator(".details .hero .nm .n")).toHaveText("Mara");
+  await page.locator(".details .back").click();
+  await expect(page.locator(".live")).toHaveCount(1);
+  expect(await fromApp(page, `import("/src/lib/stores.ts").then((s) => { let v; s.openDetails.subscribe((x) => (v = x))(); return v; })`)).toBeNull();
+  // Mara's next answer never comes (details-loading's entry for her): the page must show the skeleton meanwhile.
+  await page.evaluate(() => history.replaceState(null, "", "/?scene=details-loading"));
+  await page.locator(".live .card").filter({ hasText: "Mara" }).click();
+  await waitPage(page, "loading");
+  await expect(page.locator(".details")).not.toContainText("Mara");
+  await expect(page.locator(".details .hero .hstat .v")).toHaveCount(0);
 });
 
 test("Back paths: match → details (more kept) → live", async ({ page }) => {
@@ -574,6 +651,18 @@ test("check 5: the scroll container is not a clip; a cut inside it, or a non-scr
   expect(clipped.filter((p) => /is cut vertically by div\.scroll$/.test(p)).length, clipped.join("\n")).toBeGreaterThanOrEqual(below.length);
 });
 
+// Task 18 review, Minor 9: `overflow-x: hidden` alone makes overflow-y compute to `auto`, yet that element is not the
+// page's scroll container. Only #app's one .scroll ends the walk up from a text, so a vertical cut under such an
+// element is still reported.
+test("check 5: only the page's scroll container ends the clip walk, not any element whose overflow-y computes to auto", async ({ page }) => {
+  await openScene(page, "details");
+  await page.addStyleTag({ content: ".details .recent .rrow .rkd{display:block;height:8px!important;overflow-x:hidden}" });
+  expect(await page.locator(".details .recent .rrow .rkd").first().evaluate((el) => getComputedStyle(el).overflowY)).toBe("auto");
+  const cut = await checkClipping(page);
+  expect(cut.length).toBeGreaterThan(0);
+  for (const p of cut) expect(p).toMatch(/is cut vertically by span\.rkd$/);
+});
+
 // Check 5's decoration probe screenshots each decorated text; on a scrolling page it first brings one below the fold
 // into view (a screenshot clip cannot reach past the viewport, and would throw).
 test("check 5 probes a text decoration below the fold", async ({ page }) => {
@@ -589,6 +678,8 @@ test("check 5 probes a text decoration below the fold", async ({ page }) => {
 
 // R93/R96: check 9 scans Details and Match. Nova is a hidden player in Agent Select; her Details and her own match show
 // her in the hidden style, and her real name (a fixture string) appears nowhere in either page, attributes included.
+// Her match row is what the backend sends for a player hidden on the live screen with no remembered name: the row's
+// own agent (`hiddenAgent`, matchview.rs `hidden_style`), never `Hidden Player` (Task 18 review, Minor 11).
 test("check 9: a player hidden on the live screen leaves no trace of the real name on Details or Match (pregame Nova)", async ({ page }) => {
   const real = hiddenRealNames("pregame");
   expect(real).toEqual(["Nova", "3341"]);
@@ -606,9 +697,13 @@ test("check 9: a player hidden on the live screen leaves no trace of the real na
 
   await page.locator(".details .recent .rrow").first().click();
   await waitPage(page, "loaded");
+  const rowAgent = matchFor(recentMatchId("nova", 0)).teams.flatMap((t) => t.players).find((p) => p.isFocus)!.agentId;
+  const agent = Object.entries(AG).find(([, id]) => id === rowAgent)![0];
+  expect(agent).toBe("Brimstone");
   const own = page.locator(".match .srow").filter({ has: page.locator(".focusbar") });
-  await expect(own.locator(".nm .hid")).toHaveText("Hidden Player");
-  await expect(page.locator(".match .thead .tlabel").first()).toHaveText("Hidden Player's team");
+  await expect(own.locator(".nm .hid")).toHaveText(agent);
+  await expect(own.locator(".nm svg")).toHaveCount(1);
+  await expect(page.locator(".match .thead .tlabel").first()).toHaveText(`${agent}'s team`);
   expect(await checkHiddenIntegrity(page, real)).toEqual([]);
   await own.evaluate((el) => el.setAttribute("title", "Nova"));
   expect(await checkHiddenIntegrity(page, real)).toEqual(['a hidden srow in Match contains "Nova"', 'the Match page contains "Nova"']);

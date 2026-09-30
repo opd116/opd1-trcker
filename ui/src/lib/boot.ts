@@ -1,4 +1,5 @@
-// Startup wiring that can be tested without Tauri (spec §2.4). The Tauri-backed `Bridge` is in api.ts.
+// Startup wiring and the open Player Details, testable without Tauri (spec §2.4). The Tauri-backed `Bridge` is in api.ts.
+import { writable, type Readable } from "svelte/store";
 import { EMPTY_META } from "./meta";
 import type { LiveState, Meta, PlayerDetails } from "./types";
 
@@ -69,7 +70,54 @@ export async function runKeyAction(
   else await b.invoke("dump_raw");
 }
 
-/** A `details` event replaces the open details only when it is for the same player. */
-export function applyDetailsEvent(open: PlayerDetails | null, payload: PlayerDetails): PlayerDetails | null {
-  return open && open.card.puuid === payload.card.puuid ? payload : open;
+/** The open Player Details: the payload on screen, and the three ways it changes. */
+export interface DetailsSlot extends Readable<PlayerDetails | null> {
+  /**
+   * Details opens `puuid` (a card click, or Back from Match): `invoke('player_details')` through `fetch`. Another
+   * player's payload is cleared at once (the skeleton shows); the same player's stays on screen until the answer.
+   * The answer is dropped when anything wrote the slot while it was in flight: a `details` event (always newer than
+   * the snapshot the call returns), another open, or a close. Rejects when the call fails.
+   */
+  open(puuid: string, fetch: (puuid: string) => Promise<PlayerDetails>): Promise<void>;
+  /** A `details` event: replaces the payload when it is for the player open or opening; anything else is ignored. */
+  event(payload: PlayerDetails): void;
+  /** The route left for Live: forget the payload, so a reopen starts from the skeleton (never a stale name). */
+  close(): void;
 }
+
+export function detailsSlot(): DetailsSlot {
+  const { subscribe, set } = writable<PlayerDetails | null>(null);
+  /** The player whose Details are open or opening; null on Live. */
+  let player: string | null = null;
+  /** Bumped by every write an answer still in flight must not overwrite. */
+  let version = 0;
+  return {
+    subscribe,
+    async open(puuid, fetch) {
+      if (player !== puuid) {
+        player = puuid;
+        set(null);
+      }
+      const v = ++version;
+      const res = await fetch(puuid);
+      if (v === version) set(res);
+    },
+    event(payload) {
+      if (payload.card.puuid !== player) return;
+      version++;
+      set(payload);
+    },
+    close() {
+      player = null;
+      version++;
+      set(null);
+    },
+  };
+}
+
+/**
+ * The Player Details on screen (spec §2.4, §6.9). Details opens it, the `details` listener feeds it, and the router
+ * closes it on every navigation to Live. It lives here, not in stores.ts, so the router can reach it without an
+ * import cycle (stores.ts imports the router); stores.ts re-exports it.
+ */
+export const openDetails = detailsSlot();

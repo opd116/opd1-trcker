@@ -28,7 +28,7 @@
   <div class="mhead">
     {#if view.mapId}<img class="mmap" src={assetUrl("mapList", view.mapId)} alt="" />{:else}<div class="mmap"></div>{/if}
     <div class="mtext">
-      <span class={["mtitle", map === null && "dash"]}>{#if map === undefined}<Skel w={120} h={18} />{:else}{map ?? "—"}{/if}</span>
+      <span class="mtitle">{#if map === undefined}<Skel w={120} h={18} />{:else}{map ?? "—"}{/if}</span>
       <span class="mwhen">{whenText(view, from, $now)}</span>
     </div>
     <div class="mres">
@@ -78,10 +78,6 @@
   .mtitle {
     font-size: 20px;
     font-weight: 600;
-  }
-
-  .mtitle.dash {
-    color: var(--text2);
   }
 
   .mwhen {

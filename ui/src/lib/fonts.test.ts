@@ -1,5 +1,6 @@
 /// <reference types="node" />
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { DEFAULT_THEME, TONES } from "./theme";
 
@@ -96,11 +97,11 @@ describe("no CDN at runtime", () => {
   const banned = ["fonts." + "googleapis", "fonts." + "gstatic", "unp" + "kg"];
 
   it("no font CDN host is named anywhere under ui/src", () => {
-    const files = walk(SRC).filter((u) => !/\.(woff2?|png|jpe?g|ico)$/.test(u.pathname));
+    const files = walk(SRC).filter((u) => !/\.(woff2?|png|jpe?g|ico)$/.test(u.href));
     expect(files.length).toBeGreaterThan(10);
     for (const u of files) {
       const text = readFileSync(u, "utf8");
-      for (const b of banned) expect(text.includes(b), `${u.pathname} mentions ${b}`).toBe(false);
+      for (const b of banned) expect(text.includes(b), `${fileURLToPath(u)} mentions ${b}`).toBe(false);
     }
   });
 });

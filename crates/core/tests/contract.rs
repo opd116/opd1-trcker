@@ -26,7 +26,7 @@ use opd1_core::matchview::{build_match_view, MatchViewInput};
 use opd1_core::model::{
     build_card, match_summary, BuildCardInput, CurrentRank, DisplayName, EncounterCount,
     EncounterDetailRow, Field, Identity, LiveState, Loadout, MatchResultKind, MmrInput, PartyMark,
-    PlayerCard, PlayerDetails, Team, TeammateSummary, WeaponSkin,
+    PlayerCard, PlayerDetails, RememberedSource, Team, TeammateSummary, WeaponSkin,
 };
 use opd1_core::names::KnownName;
 use opd1_core::presence::Stage;
@@ -217,20 +217,26 @@ fn split_lookup(path: &str) -> Option<String> {
 
 /// A remembered name, its source map converted the way the shell does
 /// (`KnownName::with_map_uuid`, R84/R95): a uuid or nothing, never a path.
-fn remembered(map: Option<&str>, start_ms: Option<i64>) -> Option<KnownName> {
+fn remembered(
+    source: RememberedSource,
+    map: Option<&str>,
+    start_ms: Option<i64>,
+) -> Option<KnownName> {
     Some(
         KnownName {
             name: "Rival".into(),
             tag: "ENEMY".into(),
             map_id: map.map(str::to_string),
             start_ms,
+            source,
         }
         .with_map_uuid(&split_lookup),
     )
 }
 
-/// The seven card shapes of the live state.
-fn seven_cards() -> Vec<PlayerCard> {
+/// The nine card shapes of the live state: the seven of R23/R32 and, at the
+/// end, one remembered name of each source not yet shown (R145).
+fn live_cards() -> Vec<PlayerCard> {
     // 1. The user: visible and full, outline flag, no party or encounters.
     let mut me = card(
         identity("puuid-self", false, true, ("Me", "TAG")),
@@ -254,7 +260,7 @@ fn seven_cards() -> Vec<PlayerCard> {
         identity("puuid-known", true, true, ("Secret", "NAME")),
         Team::Enemy,
     );
-    known.remembered = remembered(Some(SPLIT_PATH), Some(SEEN_MS));
+    known.remembered = remembered(RememberedSource::OwnMatch, Some(SPLIT_PATH), Some(SEEN_MS));
     known.party = Some(PartyMark {
         group: 0,
         confirmed: true,
@@ -270,7 +276,7 @@ fn seven_cards() -> Vec<PlayerCard> {
         identity("puuid-unsourced", true, true, ("Secret", "NAME")),
         Team::Enemy,
     );
-    unsourced.remembered = remembered(None, None);
+    unsourced.remembered = remembered(RememberedSource::OwnMatch, None, None);
     let unsourced = build_card(unsourced);
 
     // 4. Hidden, agent not locked yet: "Hidden Player", no agent.
@@ -312,6 +318,28 @@ fn seven_cards() -> Vec<PlayerCard> {
     });
     missing.name = Field::Missing;
 
+    // 8. Remembered from a match the user did not play (R145): a map and a
+    //    time, like a match the user played.
+    let mut other_match = card(
+        identity("puuid-other-match", true, true, ("Secret", "NAME")),
+        Team::Enemy,
+    );
+    other_match.remembered = remembered(
+        RememberedSource::OtherMatch,
+        Some(SPLIT_PATH),
+        Some(SEEN_MS),
+    );
+    let other_match = build_card(other_match);
+
+    // 9. Remembered from a name-service answer at a visible sighting
+    //    (R145): no map, only the time it was last confirmed.
+    let mut seen = card(
+        identity("puuid-seen", true, true, ("Secret", "NAME")),
+        Team::Enemy,
+    );
+    seen.remembered = remembered(RememberedSource::Seen, None, Some(SEEN_MS));
+    let seen = build_card(seen);
+
     vec![
         me,
         known,
@@ -320,12 +348,14 @@ fn seven_cards() -> Vec<PlayerCard> {
         hidden_agent,
         loading,
         missing,
+        other_match,
+        seen,
     ]
 }
 
 #[test]
 fn live_state_matches_golden() {
-    let players = seven_cards();
+    let players = live_cards();
     // The shapes the cards are supposed to have, so a golden regenerated
     // from a broken builder can't pass unnoticed.
     let json = serde_json::to_value(&players).unwrap();
@@ -333,7 +363,14 @@ fn live_state_matches_golden() {
     assert_eq!(json[0]["name"]["kind"], "visible");
     assert_eq!(json[1]["name"]["kind"], "remembered");
     assert_eq!(json[1]["name"]["fromMapId"], SPLIT_UUID);
+    assert_eq!(json[1]["name"]["source"], "ownMatch");
     assert_eq!(json[2]["name"]["fromMapId"], Value::Null);
+    // R145: one remembered example of each source.
+    assert_eq!(json[7]["name"]["source"], "otherMatch");
+    assert_eq!(json[7]["name"]["fromMapId"], SPLIT_UUID);
+    assert_eq!(json[8]["name"]["source"], "seen");
+    assert_eq!(json[8]["name"]["fromMapId"], Value::Null);
+    assert_eq!(json[8]["name"]["fromStartMs"], json!(SEEN_MS));
     assert_eq!(json[3]["name"]["kind"], "hiddenPlayer");
     assert_eq!(json[3]["agentId"], Value::Null);
     assert_eq!(json[4]["name"]["kind"], "hiddenAgent");
@@ -407,7 +444,7 @@ fn skin(name: &str, chroma: Option<&str>, tier: Option<&str>) -> WeaponSkin {
 
 /// The Player Details of the remembered card, with every shape in it.
 fn player_details_value() -> Value {
-    let known = seven_cards().remove(1);
+    let known = live_cards().remove(1);
 
     // Recent rows, newest first (spec §7.1: `recent` is "≤8 newest first"):
     // one whose match had no stats row (every stat null, R102), one with no
@@ -449,6 +486,7 @@ fn player_details_value() -> Value {
             name: DisplayName::Remembered {
                 name: "Rival".into(),
                 tag: "ENEMY".into(),
+                source: RememberedSource::OwnMatch,
                 from_map_id: Some(SPLIT_UUID.into()),
                 from_start_ms: Some(SEEN_MS),
             },
@@ -609,6 +647,7 @@ fn view(
     focus: &str,
     hidden_now: &HashMap<String, Option<String>>,
     remembered: &HashMap<String, KnownName>,
+    seen: &HashMap<String, (String, String)>,
 ) -> Value {
     let view = build_match_view(MatchViewInput {
         stored,
@@ -618,6 +657,7 @@ fn view(
         focus_puuid: focus,
         hidden_now,
         remembered,
+        seen,
     });
     serde_json::to_value(view).unwrap()
 }
@@ -628,7 +668,8 @@ fn match_views_value() -> Value {
     // The user (on Red, the losing side) played a 13-11 competitive match:
     // a teammate with a stored name, a stored name that is live-hidden now
     // and remembered from the user's own match, an enemy without a stored
-    // name, and one without stats.
+    // name whose visible sighting stored one (R145: shown as a plain
+    // name), and one without any name and without stats.
     // A player whose details had no stats row: stored as 0/0/0 without
     // rounds, so ACS, ADR and HS% are null.
     let mut no_stats = player("enemy-3", "Blue", "", 0);
@@ -658,7 +699,12 @@ fn match_views_value() -> Value {
             tag: "ENEMY".into(),
             map_id: Some(SPLIT_PATH.into()),
             start_ms: Some(SEEN_MS),
+            source: RememberedSource::OwnMatch,
         },
+    )]);
+    let seen = HashMap::from([(
+        "enemy-2".to_string(),
+        ("Friend".to_string(), "FR1".to_string()),
     )]);
     let competitive = view(
         &stored,
@@ -666,6 +712,7 @@ fn match_views_value() -> Value {
         "ally",
         &hidden_now,
         &remembered,
+        &seen,
     );
     assert_eq!(competitive["perspective"], "self");
     assert_eq!(competitive["teams"][0]["teamId"], "Red");
@@ -673,6 +720,11 @@ fn match_views_value() -> Value {
     assert_eq!(
         competitive["teams"][1]["players"][0]["name"]["kind"],
         "remembered"
+    );
+    assert_eq!(
+        competitive["teams"][1]["players"][1]["name"],
+        json!({"kind": "visible", "name": "Friend", "tag": "FR1"}),
+        "R145: the players-table name of a row without a stored name"
     );
     // R124: a scoreboard row whose details had no stats row sends `null`
     // (never a counted 0) for kills, deaths and assists as well as for ACS,
@@ -711,11 +763,24 @@ fn match_views_value() -> Value {
         ],
         players: dm_players,
     };
+    // dm-2 has no stored name; a match of someone else's history taught it
+    // (R145): remembered, from another match.
+    let dm_remembered = HashMap::from([(
+        "dm-2".to_string(),
+        KnownName {
+            name: "Rival".into(),
+            tag: "ENEMY".into(),
+            map_id: Some(SPLIT_PATH.into()),
+            start_ms: Some(SEEN_MS),
+            source: RememberedSource::OtherMatch,
+        },
+    )]);
     let deathmatch = view(
         &dm,
         Some("puuid-self"),
         "dm-3",
         &HashMap::new(),
+        &dm_remembered,
         &HashMap::new(),
     );
     assert_eq!(deathmatch["perspective"], "focus");
@@ -750,7 +815,7 @@ fn spec(list: &[&str]) -> BTreeSet<String> {
 
 #[test]
 fn wire_keys_are_the_ones_spec_7_1_spells() {
-    let cards = serde_json::to_value(seven_cards()).unwrap();
+    let cards = serde_json::to_value(live_cards()).unwrap();
     // A fully populated card has exactly the spec's PlayerCard keys.
     assert_eq!(
         keys(&cards[0]),
@@ -796,7 +861,7 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
     assert_eq!(keys(&cards[1]["encounters"]), spec(&["with", "against"]));
     assert_eq!(
         keys(&cards[1]["name"]),
-        spec(&["kind", "name", "tag", "fromMapId", "fromStartMs"])
+        spec(&["kind", "name", "tag", "source", "fromMapId", "fromStartMs"])
     );
 
     // Player Details and its parts.

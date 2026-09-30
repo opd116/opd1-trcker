@@ -1058,7 +1058,7 @@ pub async fn fetch_self_name(st: &Arc<AppState>, session: &RiotSession) -> Resul
 
 /// R90: the user's own equipped skins, read once per connect (at the
 /// first presence showing VALORANT, `Poller::read_self_loadout_once`) from
-/// `pd .../personalization/v2/players/{self}/playerloadout` (a read-only
+/// `pd .../personalization/v3/players/{self}/playerloadout` (a read-only
 /// `GET`, always the user's own puuid): kept in the live model for their
 /// Details, and in `app_state` (only when it changed) so it still shows
 /// while VALORANT is closed. A failure is logged and not retried until the

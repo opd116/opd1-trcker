@@ -4,22 +4,26 @@
 //! reads the [`StoredMatch`] and the name sources, this decides what each
 //! row shows.
 //!
-//! # Names (R74, R93)
+//! # Names (R74, R93, R145)
 //!
 //! For every row, in this order:
 //! 1. the user → their own name (from the local chat session), shown as is;
 //! 2. a puuid that is hidden on the live screen now (`hidden_now`) → what its
-//!    card shows: the remembered name when the user's own finished match
-//!    taught it, else the row's agent, else "Hidden Player" — in every view,
+//!    card shows: the remembered name (the DB knows it from any source,
+//!    R145), else the row's agent, else "Hidden Player" — in every view,
 //!    whether or not the user played the match;
 //! 3. otherwise a stored name is shown as match-details gave it (match-details
 //!    carries no incognito flag, so this is R74's known risk for matches the
 //!    user did not play);
-//! 4. a row without a stored name gets the rule-2 result.
+//! 4. a row without a stored name shows the `players`-table name (`seen`, a
+//!    name-service answer from a time the player was visible) as a plain
+//!    name (R145);
+//! 5. with neither, the rule-2 result.
 //!
-//! The `remembered` sources come from `Repo::known_name`, which only reads
-//! matches the user played, and their Riot map path becomes a valorant-api
-//! uuid here, exactly once, via [`KnownName::with_map_uuid`] (R84, R95).
+//! The `remembered` sources come from `Repo::known_name` (any stored source)
+//! and the `seen` names from `Repo::seen_name`; a remembered name's Riot map
+//! path becomes a valorant-api uuid here, exactly once, via
+//! [`KnownName::with_map_uuid`] (R84, R95). Nothing here fetches a name.
 
 use std::cmp::Ordering;
 use std::collections::{BTreeSet, HashMap};
@@ -44,9 +48,13 @@ pub struct MatchViewInput<'a> {
     pub focus_puuid: &'a str,
     /// `LiveModel::hidden_players()`: puuid -> the agent their card shows.
     pub hidden_now: &'a HashMap<String, Option<String>>,
-    /// `Repo::known_name(self, p)` for the rows that need one: the user's
-    /// own matches only. `map_id` is still a Riot path here.
+    /// `Repo::known_name(self, p)` for the rows that need one
+    /// ([`needs_known_name`]): the best known name from any source (R145).
+    /// `map_id` is still a Riot path here.
     pub remembered: &'a HashMap<String, KnownName>,
+    /// `Repo::seen_name(p)` for the rows that need one ([`needs_seen_name`]):
+    /// the name a name-service answer stored while the player was visible.
+    pub seen: &'a HashMap<String, (String, String)>,
 }
 
 fn non_empty(s: &Option<String>) -> Option<&str> {
@@ -61,16 +69,24 @@ fn stored_name(p: &MatchPlayer) -> Option<(String, String)> {
     ))
 }
 
-/// Whether a row other than the user's is drawn in the hidden style rather
-/// than by its stored name: hidden on the live screen now (R93), or without
-/// a stored name (R74). The one place this rule lives: [`build_match_view`]
-/// draws by it, and the shell looks up a remembered name (`Repo::known_name`)
-/// for exactly these rows.
+/// Whether a row other than the user's is not shown by its stored name:
+/// hidden on the live screen now (R93), or without a stored name (R74). The
+/// shell looks up a remembered name (`Repo::known_name`) for exactly these
+/// rows. A row without a stored name may still be drawn as a plain name from
+/// the `players` table ([`needs_seen_name`]); it is drawn in the hidden style
+/// only when that is missing too.
 pub fn needs_known_name(p: &MatchPlayer, hidden_now: &HashMap<String, Option<String>>) -> bool {
     hidden_now.contains_key(&p.puuid) || stored_name(p).is_none()
 }
 
-/// The name for a row that isn't shown by its stored name: what a hidden
+/// Whether a row's `players`-table name (`Repo::seen_name`) can be drawn: it
+/// has no stored name and is not hidden on the live screen now (R145). A row
+/// hidden now keeps its card's rule, so its seen name is never a plain one.
+pub fn needs_seen_name(p: &MatchPlayer, hidden_now: &HashMap<String, Option<String>>) -> bool {
+    !hidden_now.contains_key(&p.puuid) && stored_name(p).is_none()
+}
+
+/// The name for a row that isn't shown by a plain name: what a hidden
 /// player's card shows (remembered, else the agent, else Hidden Player).
 fn hidden_style(input: &MatchViewInput, p: &MatchPlayer) -> DisplayName {
     display_name(
@@ -93,11 +109,12 @@ fn row_name(input: &MatchViewInput, p: &MatchPlayer) -> DisplayName {
         }
         return hidden_style(input, p);
     }
-    match stored_name(p) {
-        Some(name) if !needs_known_name(p, input.hidden_now) => {
-            display_name(false, Some(name), None, None)
-        }
-        _ => hidden_style(input, p),
+    if input.hidden_now.contains_key(&p.puuid) {
+        return hidden_style(input, p);
+    }
+    match stored_name(p).or_else(|| input.seen.get(&p.puuid).cloned()) {
+        Some(name) => display_name(false, Some(name), None, None),
+        None => hidden_style(input, p),
     }
 }
 

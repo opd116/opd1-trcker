@@ -115,13 +115,17 @@ pub enum DisplayName {
         name: String,
         tag: String,
     },
-    /// A hidden player's name the user learned in a finished match they
-    /// played. `from_map_id` is a valorant-api uuid, never a Riot
-    /// `/Game/...` path (`KnownName::with_map_uuid`); both source fields
-    /// are `null` on the wire when unknown.
+    /// A hidden player's name the DB knows from any source (R145; the wire
+    /// says which in `source`). `from_map_id` is a valorant-api uuid, never
+    /// a Riot `/Game/...` path (`KnownName::with_map_uuid`), and `null` for
+    /// [`RememberedSource::Seen`] (a name-service answer has no map);
+    /// `from_start_ms` is when the source match started (or, for `Seen`,
+    /// when the name was last confirmed). Both are `null` on the wire when
+    /// unknown.
     Remembered {
         name: String,
         tag: String,
+        source: RememberedSource,
         from_map_id: Option<String>,
         from_start_ms: Option<i64>,
     },
@@ -129,6 +133,22 @@ pub enum DisplayName {
     HiddenAgent {
         agent_id: String,
     },
+}
+
+/// R145: where a remembered name came from, on the wire as
+/// `"ownMatch" | "otherMatch" | "seen"`. Not a privacy tier: every kind is
+/// shown in the remembered style; the UI words the tooltip by it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum RememberedSource {
+    /// A finished match the user played in showed the name.
+    OwnMatch,
+    /// A stored match the user did not play in carried the name (someone
+    /// else's match history).
+    OtherMatch,
+    /// A name-service answer from a time the player was visible (the
+    /// `players` table).
+    Seen,
 }
 
 /// A per-group party stripe (CLAUDE.md's "Party detection"), from
@@ -784,9 +804,9 @@ pub struct BuildCardInput<'a> {
     /// no party stripe and no encounter badge — [`build_card`] drops
     /// `party`/`encounters` for them).
     pub is_self_party: bool,
-    /// The player's name as the user saw it after a finished match the
-    /// user personally played in (`Repo::known_name`) — shown only when
-    /// the player is incognito now (CLAUDE.md "Hidden names" exception).
+    /// The best name the DB knows for the player from any source
+    /// (`Repo::known_name`, R145) — shown only when the player is incognito
+    /// now (CLAUDE.md "Hidden names" exception).
     pub remembered: Option<KnownName>,
     pub party: Option<PartyMark>,
     pub encounters: Option<EncounterCount>,

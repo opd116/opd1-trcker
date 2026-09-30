@@ -748,6 +748,9 @@ impl Poller {
                 let found = extract_pregame_loadouts(&resp);
                 if !found.is_empty() {
                     lock(&self.st.live).loadouts.extend(found);
+                    // Nothing on a card shows skins, so no publish: an open
+                    // Details of an ally is rebuilt (and its skins named).
+                    crate::details::refresh_open_after_live_change(&self.st).await;
                 }
                 Ok(())
             }
@@ -891,6 +894,11 @@ impl Poller {
             live.note_hidden();
         }
         self.st.publish();
+        // An open Details of someone on this roster follows it (a lock-in,
+        // a team change): it is a snapshot otherwise. Before the worker
+        // starts, so a caller that stops the worker right after this returns
+        // is not racing a sync this rebuild gave time to run.
+        crate::details::refresh_open_after_live_change(&self.st).await;
         self.ensure_worker(session);
     }
 

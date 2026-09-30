@@ -4,33 +4,38 @@
 //! field stays visible. The precedence, highest first:
 //!
 //! 1. not incognito -> `Visible` (their current Riot ID);
-//! 2. incognito, but the user already learned the name from a finished
-//!    match *the user personally played in* -> `Remembered` (shown in a
-//!    distinct style);
+//! 2. incognito, but the DB already knows the name from any source (R145:
+//!    a finished match the user played in, a stored match the user did not
+//!    play in, or a name-service answer from a time the player was visible)
+//!    -> `Remembered` (shown in a distinct style, with its source kind);
 //! 3. incognito with an agent selected -> `HiddenAgent` (the agent's
 //!    name, no tag);
 //! 4. otherwise -> `HiddenPlayer`.
 //!
-//! This function only decides; it never fetches. The caller must supply
-//! `remembered` from `Repo::known_name` (shared matches only) and must
+//! This function only decides; it never fetches. The caller supplies
+//! `remembered` from `Repo::known_name` (any stored source, R145) and must
 //! never ask name-service for an incognito player (ruling R16) — an
 //! incognito player's `visible` name is ignored here even if one is
 //! passed, so a stale value can't leak.
 
-use crate::model::DisplayName;
+use crate::model::{DisplayName, RememberedSource};
 
-/// A name the user learned in a finished match they played in
-/// (`Repo::known_name`), with where and when it was seen.
+/// A name the DB knows for a player (`Repo::known_name`), with where and
+/// when it was seen and which kind of source it came from (R145).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnownName {
     pub name: String,
     pub tag: String,
-    /// The map of the match that showed the name. It is the stored Riot
-    /// path (`/Game/Maps/...`) until [`KnownName::with_map_uuid`] runs, and
-    /// a valorant-api uuid (or `None`) after it.
+    /// The map of the match that showed the name; `None` for
+    /// [`RememberedSource::Seen`]. It is the stored Riot path
+    /// (`/Game/Maps/...`) until [`KnownName::with_map_uuid`] runs, and a
+    /// valorant-api uuid (or `None`) after it.
     pub map_id: Option<String>,
-    /// When that match started (epoch ms).
+    /// When that match started (epoch ms); for `Seen`, when the name was
+    /// last confirmed.
     pub start_ms: Option<i64>,
+    /// Which kind of source the name came from.
+    pub source: RememberedSource,
 }
 
 impl KnownName {
@@ -78,6 +83,7 @@ pub fn display_name(
         return DisplayName::Remembered {
             name: known.name,
             tag: known.tag,
+            source: known.source,
             // Defence in depth (R84/R95): a uuid never starts with '/', a
             // Riot path (`/Game/…`) does. A caller that skipped
             // `with_map_uuid` still can't put a path on the wire.

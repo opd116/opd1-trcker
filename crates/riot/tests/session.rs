@@ -151,7 +151,7 @@ async fn player_loadout_reads_only_the_sessions_own_puuid() {
     mount_sessions_with_version(&server, "release-09.08-shipping-11-3200000").await;
     let session = connect_against(tmp.path(), &server).await;
 
-    let own = format!("/personalization/v2/players/{SELF_PUUID}/playerloadout");
+    let own = format!("/personalization/v3/players/{SELF_PUUID}/playerloadout");
     Mock::given(method("GET"))
         .and(path(own.clone()))
         .respond_with(

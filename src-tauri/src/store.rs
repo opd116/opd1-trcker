@@ -68,8 +68,11 @@ impl StoredPlayer {
 /// What the shell learned about a player this time. `None`/`0`/`""` mean
 /// "not learned now" and never overwrite what the row already has — so a
 /// player seen with a hidden name or level keeps the values stored when
-/// they were visible (they're only ever *displayed* per the live
-/// hidden-name rules, never because they're in this table).
+/// they were visible. The stored name is a known name (R145: shown in the
+/// remembered style while the player is hidden, plainly elsewhere), and
+/// `updated_ms` is when it was last confirmed: it moves only with a name,
+/// never when the player is seen hidden, so R145's newest-first order of
+/// known names stays honest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PlayerUpdate {
     pub puuid: String,
@@ -96,7 +99,8 @@ pub fn save_player(conn: &Connection, upd: &PlayerUpdate, now_ms: i64) -> Result
             account_level = CASE WHEN excluded.account_level > 0
                                  THEN excluded.account_level ELSE players.account_level END,
             card_id = CASE WHEN excluded.card_id != '' THEN excluded.card_id ELSE players.card_id END,
-            updated_ms = excluded.updated_ms",
+            updated_ms = CASE WHEN excluded.game_name != '' AND excluded.tag_line != ''
+                              THEN excluded.updated_ms ELSE players.updated_ms END",
         params![
             upd.puuid,
             name,
@@ -213,10 +217,10 @@ pub struct PlayerDb {
     /// Recent competitive-update rows (the `rrEarned` join for `last5`).
     pub comp: Vec<CompUpdateRow>,
     pub row: Option<StoredPlayer>,
-    /// Their name as shown in a finished match the user played in
-    /// (`Repo::known_name`) — displayed only while they're incognito.
-    /// `map_id` is the stored Riot path; it is converted to a uuid only
-    /// where a `DisplayName` is built (R84).
+    /// The best name the DB knows for them from any source
+    /// (`Repo::known_name`, R145) — displayed only while they're incognito.
+    /// `map_id` is the stored Riot path (`None` for a `Seen` name); it is
+    /// converted to a uuid only where a `DisplayName` is built (R84).
     pub remembered: Option<KnownName>,
     /// Matches shared with the user; `None` when there are none (no ⟲
     /// badge for strangers, R52) and always for the user themself.
@@ -452,7 +456,7 @@ mod tests {
 
     use opd1_core::db::open_db;
     use opd1_core::db::repo::{HistoryEntry, Match, MatchPlayer, MatchTeam, MmrSnapshot};
-    use opd1_core::model::{EncounterCount, MatchResultKind};
+    use opd1_core::model::{EncounterCount, MatchResultKind, RememberedSource};
 
     fn repo() -> Repo {
         Repo::new(open_db(Path::new(":memory:")).unwrap())
@@ -482,6 +486,60 @@ mod tests {
         let row = load_player(r.conn(), "p1").unwrap().unwrap();
         assert_eq!(row.name(), Some(("New".into(), "TAG".into())));
         assert_eq!((row.account_level, row.card_id.as_str()), (190, "card-b"));
+    }
+
+    #[test]
+    fn updated_ms_is_when_the_stored_name_was_last_confirmed() {
+        // R145 orders known names by time, and a `players` name's time is
+        // `updated_ms`: it moves only when a visible sighting refreshes the
+        // name, not when the player is seen hidden (level/card only).
+        let ms = |r: &Repo| -> i64 {
+            r.conn()
+                .query_row(
+                    "SELECT updated_ms FROM players WHERE puuid = 'p1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        let r = repo();
+        save_player(r.conn(), &upd(Some(("Shanky", "OPD1")), 187, "card-a"), 100).unwrap();
+        assert_eq!(ms(&r), 100);
+        // Seen again hidden, a new level and card: the name is not confirmed.
+        save_player(r.conn(), &upd(None, 190, "card-b"), 500).unwrap();
+        assert_eq!(ms(&r), 100, "a hidden sighting does not confirm the name");
+        // A visible sighting does, even under the same name.
+        save_player(r.conn(), &upd(Some(("Shanky", "OPD1")), 190, "card-b"), 900).unwrap();
+        assert_eq!(ms(&r), 900);
+        // A row first seen hidden has no name and is never a known name.
+        let hidden = PlayerUpdate {
+            puuid: "p2".into(),
+            ..upd(None, 5, "c")
+        };
+        save_player(r.conn(), &hidden, 50).unwrap();
+        assert_eq!(r.known_name("me", "p2").unwrap(), None);
+    }
+
+    #[test]
+    fn load_player_db_reads_a_name_service_name_as_seen() {
+        // R145: the `players` row a visible sighting stored is a known name
+        // (no map; its time is when it was last confirmed).
+        let r = repo();
+        save_player(r.conn(), &upd(Some(("Vis", "IBLE")), 40, "c"), 700).unwrap();
+        let db = load_player_db(&r, Some("me"), "p1").unwrap();
+        assert_eq!(
+            db.remembered,
+            Some(KnownName {
+                name: "Vis".into(),
+                tag: "IBLE".into(),
+                map_id: None,
+                start_ms: Some(700),
+                source: RememberedSource::Seen,
+            })
+        );
+        // Never for the user's own bundle.
+        let own = load_player_db(&r, Some("p1"), "p1").unwrap();
+        assert_eq!(own.remembered, None);
     }
 
     #[test]
@@ -693,7 +751,8 @@ mod tests {
             ],
         );
         // m2 (newer): a deathmatch h1 played *without* the user, under
-        // another name — never a remembered name (someone else's match).
+        // another name — R145: a known name too, the newest one, marked as
+        // from a match the user did not play.
         stored_match(
             &r,
             "m2",
@@ -723,10 +782,11 @@ mod tests {
         assert_eq!(
             db.remembered,
             Some(KnownName {
-                name: "Seen".into(),
-                tag: "AFTER".into(),
+                name: "Other".into(),
+                tag: "NAME".into(),
                 map_id: Some("/Game/Maps/Ascent/Ascent".into()),
-                start_ms: Some(100),
+                start_ms: Some(200),
+                source: RememberedSource::OtherMatch,
             })
         );
         assert_eq!(

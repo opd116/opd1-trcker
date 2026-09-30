@@ -592,15 +592,26 @@ fn comp_updates_round_trip_orders_newest_first() {
 }
 
 // ---------------------------------------------------------------------
-// known_name — privacy rule: only from a match self also played in
+// known_name (R145): the best known name from ANY stored source
 // ---------------------------------------------------------------------
 
-#[test]
-fn known_name_requires_shared_match() {
-    let repo = repo_in_memory();
+use opd1_core::model::RememberedSource;
 
-    // Match A: self and other share this match; other's name here is
-    // "Foo#123".
+/// A `players` row: what a name-service answer for a visible player stored.
+fn seen_row(puuid: &str, name: &str, tag: &str, updated_ms: i64) -> Player {
+    Player {
+        puuid: puuid.to_string(),
+        game_name: name.to_string(),
+        tag_line: tag.to_string(),
+        account_level: 10,
+        card_id: "card".to_string(),
+        updated_ms,
+    }
+}
+
+#[test]
+fn known_name_from_a_match_the_user_played_is_marked_own_match() {
+    let repo = repo_in_memory();
     repo.upsert_match(
         &sample_match("shared", 1_000, None),
         &[],
@@ -611,30 +622,188 @@ fn known_name_requires_shared_match() {
     )
     .unwrap();
 
-    // Match B: only "other" has a row here (self never played it), with a
-    // different, more recent name. This name must never leak to self.
+    let name = repo.known_name("self", "other").unwrap().unwrap();
+    assert_eq!((name.name.as_str(), name.tag.as_str()), ("Foo", "123"));
+    assert_eq!(name.source, RememberedSource::OwnMatch);
+}
+
+#[test]
+fn known_name_from_a_match_the_user_did_not_play_is_marked_other_match() {
+    // R145: a name from someone else's match history is a known name too,
+    // with its own source kind (it used to stay unknown, R143).
+    let repo = repo_in_memory();
+    repo.upsert_match(
+        &Match {
+            map_id: "/Game/Maps/Ascent/Ascent".to_string(),
+            ..sample_match("solo", 1_000, None)
+        },
+        &[],
+        &[sample_player("other", "Blue", "Foo", "123")],
+    )
+    .unwrap();
+
+    let name = repo.known_name("self", "other").unwrap().unwrap();
+    assert_eq!((name.name.as_str(), name.tag.as_str()), ("Foo", "123"));
+    assert_eq!(name.source, RememberedSource::OtherMatch);
+    assert_eq!(name.map_id.as_deref(), Some("/Game/Maps/Ascent/Ascent"));
+    assert_eq!(name.start_ms, Some(1_000));
+}
+
+#[test]
+fn known_name_takes_the_most_recent_named_row_across_own_and_other_matches() {
+    let repo = repo_in_memory();
+    // Older: a match the user played (Foo). Newer: one the user did not
+    // play (Bar). The newer row wins, and is `OtherMatch`.
+    repo.upsert_match(
+        &sample_match("shared", 1_000, None),
+        &[],
+        &[
+            sample_player("self", "Blue", "Self", "111"),
+            sample_player("other", "Blue", "Foo", "123"),
+        ],
+    )
+    .unwrap();
     repo.upsert_match(
         &sample_match("not-shared", 2_000, None),
         &[],
         &[sample_player("other", "Red", "Bar", "456")],
     )
     .unwrap();
-
     let name = repo.known_name("self", "other").unwrap().unwrap();
-    assert_eq!((name.name.as_str(), name.tag.as_str()), ("Foo", "123"));
+    assert_eq!((name.name.as_str(), name.tag.as_str()), ("Bar", "456"));
+    assert_eq!(name.source, RememberedSource::OtherMatch);
+    assert_eq!(name.start_ms, Some(2_000));
+
+    // A still newer match the user played wins back, as `OwnMatch`.
+    repo.upsert_match(
+        &sample_match("shared-newer", 3_000, None),
+        &[],
+        &[
+            sample_player("self", "Blue", "Self", "111"),
+            sample_player("other", "Blue", "Baz", "789"),
+        ],
+    )
+    .unwrap();
+    let name = repo.known_name("self", "other").unwrap().unwrap();
+    assert_eq!((name.name.as_str(), name.tag.as_str()), ("Baz", "789"));
+    assert_eq!(name.source, RememberedSource::OwnMatch);
 }
 
 #[test]
-fn known_name_none_when_never_shared() {
+fn known_name_from_the_players_table_is_seen_without_a_map() {
+    let repo = repo_in_memory();
+    repo.upsert_player(&seen_row("other", "Vis", "IBLE", 5_000))
+        .unwrap();
+
+    let name = repo.known_name("self", "other").unwrap().unwrap();
+    assert_eq!((name.name.as_str(), name.tag.as_str()), ("Vis", "IBLE"));
+    assert_eq!(name.source, RememberedSource::Seen);
+    assert_eq!(name.map_id, None, "a name-service answer has no map");
+    assert_eq!(name.start_ms, Some(5_000), "updated_ms is its time");
+}
+
+#[test]
+fn known_name_recency_decides_between_the_players_table_and_a_match_row() {
     let repo = repo_in_memory();
     repo.upsert_match(
-        &sample_match("solo", 1_000, None),
+        &sample_match("m", 2_000, None),
         &[],
-        &[sample_player("other", "Blue", "Foo", "123")],
+        &[
+            sample_player("self", "Blue", "Self", "111"),
+            sample_player("other", "Blue", "InMatch", "M"),
+        ],
     )
     .unwrap();
 
+    // The players row is older than the match row: the match row wins.
+    repo.upsert_player(&seen_row("other", "Seen", "S", 1_000))
+        .unwrap();
+    let name = repo.known_name("self", "other").unwrap().unwrap();
+    assert_eq!(name.source, RememberedSource::OwnMatch);
+    assert_eq!(name.name, "InMatch");
+
+    // A newer players row wins.
+    repo.upsert_player(&seen_row("other", "Seen", "S", 9_000))
+        .unwrap();
+    let name = repo.known_name("self", "other").unwrap().unwrap();
+    assert_eq!(name.source, RememberedSource::Seen);
+    assert_eq!(name.name, "Seen");
+}
+
+#[test]
+fn known_name_ties_prefer_own_match_then_seen_then_other_match() {
+    let repo = repo_in_memory();
+    repo.upsert_match(
+        &sample_match("own", 1_000, None),
+        &[],
+        &[
+            sample_player("self", "Blue", "Self", "111"),
+            sample_player("other", "Blue", "Own", "O"),
+        ],
+    )
+    .unwrap();
+    repo.upsert_match(
+        &sample_match("foreign", 1_000, None),
+        &[],
+        &[sample_player("other", "Red", "Foreign", "F")],
+    )
+    .unwrap();
+    repo.upsert_player(&seen_row("other", "Seen", "S", 1_000))
+        .unwrap();
+
+    let name = repo.known_name("self", "other").unwrap().unwrap();
+    assert_eq!(name.source, RememberedSource::OwnMatch);
+
+    // Without the user's own row: the players row beats the foreign match.
+    let name = repo.known_name("nobody", "other").unwrap().unwrap();
+    assert_eq!(name.source, RememberedSource::Seen);
+}
+
+#[test]
+fn known_name_ignores_empty_names_in_every_source() {
+    let repo = repo_in_memory();
+    // A match row with an empty name / a NULL tag, and a players row with
+    // an empty name (a player seen hidden): nothing is known.
+    let mut empty = sample_player("other", "Blue", "", "");
+    repo.upsert_match(
+        &sample_match("empty", 1_000, None),
+        &[],
+        &[sample_player("self", "Blue", "Self", "111"), empty.clone()],
+    )
+    .unwrap();
+    empty.game_name = Some("HalfKnown".to_string());
+    empty.tag_line = None;
+    repo.upsert_match(
+        &sample_match("half", 2_000, None),
+        &[],
+        &[sample_player("self", "Blue", "Self", "111"), empty],
+    )
+    .unwrap();
+    repo.upsert_player(&seen_row("other", "", "", 9_000))
+        .unwrap();
+
     assert_eq!(repo.known_name("self", "other").unwrap(), None);
+    // A player nobody stored anything for.
+    assert_eq!(repo.known_name("self", "stranger").unwrap(), None);
+}
+
+#[test]
+fn known_name_skips_an_empty_newest_row_for_an_older_named_one() {
+    let repo = repo_in_memory();
+    repo.upsert_match(
+        &sample_match("older", 1_000, None),
+        &[],
+        &[sample_player("other", "Blue", "Named", "N")],
+    )
+    .unwrap();
+    repo.upsert_match(
+        &sample_match("newer", 2_000, None),
+        &[],
+        &[sample_player("other", "Blue", "", "")],
+    )
+    .unwrap();
+    let name = repo.known_name("self", "other").unwrap().unwrap();
+    assert_eq!(name.name, "Named");
 }
 
 #[test]
@@ -674,15 +843,68 @@ fn known_name_returns_source_match() {
     // The stored Riot path, not a uuid: the shell converts it later (R84).
     assert_eq!(known.map_id.as_deref(), Some("/Game/Maps/Bonsai/Bonsai"));
     assert_eq!(known.start_ms, Some(2_000));
+}
 
-    // A name seen only in a match the user did not play stays unknown.
+#[test]
+fn known_name_lookup_is_one_indexed_query() {
+    // Lightness: the lookup runs for every hidden player on screen, so it
+    // must be seeks on the existing indexes/primary keys — no table scan.
+    let repo = repo_in_memory();
+    let mut stmt = repo
+        .conn()
+        .prepare(&format!("EXPLAIN QUERY PLAN {}", repo::KNOWN_NAME_SQL))
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map(rusqlite::params!["self", "other"], |row| {
+            row.get::<_, String>(3)
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    println!("known_name plan:\n{}", plan.join("\n"));
+    // The only `SCAN` allowed is the read-back of the tiny co-routine result
+    // the union feeds into the final sort (`SCAN (subquery-N)`): never a
+    // base table.
+    let scans: Vec<&String> = plan
+        .iter()
+        .filter(|d| d.starts_with("SCAN") && !d.starts_with("SCAN (subquery"))
+        .collect();
+    assert!(scans.is_empty(), "table scan in the plan: {scans:?}");
+    for seek in [
+        "SEARCH mp USING INDEX idx_match_players_puuid (puuid=?)",
+        "SEARCH m USING INDEX sqlite_autoindex_matches_1 (match_id=?)",
+        "SEARCH mine USING COVERING INDEX sqlite_autoindex_match_players_1 (match_id=? AND puuid=?)",
+        "SEARCH p USING INDEX sqlite_autoindex_players_1 (puuid=?)",
+    ] {
+        assert!(plan.iter().any(|d| d == seek), "missing `{seek}` in {plan:?}");
+    }
+}
+
+#[test]
+fn seen_name_reads_the_players_table_only() {
+    let repo = repo_in_memory();
     repo.upsert_match(
-        &on("stranger-match", 3_000, "/Game/Maps/Ascent/Ascent"),
+        &sample_match("m", 1_000, None),
         &[],
-        &[sample_player("loner", "Blue", "Hidden", "H1")],
+        &[sample_player("other", "Blue", "InMatch", "M")],
     )
     .unwrap();
-    assert_eq!(repo.known_name("self", "loner").unwrap(), None);
+    assert_eq!(
+        repo.seen_name("other").unwrap(),
+        None,
+        "match rows don't count"
+    );
+
+    repo.upsert_player(&seen_row("other", "Vis", "IBLE", 5_000))
+        .unwrap();
+    assert_eq!(
+        repo.seen_name("other").unwrap(),
+        Some(("Vis".to_string(), "IBLE".to_string()))
+    );
+
+    repo.upsert_player(&seen_row("hidden", "", "", 5_000))
+        .unwrap();
+    assert_eq!(repo.seen_name("hidden").unwrap(), None, "empty is unknown");
 }
 
 // ---------------------------------------------------------------------
@@ -832,6 +1054,79 @@ fn top_teammates_tie_breaks_by_recency() {
     let top = repo.top_teammates("self", 0, 10).unwrap();
     assert_eq!(top[0].puuid, "teamB"); // more recent shared match wins the tie
     assert_eq!(top[1].puuid, "teamA");
+}
+
+#[test]
+fn top_teammates_name_falls_back_to_the_players_table() {
+    // R145: a teammate whose stored match rows carry no name (Riot returns
+    // empty names in match-details) shows the name a visible sighting stored.
+    let repo = repo_in_memory();
+    for (id, start) in [("m1", 1_000), ("m2", 2_000)] {
+        repo.upsert_match(
+            &sample_match(id, start, None),
+            &[],
+            &[
+                sample_player("self", "Blue", "Self", "111"),
+                sample_player("mate", "Blue", "", ""),
+                sample_player("ghost", "Blue", "", ""),
+            ],
+        )
+        .unwrap();
+    }
+    repo.upsert_player(&seen_row("mate", "Friend", "FR1", 5_000))
+        .unwrap();
+
+    let top = repo.top_teammates("self", 0, 10).unwrap();
+    let by = |p: &str| top.iter().find(|t| t.puuid == p).unwrap();
+    assert_eq!(by("mate").count, 2);
+    assert_eq!(by("mate").game_name.as_deref(), Some("Friend"));
+    assert_eq!(by("mate").tag_line.as_deref(), Some("FR1"));
+    // No name anywhere: still no name (the caller shows the hidden style).
+    assert!(by("ghost").game_name.is_none() && by("ghost").tag_line.is_none());
+}
+
+#[test]
+fn top_teammates_prefers_the_match_row_name_over_the_players_table() {
+    let repo = repo_in_memory();
+    repo.upsert_match(
+        &sample_match("m1", 1_000, None),
+        &[],
+        &[
+            sample_player("self", "Blue", "Self", "111"),
+            sample_player("mate", "Blue", "InMatch", "M1"),
+        ],
+    )
+    .unwrap();
+    repo.upsert_player(&seen_row("mate", "Friend", "FR1", 5_000))
+        .unwrap();
+    let top = repo.top_teammates("self", 0, 10).unwrap();
+    assert_eq!(top[0].game_name.as_deref(), Some("InMatch"));
+}
+
+#[test]
+fn top_teammates_name_skips_an_empty_newest_row_for_an_older_named_one() {
+    let repo = repo_in_memory();
+    repo.upsert_match(
+        &sample_match("older", 1_000, None),
+        &[],
+        &[
+            sample_player("self", "Blue", "Self", "111"),
+            sample_player("mate", "Blue", "Named", "N"),
+        ],
+    )
+    .unwrap();
+    repo.upsert_match(
+        &sample_match("newer", 2_000, None),
+        &[],
+        &[
+            sample_player("self", "Blue", "Self", "111"),
+            sample_player("mate", "Blue", "", ""),
+        ],
+    )
+    .unwrap();
+    let top = repo.top_teammates("self", 0, 10).unwrap();
+    assert_eq!(top[0].game_name.as_deref(), Some("Named"));
+    assert_eq!(top[0].tag_line.as_deref(), Some("N"));
 }
 
 // ---------------------------------------------------------------------

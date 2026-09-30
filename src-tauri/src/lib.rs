@@ -96,6 +96,7 @@ pub fn run() {
             commands::meta,
             commands::live_state,
             commands::player_details,
+            commands::close_details,
             commands::match_details,
             commands::my_stats,
             commands::copy_log,

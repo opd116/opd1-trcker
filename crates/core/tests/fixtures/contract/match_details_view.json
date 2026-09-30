@@ -69,6 +69,7 @@
               "fromStartMs": 1758970000000,
               "kind": "remembered",
               "name": "Rival",
+              "source": "ownMatch",
               "tag": "ENEMY"
             },
             "puuid": "enemy-1",
@@ -85,8 +86,9 @@
             "isSelf": false,
             "kills": 20,
             "name": {
-              "agentId": "agent-enemy-2",
-              "kind": "hiddenAgent"
+              "kind": "visible",
+              "name": "Friend",
+              "tag": "FR1"
             },
             "puuid": "enemy-2",
             "tier": 15
@@ -137,8 +139,12 @@
             "isSelf": false,
             "kills": 20,
             "name": {
-              "agentId": "agent-dm-2",
-              "kind": "hiddenAgent"
+              "fromMapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+              "fromStartMs": 1758970000000,
+              "kind": "remembered",
+              "name": "Rival",
+              "source": "otherMatch",
+              "tag": "ENEMY"
             },
             "puuid": "dm-2",
             "tier": null

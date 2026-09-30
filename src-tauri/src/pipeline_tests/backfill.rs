@@ -73,6 +73,10 @@ pub(crate) struct Feed {
     /// were asked for (a server-side page cap or clamping).
     pub(crate) page_cap: Option<usize>,
     pub(crate) total: TotalMode,
+    /// Players with a blank name, other than the fixture's two, added to
+    /// every match: each match's own, so no puuid repeats across matches
+    /// (R150's names fill).
+    pub(crate) strangers: usize,
 }
 
 impl Feed {
@@ -87,8 +91,15 @@ impl Feed {
             details_slow: HashMap::new(),
             page_cap: None,
             total: TotalMode::Entries,
+            strangers: 0,
         }
     }
+}
+
+/// Stranger `j` of match `bf{i}` ([`Feed::strangers`]): a valid uuid, unique
+/// to the pair.
+pub(crate) fn stranger(i: usize, j: usize) -> String {
+    format!("{i:08x}-2222-0000-0000-{j:012x}")
 }
 
 /// Mounts ME's history and every `bf###` match's details, beating the
@@ -104,6 +115,7 @@ pub(crate) async fn mount_feed(server: &MockServer, feed: Feed) {
         details_slow,
         page_cap,
         total,
+        strangers,
     } = feed;
     Mock::given(method("GET"))
         .and(path(format!("/match-history/v1/history/{ME}")))
@@ -159,6 +171,13 @@ pub(crate) async fn mount_feed(server: &MockServer, feed: Feed) {
             let mut body: Value = serde_json::from_str(DETAILS_FIXTURE).unwrap();
             body["matchInfo"]["matchID"] = json!(id);
             body["matchInfo"]["gameStartMillis"] = json!(entry_start(base, i));
+            for j in 0..strangers {
+                body["players"].as_array_mut().unwrap().push(json!({
+                    "subject": stranger(i, j), "gameName": "", "tagLine": "",
+                    "teamId": "Red", "partyId": "", "characterId": "agent-x",
+                    "stats": {"score": 1, "roundsPlayed": 20, "kills": 1, "deaths": 1, "assists": 1}
+                }));
+            }
             if let Some(hook) = &on_details {
                 hook(served.fetch_add(1, Ordering::SeqCst) + 1);
             }
@@ -271,7 +290,7 @@ async fn is_stored(st: &AppState, id: String) -> bool {
 
 /// What the poll loop does on connect: start a run from the stored anchor,
 /// claim the worker, and let it drain (it ends when nothing is left).
-async fn run_backfill(h: &Harness) {
+pub(crate) async fn run_backfill(h: &Harness) {
     start_backfill_run(&h.st).await;
     let id = lock(&h.st.live)
         .try_start_worker()
@@ -293,7 +312,7 @@ async fn store_details_stores_the_compact_rows() {
     let details = h.session.match_details(&entry_id(1)).await.unwrap();
     assert!(!is_stored(&h.st, entry_id(1)).await);
 
-    assert_eq!(store_details(&h.st, details).await, Some(()));
+    assert!(store_details(&h.st, details).await.is_some());
 
     assert!(is_stored(&h.st, entry_id(1)).await);
     assert!(!is_stored(&h.st, entry_id(2)).await, "only that match");
@@ -320,10 +339,11 @@ async fn backfill_stops_at_first_known_id() {
         "all queues are paged, Deathmatch included"
     );
 
-    // Never name-service, for anyone.
+    // The fixture's players all have names, so the names fill (R150) has
+    // nothing to ask: the run only reads.
     assert!(
         reqs.iter().all(|r| r.method.as_str() == "GET"),
-        "the backfill only reads (no name-service PUT)"
+        "no unknown name, no name-service PUT"
     );
 
     // Match-details for entries 0..22 only, each once.

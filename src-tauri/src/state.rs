@@ -9,15 +9,16 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter};
 
-use opd1_core::db::repo::Repo;
+use opd1_core::db::repo::{Match, MatchPlayer, NameAsk, Repo};
 use opd1_core::model::{
-    build_card, shown_agent, BuildCardInput, Field, Identity, LiveState, MmrInput, PartyMark,
-    PlayerCard, PlayerDetails, Team,
+    build_card, shown_agent, BuildCardInput, Field, Identity, LiveState, MatchDetailsView,
+    MmrInput, PartyMark, PlayerCard, PlayerDetails, Team,
 };
 use opd1_core::party::detect_parties;
 use opd1_core::presence::Stage;
@@ -73,6 +74,31 @@ pub struct Slot {
     pub db: PlayerDb,
 }
 
+/// R150: the most asks the names-fill queue holds. A match end adds at most
+/// the match's players, the own-history backfill at most
+/// `sync::BACKFILL_FILL_MAX` per run, and Details a handful: a full queue is
+/// a burst nobody needs, and it is dropped rather than grown.
+pub const NAME_FILL_QUEUE_MAX: usize = 300;
+
+/// R150: how long before a match end a match can have started and still be
+/// the one that just ended. A game runs well under an hour; the slack covers
+/// overtime and an app that was started mid-match.
+pub const MATCH_END_WINDOW_MS: i64 = 2 * 3_600_000;
+
+/// R150: the puuids of a stored match's players other than `me` whose name
+/// match-details left blank — the only ones that can need the names fill (a
+/// player named in this very row has a stored name).
+pub fn unnamed_others<'a>(
+    players: &'a [MatchPlayer],
+    me: &'a str,
+) -> impl Iterator<Item = String> + 'a {
+    let full = |s: &Option<String>| s.as_deref().is_some_and(|s| !s.is_empty());
+    players
+        .iter()
+        .filter(move |p| p.puuid != me && !(full(&p.game_name) && full(&p.tag_line)))
+        .map(|p| p.puuid.clone())
+}
+
 /// One unit of work for the roster worker (see [`LiveModel::next_job`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Job {
@@ -82,10 +108,15 @@ pub enum Job {
     Names(Vec<(String, bool)>),
     /// The per-player sync of one puuid.
     Sync(String),
+    /// R150: one names-fill request (`sync::fill_names_step`): the queued
+    /// asks worth sending, in one name-service `PUT`. Handed out when no
+    /// `Names` or `Sync` job is left and before the backfill, and only
+    /// between matches, like the backfill (`LiveModel::between_matches`).
+    FillNames,
     /// One step of the own-history backfill (R101): only handed out when no
-    /// `Names` or `Sync` job is left, so it is always behind live cards, and
-    /// only in Menus or Closed (R137), never during a match — a free-for-all
-    /// one included (`LiveModel::in_match`).
+    /// `Names`, `Sync` or `FillNames` job is left, so it is always behind
+    /// live cards, and only in Menus or Closed (R137), never during a match
+    /// — a free-for-all one included (`LiveModel::in_match`).
     Backfill,
 }
 
@@ -119,6 +150,31 @@ pub struct BackfillRun {
     /// answered, or when Riot omits it). It tells the last page from a short
     /// one, and the finish log line shows it.
     pub total: Option<u32>,
+    /// R150: the players of the matches this run stored, other than the
+    /// user — newest match first, each puuid once with the start of its
+    /// newest match, at most `sync::BACKFILL_FILL_MAX`. Queued for the names
+    /// fill when the run ends (`sync::end_run`), so one run asks in a few
+    /// batched requests, not one per match.
+    pub participants: Vec<NameAsk>,
+}
+
+impl BackfillRun {
+    /// Adds the players of a stored match that started at `start_ms` (see
+    /// [`Self::participants`]). Matches arrive newest first, so a puuid
+    /// already there keeps its newer match; the list stops at the cap.
+    pub fn add_participants(&mut self, start_ms: i64, puuids: Vec<String>) {
+        for puuid in puuids {
+            if self.participants.len() >= crate::sync::BACKFILL_FILL_MAX {
+                break;
+            }
+            if !self.participants.iter().any(|a| a.puuid == puuid) {
+                self.participants.push(NameAsk {
+                    puuid,
+                    match_start_ms: Some(start_ms),
+                });
+            }
+        }
+    }
 }
 
 /// The live stage/roster plus the session-scoped bookkeeping the sync
@@ -191,6 +247,16 @@ pub struct LiveModel {
     /// The own-history backfill run in progress, if any (R101). Cleared when
     /// the account changes or the session drops.
     pub backfill: Option<BackfillRun>,
+    /// R150: the asks waiting for the names fill (`Job::FillNames`), oldest
+    /// first, one per puuid. In memory only: a restart loses them, and the
+    /// next match end, Details open or backfill asks again.
+    pub name_fill: VecDeque<NameAsk>,
+    /// R150: when the last match ended (epoch ms) — In Game to Menus, a
+    /// free-for-all one included — until the next one starts. A match stored
+    /// meanwhile that the user played in, that started shortly before, is the
+    /// match that just ended: its players are asked about
+    /// (`AppState::match_end_asks`).
+    pub match_end_ms: Option<i64>,
     /// The last built/emitted state (`live_state()` returns it).
     pub current: LiveState,
     last_bytes: Vec<u8>,
@@ -219,6 +285,8 @@ impl LiveModel {
             worker_id: None,
             next_worker_id: 0,
             backfill: None,
+            name_fill: VecDeque::new(),
+            match_end_ms: None,
             current: LiveState {
                 stage: Stage::Closed,
                 map_id: None,
@@ -462,9 +530,18 @@ impl LiveModel {
             .cloned()
     }
 
-    /// A `Names` or `Sync` job is waiting: what the backfill must yield to.
+    /// A `Names` or `Sync` job is waiting: what the backfill and the names
+    /// fill must yield to.
     pub fn live_job_pending(&self) -> bool {
         !self.names_needed().is_empty() || self.next_unsynced().is_some()
+    }
+
+    /// Between matches: Lobby or Closed, and the raw presence is not in a
+    /// match (R137: a free-for-all match keeps the Lobby view, yet it is a
+    /// match). The only time the own-history backfill and the names fill (R150)
+    /// run.
+    pub fn between_matches(&self) -> bool {
+        !self.in_match && matches!(self.stage, Stage::Menus | Stage::Closed)
     }
 
     /// R137: the own-history backfill runs only between matches (Lobby, or
@@ -474,13 +551,74 @@ impl LiveModel {
     /// stays the Lobby (R41): the raw presence (`in_match`) decides. The
     /// run's cursor survives the pause.
     pub fn backfill_ready(&self) -> bool {
-        self.backfill.is_some()
-            && !self.in_match
-            && matches!(self.stage, Stage::Menus | Stage::Closed)
+        self.backfill.is_some() && self.between_matches()
+    }
+
+    /// R150: a names fill is queued and it is between matches. The asks wait
+    /// in the queue through a match and run after it.
+    pub fn fill_ready(&self) -> bool {
+        !self.name_fill.is_empty() && self.between_matches()
     }
 
     pub fn has_pending_work(&self) -> bool {
-        self.live_job_pending() || self.backfill_ready()
+        self.live_job_pending() || self.fill_ready() || self.backfill_ready()
+    }
+
+    /// R150: queues asks for the names fill, one per puuid. Asks
+    /// [`Self::fill_allowed`] refuses (the user, anyone shown hidden) are not
+    /// queued at all — and are checked again when taken. Asked twice, the
+    /// newer match's ask stays (an ask raised by a finished match covers a
+    /// puuid asked before; an on-demand one never overrides it). A full queue
+    /// ([`NAME_FILL_QUEUE_MAX`]) takes no new puuid.
+    pub fn queue_name_fill(&mut self, asks: impl IntoIterator<Item = NameAsk>) {
+        let hidden = self.hidden_players();
+        for ask in asks {
+            if !self.fill_allowed_in(&hidden, &ask.puuid) {
+                continue;
+            }
+            if let Some(queued) = self.name_fill.iter_mut().find(|q| q.puuid == ask.puuid) {
+                // `None` (on demand) is older than any match.
+                queued.match_start_ms = queued.match_start_ms.max(ask.match_start_ms);
+            } else if self.name_fill.len() < NAME_FILL_QUEUE_MAX {
+                self.name_fill.push_back(ask);
+            }
+        }
+    }
+
+    /// R150 with R16: whether the names fill may ask about `puuid` at all. Not
+    /// the user (their name comes from the chat session, R43), not an empty
+    /// id, and never a player shown hidden on the live screen now
+    /// (`hidden_players`) or earlier this run (`seen_hidden`). Riot's
+    /// name-service answers blank for anyone hiding their name, but the
+    /// question itself is not sent (CLAUDE.md "Never request a hidden
+    /// player's name").
+    pub fn fill_allowed(&self, puuid: &str) -> bool {
+        self.fill_allowed_in(&self.hidden_players(), puuid)
+    }
+
+    fn fill_allowed_in(&self, hidden: &HashMap<String, Option<String>>, puuid: &str) -> bool {
+        !puuid.is_empty()
+            && puuid != self.self_id()
+            && !hidden.contains_key(puuid)
+            && !self.seen_hidden.contains_key(puuid)
+    }
+
+    /// R150: takes up to `n` asks off the queue, oldest first. Asks that
+    /// [`Self::fill_allowed`] refuses are dropped on the way (and don't count
+    /// towards `n`); they are not kept for later — a later trigger asks again
+    /// if the puuid is fair game then.
+    pub fn take_fill(&mut self, n: usize) -> Vec<NameAsk> {
+        let hidden = self.hidden_players();
+        let mut taken = Vec::new();
+        while taken.len() < n {
+            let Some(ask) = self.name_fill.pop_front() else {
+                break;
+            };
+            if self.fill_allowed_in(&hidden, &ask.puuid) {
+                taken.push(ask);
+            }
+        }
+        taken
     }
 
     /// R101: starts an own-history backfill run. A no-op while one is
@@ -498,6 +636,7 @@ impl LiveModel {
             pending: VecDeque::new(),
             done: false,
             total: None,
+            participants: Vec::new(),
         });
     }
 
@@ -527,6 +666,11 @@ impl LiveModel {
         }
         if let Some(puuid) = self.next_unsynced() {
             return Some(Job::Sync(puuid));
+        }
+        // After the live cards, before the backfill: one request a screen
+        // may be waiting on. Only between matches.
+        if self.fill_ready() {
+            return Some(Job::FillNames);
         }
         // Lowest priority: only with no live job left, and only between
         // matches.
@@ -613,6 +757,8 @@ pub fn closed_self_slot(self_puuid: &str, db: PlayerDb) -> Option<Slot> {
 pub trait EventSink: Send + Sync {
     fn live(&self, state: &LiveState);
     fn details(&self, details: &PlayerDetails);
+    /// R150: the open Match Details, rebuilt because names arrived.
+    fn match_view(&self, view: &MatchDetailsView);
 }
 
 impl EventSink for AppHandle {
@@ -625,6 +771,12 @@ impl EventSink for AppHandle {
     fn details(&self, details: &PlayerDetails) {
         if let Err(e) = self.emit("details", details) {
             log::warn!("emit details failed: {e}");
+        }
+    }
+
+    fn match_view(&self, view: &MatchDetailsView) {
+        if let Err(e) = self.emit("match", view) {
+            log::warn!("emit match failed: {e}");
         }
     }
 }
@@ -661,6 +813,16 @@ pub struct AppState {
     /// the live sync, a Details sync, Match Details and the backfill can all
     /// want the same match at once, and it is downloaded once.
     details_inflight: Mutex<HashMap<String, tokio::sync::watch::Sender<()>>>,
+    /// The Match Details the UI has open, if any (R150): replaced by the next
+    /// `match_details` call, dropped when the Player Details is opened again
+    /// (Back from the match). The UI has no signal for leaving the match
+    /// page for Live, so it can outlive the page: a rebuild is one DB read,
+    /// and it emits only on a change.
+    open_match: Mutex<Option<OpenMatch>>,
+    /// R150: set when names-fill asks are queued (`queue_name_fill`), taken
+    /// by the poll loop (`take_worker_kick`), which owns the worker's handle:
+    /// a command can't start a worker itself.
+    worker_kick: AtomicBool,
     /// `app_data_dir()/debug` — where `dump_raw` writes.
     pub debug_dir: PathBuf,
 }
@@ -709,6 +871,8 @@ impl AppState {
             skins_inflight: Mutex::new(HashMap::new()),
             open_details: Mutex::new(None),
             details_inflight: Mutex::new(HashMap::new()),
+            open_match: Mutex::new(None),
+            worker_kick: AtomicBool::new(false),
             debug_dir,
         }
     }
@@ -854,9 +1018,96 @@ impl AppState {
     }
 
     /// Records `details` as the open Player Details, as the UI was just
-    /// given them (the `player_details` answer).
+    /// given them (the `player_details` answer). Opening a Player Details
+    /// also closes any Match Details: the UI only gets here from the match
+    /// page by going Back.
     pub fn set_open_details(&self, details: &PlayerDetails) {
         *lock(&self.open_details) = Some(details.clone());
+        *lock(&self.open_match) = None;
+    }
+
+    /// Records `view` as the open Match Details, as the UI was just given it
+    /// (the `match_details` answer).
+    pub fn set_open_match(&self, match_id: &str, focus_puuid: &str, view: &MatchDetailsView) {
+        *lock(&self.open_match) = Some(OpenMatch {
+            match_id: match_id.to_string(),
+            focus_puuid: focus_puuid.to_string(),
+            view: view.clone(),
+        });
+    }
+
+    /// `(match id, focus puuid)` of the open Match Details, if any.
+    pub fn open_match_args(&self) -> Option<(String, String)> {
+        lock(&self.open_match)
+            .as_ref()
+            .map(|o| (o.match_id.clone(), o.focus_puuid.clone()))
+    }
+
+    /// Emits `fresh` as a `"match"` event when it is the open Match Details
+    /// (same match and focus) and differs from what the UI was last given;
+    /// `true` when it was emitted. Compare, emit and record happen under one
+    /// lock, like [`Self::emit_details_if_changed`].
+    pub fn emit_match_if_changed(
+        &self,
+        match_id: &str,
+        focus_puuid: &str,
+        fresh: MatchDetailsView,
+    ) -> bool {
+        let mut open = lock(&self.open_match);
+        match open.as_mut() {
+            Some(o)
+                if o.match_id == match_id && o.focus_puuid == focus_puuid && o.view != fresh =>
+            {
+                self.sink.match_view(&fresh);
+                o.view = fresh;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// R150: queues names-fill asks (`LiveModel::queue_name_fill`) and wakes
+    /// the poll loop, which starts a worker for them (`take_worker_kick`).
+    /// The asks run between matches, behind the live cards.
+    pub fn queue_name_fill(&self, asks: Vec<NameAsk>) {
+        if asks.is_empty() {
+            return;
+        }
+        lock(&self.live).queue_name_fill(asks);
+        self.worker_kick.store(true, Ordering::Release);
+    }
+
+    /// `true` once after each [`Self::queue_name_fill`]: the poll loop calls
+    /// it every tick and, when it is set, makes sure a worker runs.
+    pub fn take_worker_kick(&self) -> bool {
+        self.worker_kick.swap(false, Ordering::AcqRel)
+    }
+
+    /// R150: the asks a just-stored match raises — every other player of the
+    /// match that just ended whose name match-details left blank, each tagged
+    /// with the match's start — or nothing.
+    /// A match is "the one that just ended" when a match end is on record
+    /// (`LiveModel::match_end_ms`), the user played in it, and it started
+    /// within [`MATCH_END_WINDOW_MS`] before that end (not after it: that is
+    /// the next match). Who may actually be asked is decided later, when the
+    /// fill runs (`LiveModel::take_fill`).
+    pub fn match_end_asks(&self, m: &Match, players: &[MatchPlayer]) -> Vec<NameAsk> {
+        let live = lock(&self.live);
+        let (Some(me), Some(end)) = (live.self_puuid.as_deref(), live.match_end_ms) else {
+            return Vec::new();
+        };
+        if m.start_ms > end
+            || m.start_ms < end - MATCH_END_WINDOW_MS
+            || !players.iter().any(|p| p.puuid == me)
+        {
+            return Vec::new();
+        }
+        unnamed_others(players, me)
+            .map(|puuid| NameAsk {
+                puuid,
+                match_start_ms: Some(m.start_ms),
+            })
+            .collect()
     }
 
     /// `puuid`'s Player Details is the one the UI asked for last.
@@ -985,6 +1236,14 @@ impl AppState {
     }
 }
 
+/// The Match Details the UI asked for last (`match_details`), as it was last
+/// given to the UI (R150): rebuilt and re-emitted when names arrive.
+struct OpenMatch {
+    match_id: String,
+    focus_puuid: String,
+    view: MatchDetailsView,
+}
+
 /// See [`AppState::claim_details_fetch`].
 pub enum DetailsClaim {
     /// This task downloads it; drop the guard once the rows are stored.
@@ -1030,7 +1289,7 @@ impl Drop for SkinResolveGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opd1_core::db::repo::MatchPlayerRow;
+    use opd1_core::db::repo::{MatchPlayerRow, NameAsk};
     use opd1_core::model::{DisplayName, EncounterCount, PartyMark, RememberedSource};
     use opd1_core::names::KnownName;
     use opd1_core::party::SharedRef;
@@ -1689,6 +1948,183 @@ mod tests {
         assert_eq!(run.pending.len(), 1);
     }
 
+    // -- R150: the names fill ---------------------------------------------
+
+    fn ask(puuid: &str, match_start_ms: Option<i64>) -> NameAsk {
+        NameAsk {
+            puuid: puuid.into(),
+            match_start_ms,
+        }
+    }
+
+    fn queued(m: &LiveModel) -> Vec<(&str, Option<i64>)> {
+        m.name_fill
+            .iter()
+            .map(|a| (a.puuid.as_str(), a.match_start_ms))
+            .collect()
+    }
+
+    #[test]
+    fn the_fill_queue_keeps_one_ask_per_puuid_and_the_newest_match() {
+        let mut m = model(vec![]);
+        m.queue_name_fill(vec![ask("a", None), ask("b", Some(10))]);
+        // Asked again: an on-demand ask never overrides a match's; a match's
+        // ask upgrades an on-demand one (it covers a puuid asked before);
+        // of two matches the newer stays.
+        m.queue_name_fill(vec![
+            ask("a", Some(20)),
+            ask("b", None),
+            ask("b", Some(5)),
+            ask("c", None),
+        ]);
+        assert_eq!(queued(&m), [("a", Some(20)), ("b", Some(10)), ("c", None)]);
+        m.queue_name_fill(vec![ask("b", Some(30))]);
+        assert_eq!(queued(&m)[1], ("b", Some(30)));
+    }
+
+    #[test]
+    fn the_fill_queue_is_bounded() {
+        let mut m = model(vec![]);
+        let many: Vec<NameAsk> = (0..NAME_FILL_QUEUE_MAX + 50)
+            .map(|i| ask(&format!("p{i}"), None))
+            .collect();
+        m.queue_name_fill(many);
+        assert_eq!(m.name_fill.len(), NAME_FILL_QUEUE_MAX);
+        assert_eq!(m.name_fill[0].puuid, "p0", "the oldest asks are kept");
+        // Room is not made by dropping: a full queue takes nothing more.
+        m.queue_name_fill(vec![ask("late", None)]);
+        assert!(!m.name_fill.iter().any(|a| a.puuid == "late"));
+    }
+
+    #[test]
+    fn the_fill_job_comes_after_live_cards_and_before_the_backfill() {
+        let mut m = model(vec![slot("me", false), slot("p1", false)]);
+        m.stage = Stage::Menus;
+        m.start_backfill(None, None);
+        m.queue_name_fill(vec![ask("x", Some(1))]);
+        let id = m.try_start_worker().expect("work pending");
+
+        assert!(matches!(m.next_job(id), Some(Job::Names(_))));
+        m.names_attempted.insert("p1".into());
+        assert_eq!(m.next_job(id), Some(Job::Sync("me".into())));
+        m.synced.insert("me".into());
+        assert_eq!(m.next_job(id), Some(Job::Sync("p1".into())));
+        m.synced.insert("p1".into());
+        assert!(!m.live_job_pending());
+
+        // Live cards done: the fill, then (its queue drained) the run.
+        assert_eq!(m.next_job(id), Some(Job::FillNames));
+        assert_eq!(m.take_fill(10).len(), 1);
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
+
+        // A fill queued mid-run goes ahead of the run's next step, and a
+        // roster player added later goes ahead of both.
+        m.queue_name_fill(vec![ask("y", None)]);
+        assert_eq!(m.next_job(id), Some(Job::FillNames));
+        m.slots.push(slot("late", false));
+        m.names_attempted.insert("late".into());
+        assert_eq!(m.next_job(id), Some(Job::Sync("late".into())));
+    }
+
+    #[test]
+    fn the_fill_waits_for_the_match_to_end() {
+        // Never in Agent Select or In Game, and never in a free-for-all
+        // match either (its view stays the Lobby, `in_match` is the truth).
+        for (stage, in_match) in [
+            (Stage::Pregame, true),
+            (Stage::Ingame, true),
+            (Stage::Menus, true),
+        ] {
+            let mut m = model(vec![slot("me", false)]);
+            m.synced.insert("me".into());
+            m.stage = stage;
+            m.in_match = in_match;
+            m.queue_name_fill(vec![ask("x", None)]);
+            assert!(
+                m.try_start_worker().is_none(),
+                "{stage:?}/{in_match}: a fill alone is no work during a match"
+            );
+
+            // A worker that claimed between matches, then the match began.
+            m.stage = Stage::Menus;
+            m.in_match = false;
+            let id = m.try_start_worker().expect("between matches: work");
+            m.stage = stage;
+            m.in_match = in_match;
+            assert_eq!(m.next_job(id), None, "{stage:?}/{in_match}: never a fill");
+            assert!(!m.worker_running(), "the claim is released");
+            assert_eq!(m.name_fill.len(), 1, "the ask waits in the queue");
+        }
+        // Back between matches (Lobby, or Closed): the same ask runs.
+        for stage in [Stage::Menus, Stage::Closed] {
+            let mut m = model(vec![slot("me", false)]);
+            m.synced.insert("me".into());
+            m.stage = stage;
+            m.queue_name_fill(vec![ask("x", None)]);
+            let id = m.try_start_worker().expect("the fill is work");
+            assert_eq!(m.next_job(id), Some(Job::FillNames), "{stage:?}");
+        }
+    }
+
+    #[test]
+    fn take_fill_never_hands_out_the_user_or_anyone_hidden() {
+        // R150 with R16: a puuid shown hidden on the live screen now
+        // (`hidden_players`), one shown hidden earlier this run
+        // (`seen_hidden`), the user, and an empty id are dropped from the
+        // queue — never asked, and not kept for later.
+        let mut m = model(vec![
+            slot("me", false),
+            slot("live-hidden", true),
+            slot("visible", false),
+        ]);
+        m.stage = Stage::Menus;
+        m.seen_hidden.insert("was-hidden".into(), None);
+        // Straight into the queue: it is `take_fill` that is under test (the
+        // player may have turned hidden after the ask was queued).
+        m.name_fill.extend([
+            ask("live-hidden", Some(1)),
+            ask("was-hidden", Some(1)),
+            ask("me", Some(1)),
+            ask("", Some(1)),
+            ask("visible", Some(1)),
+            ask("stranger", None),
+        ]);
+        let taken: Vec<String> = m.take_fill(10).into_iter().map(|a| a.puuid).collect();
+        assert_eq!(taken, ["visible", "stranger"]);
+        assert!(m.name_fill.is_empty(), "the hidden asks are dropped");
+        // The same rule as a check, for the last look before a request.
+        assert!(!m.fill_allowed("live-hidden"));
+        assert!(!m.fill_allowed("was-hidden"));
+        assert!(!m.fill_allowed("me"));
+        assert!(m.fill_allowed("stranger"));
+    }
+
+    #[test]
+    fn hidden_players_are_not_even_queued() {
+        let mut m = model(vec![slot("me", false), slot("live-hidden", true)]);
+        m.seen_hidden.insert("was-hidden".into(), None);
+        m.queue_name_fill(vec![
+            ask("live-hidden", None),
+            ask("was-hidden", Some(1)),
+            ask("me", Some(1)),
+            ask("", None),
+            ask("visible", None),
+        ]);
+        assert_eq!(queued(&m), [("visible", None)]);
+    }
+
+    #[test]
+    fn take_fill_takes_at_most_n_in_arrival_order() {
+        let mut m = model(vec![]);
+        m.queue_name_fill((0..5).map(|i| ask(&format!("p{i}"), None)));
+        let first: Vec<String> = m.take_fill(2).into_iter().map(|a| a.puuid).collect();
+        assert_eq!(first, ["p0", "p1"]);
+        assert_eq!(m.name_fill.len(), 3);
+        assert!(m.take_fill(0).is_empty());
+        assert_eq!(m.take_fill(99).len(), 3);
+        assert!(!m.fill_ready());
+    }
+
     #[test]
     fn settle_only_touches_attempted_sources() {
         let mut m = model(vec![slot("p1", false)]);
@@ -1741,6 +2177,7 @@ mod tests {
             lock(&self.0 .0).push(state.clone());
         }
         fn details(&self, _details: &PlayerDetails) {}
+        fn match_view(&self, _view: &MatchDetailsView) {}
     }
 
     fn test_state() -> (Arc<AppState>, Arc<Recorder>, tempfile::TempDir) {

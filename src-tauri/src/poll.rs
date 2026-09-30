@@ -245,6 +245,10 @@ impl Poller {
                 // R101: the previous account's run (and its cursor) is not
                 // this account's.
                 live.backfill = None;
+                // R150: nor are its queued name asks and its last match end
+                // (their hidden players were just forgotten above).
+                live.name_fill.clear();
+                live.match_end_ms = None;
             }
             live.self_puuid = Some(me.clone());
             live.self_name_attempted = false;
@@ -361,6 +365,13 @@ impl Poller {
         {
             self.post_match_check(session).await;
         }
+        // R150: names-fill asks queued by a command (Player Details, Match
+        // Details) need a worker, and only this loop owns the worker's
+        // handle. Not while VALORANT is closed (R137: no worker on a stale
+        // session); the next roster install starts one then.
+        if self.st.take_worker_kick() && self.stage != Stage::Closed {
+            self.ensure_worker(session);
+        }
         Ok(())
     }
 
@@ -425,7 +436,15 @@ impl Poller {
         // R137: the raw presence, not the view — a free-for-all match keeps
         // the Lobby view (R41) but is still a match. Set before any stage
         // change below starts a worker.
-        lock(&self.st.live).in_match = matches!(presence.stage, Stage::Pregame | Stage::Ingame);
+        {
+            let mut live = lock(&self.st.live);
+            live.in_match = matches!(presence.stage, Stage::Pregame | Stage::Ingame);
+            if live.in_match {
+                // R150: a match is running, so no match end is on record: the
+                // one that ended before it is history.
+                live.match_end_ms = None;
+            }
+        }
 
         if presence.stage == Stage::Ingame {
             self.match_queue = presence.queue_id.clone();
@@ -434,6 +453,13 @@ impl Poller {
         // a free-for-all keeps the Lobby view through the whole match, but
         // its history entry is just as new.
         let match_ended = self.presence_stage == Stage::Ingame && presence.stage == Stage::Menus;
+        if match_ended {
+            // R150: the main trigger of the names fill. On record before the
+            // stage change below starts a worker, so the match's details —
+            // stored by that worker's sync or by the backfill, whichever gets
+            // them first (`sync::store_details`) — queue its players.
+            lock(&self.st.live).match_end_ms = Some(now_ms());
+        }
         let view = view_stage(presence.stage, presence.queue_id.as_deref());
         if presence.stage != self.presence_stage {
             if view != presence.stage {
@@ -1512,6 +1538,131 @@ mod tests {
             let run = live.backfill.as_ref().expect("the new account's own run");
             assert_eq!(run.anchor, None, "a first run, not the stale one");
         }
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn an_account_switch_clears_the_names_fill_queue_and_the_match_end() {
+        // R150: the previous account's queued asks and match end are not
+        // this account's (their hidden players are forgotten too).
+        let h = harness().await;
+        {
+            let mut live = lock(&h.st.live);
+            live.self_puuid = Some("previous-account".into());
+            live.match_end_ms = Some(now_ms());
+            live.queue_name_fill([opd1_core::db::repo::NameAsk {
+                puuid: "someone".into(),
+                match_start_ms: None,
+            }]);
+            assert_eq!(live.name_fill.len(), 1);
+        }
+
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+
+        let live = lock(&h.st.live);
+        assert!(live.name_fill.is_empty());
+        assert_eq!(live.match_end_ms, None);
+        drop(live);
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_match_end_arms_the_names_fill_and_a_new_match_disarms_it() {
+        // R150: In Game -> Menus (a Deathmatch included) records the match
+        // end; the next match starting drops it, so a later match is never
+        // taken for the one that ended.
+        for queue in ["unrated", "deathmatch"] {
+            let h = harness().await;
+            mount_feed(&h.server, Feed::new(1)).await;
+            let presence = switchable_presence(&h, "INGAME", queue).await;
+            let mut poller = Poller::new(h.st.clone());
+            poller.stage = if queue == "deathmatch" {
+                Stage::Menus
+            } else {
+                Stage::Ingame
+            };
+            poller.presence_stage = Stage::Ingame;
+            poller.party_key = mocked_party_key();
+            lock(&h.st.live).stage = poller.stage;
+            lock(&h.st.live).in_match = true;
+            lock(&h.st.live).match_end_ms = Some(1);
+            poller.presence_tick(&h.session).await.unwrap();
+            assert_eq!(
+                lock(&h.st.live).match_end_ms,
+                None,
+                "{queue}: a match is running: no match end on record"
+            );
+
+            let before = now_ms();
+            *presence.lock().unwrap() = ("MENUS".into(), queue.into());
+            poller.presence_tick(&h.session).await.unwrap();
+            let end = lock(&h.st.live).match_end_ms.expect("armed at the end");
+            assert!(end >= before && end <= now_ms(), "{queue}: ends now");
+
+            // Still in the Lobby a tick later: unchanged.
+            poller.presence_tick(&h.session).await.unwrap();
+            assert_eq!(lock(&h.st.live).match_end_ms, Some(end));
+
+            *presence.lock().unwrap() = ("PREGAME".into(), queue.into());
+            poller.presence_tick(&h.session).await.unwrap();
+            assert_eq!(lock(&h.st.live).match_end_ms, None, "{queue}: new match");
+            poller.stop_worker();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_queued_fill_gets_a_worker_at_the_next_tick() {
+        // A command can't start the worker (the poll loop owns its handle):
+        // it queues and the next tick starts one — in the Lobby, not
+        // in a match.
+        let h = harness().await;
+        Mock::given(method("PUT"))
+            .and(path("/name-service/v2/players"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!([])))
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        synced_lobby(&h);
+        let asks = || {
+            vec![opd1_core::db::repo::NameAsk {
+                puuid: "cccccccc-0000-0000-0000-000000000009".into(),
+                match_start_ms: None,
+            }]
+        };
+
+        // In a match: the tick starts nothing, the ask waits.
+        lock(&h.st.live).in_match = true;
+        h.st.queue_name_fill(asks());
+        poller.connected_tick(&h.session).await.unwrap();
+        assert!(!lock(&h.st.live).worker_running());
+        assert_eq!(lock(&h.st.live).name_fill.len(), 1);
+
+        // The match ended and a roster install starts the worker (the kick
+        // was spent in the match): it asks.
+        lock(&h.st.live).in_match = false;
+        h.st.queue_name_fill(asks());
+        poller.connected_tick(&h.session).await.unwrap();
+        for _ in 0..250 {
+            if !requests(&h.server)
+                .await
+                .iter()
+                .all(|r| r.method.as_str() != "PUT")
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            requests(&h.server)
+                .await
+                .iter()
+                .any(|r| r.method.as_str() == "PUT"),
+            "the tick started a worker that asked name-service"
+        );
         poller.stop_worker();
     }
 

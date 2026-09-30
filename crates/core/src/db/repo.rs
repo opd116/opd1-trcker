@@ -819,8 +819,11 @@ impl Repo {
     /// from any of these sources — on the live screen in the remembered
     /// style, off it as a plain name. What never changes is what is
     /// *requested*: no endpoint is ever asked for a hidden player's name;
-    /// name-service is only called with a `VisiblePuuid`, so the `players`
-    /// table only ever holds names Riot gave for a player who was visible at
+    /// name-service is only called with a `VisiblePuuid` — during a match for
+    /// the visible players of the roster, and between matches (R150, the
+    /// names fill) for players not shown hidden on the live screen, and Riot
+    /// answers blank for anyone hiding their name — so the `players` table
+    /// only ever holds names Riot gave for a player who was not hiding it at
     /// that moment. This function reads; it fetches nothing.
     ///
     /// One indexed query: seeks on `idx_match_players_puuid`, the primary
@@ -884,6 +887,110 @@ pub const KNOWN_NAME_SQL: &str = "SELECT name, tag, map_id, ts, rank FROM (
      )
      ORDER BY ts DESC, rank ASC
      LIMIT 1";
+
+// ---------------------------------------------------------------------
+// names fill (R150)
+// ---------------------------------------------------------------------
+
+/// One name-service question (R150): a puuid, and the start (epoch ms) of
+/// the finished match that raised it — `None` for an on-demand question
+/// (Player Details, Match Details, Top 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameAsk {
+    pub puuid: String,
+    pub match_start_ms: Option<i64>,
+}
+
+/// [`Repo::names_to_ask`]'s per-puuid check (`?1` the puuid): whether the
+/// `players` row has a full name, whether any stored `match_players` row has
+/// one, and the puuid's marker (`players.name_asked_ms`). Three key seeks:
+/// `players`' primary key twice and `idx_match_players_puuid`. Public so a
+/// test can `EXPLAIN QUERY PLAN` exactly this text.
+pub const NAMES_TO_ASK_SQL: &str = "SELECT
+       EXISTS (SELECT 1 FROM players
+               WHERE puuid = ?1 AND game_name != '' AND tag_line != ''),
+       EXISTS (SELECT 1 FROM match_players
+               WHERE puuid = ?1
+                 AND game_name IS NOT NULL AND game_name != ''
+                 AND tag_line IS NOT NULL AND tag_line != ''),
+       (SELECT name_asked_ms FROM players WHERE puuid = ?1)";
+
+impl Repo {
+    /// The asks name-service should be sent (R150), in input order: the
+    /// puuids with no known name — no full `players` name and no full
+    /// `match_players` name — that a previous blank answer doesn't rule out.
+    ///
+    /// A blank answer is remembered as a marker, `players.name_asked_ms`: the
+    /// start of the newest finished match whose question ended blank (0 for
+    /// an on-demand one). Name-service answers with the player's status now,
+    /// so an ask raised by a finished match (`match_start_ms: Some`) is
+    /// dropped when the marker is at least that match's start — the same
+    /// match again, or an older one: nothing changed since — and sent when
+    /// the match is newer: the next finished match the puuid is in asks
+    /// again, and there is no timer. An on-demand ask (`None`) is dropped by
+    /// any marker: it only covers puuids never asked before.
+    ///
+    /// This decides only what is *worth* asking. Who may be asked at all
+    /// (never a puuid hidden on the live screen, R16) is the caller's rule.
+    pub fn names_to_ask(&self, asks: &[NameAsk]) -> Result<Vec<NameAsk>> {
+        let mut stmt = self.conn.prepare(NAMES_TO_ASK_SQL)?;
+        let mut out = Vec::new();
+        for a in asks {
+            let (in_players, in_matches, marker): (bool, bool, Option<i64>) = stmt
+                .query_row(params![a.puuid], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?;
+            let covered = in_players
+                || in_matches
+                || match (a.match_start_ms, marker) {
+                    (_, None) => false,
+                    (None, Some(_)) => true,
+                    (Some(start), Some(marker)) => marker >= start,
+                };
+            if !covered {
+                out.push(a.clone());
+            }
+        }
+        Ok(out)
+    }
+
+    /// Stores what name-service answered (R150), in one transaction.
+    /// `learned` is `(puuid, name, tag)` — a full name, kept in `players`
+    /// with `updated_ms = now_ms` (its `Seen` kind in [`Self::known_name`]);
+    /// the row's level and card are left alone. `blank` are the asks that got
+    /// no name: each raises the marker (`name_asked_ms`) to its match's start
+    /// (0 for an on-demand ask; the marker never goes down), and nothing else
+    /// on the row moves — a blank answer never erases a name.
+    pub fn record_name_answers(
+        &self,
+        learned: &[(String, String, String)],
+        blank: &[NameAsk],
+        now_ms: i64,
+    ) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for (puuid, name, tag) in learned {
+            tx.execute(
+                "INSERT INTO players (puuid, game_name, tag_line, account_level, card_id, updated_ms)
+                 VALUES (?1, ?2, ?3, 0, '', ?4)
+                 ON CONFLICT(puuid) DO UPDATE SET
+                    game_name = excluded.game_name,
+                    tag_line = excluded.tag_line,
+                    updated_ms = excluded.updated_ms",
+                params![puuid, name, tag, now_ms],
+            )?;
+        }
+        for a in blank {
+            tx.execute(
+                "INSERT INTO players (puuid, game_name, tag_line, account_level, card_id, updated_ms, name_asked_ms)
+                 VALUES (?1, '', '', 0, '', ?2, ?3)
+                 ON CONFLICT(puuid) DO UPDATE SET
+                    name_asked_ms = MAX(COALESCE(players.name_asked_ms, 0), excluded.name_asked_ms)",
+                params![a.puuid, now_ms, a.match_start_ms.unwrap_or(0)],
+            )?;
+        }
+        tx.commit()
+    }
+}
 
 // ---------------------------------------------------------------------
 // top_teammates

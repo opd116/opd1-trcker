@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use opd1_core::db::repo::NameAsk;
 use opd1_core::matchview::{build_match_view, needs_known_name, needs_seen_name, MatchViewInput};
 use opd1_core::model::MatchDetailsView;
 use opd1_core::names::KnownName;
@@ -18,32 +19,59 @@ use crate::sync::fetch_missing_details;
 /// and reads again. `Err("unknown match")` when it still isn't there
 /// (no session, the fetch failed, or the id names no match).
 ///
+/// R150: the view is also recorded as the open Match Details, and the rows
+/// that have no name anywhere (and aren't hidden on the live screen) are
+/// queued for the names fill: they show the names when it answers, through a
+/// `"match"` event ([`refresh_open`]).
+///
 /// The caller has already validated both ids (`commands::check_match_args`).
 pub async fn load(
     st: &Arc<AppState>,
     match_id: &str,
     focus_puuid: &str,
 ) -> Result<MatchDetailsView, String> {
-    if let Some(view) = read(st, match_id, focus_puuid).await? {
-        return Ok(view);
-    }
-    if let Some(session) = st.session() {
-        // A client that went away mid-fetch is just a miss here: the poll
-        // loop notices it on its own next tick.
-        let _ = fetch_missing_details(st, &session, vec![match_id.to_string()]).await;
-        if let Some(view) = read(st, match_id, focus_puuid).await? {
-            return Ok(view);
-        }
-    }
-    Err("unknown match".into())
+    let found = match read(st, match_id, focus_puuid).await? {
+        Some(found) => Some(found),
+        None => match st.session() {
+            Some(session) => {
+                // A client that went away mid-fetch is just a miss here: the
+                // poll loop notices it on its own next tick.
+                let _ = fetch_missing_details(st, &session, vec![match_id.to_string()]).await;
+                read(st, match_id, focus_puuid).await?
+            }
+            None => None,
+        },
+    };
+    let Some((view, asks)) = found else {
+        return Err("unknown match".into());
+    };
+    st.set_open_match(match_id, focus_puuid, &view);
+    st.queue_name_fill(asks);
+    Ok(view)
 }
 
-/// The view from what is stored, or `None` when the match isn't.
+/// Rebuilds the open Match Details, if any, from the DB and emits it
+/// (`"match"`) when it changed (R150: names arrived from the names fill).
+pub async fn refresh_open(st: &Arc<AppState>) {
+    let Some((match_id, focus_puuid)) = st.open_match_args() else {
+        return;
+    };
+    match read(st, &match_id, &focus_puuid).await {
+        Ok(Some((view, _))) => {
+            st.emit_match_if_changed(&match_id, &focus_puuid, view);
+        }
+        Ok(None) => {}
+        Err(e) => log::warn!("match rebuild failed: {e}"),
+    }
+}
+
+/// The view from what is stored — with the names fill's asks for its rows
+/// (on demand: puuids never asked before) — or `None` when the match isn't.
 async fn read(
     st: &Arc<AppState>,
     match_id: &str,
     focus_puuid: &str,
-) -> Result<Option<MatchDetailsView>, String> {
+) -> Result<Option<(MatchDetailsView, Vec<NameAsk>)>, String> {
     let (self_puuid, self_name, hidden_now) = {
         let live = lock(&st.live);
         (
@@ -82,15 +110,29 @@ async fn read(
                     }
                 }
             }
-            Ok(Some((stored, remembered, seen)))
+            // R150: a row with no name in this match, none in the `players`
+            // table and none remembered from any match, that is not hidden
+            // on the live screen, is worth asking name-service about.
+            let asks: Vec<NameAsk> = stored
+                .players
+                .iter()
+                .filter(|p| p.puuid != me)
+                .filter(|p| needs_seen_name(p, &hidden))
+                .filter(|p| !seen.contains_key(&p.puuid) && !remembered.contains_key(&p.puuid))
+                .map(|p| NameAsk {
+                    puuid: p.puuid.clone(),
+                    match_start_ms: None,
+                })
+                .collect();
+            Ok(Some((stored, remembered, seen, asks)))
         })
         .await
         .ok_or_else(|| "database unavailable".to_string())?;
-    let Some((stored, remembered, seen)) = loaded else {
+    let Some((stored, remembered, seen, asks)) = loaded else {
         return Ok(None);
     };
 
-    Ok(Some(build_match_view(MatchViewInput {
+    let view = build_match_view(MatchViewInput {
         stored: &stored,
         map_uuid: &|path| st.map_uuid(path),
         self_puuid: self_puuid.as_deref(),
@@ -99,5 +141,6 @@ async fn read(
         hidden_now: &hidden_now,
         remembered: &remembered,
         seen: &seen,
-    })))
+    });
+    Ok(Some((view, asks)))
 }

@@ -253,6 +253,14 @@ pub async fn refresh_open_after_live_change(st: &Arc<AppState>) {
     }
 }
 
+/// Rebuilds the open Player Details, if any, and emits it when it changed
+/// (R150: names arrived from the names fill).
+pub async fn refresh_open(st: &Arc<AppState>) {
+    if let Some(puuid) = st.open_details_puuid() {
+        refresh(st, &puuid).await;
+    }
+}
+
 /// Rebuilds `puuid`'s details and emits them (`"details"`) when they are
 /// the open Player Details and changed since the UI was last given them
 /// (`AppState::emit_details_if_changed`). A no-op for anyone else, so the

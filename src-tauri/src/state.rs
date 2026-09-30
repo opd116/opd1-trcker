@@ -5,7 +5,7 @@
 //! synchronous work (never across an `.await`); SQLite work always goes
 //! through [`AppState::db`] (`spawn_blocking`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -75,6 +75,36 @@ pub enum Job {
     Names(Vec<(String, bool)>),
     /// The per-player sync of one puuid.
     Sync(String),
+    /// One step of the own-history backfill (R101): only handed out when no
+    /// `Names` or `Sync` job is left, so it is always behind live cards.
+    Backfill,
+}
+
+/// One own-history backfill run (R101; `sync::backfill_step` advances it).
+/// It lives in the [`LiveModel`], so a step that yields to a live job — or a
+/// worker aborted by a stage change — resumes from the same cursor. The
+/// stored anchor moves only when a run *finishes*: a run that ends early
+/// (disconnect, account switch, a Riot error) is dropped, and the next one
+/// starts over from the old anchor (ids already stored are skipped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillRun {
+    /// The last finished run's newest `(match_id, start_ms)`; `None` on the
+    /// first run ever.
+    pub anchor: Option<(String, i64)>,
+    /// The current act's start, first run only (`None` when the act tables
+    /// aren't loaded; each page looks it up again until it is known).
+    pub act_start_ms: Option<i64>,
+    /// The next match-history `startIndex`.
+    pub next_index: u32,
+    /// History entries looked at so far (the first run's cap).
+    pub scanned: u32,
+    /// Page 0's first entry; becomes the anchor when the run finishes.
+    pub newest: Option<(String, i64)>,
+    /// Ids from the current page still to fetch, kept when a step yields.
+    pub pending: VecDeque<String>,
+    /// The last page reached a stop (the anchor, the act start, the cap, or
+    /// the end of the history); the run finishes once `pending` is empty.
+    pub done: bool,
 }
 
 /// The live stage/roster plus the session-scoped bookkeeping the sync
@@ -131,6 +161,9 @@ pub struct LiveModel {
     /// a new one being refused.
     worker_id: Option<u64>,
     next_worker_id: u64,
+    /// The own-history backfill run in progress, if any (R101). Cleared when
+    /// the account changes or the session drops.
+    pub backfill: Option<BackfillRun>,
     /// The last built/emitted state (`live_state()` returns it).
     pub current: LiveState,
     last_bytes: Vec<u8>,
@@ -156,6 +189,7 @@ impl LiveModel {
             party_ready: HashSet::new(),
             worker_id: None,
             next_worker_id: 0,
+            backfill: None,
             current: LiveState {
                 stage: Stage::Closed,
                 map_id: None,
@@ -378,8 +412,30 @@ impl LiveModel {
             .cloned()
     }
 
+    /// A `Names` or `Sync` job is waiting: what the backfill must yield to.
+    pub fn live_job_pending(&self) -> bool {
+        !self.names_needed().is_empty() || self.next_unsynced().is_some()
+    }
+
     pub fn has_pending_work(&self) -> bool {
-        self.next_unsynced().is_some() || !self.names_needed().is_empty()
+        self.live_job_pending() || self.backfill.is_some()
+    }
+
+    /// R101: starts an own-history backfill run. A no-op while one is
+    /// active, so a second trigger (a match ended mid-run) keeps its cursor.
+    pub fn start_backfill(&mut self, anchor: Option<(String, i64)>, act_start_ms: Option<i64>) {
+        if self.backfill.is_some() {
+            return;
+        }
+        self.backfill = Some(BackfillRun {
+            anchor,
+            act_start_ms,
+            next_index: 0,
+            scanned: 0,
+            newest: None,
+            pending: VecDeque::new(),
+            done: false,
+        });
     }
 
     /// R45: claims the worker slot if there is work and no worker owns it
@@ -408,6 +464,10 @@ impl LiveModel {
         }
         if let Some(puuid) = self.next_unsynced() {
             return Some(Job::Sync(puuid));
+        }
+        // Lowest priority: only with no live job left.
+        if self.backfill.is_some() {
+            return Some(Job::Backfill);
         }
         self.worker_id = None;
         None
@@ -1295,6 +1355,76 @@ mod tests {
             "the old worker can't free the new one's claim"
         );
         assert!(m.next_job(new).is_some());
+    }
+
+    #[test]
+    fn backfill_job_is_lowest_priority() {
+        let mut m = model(vec![slot("me", false), slot("p1", false)]);
+        m.start_backfill(None, None);
+        let id = m.try_start_worker().expect("work pending");
+
+        // A name is needed and slots are unsynced: both come before the run.
+        assert!(m.live_job_pending());
+        assert!(matches!(m.next_job(id), Some(Job::Names(_))));
+        m.names_attempted.extend(["p1".to_string()]);
+        assert_eq!(m.next_job(id), Some(Job::Sync("me".into())));
+        m.synced.insert("me".into());
+        assert_eq!(m.next_job(id), Some(Job::Sync("p1".into())));
+        m.synced.insert("p1".into());
+
+        // Both empty: only now the backfill.
+        assert!(!m.live_job_pending());
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
+        assert_eq!(m.next_job(id), Some(Job::Backfill), "until the run ends");
+        // A roster player added mid-run goes first again.
+        m.slots.push(slot("late", false));
+        m.names_attempted.insert("late".into());
+        assert!(m.live_job_pending());
+        assert_eq!(m.next_job(id), Some(Job::Sync("late".into())));
+        m.synced.insert("late".into());
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
+
+        // The run ended: nothing left, and the claim is released with it.
+        m.backfill = None;
+        assert_eq!(m.next_job(id), None);
+        assert!(!m.worker_running(), "claim released");
+    }
+
+    #[test]
+    fn a_backfill_run_alone_starts_a_worker() {
+        // The roster is fully synced; only the run is left. `try_start_worker`
+        // must still claim (R45), or a run started after the sync would
+        // never get a worker.
+        let mut m = model(vec![slot("me", false)]);
+        m.synced.insert("me".into());
+        assert!(m.try_start_worker().is_none(), "no run, no work");
+        m.start_backfill(None, None);
+        let id = m.try_start_worker().expect("the run is work");
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
+    }
+
+    #[test]
+    fn start_backfill_is_noop_while_running() {
+        let mut m = model(vec![slot("me", false)]);
+        let anchor = Some(("m9".to_string(), 900));
+        m.start_backfill(anchor.clone(), Some(500));
+        {
+            let run = m.backfill.as_mut().unwrap();
+            assert_eq!(run.anchor, anchor);
+            assert_eq!(run.act_start_ms, Some(500));
+            assert_eq!((run.next_index, run.scanned), (0, 0));
+            assert!(run.pending.is_empty() && run.newest.is_none() && !run.done);
+            // The run made progress…
+            run.next_index = 40;
+            run.scanned = 37;
+            run.pending.push_back("m3".into());
+        }
+        // …and a second trigger (a match ended meanwhile) must not reset it.
+        m.start_backfill(None, None);
+        let run = m.backfill.as_ref().unwrap();
+        assert_eq!(run.anchor, anchor, "same run");
+        assert_eq!((run.next_index, run.scanned), (40, 37));
+        assert_eq!(run.pending.len(), 1);
     }
 
     #[test]

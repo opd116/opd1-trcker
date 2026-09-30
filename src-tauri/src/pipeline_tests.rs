@@ -238,7 +238,7 @@ pub(crate) struct Harness {
     /// The DB file when the harness was built `with_db_file`, else the DB
     /// is in memory.
     db_path: Option<std::path::PathBuf>,
-    server: MockServer,
+    pub(crate) server: MockServer,
     /// valorant-api. No routes are mounted until a test calls
     /// [`mount_asset_tables`], so it answers 404: the asset tables stay
     /// unloaded and every map id resolves to `None`.
@@ -275,7 +275,10 @@ async fn build_harness(db_file: bool) -> Harness {
         },
     )
     .await
-    .expect("connect to the mock client");
+    .expect("connect to the mock client")
+    // The production 10 rps would make the backfill tests (hundreds of
+    // requests) take half a minute; the bucket itself is tested in `opd1-riot`.
+    .with_global_rate(1_000.0);
 
     let rec = Arc::new(Recorder::default());
     let db_path = db_file.then(|| dir.path().join("opd1.sqlite"));
@@ -1154,3 +1157,8 @@ async fn failed_bundle_reload_never_feeds_party_marks() {
 /// file; same harness).
 #[cfg(test)]
 mod details_loadouts;
+
+/// Task 15b's own-history backfill tests (R101; their own file; same
+/// harness).
+#[cfg(test)]
+pub(crate) mod backfill;

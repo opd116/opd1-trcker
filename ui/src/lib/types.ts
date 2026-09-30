@@ -172,7 +172,11 @@ export interface ScoreRow {
   name: DisplayName;
   agentId: string | null;
   tier: number | null;
-  /** R124: kills, deaths, assists, acs, adr, hsPct and tier are all null for a player with no stats row (shown as —). */
+  /**
+   * R124: kills, deaths, assists, acs, adr and hsPct are all null for a player with no stats row (shown as —); adr is
+   * also null when only the damage is unknown. `tier` is independent of the stats (R81): a ranked player with no
+   * stats row still has one, so draw the rank and the — cells together.
+   */
   kills: number | null;
   deaths: number | null;
   assists: number | null;

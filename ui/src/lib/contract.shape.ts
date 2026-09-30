@@ -2,6 +2,13 @@
 // side pins (crates/core/tests/fixtures/contract/*.json), not from types.ts. contract.test.ts walks the
 // goldens (and the demo fixtures) with these; contract.test-d.ts holds them against types.ts. Nothing in
 // the app imports this file, so `vite build` drops it.
+//
+// Two differences in form from the plan's interface text (accepted in the Task 16b fix round, for Task 18):
+//  - the four `DisplayName` variants are their own export, `displayNameShapes` (keyed by the `kind` tag), not
+//    entries of `shapes`: `DisplayName` is a union, so it has no single `ShapeOf<DisplayName>`. The walker picks the
+//    variant by `kind`; contract.test-d.ts asserts the variant set equals `DisplayName["kind"]`.
+//  - `Desc` has two optional fields beyond `{ kinds, optional?, shape? }`: `enum` (a closed string set) and
+//    `fraction` (a 0..1 number). Both are additive, and the type tests pin them.
 import type {
   DisplayName,
   EncounterCount,

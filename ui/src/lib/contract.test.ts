@@ -88,6 +88,19 @@ const strings = (value: unknown): string[] =>
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const desc = (xs: number[]) => xs.every((x, i) => i === 0 || xs[i - 1]! >= x);
 
+// R124: match-details keeps no round count for a player with no stats row, so kills (and with it deaths, assists,
+// acs, hsPct and adr) are unknown, never a counted 0. `tier` is NOT in this list: Rust sets it from the player's
+// competitive tier whatever the stats (matchview.rs, R81), so a ranked player with no stats row keeps their rank.
+// `adr` is also null when only the damage is unknown, so a row WITH kills may still have a null adr.
+const SCORELESS_NULL_KEYS = ["deaths", "assists", "acs", "adr", "hsPct"] as const;
+
+/** Every stat that is not null on a scoreboard row whose kills are null; a row with kills is not held to it. */
+function scorelessProblems(row: object): string[] {
+  const r = row as Obj;
+  if (r.kills !== null) return [];
+  return SCORELESS_NULL_KEYS.filter((k) => r[k] !== null).map((k) => `${k} is ${JSON.stringify(r[k])}, not null, on a row with no kills`);
+}
+
 // ── the guard itself ─────────────────────────────────────────────────────────────
 describe("the walker can fail (a check that cannot fail proves nothing)", () => {
   const rank = { tier: 15, rr: 42 };
@@ -137,6 +150,18 @@ describe("the walker can fail (a check that cannot fail proves nothing)", () => 
     expect(problems({ kind: "hiddenAgent" }, "DisplayName", "n")).toEqual(["n.agentId: required key of DisplayName is missing"]);
     expect(problems({ kind: "visible", name: "A" }, "DisplayName", "n")).toEqual(["n.tag: required key of DisplayName is missing"]);
     expect(problems({ kind: "mystery" }, "DisplayName", "n")).toEqual(['n: no DisplayName descriptor for kind "mystery"']);
+  });
+
+  it("a scoreboard row with no stats row: every stat null, but the rank is independent (R124, R81)", () => {
+    const bare = { kills: null, deaths: null, assists: null, acs: null, adr: null, hsPct: null };
+    expect(scorelessProblems({ ...bare, tier: null })).toEqual([]);
+    expect(scorelessProblems({ ...bare, tier: 15 })).toEqual([]); // ranked, no stats: the real backend shape
+    expect(scorelessProblems({ ...bare, acs: 200, hsPct: 0.2 })).toEqual([
+      "acs is 200, not null, on a row with no kills",
+      "hsPct is 0.2, not null, on a row with no kills",
+    ]);
+    // With kills the row is not held to it: adr is null when the damage alone is unknown.
+    expect(scorelessProblems({ kills: 12, deaths: 9, assists: 3, acs: 240, adr: null, hsPct: 0.3, tier: 15 })).toEqual([]);
   });
 
   it("every `shape` a descriptor names exists", () => {
@@ -245,7 +270,7 @@ describe("golden invariants the UI relies on", () => {
     const rows = MATCHES.flatMap((m) => (m.teams as Obj[]).flatMap((t) => t.players as Obj[]));
     const scoreless = rows.filter((r) => r.kills === null);
     expect(scoreless.length).toBeGreaterThan(0);
-    for (const r of scoreless) for (const k of ["deaths", "assists", "acs", "adr", "hsPct", "tier"]) expect(r[k], `row.${k}`).toBeNull();
+    for (const r of scoreless) expect(scorelessProblems(r), `row ${String(r.puuid)}`).toEqual([]);
   });
 
   it("scoreboard rows are sorted by ACS descending, null last; team 0 holds the focus or self row; no-team modes have one team", () => {
@@ -406,9 +431,7 @@ describe("the demo fixtures follow the golden contract", () => {
     for (const [n, m] of allMatches) {
       for (const t of m.teams) {
         expect(desc(t.players.map((p) => p.acs ?? -1)), `${n} ${t.teamId}`).toBe(true);
-        for (const p of t.players) {
-          if (p.kills === null) expect([p.deaths, p.assists, p.acs, p.adr, p.hsPct, p.tier], `${n} ${p.puuid}`).toEqual([null, null, null, null, null, null]);
-        }
+        for (const p of t.players) expect(scorelessProblems(p), `${n} ${p.puuid}`).toEqual([]);
       }
     }
   });

@@ -106,7 +106,8 @@ async fn hold_for_never_panics_on_malformed_seconds() {
     // A malformed/huge `Retry-After` (or any other bogus caller value)
     // must never reach `Duration::from_secs_f64`/`Instant + Duration`
     // unclamped — those panic on non-finite or out-of-range input, and
-    // release builds use `panic = "abort"`. This test's assertion *is*
+    // release builds unwind (R138), which would still end the calling
+    // task. This test's assertion *is*
     // that none of these calls panic (a huge/infinite value clamps to a
     // real 30s hold internally, per `clamp_hold_secs`'s unit tests in
     // `src/throttle.rs` — we don't wait it out here, just prove

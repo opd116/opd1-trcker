@@ -80,14 +80,14 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Outline around the card = the user's own card.
 - Coloured right-edge stripe + party tab = detected party (dashed/outlined = likely, solid/filled = confirmed). Tooltip `Party · likely` / `Party · confirmed`.
 - ⟲ + count = past matches with the user (see Encounters).
-- Eye-off icon + dotted-underlined name + tag = hidden player's name remembered from the user's own finished match. Tooltip `Hidden name · known from your match` + map · date.
+- Eye-off icon + dotted-underlined name + tag = hidden player's name remembered by the DB, from any source (R145). The tooltip names the source: `Hidden name · known from your match` or `Hidden name · known from a past match`, each + map · date; `Hidden name · seen before` + date only.
 - Eye-off icon + italic agent name = hidden name. Tooltip `Hidden name`.
 
 **Player details** (click any card in any stage; **scrolling allowed**):
 - **Back** button.
 - **Recent Competitive Matches:** 3 shown, each with map image and result. **Show More** reveals more, up to 8 total, newest first. No count picker.
 - **Top 3 Teammates** for the current act, with full names and shared match count. Computed from the last 20 current-act comp matches plus any older matches already in the DB.
-- **Loadout:** Vandal, Phantom, Operator, and Sheriff skins, in the equipped chroma.
+- **Loadout:** Vandal, Phantom, Operator, and Sheriff skins, in the equipped chroma. The user's own loadout comes from personalization v3 (`/personalization/v3/players/{puuid}/playerloadout`; v2 returns 404 on every shard, R148).
 - Encounter history with the user (see Smart data).
 - Hero stats: Win%, Games, W / L for the current act; K/D and HS% from the last ≤20 current-act competitive matches (tooltip `Last N competitive · this act`) (R116, user 2026-09-29).
 - Clicking a recent match or an encounter row opens **Match Details** (the design's scoreboard: ACS, K/D/A, +/−, ADR, HS%, half scores, rank per player). Hidden-name rules apply inside it (see Hidden names).
@@ -126,11 +126,11 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - The user's own card always shows the user's own name (from the local chat session, never name-service) (R43/R49).
 - These rules apply everywhere a live player appears, including Player Details (Top 3 Teammates, encounter rows) and Match Details (R18).
 - Account level shows `—` only when Riot itself withholds it (HideAccountLevel) — a separate player setting, not part of the hidden name — except on the user's own card, which always shows the user's own level (R100).
-- **Exception:** if the DB already knows that player's name from a finished match **the user personally played in** (where the name was shown after the match), show that name during live stages in the remembered-name style (Card indicators).
-- **Never request a hidden player's name** from any endpoint (name-service or otherwise).
-- **Names from other matches (R143, user 2026-09-30):** during live stages a hidden player's name shows only per the remembered-name exception above (the user's own finished matches). Off the live screen (Player Details, Match Details), names that Riot returns in match-details of matches the user did not play may be shown. Whether Riot returns them is checked on the user's PC (R94).
+- **Exception:** if the DB already knows that player's name, show it during live stages in the remembered-name style (Card indicators). Which sources count is in the R145 paragraph below.
+- **Never request a hidden player's name** from any endpoint (name-service or otherwise) while that player is incognito in a live stage (R150 below).
+- **Names from any source (R145, user 2026-09-30) and name-service (R150):** During live stages, a hidden player's name shows in the remembered style when the DB knows it from any source: the user's own matches, other matches, or a name-service answer from when the player was visible. The tooltip names the source. Outside live stages, name-service may be asked for match participants with no known name. Riot blanks anyone who currently hides their name. Live incognito puuids are never sent to any endpoint.
 - After a match ends, show names as the client/match-details shows them.
-- Match Details: in every view, a player incognito on the live screen now shows as on their card: the remembered name when the user's own finished match knows it, else the agent name (R93). Otherwise, a match the user played shows names as match-details gives them, and so does a match the user did not play when Riot returns them (R143); a player with no stored name shows as the agent name (or the remembered name). Names from matches the user did not play are never stored as known names for the live-stage remembered style (R74; match-details has no incognito flag, and a check of the user's DB after the first real test will confirm whether Riot returns those names, R94).
+- Match Details: in every view, a player incognito on the live screen now shows as on their card: the remembered name when the DB knows it from any source (R145), else the agent name (R93). Otherwise, a match the user played shows names as match-details gives them, and so does a match the user did not play when Riot returns them (R143); a player with no stored name shows as the agent name (or the remembered name). A row Riot left blank shows the name stored in the players table, else the agent name (R145 supersedes R74's rule that only the user's own matches supply known names; match-details has no incognito flag).
 
 ## Smart data (SQLite)
 
@@ -170,7 +170,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - **Region/shard:** parse the `pd.` and `glz-` URLs from `%LOCALAPPDATA%\VALORANT\Saved\Logs\ShooterGame.log`.
 - **Stage:** comes from the `/chat/v4/presences` private blob (`sessionLoopState`), confirmed by the `pregame/v1/players/{puuid}` and `core-game/v1/players/{puuid}` endpoints.
 - **Endpoints:**
-  - `pregame`, `core-game` (+ loadouts)
+  - `pregame`, `core-game` (+ loadouts; the user's own loadout via `personalization/v3`)
   - `mmr/v1/players/{puuid}` (+ `/competitiveupdates`)
   - `match-history`, `match-details`
   - `name-service/v2/players` (never for hidden players)

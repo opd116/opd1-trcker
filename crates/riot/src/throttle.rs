@@ -15,9 +15,10 @@ use tokio::time::sleep;
 /// against a nonsensical `rps <= 0` (or NaN) causing a divide-by-zero (or
 /// by-a-negative-number) when computing how long to wait for the next
 /// token — which would hand a non-finite or negative value to
-/// `Duration::from_secs_f64`, and panic. Release builds use
-/// `panic = "abort"`, so a panic here would take the whole app down. Real
-/// call sites always pass a real positive `rps` (10.0, 0.4); this only
+/// `Duration::from_secs_f64`, and panic. Release builds unwind on panic
+/// (R138: no `panic = "abort"`), so a panic here would end the calling task
+/// instead of the app, but it would still cut that task short mid-match.
+/// Real call sites always pass a real positive `rps` (10.0, 0.4); this only
 /// protects against misuse.
 const MIN_RPS: f64 = 0.01;
 

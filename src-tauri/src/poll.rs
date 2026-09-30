@@ -493,8 +493,9 @@ impl Poller {
     /// `LiveModel::try_start_worker`; a running worker picks up roster
     /// changes itself).
     fn ensure_worker(&mut self, session: &Arc<RiotSession>) {
-        // A worker task that ended without releasing its claim (it can
-        // only panic in a debug build) must not block all future work.
+        // A worker task that ended without releasing its claim (it
+        // panicked; release builds unwind, R138, so the task ends and the
+        // app keeps running) must not block all future work.
         if let Some((handle, id)) = &self.worker {
             if handle.inner().is_finished() {
                 lock(&self.st.live).release_worker(*id);

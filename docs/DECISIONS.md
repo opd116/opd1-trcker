@@ -1,9 +1,9 @@
 # Decisions
 
-Every ruling made while building OPD1 TRCKER, in number order (R1 to R147). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
+Every ruling made while building OPD1 TRCKER, in number order (R1 to R150). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.
-- Rulings come from the working ledger (R1 to R73 and R87 to R147) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
+- Rulings come from the working ledger (R1 to R73 and R87 to R150) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
 - Precedence when rules disagree (R92): `docs/requirements-raw.md` (newest dated block) > the design file > older `CLAUDE.md` visual rules. `docs/design-spec.md` outranks the design file only for the R74 to R86 gap-fills.
 - The user's own words are in `docs/requirements-raw.md`; the [user decisions index](#user-decisions-index) at the end maps each dated block to a summary.
 
@@ -131,7 +131,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R147). Each
 - **What:** A teammate whose puuid is incognito in the current live roster is shown by the display_name rules (remembered from a match the user played, or hidden) in Player Details, never with a name from another player's history.
 - **Why:** Closes an indirect leak.
 - **Cost:** A hidden duo partner shows as hidden in someone else's details.
-- **Status:** active
+- **Status:** narrowed by R145 (the remembered name now comes from any source the DB knows, not only a match the user played; the never-from-another-player's-history part stands for live incognito puuids)
 
 ### R19 — new_match_ids drops the puuid parameter
 
@@ -523,7 +523,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R147). Each
 - **What:** Match Details names: in a match the user did not play, a row shows as its agent name (or the remembered name) when its puuid is incognito on the live screen now or its stored name is empty; otherwise Visible. This replaces audit §2.12's "flagged incognito in that match".
 - **Why:** match-details has no incognito flag (`endpoints.rs` `MatchPlayer`), so §2.12 can't be implemented.
 - **Cost:** If match-details returns real names for players who were incognito in that match, those names show for players not on screen now, and the same risk covers Top 3 names built from the details player's own history (R94). Task 19 item 12 checks this against the user's DB. The follow-up would hide every name in matches the user didn't play, and every Top 3 name learned only from such matches, except players visible on the live screen now.
-- **Status:** active
+- **Status:** narrowed by R145 and R150 (a name from a match the user did not play may now be the remembered name; blank rows fall back to the players-table name; the live incognito rule stands)
 
 ### R75 — Fixed 5-slot Live columns and one card size
 
@@ -558,7 +558,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R147). Each
 - **What:** Type and assets: weight 400 is dropped (hero `Prev —` at 500); ⟲ is an inline SVG (Lucide `rotate-ccw`, ISC notice in `THIRD-PARTY-NOTICES.md`); `cardLarge` is 160px wide (not the audit's ~128, because 160 covers the 109px hero at 150% DPI); `contentTier` 32px; `chroma` 256px.
 - **Why:** Lightness. The Segoe glyph exists only on Windows.
 - **Cost:** A few KB.
-- **Status:** active
+- **Status:** narrowed by R149 (the ⟲ part is superseded: R149 put the design's own Segoe UI Symbol glyph back, so the Lucide `rotate-ccw` swap and its ISC notice are gone; the rest stands)
 
 ### R80 — States built from the design's parts
 
@@ -635,7 +635,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R147). Each
 - **What:** Fetch the user's own loadout once per connect via pd `personalization/v2/players/{self}/playerloadout` (read-only, 1 call), so the user's own Details shows skins outside a match. Others keep R83 (`—` outside Agent Select and In Game).
 - **Why:** The user's own Details should not be blank outside a match.
 - **Cost:** 1 call per connect.
-- **Status:** active
+- **Status:** narrowed by R148 (the endpoint is `personalization/v3`; v2 returns 404 on every shard)
 
 ### R91 — Arabic line for the Claude calls
 
@@ -1006,7 +1006,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R147). Each
 - **What:** User decision 2026-09-30. Names that Riot returns in match-details of matches the user did not play may be shown in the Player Details and Match Details views (off the live screen). Mid-match rules are unchanged (`requirements-raw.md` lines 16 and 47): during live stages a hidden player shows `Hidden Player` or the agent name, or the remembered style only from the user's own finished matches. This supersedes R142's "prevent names learned solely from matches the user did not play" for the off-live views, and CLAUDE.md's "Never take names from other players' match histories" for those views (CLAUDE.md updated). Whether Riot actually returns them is R94's check on the user's PC.
 - **Why:** The user's words: «ما منعته، دايم يمدي — بس هل يمدي أساساً؟» (he never forbade it, it's always possible, but is it possible at all?).
 - **Cost:** One filter.
-- **Status:** active
+- **Status:** narrowed by R145 (the off-screen part stands; the live-stage clause "the remembered style only from the user's own finished matches" no longer applies: R145 allows any known source)
 
 ### R144 — One UI batch: the Windows path bug and the Task 18 minors
 
@@ -1020,14 +1020,14 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R147). Each
 - **What:** User decision 2026-09-30 (the question «من أي مكان نعرفه»). During live stages a hidden player's name shows in the remembered style (eye-off icon and dotted underline) whenever the DB knows it from any source: the user's own finished matches, name-service answers from a time the player was visible, or match-details of matches the user did not play (if Riot returns names there). Still never request a hidden player's name. The tooltip is `Hidden name · known from your match` + map · date when the source match is the user's, `Hidden name · known from a past match` + map · date otherwise, and `Hidden name · seen before` when the name came from a name-service answer with no match. Implemented after the backend whole-branch fix lands: the backend known-name lookup, the contract and its tests, and the UI tips. The docs (CLAUDE.md Hidden names, requirements-raw, DECISIONS, spec §3.4 and §4.2) change in the same pass. Supersedes the source restriction of the line-47 exception and R74's store-only-own-match rule.
 - **Why:** The user's answer when asked where a remembered name may come from (`من أي مكان نعرفه`, from any place we know it).
 - **Cost:** One query filter.
-- **Status:** active (targeted at v0.2.1; not in v0.2.0)
+- **Status:** active (pulled forward from v0.2.1 into v0.2.0 by R148)
 
 ### R146 — The fast path: v0.2.0 tags before the UI whole-branch review ends
 
 - **What:** User decision 2026-09-30, the fast path. (1) The preview `Setup.exe` link goes to the user as soon as the `ui-lane` Windows CI is green. (2) v0.2.0 is Task 19b, right after the backend whole-branch fix lands and the `ui-lane` minors batch is green: merge `ui-lane`, full suites, CI, tag. The UI whole-branch review runs in parallel and does not block the tag; its findings ship in v0.2.1. (3) R145 ships in v0.2.1 right after.
 - **Why:** The user asked for speed. Per-task Opus reviews and the user's own testing cover the gap.
 - **Cost:** Residual UI risk for a few hours.
-- **Status:** active
+- **Status:** narrowed by R148 (item 3: R145 shipped in v0.2.0, not v0.2.1; the v0.2.0 tag is held until R148's fixes land)
 
 ### R147 — Every subagent runs on Sonnet
 
@@ -1035,6 +1035,27 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R147). Each
 - **Why:** The user's call; no reason is recorded. The two running Opus agents finish because restarting them would lose their progress and the speed the user asked for.
 - **Cost:** None recorded.
 - **Status:** active
+
+### R148 — Fix the loadout endpoint and the names in v0.2.0; the tag stays held
+
+- **What:** Fix both in v0.2.0, and the tag stays held. (1) The loadout uses the personalization v3 endpoint. (2) R145 is pulled forward from v0.2.1: known names from any source (own match, other match, name-service `seen`); `DisplayName::Remembered` gains `source` (`ownMatch`, `otherMatch` or `seen`); the off-live views fall back to the players-table name when `match_players` is blank. The backend half landed on `p2-backend` (d32e6d6, not landed on `main` until the UI half was ready); the UI half (types and the tooltip texts per R145) followed on `ui-lane`.
+- **Why:** The user's test of the preview (2026-09-30): Match Details of the user's own match showed every other player as hidden and Top 3 showed 3× Hidden Player, and the own loadout rows were all `—`. Research confirmed that personalization v2 `playerloadout` returns 404 on every shard, so v3 (`Guns[]` unchanged) is the fix. Why the stored match-details names are blank was unconfirmed; the legitimate names are name-service answers for visible players (the players table) and the user's own name. Shipping names-all-hidden would be a broken release.
+- **Cost:** None recorded.
+- **Status:** active
+
+### R149 — The UI batch for v0.2.0
+
+- **What:** One UI batch for v0.2.0 on `ui-lane`, then merged. Details calls `close_details` on leave. The ⟲ badge goes back to the design's Segoe UI Symbol glyph (R92): the app is Windows-only, so the "glyph only on Windows" reason for the Lucide swap (R79) does not hold. `tauri.conf` window `backgroundColor` is `#0e1013` (no white flash). Release-only guards: no context menu, no F5 or Ctrl+R reload, no Ctrl+P or Ctrl+F. The focus ring is not clipped (inset offset on panel rows and the tab). A rejected `player_details` or `match_details` retries once, then shows the `—` state (no skeleton forever). The `now` store sets `Date.now()` on start. A truncated remembered name's tooltip includes the full `Name#TAG`. `dir="auto"` on name spans. A `<svelte:boundary>` around the routes, with the `liveColumns` default. A double-click guard on opening a card. The R145 UI half: `Remembered.source` and the three tooltips `Hidden name · known from your match`, `Hidden name · known from a past match` and `Hidden name · seen before`, with map · date (date only for `seen`).
+- **Why:** The UI whole-branch review's findings (an open Details was not refreshed on live changes; the focus ring was clipped by the panel), the user's preview test, and R92 for the glyph.
+- **Cost:** None recorded. Parked, not done: Playwright in CI (the harness is Linux-only) and shipping all three fonts (the six options are built now per the user; Settings comes later).
+- **Status:** active
+
+### R150 — Off the live stages, name-service may be asked for match participants
+
+- **What:** Outside the live stages (Match Details, Top 3, encounters, backfilled own matches) the app may ask name-service for match participants: batched, throttled, only for puuids with no known name, and the results cached in `players`. Riot itself blanks anyone who currently hides their name, so no hidden name is revealed. During the live stages the `VisiblePuuid` rule stays: a live incognito puuid is never sent to any endpoint. The user's dump is no longer needed to proceed; it remains a check after the next build.
+- **Why:** Scout's evidence (`backend/live_match.py` `reveal_names` and `diagnose_reveal`, 5e0cd0a): Scout PUTs name-service for all match participants and keeps only the non-empty `GameName`. Match-details names are dynamic on the player's current status (blank while they hide now), so history alone cannot reveal hidden names, and post-match names come from name-service with Riot enforcing the privacy.
+- **Cost:** Extra name-service calls (bounded, cached).
+- **Status:** active (decided; the batched off-live name-service call is not built yet, only the `VisiblePuuid` guard and the players-table fallback exist)
 
 ## User decisions index
 

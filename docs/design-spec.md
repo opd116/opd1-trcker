@@ -302,22 +302,21 @@ The party stripe and tab (§3.9) come **before** the grid in the markup, as in t
 | Variant (`card.name.kind`) | Nodes inside the wrapper | Tooltip |
 |---|---|---|
 | `visible` (includes self) | name: `min-width:0; font-size:16px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis`. Tag: `flex:none; font-size:13px; font-weight:500; color:var(--text2); nowrap`. Tag text = `'#' + tag`. | `{name}#{tag}`, overflow-only |
-| `remembered` | eye-off 14×14 (`flex:none; align-self:center; color:var(--text2)`), name as `visible` plus `text-decoration:underline dotted var(--text2); text-underline-offset:4px` (hero 5px), then the tag. **[C] (R128)** The name span uses `overflow:clip; overflow-clip-margin:6px` instead of `overflow:hidden`, so the underline is not clipped (see below) | `Hidden name · known from your match\n{Map} · {Mon D, YYYY}`, always |
+| `remembered` | eye-off 14×14 (`flex:none; align-self:center; color:var(--text2)`), name as `visible` plus `text-decoration:underline dotted var(--text2); text-underline-offset:4px` (hero 5px), then the tag. **[C] (R128)** The name span uses `overflow:clip; overflow-clip-margin:6px` instead of `overflow:hidden`, so the underline is not clipped (see below). **(R145)** One look for every `source`; only the tooltip differs | by `source`, always (§4.2): `Hidden name · known from your match` / `… known from a past match` + `\n{Map} · {Mon D, YYYY}`; `Hidden name · seen before` + `\n{Mon D, YYYY}` |
 | `hiddenAgent` | eye-off 14, then the agent name (`meta.agents[agentId].name`): `min-width:0; font-size:16px; font-weight:500; font-style:italic; color:var(--text-soft); nowrap; overflow:hidden; text-overflow:ellipsis`. No tag. | `Hidden name`, always |
 | `hiddenPlayer` (Agent Select before the lock, R99) | eye-off 14, then `Hidden Player` in the `hiddenAgent` style | `Hidden name`, always |
 | name `null` (missing) | `—` 16px/600 `--text2` | none |
 | name absent (loading) | an inline-block 120×13 bar, radius 3, `--skel`, `vertical-align:middle`. The line box stays. No tag. | none |
 
 - **The remembered underline needs clip room (R128).** The dotted underline is painted 2–4px below the name's box (font and size dependent; fully outside at the card, hero and row sizes in Barlow and Archivo, half outside at card size in IBM Plex Sans). The name span clips for its ellipsis, and `overflow:hidden` would cut the underline away (the design's own mock does, by accident). So the remembered-name span uses `overflow:clip; overflow-clip-margin:6px` (covers the worst measured case, 4px): it only widens what is painted, adds no layout or scrollable overflow (§8.3 check 2 stays clean) and the ellipsis still applies. Same rule at the card (16px), hero (22px, offset 5px) and row (14px) sizes. CLAUDE.md "Card indicators" defines the style as including the underline (R92, R128). Covered by a pixel probe in `fit-live.spec.ts`.
-- The remembered tooltip's second line is dropped when `fromMapId` and `fromStartMs` are both null. If one is null, only the other part is shown.
+- The remembered tooltip's second line is dropped when the parts it would show are all null (`fromStartMs`, and `fromMapId` for the two match sources). If one is null, only the other part is shown. A `seen` name has no map, so its second line is the date alone.
 - Eye-off SVG (v8:62): `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8 12.1 12.5 8 12.5 1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/><path d="M2.5 13.5l11-11"/></svg>`.
 
 ### 3.5 Encounter slot (v8:71-75)
 
 - Shown only when `!card.isSelf && !card.isSelfParty && encounters && (with+against) > 0`.
 - Content: `display:flex; align-items:center; gap:3px; font-size:13px; font-weight:600; color:var(--text2); tab`. It holds the icon, then the count `with+against`. Tooltip `{with} with · {against} against`.
-- The U+27F2 glyph (Segoe UI Symbol) is replaced by an inline SVG of the same visual size: 12×12 in the card, 13×13 in the hero. It is `flex:none` and uses `currentColor`:
-  `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>` (anticlockwise arrow, ISC-licensed Lucide `rotate-ccw` geometry; its ISC copyright and permission notice lives in `THIRD-PARTY-NOTICES.md`, plan Task 13).
+- **(R149)** The glyph is the design's own (v8:73, v8:196): the U+27F2 character `⟲` in a `<span class="glyph">` set in `font-family:"Segoe UI Symbol","Segoe UI",sans-serif; font-weight:400`, at the badge's own size (13px in the card, 14px in the hero) and colour. No SVG, no icon library. The app is Windows-only, so the system font is always there and nothing is downloaded. This supersedes the inline Lucide `rotate-ccw` SVG that R79 had chosen (that reason, the glyph existing only on Windows, does not hold for a Windows-only app). Covered by `EncounterBadge.test.ts`.
 - **[C] (R129)** The card's badge has `margin-left:5px`, and only 3+ digit counts show it (1–2 digits keep the design's 36px slot, §3.3). The hero badge (§6.2) has no such margin.
 - 3+ digit counts: see the slot's `min-width` in §3.3. `ingame-longnames` carries a `123` count (§8.2).
 
@@ -433,7 +432,9 @@ Shown only when `card.party && !card.isSelf && !card.isSelfParty`. `col = --part
 | Trigger | Screen | Text |
 |---|---|---|
 | Name wrapper, `visible` | card, hero | `{name}#{tag}`, only when the name is truncated |
-| Name wrapper, `remembered` | card, hero | `Hidden name · known from your match\n{Map} · {Mon D, YYYY}` |
+| Name wrapper, `remembered`, `source: ownMatch` | card, hero | `Hidden name · known from your match\n{Map} · {Mon D, YYYY}` |
+| Name wrapper, `remembered`, `source: otherMatch` | card, hero | `Hidden name · known from a past match\n{Map} · {Mon D, YYYY}` |
+| Name wrapper, `remembered`, `source: seen` | card, hero | `Hidden name · seen before\n{Mon D, YYYY}` (the date alone; a name-service answer has no map) |
 | Name wrapper, `hiddenAgent` / `hiddenPlayer` | card, hero | `Hidden name` |
 | ⟲ badge | card, hero | `{with} with · {against} against` |
 | Party hit area + tab | card | `Party · confirmed` / `Party · likely` |
@@ -564,7 +565,7 @@ Map names, agent names (hidden-agent cards, Details `shortName`, Top-3 and toolt
   - hidden-agent name (card, hero, Top 3, scoreboard): the §3.4 120×13 name bar, eye-off icon kept;
   - Details `shortName` and team label `{name}'s team`: 60×10.
 - **Loaded, id missing:** `—` in that text's own style (for `hiddenAgent` the eye-off icon and italic style stay, so the name is still never shown).
-- **Tooltips:** a missing part is dropped (`In this match` without the agent; the remembered tip shows only the date; the rank-icon tip is empty, i.e. no tip). No tooltip ever contains `undefined` or `null`.
+- **Tooltips:** a missing part is dropped (`In this match` without the agent; a remembered tip shows only the date (always so for `seen`); the rank-icon tip is empty, i.e. no tip). No tooltip ever contains `undefined` or `null`.
 - Images are keyed by id and never wait for meta.
 - Scene `ingame-nometa` (§8.2) covers the pending state; the miss state is unit-tested (`live.test.ts`, `tooltip.test.ts`).
 
@@ -774,12 +775,12 @@ Container and Back as §6.1. Back → details.
 - **Perspective** (backend sets it; the UI only renders):
   - `teams[0]` is the user's team when the user played in the match (`perspective:'self'`). Otherwise it is the focus player's team (`perspective:'focus'`).
   - The header chip, score and halves are from `teams[0]`'s side. This generalises v8:688 and follows the "Your result = user's side" rule.
-- **Hidden names (R74, R93):** each row's `name` is a `DisplayName` computed by the backend:
-  - in every view, a player hidden on the live screen now follows the same rule as their card: `remembered` when the user's own finished match knows them, else `hiddenAgent` (R93), so the card, Top 3 and the scoreboard agree;
+- **Hidden names (R74, R93, R145, R150):** each row's `name` is a `DisplayName` computed by the backend:
+  - in every view, a player hidden on the live screen now follows the same rule as their card: `remembered` when the DB knows the name from any source (the user's own finished matches, other stored matches, or a name-service answer from when the player was visible, R145), else `hiddenAgent` (R93), so the card, Top 3 and the scoreboard agree. The tooltip names the source (§4.2);
   - otherwise, a match the user played → names as match-details gives them;
-  - otherwise (a match the user didn't play) → players with no stored name are `hiddenAgent` (or `remembered` if the user's own finished match knows them).
+  - otherwise (a match the user didn't play) → names as Riot returns them (R143). A row Riot left blank and whose player is not hidden on the live screen shows the name stored in the players table as a plain name; with none, the remembered rule above, else the agent name;
   - This replaces audit §2.12's "any player flagged incognito in that match": match-details carries no incognito flag (`endpoints.rs` `MatchPlayer`), so that rule can't be implemented.
-  - Names from matches the user didn't play (R143, user 2026-09-30): if Riot's match-details returns real names for players who were incognito in that match, those names may show here, off the live screen (Match Details, Top 3, encounter rows). This is allowed, not a risk to be closed. R94 checks on the user's PC whether Riot returns such names at all (the user's DB compared with the core-game dump); if it doesn't, those players stay as the agent name, as above. During the live stages nothing changes: a hidden player shows `Hidden Player` or the agent name, or the remembered style only from the user's own finished matches.
+  - **Name-service (R150):** off the live stages (Match Details, Top 3, encounter rows, backfilled own matches) the app may ask name-service, batched, throttled and cached in `players`, for the participants of a match that have no known name. Riot itself blanks anyone who currently hides their name, so nothing hidden is revealed. During the live stages a live incognito puuid is never sent to any endpoint. Decided, not built yet in v0.2.0 (the code reads only the players table for such rows).
 - **No-team modes** (Deathmatch): a single team block. The team header shows no chip, `—` for rounds, and the label `Players`. The header chip is omitted, the score is `—`, and halves are hidden.
 - **Loading [C]:** the header box with a 150×56 `--skel` radius-5 box and a 120×18 bar; the scoreboard header row; 2 team headers with 5 rows each (28-box, 22-circle, 120×13 bar, and 30×13 bars aligned as each column's numbers are; the K / D / A bar is centred, as that column is in the design).
 
@@ -797,7 +798,9 @@ type Result = 'win' | 'loss' | 'draw';
 type DisplayName =
   | { kind: 'visible'; name: string; tag: string }
   | { kind: 'remembered'; name: string; tag: string;
-      fromMapId: string | null; fromStartMs: number | null }            // NEW fields
+      source: 'ownMatch' | 'otherMatch' | 'seen';                        // R145
+      fromMapId: string | null;                                          // null for 'seen'
+      fromStartMs: number | null }                                       // 'seen': when last confirmed
   | { kind: 'hiddenPlayer' }
   | { kind: 'hiddenAgent'; agentId: string };
 
@@ -969,6 +972,7 @@ The contract tests pin a no-stats `ScoreRow` as `kills`, `deaths`, `assists`, `a
 | `ingame-unranked` | a card with every value null and `last5: []`; one with 2 matches (3 empty tiles) |
 | `ingame-loading` | `players: []`, `mapId: null` |
 | `ingame-nometa` | the `ingame` roster with `meta` still pending (§5.8: skeleton bars for the map name, tier names and the hidden agent name) |
+| `ingame-remembered` | the `ingame` roster with three remembered cards, one per source (R145): Rook `ownMatch`, Nyx `otherMatch`, Kilo `seen` (no map). Drives the three remembered tooltips of §4.2 (`tips-live.spec.ts`) |
 | `details` | Mara (Show more visible, 3 encounters, 1 live teammate) |
 | `details-longnames` | a focus player named `WWWWWWWWWWWWWWWW#WWWWW` (hero name truncates, tag whole; encounters header ellipsizes); Top 3 = three 16-char `W` names, one of them live (they wrap, never overlap the icons or the count); loadout skin lines `Protocol 781-A · Sunrise`-length (ellipsis) |
 | `details-partial` | the hero card with per-field loading: name, level, rank, peak, stats and last5 each absent (§6.2 bars), recent rows present; one loadout weapon absent (resolving) and one `null` (R97) |

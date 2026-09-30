@@ -159,3 +159,17 @@ test("the Win% tip shows W · L · games / This act in --win / --loss", async ({
   expect(await colour(".w")).toBe(await probe("--win"));
   expect(await colour(".l")).toBe(await probe("--loss"));
 });
+
+// F4/F13 (task 17 review), spec §2.3: no APR tip while a rank is still loading (a count would be false), and with
+// 2+ players and nobody ranked the tip says so: `From 0 ranked players` explains the empty box and —.
+test("APR tip: none while a rank is loading", async ({ page }) => {
+  await openScene(page, "lobby2-loading", {}, { clock: "manual" });
+  await expect(page.locator("header.bar .apr .sk")).toHaveCount(2);
+  expect(await hoverTip(page, page.locator("header.bar .apr"))).toBeNull();
+});
+
+test("APR tip: `From 0 ranked players` when nobody is ranked", async ({ page }) => {
+  await openScene(page, "lobby2-unranked", {}, { clock: "manual" });
+  await expect(page.locator("header.bar .apr .ebox")).toHaveCount(1);
+  expect(await hoverTip(page, page.locator("header.bar .apr"))).toBe("Average party rank\nFrom 0 ranked players");
+});

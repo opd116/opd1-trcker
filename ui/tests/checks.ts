@@ -66,6 +66,7 @@ export async function checkFontFloor(page: Page): Promise<string[]> {
 /**
  * 5. Nothing clips except the `data-ellipsis` spans. A truncated allowed span ends in an ellipsis, and a truncated
  * Riot-ID name keeps its tag fully visible. The Peak and Prev rows are strict.
+ * Horizontal only: ink that hangs outside a clipping box (a text-decoration) is `decorationInk`'s job below.
  */
 export async function checkClipping(page: Page): Promise<string[]> {
   return page.evaluate(() => {
@@ -95,6 +96,53 @@ export async function checkClipping(page: Page): Promise<string[]> {
     }
     return out;
   });
+}
+
+/**
+ * Ink probe for a text decoration that hangs below its text (fix round 1, F7). Check 5 measures only horizontal
+ * overflow, and ink outside an `overflow:hidden` box never shows up in `scrollHeight`, so a clipped underline
+ * would pass it. For the first match of `sel` this screenshots the box plus a 10px band under it twice, with and
+ * without `text-decoration`, and counts the pixels that differ: that is the decoration's ink. It counts once as
+ * rendered and once with the clip pushed 14px out (`overflow:clip` + `overflow-clip-margin`, which keeps the
+ * text-overflow ellipsis, so the decoration's extent is the same in both), so `ink < unclipped` means the clip is
+ * eating part of the decoration (a font that puts the underline half inside the box still shows some ink, which
+ * is why a plain "some ink" floor is not enough). The caller keeps the pointer away so no tooltip is in the crop.
+ */
+export async function decorationInk(page: Page, sel: string): Promise<{ ink: number; unclipped: number; width: number }> {
+  const loc = page.locator(sel).first();
+  const r = await loc.boundingBox();
+  if (!r) throw new Error(`no box for ${sel}`);
+  const clip = { x: Math.floor(r.x) - 1, y: Math.floor(r.y) - 2, width: Math.ceil(r.width) + 2, height: Math.ceil(r.height) + 12 };
+  const count = async (extra: string): Promise<number> => {
+    const base = await page.addStyleTag({ content: extra || "/* as rendered */" });
+    const withDeco = await page.screenshot({ clip });
+    const off = await page.addStyleTag({ content: `${sel}{text-decoration:none!important}` });
+    const without = await page.screenshot({ clip });
+    await off.evaluate((el) => (el as Element).remove());
+    await base.evaluate((el) => (el as Element).remove());
+    return page.evaluate(
+      async ([a, b]) => {
+        const px = async (b64: string) => {
+          const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+          const bmp = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+          const cv = new OffscreenCanvas(bmp.width, bmp.height);
+          const ctx = cv.getContext("2d")!;
+          ctx.drawImage(bmp, 0, 0);
+          return ctx.getImageData(0, 0, bmp.width, bmp.height).data;
+        };
+        const [da, db] = [await px(a!), await px(b!)];
+        let n = 0;
+        for (let i = 0; i < da.length; i += 4) {
+          if (Math.abs(da[i]! - db[i]!) + Math.abs(da[i + 1]! - db[i + 1]!) + Math.abs(da[i + 2]! - db[i + 2]!) > 24) n++;
+        }
+        return n;
+      },
+      [withDeco.toString("base64"), without.toString("base64")],
+    );
+  };
+  const ink = await count("");
+  const unclipped = await count(`${sel}{overflow:clip!important;overflow-clip-margin:14px!important}`);
+  return { ink, unclipped, width: r.width };
 }
 
 /**

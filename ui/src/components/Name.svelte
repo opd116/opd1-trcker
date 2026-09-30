@@ -79,9 +79,18 @@
     text-overflow: ellipsis;
   }
 
+  /*
+    The dotted underline hangs 2–4px below the name's box (font and size dependent), and the name clips for its
+    ellipsis, so the clip edge moves out 6px: `overflow:clip` + `overflow-clip-margin` only widens what is painted.
+    It adds no layout or scrollable overflow (spec §8.3 check 2 stays clean) and the ellipsis still applies. The
+    design's own mock clips the underline away by accident; CLAUDE.md "Card indicators" makes it part of the
+    remembered style. Covered by fit-live's "remembered name" pixel probe.
+  */
   .rem {
     text-decoration: underline dotted var(--text2);
     text-underline-offset: 4px;
+    overflow: clip;
+    overflow-clip-margin: 6px;
   }
 
   .t {

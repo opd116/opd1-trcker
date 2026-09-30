@@ -10,9 +10,10 @@ import {
   checkFontFloor,
   checkLiveNoOverflow,
   checkNoStatusText,
+  decorationInk,
   liveChecks,
 } from "./checks";
-import { ACCENTS, FONTS, fontSlug, openScene, SHOTS_DIR, watchFontCdn, type ThemeParams } from "./harness";
+import { ACCENTS, FONTS, fontSlug, openScene, pointerAway, SHOTS_DIR, watchFontCdn, type ThemeParams } from "./harness";
 
 const LIVE_SCENES = [
   "closed", "closed-empty", "boot", "lobby1", "lobby2", "lobby3", "lobby4", "lobby5", "lobby2-loading", "lobby2-unranked",
@@ -467,3 +468,90 @@ test("no request to fonts.googleapis.com / fonts.gstatic.com", async ({ page }) 
   for (const font of FONTS) await openScene(page, "ingame", { font });
   expect(hits).toEqual([]);
 });
+
+// F7 (fix round 1): CLAUDE.md "Card indicators" defines the remembered style as eye-off + dotted-underlined name +
+// tag. The name span clips (`overflow:hidden`, for the ellipsis), and the underline hangs below the text, so the
+// clip box needs room for it. Check 5 sees only horizontal overflow, hence this pixel probe: the underline must
+// paint, and the clip must not eat any of it (same pixels with the clip pushed out). The name component is one
+// piece; the hero and row sizes are probed by putting the card's `.nm` into those sizes.
+for (const font of FONTS) {
+  test(`remembered name: the dotted underline is drawn at card, hero and row size [${font}]`, async ({ page }) => {
+    for (const scene of ["ingame", "ingame-longnames"]) {
+      await openScene(page, scene, { font });
+      await pointerAway(page);
+      await expect(page.locator(".live .card .nm .rem")).toHaveCount(1);
+      for (const size of ["card", "hero", "row"] as const) {
+        await page.evaluate((sz) => {
+          const nm = document.querySelector(".live .card .nm:has(.rem)")!;
+          nm.classList.remove("size-card", "size-hero", "size-row");
+          nm.classList.add(`size-${sz}`);
+        }, size);
+        const { ink, unclipped, width } = await decorationInk(page, ".live .card .nm .rem");
+        // A 1px dotted line lights about half the pixels under the span; a quarter is a safe floor.
+        expect(unclipped, `${scene} ${size}: the underline itself paints (${width}px name)`).toBeGreaterThanOrEqual(Math.floor(width / 4));
+        expect(ink, `${scene} ${size}: the clip eats ${unclipped - ink} of ${unclipped} underline pixels`).toBe(unclipped);
+      }
+    }
+  });
+}
+
+// F3/F12 (task 17 review): the level line has three states. Absent (still loading, R23) → the skeleton card's own
+// 48×10 bar inline in the Lv line, so the name column keeps its height; withheld (null, R100) → `Lv —`.
+test("level: absent = a 48×10 bar in the Lv line (name column keeps its height); withheld = Lv —", async ({ page }) => {
+  await openScene(page, "ingame-partial");
+  const cards = page.locator(".live .card");
+  const absent = cards.nth(2); // Vesper: `level` key deleted
+  const bar = absent.locator(".lv .sk");
+  await expect(bar).toHaveCount(1);
+  const b = await box(bar);
+  near(b.width, 48, "level bar width");
+  near(b.height, 10, "level bar height");
+  expect(await css(bar, "border-radius")).toBe("3px");
+  expect(await css(bar, "background-color")).toBe(await varRgb(page, "--skel"));
+  expect((await absent.locator(".lv").innerText()).trim()).toBe("");
+  const known = cards.nth(0); // Fahad: a number
+  expect((await known.locator(".lv").innerText()).replace(/\s+/g, " ").trim()).toMatch(/^Lv \d+$/);
+  near((await box(absent.locator(".ncol"))).height, (await box(known.locator(".ncol"))).height, "name column height");
+  near((await box(absent.locator(".lv"))).height, (await box(known.locator(".lv"))).height, "Lv line height");
+
+  await openScene(page, "ingame-unranked");
+  const withheld = cardNamed(page, "Zephyr"); // level: null
+  expect((await withheld.locator(".lv").innerText()).replace(/\s+/g, " ").trim()).toBe("Lv —");
+  await expect(withheld.locator(".lv .sk")).toHaveCount(0);
+});
+
+// F5/F11: the party stripe and tab come before the grid in the DOM (design v8:44-49; markup order is asserted in
+// PlayerCard.test.ts) and z-index paints them above it: a hit test on them finds them, not the grid.
+test("party stripe and tab paint above the card grid", async ({ page }) => {
+  await openScene(page, "ingame-parties4");
+  const sable = cardNamed(page, "Sable");
+  const hit = async (sel: string, dx: number, dy: number) => {
+    const b = await box(sable.locator(sel).first());
+    return page.evaluate(([x, y, s]) => document.elementFromPoint(x as number, y as number)?.closest(s as string) != null, [b.x + dx, b.y + dy, sel] as const);
+  };
+  const tab = await box(sable.locator(".ptab"));
+  expect(await hit(".ptab", tab.width / 2, tab.height / 2), "tab hit").toBe(true);
+  const stripe = await box(sable.locator(".stripe"));
+  expect(await hit(".stripe", stripe.width / 2, stripe.height - 20), "stripe hit").toBe(true);
+});
+
+// F8 (task 17 review; ruling pending, this pins today's behaviour): Lobby and Closed have no agent to show, and the
+// card stays identical to every other stage's (CLAUDE.md "the card is identical everywhere"): the same empty
+// 40×40 `--raised` box, never an image.
+for (const scene of ["lobby3", "closed"]) {
+  test(`${scene}: every card keeps the empty 40×40 agent box, no image`, async ({ page }) => {
+    await openScene(page, scene);
+    const cards = page.locator(".live .card");
+    expect(await cards.count()).toBeGreaterThan(0);
+    for (let i = 0; i < (await cards.count()); i++) {
+      const agent = cards.nth(i).locator(".who .agent");
+      await expect(agent, `card ${i}`).toHaveCount(1);
+      expect(await agent.evaluate((el) => el.tagName), `card ${i} is not an img`).toBe("DIV");
+      const b = await box(agent);
+      near(b.width, 40, `card ${i} agent w`);
+      near(b.height, 40, `card ${i} agent h`);
+      expect(await css(agent, "background-color")).toBe(await varRgb(page, "--raised"));
+    }
+    await expect(page.locator(".live .card .who img")).toHaveCount(0);
+  });
+}

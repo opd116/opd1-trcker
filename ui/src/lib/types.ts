@@ -1,6 +1,9 @@
-// Provisional (Task 16a): written from spec §7.1. Task 16b syncs it with crates/core/tests/fixtures/contract/*.json.
-// Mirror of the Rust → UI JSON contract (serde camelCase). Rulings: R5 (rates are 0..1 fractions),
-// R10 (enum shapes), R23 (tri-state fields), R97 (per-weapon tri-state), R99 (agent set only on lock).
+// Mirror of the Rust → UI JSON contract (crates/core/src/model.rs, serde camelCase; spec §7.1). The golden JSON in
+// crates/core/tests/fixtures/contract/ pins it: contract.shape.ts holds one descriptor per type written from those
+// files, contract.test.ts walks the goldens (and the demo fixtures) with them, contract.test-d.ts ties them to the
+// types below. Rulings: R5 (rates are 0..1 fractions), R10 (enum shapes), R23 (tri-state fields), R97 (per-weapon
+// tri-state), R99 (agent set only on lock), R102 / R124 (a match without a stats row sends null, never a counted 0),
+// R116 / R120 (Details hero stats).
 //
 // Tri-state convention for loadable fields:
 //   key absent (undefined) → still loading → skeleton
@@ -97,11 +100,13 @@ export interface MatchSummary {
   roundsWon: number | null;
   roundsLost: number | null;
   agentId: string | null;
-  kills: number;
-  deaths: number;
-  assists: number;
-  kd: number;
+  /** R102: kills, deaths, assists, kd, acs and hsPct are all null when the match has no stats row for the player (shown as —). */
+  kills: number | null;
+  deaths: number | null;
+  assists: number | null;
+  kd: number | null;
   acs: number | null;
+  /** Fraction 0..1; also null when no shot landed. */
   hsPct: number | null;
   rrEarned: number | null;
   /** The player's rank during that match (R81: one rule for recent rows, encounters and the scoreboard). */
@@ -154,6 +159,12 @@ export interface PlayerDetails {
   loadout: Loadout;
   /** Newest first. */
   encounters: EncounterDetailRow[];
+  /** R116: K/D over the newest (up to 20) current-act competitive matches that have stats; null when there are none. */
+  heroKd: number | null;
+  /** R116, R120: HS% over the same matches, a 0..1 fraction like every other HS% field; null when there are none. */
+  heroHs: number | null;
+  /** R116: how many matches heroKd / heroHs use (0..20). Feeds the hero tooltip. */
+  heroMatches: number;
 }
 
 export interface ScoreRow {
@@ -161,11 +172,13 @@ export interface ScoreRow {
   name: DisplayName;
   agentId: string | null;
   tier: number | null;
-  kills: number;
-  deaths: number;
-  assists: number;
+  /** R124: kills, deaths, assists, acs, adr, hsPct and tier are all null for a player with no stats row (shown as —). */
+  kills: number | null;
+  deaths: number | null;
+  assists: number | null;
   acs: number | null;
   adr: number | null;
+  /** Fraction 0..1. */
   hsPct: number | null;
   isSelf: boolean;
   isFocus: boolean;

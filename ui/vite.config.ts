@@ -37,5 +37,7 @@ export default defineConfig({
   test: {
     // Unit tests only; Playwright specs under tests/ run with `playwright test`.
     include: ["src/**/*.test.ts"],
+    // Type tests (`*.test-d.ts`, Task 16b): `ui/tsconfig.json` only lists references, so name the project.
+    typecheck: { enabled: true, include: ["src/**/*.test-d.ts"], tsconfig: "./tsconfig.app.json" },
   },
 });

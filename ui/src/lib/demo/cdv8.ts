@@ -350,7 +350,18 @@ export function detailsFor(id: string, c?: PlayerCard, live?: readonly PlayerCar
       themAgentId: AG[e.them[0]], themTier: e.them[1], selfAgentId: AG[e.me[0]], selfTier: e.me[1],
     };
   });
-  return { card: base, recent: rec, topTeammates: mates(r, live), loadout: loadout(), encounters: enc };
+  // R116: the hero's K/D and HS% cover up to 20 current-act competitive matches; the demo shows the design's own numbers over them.
+  const [, wins, losses] = r.win;
+  return {
+    card: base,
+    recent: rec,
+    topTeammates: mates(r, live),
+    loadout: loadout(),
+    encounters: enc,
+    heroKd: r.kd,
+    heroHs: r.hs / 100,
+    heroMatches: Math.min(20, wins + losses),
+  };
 }
 
 /** Details for a player with no history at all (`details-empty`): nothing to list, nothing known about the loadout. */
@@ -361,6 +372,9 @@ export function emptyDetails(c: PlayerCard): PlayerDetails {
     topTeammates: [],
     loadout: { vandal: null, phantom: null, operator: null, sheriff: null },
     encounters: [],
+    heroKd: null,
+    heroHs: null,
+    heroMatches: 0,
   };
 }
 
@@ -460,20 +474,25 @@ function encounterMatch(r: Raw, i: number, matchId: string): MatchDetailsView {
   };
 }
 
-/** A Deathmatch (no teams): one block, no result, no rounds, no halves. Mara is the focus player. */
+/**
+ * A Deathmatch (no teams): one block with an empty team id, no result, no rounds, no halves. Like the backend's
+ * (golden match_details_view.json), its rows carry no rank (competitive tier 0) and no ADR. Mara is the focus player.
+ */
 export function deathmatch(matchId: string): MatchDetailsView {
   const r = rawById("mara")!;
   const kills = [38, 34, 31, 29, 27, 24, 22, 19, 17, 14];
   const rows = kills.map((k, n): ScoreRow => {
     const kda: [number, number, number] = [k, 12 + n, n % 4];
-    return n === 0
-      ? scoreRow({ puuid: PUUID.mara!, name: displayName(r), agent: "Reyna", tier: 24, kda, hs: 31, isFocus: true })
-      : scoreRow({ ...poolRow(n - 1), kda });
+    const row =
+      n === 0
+        ? scoreRow({ puuid: PUUID.mara!, name: displayName(r), agent: "Reyna", tier: 24, kda, hs: 31, isFocus: true })
+        : scoreRow({ ...poolRow(n - 1), kda });
+    return { ...row, tier: null, adr: null };
   });
   return {
     matchId, mapId: MAPS.Lotus, queueId: "deathmatch", startMs: at(8, 29, 20, 40), durationMs: 9 * MIN,
     perspective: "focus",
-    teams: [{ teamId: "FreeForAll", result: null, roundsWon: null, firstHalf: null, players: rows.sort(byAcs) }],
+    teams: [{ teamId: "", result: null, roundsWon: null, firstHalf: null, players: rows.sort(byAcs) }],
   };
 }
 

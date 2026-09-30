@@ -438,7 +438,7 @@ Shown only when `card.party && !card.isSelf && !card.isSelfParty`. `col = --part
 | ⟲ badge | card, hero | `{with} with · {against} against` |
 | Party hit area + tab | card | `Party · confirmed` / `Party · likely` |
 | Peak group (icon + name + when) | card, hero | past act: `{actTitle}\n{actDates}`; current act: `{actLabel} · Current act\n{actDates}`. Examples: `VALORANT 2026 · Act 4\nJun 24 – Aug 25, 2026`, `V26 A5 · Current act\nAug 26 – Oct 20, 2026`. The design shows the dates only; the act name is added. |
-| K/D block, HS% block | card | `Last 5 competitive` |
+| K/D block, HS% block | card | `Last 5 competitive`. A value that is still loading (`kd` / `hsPct` absent, the skeleton bar) carries no tip, the same as the APR group and Win% while unknown; a known-empty value (`null`, shown `—`) keeps it. |
 | K/D block, HS% block | hero | `Last {N} competitive · this act`, `N = details.heroMatches` (R116) |
 | Win% block | card, hero | `wl:{actWins}:{actGames−actWins}:{actGames}` rendered structured (§4.1). No tip if `actGames` is null. |
 | Games block, W / L block | hero | `This act` **[bound]** (the design's `tipGames`; `tipWL` would repeat Games, so it uses the scope word too) |
@@ -768,7 +768,7 @@ Container and Back as §6.1. Back → details.
     - K / D / A: the §6.4 inner grid. Each of k, d and a shows `—` when null (R124); the two `/` separators stay.
     - +/−: right, 14px/600 `tab`, `k−d` as `+N` / `−N` / `0`, coloured `--win` if >0, `--loss` if <0, `--text2` if 0. `—` in `--text2` when `kills` or `deaths` is null (R124), never `0`.
     - ADR: right, 14px/500 `tab`, integer.
-    - HS%: right, 14px/500 `tab`, `pct0`. Null values → `—` in every numeric cell (R124: a player with no stats row shows `—` in ACS, K / D / A, +/−, ADR and HS%, never 0).
+    - HS%: right, 14px/500 `tab`, `pct0`. Null values → `—` in every numeric cell (R124: a player with no stats row shows `—` in ACS, K / D / A, +/−, ADR and HS%, never 0; ADR is also `—` when only the damage is unknown). The rank icon does not depend on the stats row: `tier` comes from the player's competitive_tier (R81), so a ranked player with no stats row keeps the icon beside the `—` cells.
   - Sort: each team's rows by ACS descending, with null ACS last (v8:668).
 - **Perspective** (backend sets it; the UI only renders):
   - `teams[0]` is the user's team when the user played in the match (`perspective:'self'`). Otherwise it is the focus player's team (`perspective:'focus'`).
@@ -867,8 +867,8 @@ interface MatchDetailsView {            // NEW — invoke('match_details', { mat
   teams: {                              // [0] = perspective team; 1 entry for no-team modes
     teamId: string; result: Result | null; roundsWon: number | null; firstHalf: number | null;
     players: { puuid: string; name: DisplayName; agentId: string | null; tier: number | null;
-               kills: number | null; deaths: number | null; assists: number | null;   // R124: null (never a counted 0/0/0) when the player has no stats row; the row shows — (golden match_details_view.json, row enemy-3: kills, deaths, assists, acs, adr, hsPct and tier all null)
-               acs: number | null; adr: number | null; hsPct: number | null;   // hsPct 0..1; null without a stats row
+               kills: number | null; deaths: number | null; assists: number | null;   // R124: null (never a counted 0/0/0) when the player has no stats row; the row shows — (golden match_details_view.json, row enemy-3: kills, deaths, assists, acs, adr and hsPct all null). `tier` is independent of the stats (R81): it comes from the player's competitive_tier, so a ranked player with no stats row still has one and the rank icon draws next to the — cells
+               acs: number | null; adr: number | null; hsPct: number | null;   // hsPct 0..1; null without a stats row; adr is also null when only the damage is unknown
                isSelf: boolean; isFocus: boolean }[];   // sorted by ACS desc
   }[];
 }
@@ -905,7 +905,7 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
 | Top 3 | `details.topTeammates[].{puuid,name,count}` plus a live join on `live.players[].{puuid,name.kind,agentId,rank.tier}` | existing |
 | Loadout | `details.loadout.{vandal,phantom,operator,sheriff}.{chromaId,skinName,chromaName,tierId}` (each key tri-state, R97) → `assetUrl('chroma')`, `assetUrl('contentTier')` | **NEW** shape + kind |
 | Match header | `mdv.{mapId,queueId,startMs,durationMs}`, `teams[0/1].{result,roundsWon,firstHalf}` | **NEW** command |
-| Scoreboard | `mdv.teams[].players[].{name,agentId,tier,kills,deaths,assists,acs,adr,hsPct,isSelf,isFocus}`, `mdv.perspective` (`kills, deaths, assists, acs, adr, hsPct` and `tier` are `null` for a player with no stats row and render `—`, R124) | **NEW** |
+| Scoreboard | `mdv.teams[].players[].{name,agentId,tier,kills,deaths,assists,acs,adr,hsPct,isSelf,isFocus}`, `mdv.perspective` (`kills, deaths, assists, acs, adr, hsPct` are `null` for a player with no stats row and render `—`, R124; `adr` is also `null` when the damage is unknown; `tier` is independent of the stats, R81, so the rank icon still draws) | **NEW** |
 
 ### 7.3 Backend deltas this spec depends on (for the plan; no code here)
 
@@ -927,6 +927,14 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
    - Parse `matchInfo.gameLengthMillis`, `players[].competitiveTier`, `roundResults[].winningTeam`/`roundNum`.
 9. New command `match_details(matchId, focusPuuid) -> MatchDetailsView` (perspective, sorting, hidden-name rule, no-team modes).
 
+### 7.4 Contract test descriptors (`ui/src/lib/contract.shape.ts`, Task 16b; test-only)
+
+The descriptors are written from the Rust goldens under `crates/core/tests/fixtures/contract/`, not from `types.ts`, and `contract.test-d.ts` holds them against `types.ts`. Two differences in form from the plan's interface text were accepted in the Task 16b fix round (`d478473`):
+- The four `DisplayName` variants live in a separate export, `displayNameShapes`, keyed by the `kind` tag, not in `shapes`. `DisplayName` is a union, so it has no single `ShapeOf<DisplayName>`. The walker picks the variant by `kind`, and a type test asserts the variant set equals `DisplayName['kind']`.
+- `Desc` has two optional fields beyond `{ kinds, optional?, shape? }`: `enum` (a closed string set, keyed into the exported `enums` table) and `fraction` (a 0..1 number, R5 and R120). Both are additive and pinned by the type tests.
+
+The contract tests pin a no-stats `ScoreRow` as `kills`, `deaths`, `assists`, `acs`, `adr` and `hsPct` null, and leave `tier` free of that rule (R81, §7.1).
+
 ---
 
 ## 8. Verification (Playwright, Chromium, viewport exactly 1000×800, DEV demo feed)
@@ -939,6 +947,7 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
 - `page.route('https://media.valorant-api.com/**')` serves from a local cache dir when the file exists, otherwise passes through.
 - Screenshot every scene to `ui/tests/shots/<scene>[__<variant>].png`. Look at each one before reporting.
 - Fonts come from bundled files. Assert that no request goes to `fonts.googleapis.com` or `fonts.gstatic.com`.
+- Design-ref visual gate (plan Task 17, `ui/tests/visual-live.spec.ts`): at most 0.02% of the 800 000 pixels (160 px) may differ at a per-pixel YIQ threshold of 0.2. The card's Prev row (R125) is masked in both renders as an approved deviation, and the two masked rects must be identical, so the mask can never grow past the row. The contract test descriptors are §7.4.
 
 ### 8.2 Scenes
 

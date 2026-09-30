@@ -1,9 +1,9 @@
 # Decisions
 
-Every ruling made while building OPD1 TRCKER, in number order (R1 to R130). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
+Every ruling made while building OPD1 TRCKER, in number order (R1 to R134). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.
-- Rulings come from the working ledger (R1 to R73 and R87 to R130) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
+- Rulings come from the working ledger (R1 to R73 and R87 to R134) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
 - Precedence when rules disagree (R92): `docs/requirements-raw.md` (newest dated block) > the design file > older `CLAUDE.md` visual rules. `docs/design-spec.md` outranks the design file only for the R74 to R86 gap-fills.
 - The user's own words are in `docs/requirements-raw.md`; the [user decisions index](#user-decisions-index) at the end maps each dated block to a summary.
 
@@ -877,7 +877,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R130). Each
 
 ### R125 — The card's Prev row reads icon, Prev, name
 
-- **What:** The user delegated the call to Claude (choose what is best for the user experience), so this is a user-delegated change to the design (R92). The card's Prev row becomes icon · `Prev` · name (variant V4 in `.superpowers/sdd/plan/shots-prev/`): the greyed 18px prev icon is centred in the 40px rank-icon column, then comes the 12px `Prev` label, then the tier name in the rank-name column. With no prev tier: an empty icon column, then `Prev —`. The Peak row is unchanged (50px label), and so is the hero Prev row. Applied on `ui-lane` after the Task 17 review loop; the design-ref visual test accepts the Prev row as an approved deviation. Spec §3.6 (Prev) and the §8.4 geometry table record it.
+- **What:** The user delegated the call to Claude (choose what is best for the user experience), so this is a user-delegated change to the design (R92). The card's Prev row becomes icon · `Prev` · name (variant V4 in `.superpowers/sdd/plan/shots-prev/`): the greyed 18px prev icon is centred in the 40px rank-icon column, then comes the 12px `Prev` label, starting right after that icon column (R126, spec §3.6), then the tier name right after the label. With no prev tier: an empty icon column, then `Prev —`. The Peak row is unchanged (50px label), and so is the hero Prev row. Applied on `ui-lane` after the Task 17 review loop; the design-ref visual test accepts the Prev row as an approved deviation. Spec §3.6 (Prev) and the §8.4 geometry table record it.
 - **Why:** The user found the 50px label gap untidy. V4 mirrors the rank block above it (icon column, then text column), puts the word next to its value, and matches the design's own Details hero Prev order (icon · Prev · name, v8:214-218).
 - **Cost:** One CSS change.
 - **Status:** active
@@ -915,6 +915,34 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R130). Each
 - **What:** One Opus (visual) batch on `ui-lane`: the R125/R126 Prev row; Last5 keyed by index (a duplicate `startMs` would drop tiles); `live.ts` Closed shows self only; loading K/D and HS% carry no tooltip; check 9 covers meta-pending hidden names; `varRgb` deduplicated; dead test code removed; the clock pause is relative; the card-click test asserts the right player; a map skeleton assertion; the design gate tightened (threshold near the measured baseline, ⟲ unmasked where stable); check 5 adds a vertical and underline ink probe; the AgentBox test regex; the fit-live deep-equal covers shadow, opacity and border. The tests tsconfig moves to Task 16b.
 - **Why:** The Task 17 review left 10 spec-review Minors and 4 design-review Minors outside fix rounds 1 and 2, and R125/R126 still had to land in code.
 - **Cost:** Not recorded in the ledger.
+- **Status:** active
+
+### R131 — Task 16b may write the UI tsconfig files
+
+- **What:** Task 16b may also write `ui/tsconfig*.json`: a tests tsconfig, so `npm run check` type-checks `ui/tests/**` and `playwright.config.ts`. R130 moved it here. The UI lane is the only `ui/` config writer until Task 19. The plan and spec text that quotes the 1% design gate is updated to 0.02% in Task 19's docs pass (done in the 2026-09-30 docs drift pass).
+- **Why:** R130 moved the tests tsconfig from the Task 17 follow-up batch to Task 16b, and the UI lane is the only `ui/` config writer until Task 19.
+- **Cost:** None.
+- **Status:** active
+
+### R132 — opd1-riot may depend on `log`
+
+- **What:** `opd1-riot` may depend on `log`. `RiotSession::with_global_rate` must be test-only.
+- **Why:** `log` is already in `Cargo.lock` through `src-tauri`, so no new crate enters the build.
+- **Cost:** None.
+- **Status:** active
+
+### R133 — ui/tsconfig.node.json is widened to cover the tests
+
+- **What:** Widening `ui/tsconfig.node.json` to cover `tests/**` and `playwright.config.ts`, instead of a separate `tsconfig.tests.json`, is accepted. Task 18 adds the `details-nostats` and `match-nostats` DEV scenes (the `—` cells).
+- **Why:** `package.json` is outside the lane and strictness holds.
+- **Cost:** None.
+- **Status:** active
+
+### R134 — Task 16b's test-strength Minors go into Task 18
+
+- **What:** Task 16b's test-strength Minors are folded into Task 18 as its first commit: the test that ties `heroHs` null-ness only to `heroKd` is corrected (`heroHs` is also null when no shot landed); the hidden-card stats check runs over every non-visible name, including `hiddenAgent` and `remembered`, and matches `agentId`; the invariant `isSelf` ⇒ `isSelfParty` ⇒ no party and no encounters; a `KindOf` type test for the base kinds; a narrower demo error regex; a fixed overclaiming test title; the report's 15b note corrected.
+- **Why:** It is the same lane, and it avoids two agents in one worktree.
+- **Cost:** None.
 - **Status:** active
 
 ## User decisions index

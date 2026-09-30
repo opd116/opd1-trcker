@@ -9,13 +9,14 @@ import {
   installReleaseGuards,
   keyAction,
   loadMeta,
+  matchSlot,
   retryOnce,
   runKeyAction,
   startLive,
   type Bridge,
 } from "./boot";
 import { EMPTY_META } from "./meta";
-import type { LiveState, Meta, PlayerDetails } from "./types";
+import type { LiveState, MatchDetailsView, Meta, PlayerDetails } from "./types";
 
 const live = (stage: LiveState["stage"]): LiveState => ({ stage, mapId: null, players: [] });
 
@@ -461,6 +462,126 @@ describe("detailsSlot (spec §2.4, §6.9: the open Player Details)", () => {
       await seen;
       expect(now(slot)?.marker).toBe("first");
     });
+  });
+});
+
+describe("matchSlot (R150: the open Match Details, refreshed by the `match` event)", () => {
+  const view = (matchId: string, marker: string) => ({ matchId, marker }) as unknown as MatchDetailsView;
+  const now = (slot: ReturnType<typeof matchSlot>) => get(slot) as (MatchDetailsView & { marker: string }) | null;
+  /** A `match_details` call held open until the test answers it. */
+  function deferred() {
+    let answer!: (v: MatchDetailsView) => void;
+    const calls: string[] = [];
+    const fetch = (matchId: string) => {
+      calls.push(matchId);
+      return new Promise<MatchDetailsView>((res) => (answer = res));
+    };
+    return { fetch, calls, answer: (v: MatchDetailsView) => answer(v) };
+  }
+  const settle = (matchId: string) => view(matchId, "settled");
+
+  it("open fetches the match and shows the answer", async () => {
+    const slot = matchSlot();
+    const f = deferred();
+    const done = slot.open("m1", f.fetch);
+    expect(f.calls).toEqual(["m1"]);
+    expect(now(slot)).toBeNull();
+    f.answer(view("m1", "agent names"));
+    await done;
+    expect(now(slot)?.marker).toBe("agent names");
+  });
+
+  it("a match event for the open match replaces the view in place (the names arrived)", async () => {
+    const slot = matchSlot();
+    await slot.open("m1", async () => view("m1", "agent names"));
+    slot.event(view("m1", "real names"));
+    expect(now(slot)?.marker).toBe("real names");
+  });
+
+  it("an event for another match changes nothing", async () => {
+    const slot = matchSlot();
+    await slot.open("m1", async () => view("m1", "agent names"));
+    slot.event(view("m2", "other match"));
+    expect(now(slot)?.marker).toBe("agent names");
+  });
+
+  it("an event while nothing is open changes nothing, before the first open and after a close", async () => {
+    const slot = matchSlot();
+    slot.event(view("m1", "early"));
+    expect(now(slot)).toBeNull();
+    await slot.open("m1", async () => view("m1", "a"));
+    slot.close();
+    expect(now(slot)).toBeNull();
+    slot.event(view("m1", "after leaving"));
+    expect(now(slot)).toBeNull();
+  });
+
+  it("an event that lands before the older answer still in flight wins over that answer", async () => {
+    const slot = matchSlot();
+    const f = deferred();
+    const done = slot.open("m1", f.fetch);
+    slot.event(view("m1", "event"));
+    expect(now(slot)?.marker).toBe("event");
+    f.answer(view("m1", "snapshot"));
+    await done;
+    expect(now(slot)?.marker).toBe("event");
+  });
+
+  it("two events in a row: the later one stays, an older answer never comes back over it", async () => {
+    const slot = matchSlot();
+    const f = deferred();
+    const done = slot.open("m1", f.fetch);
+    slot.event(view("m1", "first"));
+    slot.event(view("m1", "second"));
+    f.answer(view("m1", "snapshot"));
+    await done;
+    expect(now(slot)?.marker).toBe("second");
+  });
+
+  it("leaving drops an answer still in flight, and a reopen starts from the skeleton", async () => {
+    const slot = matchSlot();
+    const f = deferred();
+    const done = slot.open("m1", f.fetch);
+    slot.close();
+    f.answer(view("m1", "late"));
+    await done;
+    expect(now(slot)).toBeNull();
+    await slot.open("m1", async () => view("m1", "b"));
+    slot.close();
+    void slot.open("m1", deferred().fetch);
+    expect(now(slot)).toBeNull(); // never the old payload while the new answer is on its way
+  });
+
+  it("opening another match clears the old one at once, and the old answer never lands", async () => {
+    const slot = matchSlot();
+    const f1 = deferred();
+    const first = slot.open("m1", f1.fetch);
+    await slot.open("m2", async () => view("m2", "b"));
+    f1.answer(view("m1", "late"));
+    await first;
+    expect(now(slot)?.marker).toBe("b");
+    slot.event(view("m1", "old match"));
+    expect(now(slot)?.marker).toBe("b");
+  });
+
+  it("a rejection is retried once; two rejections settle on the empty view, and a later event replaces it", async () => {
+    vi.useFakeTimers();
+    try {
+      const slot = matchSlot();
+      const fetch = vi.fn(async () => {
+        throw new Error("unknown match");
+      });
+      const done = slot.open("m1", fetch, { retryMs: DETAILS_RETRY_MS, settle });
+      const seen = expect(done).rejects.toThrow("unknown match");
+      await vi.advanceTimersByTimeAsync(DETAILS_RETRY_MS);
+      await seen;
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(now(slot)?.marker).toBe("settled");
+      slot.event(view("m1", "real"));
+      expect(now(slot)?.marker).toBe("real");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

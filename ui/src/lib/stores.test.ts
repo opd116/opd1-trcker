@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
-import type { LiveState, Meta, PlayerDetails } from "./types";
+import type { LiveState, MatchDetailsView, Meta, PlayerDetails } from "./types";
 
 const state = (stage: LiveState["stage"]): LiveState => ({ stage, mapId: null, players: [] });
 
@@ -116,6 +116,23 @@ describe("stores", () => {
       answer(d("snapshot"));
       await done;
       expect(get(openDetails)).toEqual(d("event"));
+    });
+
+    it("a match event reaches the open-match slot, wins over the answer in flight, and only for the open match (R150)", async () => {
+      const { startFeeds, openMatch, emit } = await underTauri(0);
+      await startFeeds();
+      const v = (matchId: string, marker: string) => ({ matchId, marker }) as unknown as MatchDetailsView;
+      let answer!: (v: MatchDetailsView) => void;
+      const done = openMatch.open("m1", () => new Promise<MatchDetailsView>((res) => (answer = res)));
+      emit("match", v("m2", "another match")); // ignored
+      expect(get(openMatch)).toBeNull();
+      emit("match", v("m1", "names"));
+      answer(v("m1", "snapshot"));
+      await done;
+      expect(get(openMatch)).toEqual(v("m1", "names"));
+      openMatch.close(); // the page was left: an event after that changes nothing
+      emit("match", v("m1", "after leaving"));
+      expect(get(openMatch)).toBeNull();
     });
 
     it("a rejected meta() does not leave meta pending: EMPTY_META now, the real tables on a retry", async () => {

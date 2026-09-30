@@ -427,6 +427,70 @@ test("match-hidden: a hidden-agent row (italic agent name, eye, no tag) and a re
   expect(await css(rem.locator(".rem"), "text-underline-offset")).toBe("4px");
 });
 
+// ── R150: Rust finds names for the open match and emits it again (`match`), through the app's own reducer ─────────
+/** Emits the open match's own view with `edit` applied to a copy, as Rust's `match` event does (DEV: no Rust side). */
+const matchEvent = (page: Page, edit: string) =>
+  fromApp(
+    page,
+    `import("/src/lib/stores.ts").then((s) => {
+      let v; s.openMatch.subscribe((x) => (v = x))();
+      const m = structuredClone(v); const rows = m.teams.flatMap((t) => t.players); ${edit}
+      s.openMatch.event(m);
+    })`,
+  );
+const REAL_NAME = `const p = rows.find((r) => r.name.kind === "hiddenAgent"); p.name = { kind: "visible", name: "Ghost", tag: "0007" };`;
+
+test("a `match` event for the open match turns the agent name into the real name, in place (R150)", async ({ page }) => {
+  await openScene(page, "match-hidden");
+  const hidden = page.locator(".match .srow .nm .hid");
+  await expect(hidden).toHaveText("Cypher");
+  const row = await page.locator(".match .srow").filter({ has: page.locator(".nm .hid") }).elementHandle();
+  const teamLabel = await text(page.locator(".match .thead .tlabel").first());
+  await matchEvent(page, REAL_NAME);
+  await expect(hidden).toHaveCount(0);
+  await expect(page.locator(".match .srow .nm").filter({ hasText: /Ghost\s*#0007/ })).toHaveCount(1);
+  // Keyed rows: the same DOM node, updated in place; nothing else on the page moves or changes.
+  expect(await row!.evaluate((el) => el.isConnected && !!el.querySelector(".nm .n"))).toBe(true);
+  await expect(page.locator(".match .srow .nm .rem")).toHaveText("Drift");
+  expect(await text(page.locator(".match .thead .tlabel").first())).toBe(teamLabel);
+  await expect(page.locator(".match")).toHaveAttribute("aria-busy", "false");
+});
+
+test("a `match` event for another match changes nothing (R150)", async ({ page }) => {
+  await openScene(page, "match-hidden");
+  await matchEvent(page, `${REAL_NAME} m.matchId = "mdemo:another:match";`);
+  await expect(page.locator(".match .srow .nm .hid")).toHaveText("Cypher");
+  await expect(page.locator(".match .srow .nm").filter({ hasText: "Ghost" })).toHaveCount(0);
+});
+
+test("after leaving the match page (Back, or the Live tab) a `match` event changes nothing, and a reopen shows the answer (R150)", async ({ page }) => {
+  await openScene(page, "match-hidden");
+  await page.locator(".match .back").click();
+  await waitPage(page, "loaded");
+  const openMatch = () => fromApp<unknown>(page, `import("/src/lib/stores.ts").then((s) => { let v; s.openMatch.subscribe((x) => (v = x))(); return v; })`);
+  expect(await openMatch()).toBeNull();
+  // The event has no page to change: the slot is closed, so it is dropped (a copy of the scene's own view).
+  await fromApp(
+    page,
+    `import("/src/lib/demo/scenes.ts").then(async (d) => {
+      const m = await d.resolveMatch("match-hidden", ${JSON.stringify(recentMatchId("mara", 0))}, ${JSON.stringify(MARA)});
+      const p = m.teams.flatMap((t) => t.players).find((r) => r.name.kind === "hiddenAgent"); p.name = { kind: "visible", name: "Ghost", tag: "0007" };
+      const s = await import("/src/lib/stores.ts"); s.openMatch.event(m);
+    })`,
+  );
+  expect(await openMatch()).toBeNull();
+  await expect(page.locator(".details")).toHaveCount(1);
+  await expect(page.locator(".match")).toHaveCount(0);
+  // The reopened page shows what `match_details` answers now (still an agent name), never the dropped event.
+  await page.locator(".details .recent .rrow").first().click();
+  await waitPage(page, "loaded");
+  await expect(page.locator(".match .srow .nm .hid")).toHaveText("Cypher");
+  // The Live tab leaves it the same way.
+  await page.locator("header.bar .tab.on").click();
+  await expect(page.locator(".live")).toHaveCount(1);
+  expect(await openMatch()).toBeNull();
+});
+
 test("match-dm: one team block labelled Players, no chips, header score — and no halves; no rank, ADR —", async ({ page }) => {
   await openScene(page, "match-dm");
   await expect(page.locator(".match .thead")).toHaveCount(1);

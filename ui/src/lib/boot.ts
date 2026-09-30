@@ -1,7 +1,7 @@
-// Startup wiring and the open Player Details, testable without Tauri (spec §2.4). The Tauri-backed `Bridge` is in api.ts.
+// Startup wiring and the open Player Details and Match Details, testable without Tauri (spec §2.4). The Tauri-backed `Bridge` is in api.ts.
 import { writable, type Readable } from "svelte/store";
 import { EMPTY_META } from "./meta";
-import type { LiveState, Meta, PlayerDetails } from "./types";
+import type { LiveState, MatchDetailsView, Meta, PlayerDetails } from "./types";
 
 export interface Bridge {
   listen<T>(ev: string, cb: (e: { payload: T }) => void): Promise<() => void>;
@@ -114,77 +114,92 @@ export async function retryOnce<T>(call: () => Promise<T>, delayMs: number, want
   }
 }
 
-/** The open Player Details: the payload on screen, and the three ways it changes. */
-export interface OpenOptions {
+/** The open page's payload (Player Details, Match Details): the payload on screen, and the three ways it changes. */
+export interface OpenOptions<T = PlayerDetails> {
   /** A rejected call is retried once after this many ms; skipped when anything wrote the slot during the wait. */
   retryMs?: number;
   /**
-   * When the call has failed for good (after the retry, if any) and the slot is still empty for this player: the
-   * payload to settle on, so the skeleton ends. A later `details` event still replaces it.
+   * When the call has failed for good (after the retry, if any) and the slot is still empty for this key: the
+   * payload to settle on, so the skeleton ends. A later event still replaces it.
    */
-  settle?: (puuid: string) => PlayerDetails;
+  settle?: (key: string) => T;
 }
 
-export interface DetailsSlot extends Readable<PlayerDetails | null> {
+/**
+ * One open page's payload, keyed by what identifies the page (a player's puuid, a match id). The page opens it, the
+ * Rust event for that page feeds it, and leaving the page closes it: nothing is ever shown for a page that is not the
+ * open one, and an older payload never lands over a newer one.
+ */
+export interface Slot<T> extends Readable<T | null> {
   /**
-   * Details opens `puuid` (a card click, or Back from Match): `invoke('player_details')` through `fetch`. Another
-   * player's payload is cleared at once (the skeleton shows); the same player's stays on screen until the answer.
-   * The answer is dropped when anything wrote the slot while it was in flight: a `details` event (always newer than
-   * the snapshot the call returns), another open, or a close. Rejects when the call fails for good (after
-   * `opts.retryMs`'s one retry, and after `opts.settle` has been applied).
+   * The page opens `key` (a card click, or Back from Match): the command through `fetch`. Another key's payload is
+   * cleared at once (the skeleton shows); the same key's stays on screen until the answer. The answer is dropped when
+   * anything wrote the slot while it was in flight: an event (always newer than the snapshot the call returns),
+   * another open, or a close. Rejects when the call fails for good (after `opts.retryMs`'s one retry, and after
+   * `opts.settle` has been applied).
    */
-  open(puuid: string, fetch: (puuid: string) => Promise<PlayerDetails>, opts?: OpenOptions): Promise<void>;
-  /** A `details` event: replaces the payload when it is for the player open or opening; anything else is ignored. */
-  event(payload: PlayerDetails): void;
-  /** The route left for Live: forget the payload, so a reopen starts from the skeleton (never a stale name). */
+  open(key: string, fetch: (key: string) => Promise<T>, opts?: OpenOptions<T>): Promise<void>;
+  /** A Rust event: replaces the payload when it is for the key open or opening; anything else is ignored. */
+  event(payload: T): void;
+  /** The page was left: forget the payload, so a reopen starts from the skeleton (never a stale name). */
   close(): void;
 }
 
-export function detailsSlot(): DetailsSlot {
-  const store = writable<PlayerDetails | null>(null);
+export type DetailsSlot = Slot<PlayerDetails>;
+export type MatchSlot = Slot<MatchDetailsView>;
+
+/** A slot for payloads that `keyOf` tells apart: the key an event must carry to be for the page that is open. */
+function keyedSlot<T>(keyOf: (payload: T) => string): Slot<T> {
+  const store = writable<T | null>(null);
   /** What is on screen (the store's value, readable without a subscription). */
-  let current: PlayerDetails | null = null;
-  const put = (d: PlayerDetails | null) => {
-    current = d;
-    store.set(d);
+  let current: T | null = null;
+  const put = (v: T | null) => {
+    current = v;
+    store.set(v);
   };
-  /** The player whose Details are open or opening; null on Live. */
-  let player: string | null = null;
+  /** The key of the page open or opening; null once it was left. */
+  let openKey: string | null = null;
   /** Bumped by every write an answer still in flight must not overwrite. */
   let version = 0;
   return {
     subscribe: store.subscribe,
-    async open(puuid, fetch, opts = {}) {
-      if (player !== puuid) {
-        player = puuid;
+    async open(key, fetch, opts = {}) {
+      if (openKey !== key) {
+        openKey = key;
         put(null);
       }
       const v = ++version;
       try {
         const res =
           opts.retryMs === undefined
-            ? await fetch(puuid)
-            : await retryOnce(() => fetch(puuid), opts.retryMs, () => v === version);
+            ? await fetch(key)
+            : await retryOnce(() => fetch(key), opts.retryMs, () => v === version);
         if (v === version) put(res);
       } catch (err) {
-        // Failed for good: end the skeleton, unless something newer wrote the slot or this player's payload is
+        // Failed for good: end the skeleton, unless something newer wrote the slot or this key's payload is
         // already on screen (Back from Match keeps what it had).
-        if (v === version && current === null && opts.settle) put(opts.settle(puuid));
+        if (v === version && current === null && opts.settle) put(opts.settle(key));
         throw err;
       }
     },
     event(payload) {
-      if (payload.card.puuid !== player) return;
+      if (keyOf(payload) !== openKey) return;
       version++;
       put(payload);
     },
     close() {
-      player = null;
+      openKey = null;
       version++;
       put(null);
     },
   };
 }
+
+/** The open Player Details: keyed by the player. */
+export const detailsSlot = (): DetailsSlot => keyedSlot<PlayerDetails>((d) => d.card.puuid);
+
+/** The open Match Details (R150): keyed by the match id. */
+export const matchSlot = (): MatchSlot => keyedSlot<MatchDetailsView>((m) => m.matchId);
 
 /**
  * The Player Details on screen (spec §2.4, §6.9). Details opens it, the `details` listener feeds it, and the router
@@ -192,3 +207,10 @@ export function detailsSlot(): DetailsSlot {
  * import cycle (stores.ts imports the router); stores.ts re-exports it.
  */
 export const openDetails = detailsSlot();
+
+/**
+ * The Match Details on screen (R150). The Match page opens it and closes it when it is left (Back, the Live tab, a new
+ * match's switch to Live); the `match` listener feeds it, so the names Rust finds for the open match replace the
+ * agent names in place. Same reasons as `openDetails` for living here.
+ */
+export const openMatch = matchSlot();

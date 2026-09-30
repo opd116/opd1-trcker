@@ -281,9 +281,27 @@ fn dump_files(
     files
 }
 
-/// Writes `files` into `dir` (created if needed); how many were written.
+/// Whether `name` is an error file of an earlier dump (`<key>.error.json` /
+/// `<key>.error.txt`).
+fn is_error_dump_name(name: &str) -> bool {
+    name.ends_with(".error.json") || name.ends_with(".error.txt")
+}
+
+/// Writes `files` into `dir` (created if needed); how many were written. The
+/// error files of an earlier dump are removed first (only those, only in
+/// `dir`): an error file carries no time, so one from an earlier run left
+/// beside a fresh dump would blame an endpoint that works now.
 fn write_dump(dir: &std::path::Path, files: &[(String, String)]) -> std::io::Result<u32> {
     std::fs::create_dir_all(dir)?;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let is_stale_error = entry.file_type().is_ok_and(|t| t.is_file())
+            && entry.file_name().to_str().is_some_and(is_error_dump_name);
+        if is_stale_error {
+            // Best effort: a file that cannot be removed is overwritten below
+            // when its endpoint failed again, and otherwise stays.
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
     let mut n = 0;
     for (name, contents) in files {
         std::fs::write(dir.join(name), contents)?;
@@ -543,6 +561,61 @@ mod tests {
         );
         assert_eq!(write_dump(&debug, &files).unwrap(), 2, "the log counts");
         assert!(debug.join("mmr.json").exists());
+    }
+
+    #[test]
+    fn a_new_dump_removes_the_error_files_of_an_earlier_one() {
+        // An error file has no time on it: one left from an earlier run would
+        // blame an endpoint that works now.
+        let dir = tempfile::tempdir().unwrap();
+        let debug = dir.path().join("debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        for stale in ["mmr.error.json", "comp_updates.error.txt"] {
+            std::fs::write(debug.join(stale), "old").unwrap();
+        }
+        // Not error files: left alone (a 2xx capture is overwritten only when
+        // written again; anything else in the directory is not ours to touch).
+        std::fs::write(debug.join("notes.txt"), "keep").unwrap();
+        std::fs::write(debug.join("errors.json"), "keep").unwrap();
+        std::fs::write(debug.join("match_details.json"), "old capture").unwrap();
+        std::fs::create_dir_all(debug.join("sub.error.json")).unwrap();
+        // A file outside the debug directory is never looked at.
+        std::fs::write(dir.path().join("outside.error.json"), "keep").unwrap();
+
+        let files = dump_files(
+            vec![("mmr".into(), "{}".into())],
+            vec![opd1_riot::raw_capture::ErrorDump {
+                key: "match_details".into(),
+                ext: "txt",
+                contents: "HTTP 502\nbad gateway".into(),
+            }],
+            "log".into(),
+        );
+        assert_eq!(write_dump(&debug, &files).unwrap(), 3);
+
+        assert!(!debug.join("mmr.error.json").exists(), "stale: gone");
+        assert!(
+            !debug.join("comp_updates.error.txt").exists(),
+            "stale: gone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(debug.join("match_details.error.txt")).unwrap(),
+            "HTTP 502\nbad gateway",
+            "the fresh error file is written"
+        );
+        for kept in ["notes.txt", "errors.json", "match_details.json"] {
+            assert!(debug.join(kept).exists(), "{kept}");
+        }
+        assert!(
+            debug.join("sub.error.json").is_dir(),
+            "a directory is not a file of ours"
+        );
+        assert!(dir.path().join("outside.error.json").exists());
+
+        // A dump with no errors at all leaves no error file behind.
+        let files = dump_files(Vec::new(), Vec::new(), "log".into());
+        write_dump(&debug, &files).unwrap();
+        assert!(!debug.join("match_details.error.txt").exists());
     }
 
     #[test]

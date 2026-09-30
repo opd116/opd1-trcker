@@ -254,6 +254,60 @@ async fn refresh_tables_fetches_and_persists_on_first_call() {
 }
 
 #[tokio::test]
+async fn a_gzip_encoded_table_answer_is_decoded() {
+    // The valorant-api clients keep gzip on (large JSON tables, an ordinary
+    // CDN): a compressed answer must decode, and be written decoded.
+    use std::io::Write;
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_version(&server, "v1").await;
+    mount_maps(&server, None).await;
+    mount_tiers(&server, None).await;
+    mount_seasons(&server, None).await;
+    mount_content_tiers(&server, None).await;
+    let agents = json!({
+        "status": 200,
+        "data": [{
+            "uuid": AGENT_UUID,
+            "displayName": "Gekko",
+            "displayIcon": format!("{}/img/agent.png", server.uri()),
+        }]
+    });
+    let mut enc = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    enc.write_all(agents.to_string().as_bytes()).unwrap();
+    Mock::given(method("GET"))
+        .and(path("/v1/agents"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-encoding", "gzip")
+                .set_body_bytes(enc.finish().unwrap()),
+        )
+        .mount(&server)
+        .await;
+
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    assert!(cache.refresh_tables().await.unwrap());
+    // Decoded before it was parsed and cached.
+    let meta = cache.meta().unwrap();
+    assert_eq!(meta.agents.get(AGENT_UUID).unwrap().name, "Gekko");
+    // The request said it accepts gzip.
+    let asked = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|r| r.url.path() == "/v1/agents")
+        .unwrap();
+    let accept = asked
+        .headers
+        .get("accept-encoding")
+        .unwrap()
+        .to_str()
+        .unwrap();
+    assert!(accept.contains("gzip"), "{accept}");
+}
+
+#[tokio::test]
 async fn refresh_tables_skips_network_when_version_is_unchanged() {
     let dir = tempdir();
     let server = MockServer::start().await;

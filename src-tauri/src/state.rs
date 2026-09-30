@@ -115,12 +115,14 @@ pub enum Job {
     RankRetry(String),
     /// R150: one names-fill request (`sync::fill_names_step`): the queued
     /// asks worth sending, in one name-service `PUT`. Handed out when no
-    /// `Names` or `Sync` job is left and before the backfill, and only
-    /// between matches, like the backfill (`LiveModel::between_matches`).
+    /// `Names`, `Sync` or due `RankRetry` job is left and before the
+    /// backfill, and only between matches, like the backfill
+    /// (`LiveModel::between_matches`).
     FillNames,
     /// One step of the own-history backfill (R101): only handed out when no
-    /// `Names`, `Sync` or `FillNames` job is left, so it is always behind
-    /// live cards, and only in Menus or Closed (R137), never during a match
+    /// `Names`, `Sync`, due `RankRetry` or `FillNames` job is left, so it is
+    /// always behind live cards, and only in Menus or Closed (R137), never
+    /// during a match
     /// — a free-for-all one included (`LiveModel::in_match`).
     Backfill,
 }

@@ -102,9 +102,9 @@ pub(crate) struct Poller {
     /// The user's own loadout was asked for under this session (R90: once
     /// per connect, at the first presence that shows VALORANT running).
     self_loadout_asked: bool,
-    /// The client version was re-resolved from the user's VALORANT presence
-    /// under this session (R159: once per connect, at that same first
-    /// presence — no extra request).
+    /// The client version came from the user's VALORANT presence under this
+    /// session (R159: re-resolved at the first presence that has one, once per
+    /// connect — no extra request).
     version_from_presence_done: bool,
     /// The presence `queueId` while in a match — decides the post-match
     /// check for the match that just ended (R48).
@@ -525,11 +525,14 @@ impl Poller {
         });
     }
 
-    /// R159: the first time this session sees the user's VALORANT presence,
-    /// its `partyClientVersion` (already in hand: the tick read the presences)
-    /// replaces a client version the session took from a lower source when it
-    /// was built before the game's presence existed. No request; the header
-    /// value of the next remote call changes if the version did.
+    /// R159: the first time this session sees the user's VALORANT presence
+    /// *with a usable version*, its `partyClientVersion` (already in hand: the
+    /// tick read the presences) replaces a client version the session took
+    /// from a lower source when it was built before the game's presence
+    /// existed. No request; the header value of the next remote call changes
+    /// if the version did. A presence without one changes nothing and does not
+    /// use up the turn (a tiny base64 + JSON read per tick until one has it),
+    /// or a session would keep the lower value for its whole life.
     fn client_version_from_presence_once(
         &mut self,
         session: &Arc<RiotSession>,
@@ -538,9 +541,12 @@ impl Poller {
         if self.version_from_presence_done {
             return;
         }
-        self.version_from_presence_done = true;
         if let Some(private) = private {
             session.note_presence_version(private);
+            // The presence has spoken (now or at connect) exactly when it is
+            // the source in use.
+            self.version_from_presence_done =
+                session.client_version_source() == opd1_riot::session::VersionSource::Presence;
         }
     }
 
@@ -1793,6 +1799,50 @@ mod tests {
 
         // Once per session: a later presence with another value changes nothing.
         mock_presence_with_version(&h, "MENUS", "release-other-0", 10).await;
+        poller.presence_tick(&h.session).await.unwrap();
+        assert_eq!(
+            h.session.client_version(),
+            "release-13.06-shipping-18-5590001"
+        );
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_first_presence_without_a_version_does_not_use_up_the_re_resolve() {
+        // R159 review: the turn is only spent by a presence that had a usable
+        // `partyClientVersion`; otherwise the session would keep the lower
+        // source's value for its whole life.
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.presence_stage = Stage::Menus;
+        poller.party_key = mocked_party_key();
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        synced_lobby(&h);
+        // The first presences carry a blank version; the third has the real one.
+        mock_presence_with_version(&h, "MENUS", "  ", 2).await;
+        mock_presence_with_version(&h, "MENUS", "release-13.06-shipping-18-5590001", 1).await;
+        mock_presence_with_version(&h, "MENUS", "release-other-0", 10).await;
+        let before = h.session.client_version();
+
+        for _ in 0..2 {
+            poller.presence_tick(&h.session).await.unwrap();
+            assert_eq!(h.session.client_version(), before, "nothing usable yet");
+            assert!(!poller.version_from_presence_done);
+        }
+        poller.presence_tick(&h.session).await.unwrap();
+        assert_eq!(
+            h.session.client_version(),
+            "release-13.06-shipping-18-5590001"
+        );
+        assert!(poller.version_from_presence_done);
+        h.session.mmr(ME).await.ok();
+        assert_eq!(
+            last_version_header(&h, &mmr_of(ME)).await,
+            "release-13.06-shipping-18-5590001",
+            "the request after the second presence carries it"
+        );
+        // And now it is done: a later value changes nothing.
         poller.presence_tick(&h.session).await.unwrap();
         assert_eq!(
             h.session.client_version(),

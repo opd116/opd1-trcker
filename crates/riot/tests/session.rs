@@ -575,6 +575,37 @@ async fn an_error_body_is_redacted_and_cut_in_the_error_text() {
     assert!(msg.contains("BAD_CLAIMS"), "{msg}");
     assert!(!msg.contains("opaque-secret-access-token"), "{msg}");
     assert!(!msg.contains(jwt), "{msg}");
+
+    // A token quoted inside a longer string value goes too, in the error text
+    // (the log line) and in the dump.
+    Mock::given(method("GET"))
+        .and(path("/match-details/v1/matches/abc"))
+        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
+            "errorCode": "BAD_CLAIMS",
+            "message": format!("invalid bearer {jwt} for player"),
+        })))
+        .mount(&server)
+        .await;
+    let quoted = session
+        .pd::<Value>("/match-details/v1/matches/abc")
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        quoted.contains("BAD_CLAIMS") && quoted.contains("invalid bearer"),
+        "{quoted}"
+    );
+    assert!(!quoted.contains(jwt) && !quoted.contains("eyJ"), "{quoted}");
+    let dump = session
+        .raw_error_captures()
+        .into_iter()
+        .find(|d| d.key == "match_details")
+        .unwrap();
+    assert!(
+        !dump.contents.contains(jwt) && !dump.contents.contains("eyJ"),
+        "{}",
+        dump.contents
+    );
     assert!(
         msg.chars().count() < 400,
         "bounded: {} chars",
@@ -721,6 +752,25 @@ async fn every_remote_request_sends_scouts_user_agent_and_the_presence_version()
         local.iter().all(|r| r.headers.get("user-agent").is_none()),
         "local calls send no User-Agent"
     );
+    // Nor do they ask for gzip: compression is for the remote client only
+    // (reqwest's `gzip` feature would otherwise make it every client's
+    // default). The remote requests do ask.
+    let gzip = |r: &&wiremock::Request| {
+        r.headers
+            .get("accept-encoding")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.contains("gzip"))
+    };
+    assert!(
+        local.iter().all(|r| !gzip(r)),
+        "local calls send no Accept-Encoding: gzip"
+    );
+    let remote: Vec<_> = requests
+        .iter()
+        .filter(|r| r.url.path() == mmr_path() || r.url.path().starts_with("/pregame/"))
+        .collect();
+    assert_eq!(remote.len(), 2);
+    assert!(remote.iter().all(gzip), "remote calls accept gzip");
 }
 
 #[tokio::test]
@@ -809,6 +859,41 @@ async fn an_empty_or_blank_version_falls_through_at_every_step() {
         );
         assert_eq!(session.client_version(), "release-09.00");
     }
+}
+
+#[tokio::test]
+async fn a_version_that_could_not_be_sent_as_a_header_falls_through() {
+    // Non-ASCII / control characters would fail every remote call at `send()`.
+    // Presence -> valorant-api:
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    mount_presence_with_version(&server, SELF_PUUID, "release-é-1").await;
+    mount_valorant_api_version(&server, "release-api-ok").await;
+    let session = session_for(&server, &tmp).await;
+    assert_eq!(session.client_version_source(), VersionSource::ValorantApi);
+    // ... valorant-api -> the log:
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    write_shooter_log_with_version(tmp.path(), " release-log-ok");
+    mount_valorant_api_version(&server, "bad\u{1}version").await;
+    let session = session_for_written_log(&server, &tmp).await;
+    assert_eq!(session.client_version_source(), VersionSource::Log);
+    // ... the log -> the literal, and a remote call still goes out:
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    write_shooter_log_with_version(tmp.path(), " release-\u{7f}-log");
+    let session = session_for_written_log(&server, &tmp).await;
+    assert_eq!(session.client_version_source(), VersionSource::Fallback);
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+        .mount(&server)
+        .await;
+    let _: Value = session.pd(&mmr_path()).await.expect("the call is sendable");
+    // And a bad presence value never replaces the version in use.
+    let bad = presence_private_b64(&json!({"partyClientVersion": "release-é-2"}));
+    assert!(!session.note_presence_version(&bad));
+    assert_eq!(session.client_version_source(), VersionSource::Fallback);
 }
 
 #[tokio::test]

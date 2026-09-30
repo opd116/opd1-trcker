@@ -522,14 +522,20 @@ impl AssetCache {
         // ignored, same as `session.rs`).
         let _ = rustls::crypto::ring::default_provider().install_default();
 
+        // `gzip`: on purpose, for both clients (R159 review ruling). reqwest's
+        // `gzip` feature makes it every client's default; valorant-api's JSON
+        // tables are large and it is an ordinary CDN, so they stay compressed
+        // (only the local Riot client opts out, in `session.rs`).
         let json_client = reqwest::Client::builder()
             .timeout(JSON_TIMEOUT)
             .connect_timeout(CONNECT_TIMEOUT)
+            .gzip(true)
             .build()
             .expect("building the valorant-api JSON HTTP client should never fail");
         let image_client = reqwest::Client::builder()
             .timeout(IMAGE_TIMEOUT)
             .connect_timeout(CONNECT_TIMEOUT)
+            .gzip(true)
             .build()
             .expect("building the valorant-api image HTTP client should never fail");
         Self {

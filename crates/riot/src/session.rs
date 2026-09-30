@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use reqwest::header::{HeaderMap, AUTHORIZATION, RETRY_AFTER, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION, RETRY_AFTER, USER_AGENT};
 use reqwest::{Client, Method, Response, StatusCode};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -324,16 +324,20 @@ impl RiotSession {
         // `danger_accept_invalid_certs` is ONLY ever set on this client —
         // the local Riot client's cert is self-signed. The remote
         // (pd/glz/valorant-api) client below uses normal certificate
-        // validation.
+        // validation. `no_gzip`: with reqwest's `gzip` feature on, every
+        // client asks for gzip by default; the local client talks to
+        // 127.0.0.1, where compression only costs CPU, so it opts out.
         let local_client = Client::builder()
             .danger_accept_invalid_certs(true)
             .timeout(local_timeout)
+            .no_gzip()
             .build()
             .map_err(http_error)?;
         // `gzip`: pd/glz bodies (match-details is about 1 MB) come back
         // compressed, as they do for Valorant-Scout's `requests`; reqwest
         // decodes them before `buffer_response`, so captures and parsing see
-        // plain JSON. Not on the local client: it talks to 127.0.0.1.
+        // plain JSON. Explicit, because with the feature on it is the default
+        // of every client (`assets.rs`' two keep it, on purpose).
         let remote_client = Client::builder()
             .timeout(remote_timeout)
             .connect_timeout(REMOTE_CONNECT_TIMEOUT)
@@ -448,12 +452,18 @@ impl RiotSession {
         let Some(version) = version_from_private_b64(private_b64) else {
             return false;
         };
-        let mut auth = self.auth.lock().unwrap();
-        if auth.client_version_source == VersionSource::Presence {
-            return false;
-        }
-        let was = std::mem::replace(&mut auth.client_version, version.clone());
-        let was_from = std::mem::replace(&mut auth.client_version_source, VersionSource::Presence);
+        let (was, was_from) = {
+            let mut auth = self.auth.lock().unwrap();
+            if auth.client_version_source == VersionSource::Presence {
+                return false;
+            }
+            (
+                std::mem::replace(&mut auth.client_version, version.clone()),
+                std::mem::replace(&mut auth.client_version_source, VersionSource::Presence),
+            )
+        };
+        // Logged after the lock is released: a request in flight never waits
+        // on the logger.
         let changed = was != version;
         if changed {
             log::info!(
@@ -729,6 +739,8 @@ fn http_error(e: reqwest::Error) -> RiotError {
         "body"
     } else if e.is_decode() {
         "decode"
+    } else if e.is_builder() {
+        "builder"
     } else if e.is_request() {
         "request"
     } else {
@@ -801,17 +813,22 @@ async fn fetch_client_version(
     if let Some(v) = fetch_version_from_valorant_api(remote_client, valorant_api_base).await {
         return (v, VersionSource::ValorantApi);
     }
-    if let Some(v) = parse_client_version(raw_log) {
+    if let Some(v) = parse_client_version(raw_log).and_then(|v| usable_version(&v)) {
         return (v, VersionSource::Log);
     }
     (FALLBACK_CLIENT_VERSION.to_string(), VersionSource::Fallback)
 }
 
-/// `raw` trimmed, or `None` when nothing is left: a version source that
-/// answers an empty or whitespace-only string has not answered.
+/// `raw` trimmed, or `None` when nothing is left or what is left could not be
+/// sent as a header: a version source that answers an empty, whitespace-only
+/// or unsendable string has not answered.
 fn usable_version(raw: &str) -> Option<String> {
     let v = raw.trim();
-    (!v.is_empty()).then(|| v.to_string())
+    // A value the HTTP layer would refuse as a header (a control character)
+    // would fail every remote call of the session at `send()`: it is no answer
+    // either, and the chain goes on. `HeaderValue` lets bytes above 127 through
+    // (obs-text), but no real version has any: a non-ASCII one is garbage too.
+    (!v.is_empty() && v.is_ascii() && HeaderValue::from_str(v).is_ok()).then(|| v.to_string())
 }
 
 async fn fetch_version_from_presence(
@@ -968,6 +985,32 @@ mod tests {
             version_from_presence_value(&both).as_deref(),
             Some("release-nested-3")
         );
+    }
+
+    #[test]
+    fn a_version_the_http_layer_would_refuse_is_no_answer() {
+        // A control character makes `send()` fail for every remote call of the
+        // session; a non-ASCII one is garbage no real version has: such a value
+        // falls through instead.
+        for bad in [
+            "release-\u{7f}1",
+            "release-\u{1}1",
+            "release-é-1",
+            "rel\nease",
+            "版本",
+        ] {
+            assert_eq!(usable_version(bad), None, "{bad:?}");
+            let api = json!({ "data": { "riotClientVersion": bad } });
+            assert_eq!(version_from_valorant_api_json(&api), None, "{bad:?}");
+            let presence = json!({ "partyClientVersion": bad });
+            assert_eq!(version_from_presence_value(&presence), None, "{bad:?}");
+        }
+        // A real one, and one with inner spaces, are fine.
+        assert_eq!(
+            usable_version(" release-13.06-shipping-18-5590001 ").as_deref(),
+            Some("release-13.06-shipping-18-5590001")
+        );
+        assert_eq!(usable_version("release 1").as_deref(), Some("release 1"));
     }
 
     #[test]

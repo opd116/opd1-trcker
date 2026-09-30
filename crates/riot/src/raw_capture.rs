@@ -186,13 +186,19 @@ fn redact_value(value: &mut Value) {
         Value::String(s) if looks_like_jwt(s) => {
             *value = Value::String(REDACTED.to_string());
         }
+        // A token quoted inside a longer string ("invalid bearer eyJ... for
+        // player"): the same scan the plain-text path runs.
+        Value::String(s) if s.contains("eyJ") => {
+            *s = redact_jwts_in_plain_text(s);
+        }
         _ => {}
     }
 }
 
-/// Scans plain (non-JSON) text for JWT-shaped substrings and redacts them
-/// — the fallback path for a body that isn't valid JSON (an HTML error
-/// page, an empty body, etc.). Manual scan rather than a `regex`
+/// Scans plain text for JWT-shaped substrings and redacts them — the path
+/// for a body that isn't valid JSON (an HTML error page, an empty body,
+/// etc.), and for a string value inside a JSON body that quotes a token
+/// within longer text. Manual scan rather than a `regex`
 /// dependency: the shape is simple (`eyJ` then two more base64url runs
 /// separated by single dots) and this path is a defensive fallback, not
 /// the common case (every endpoint this app calls returns JSON).
@@ -207,6 +213,11 @@ fn redact_jwts_in_plain_text(s: &str) -> String {
                 |c: u8| c.is_ascii_alphanumeric() || c == b'-' || c == b'_' || c == b'.';
             while j < bytes.len() && is_token_char(bytes[j]) {
                 j += 1;
+            }
+            // A token ending a sentence ("... was eyJ....abc.") is still one:
+            // trailing dots belong to the text around it, not to the token.
+            while j > i && bytes[j - 1] == b'.' {
+                j -= 1;
             }
             let candidate = &s[i..j];
             if looks_like_jwt(candidate) {
@@ -383,13 +394,16 @@ impl RawCaptures {
     /// error and nothing else. The body is redacted the moment it is stored and
     /// cut to [`MAX_ERROR_CAPTURE_BYTES`], so one key never holds more than
     /// that; a body over [`MAX_CAPTURE_BYTES`] is not even scanned (a marker
-    /// stands in, as for a 2xx capture).
+    /// stands in, as for a 2xx capture). Full uuids are shortened to their
+    /// first 8 characters, as in a log line.
     pub(crate) fn record_error(&self, path: &str, status: u16, body: &[u8]) {
         let key = endpoint_key(path);
         let redacted = if body.len() > MAX_CAPTURE_BYTES {
             format!(r#"{{"truncated":true,"bytes":{}}}"#, body.len())
         } else {
-            redact_bytes(body)
+            // Unlike a 2xx capture (a fixture, full ids and all), an error
+            // file is a field report: no full puuid or match id in it either.
+            shorten_uuids(&redact_bytes(body))
         };
         let (text, cut) = cut_bytes(redacted, MAX_ERROR_CAPTURE_BYTES);
         self.errors
@@ -808,5 +822,86 @@ mod tests {
         captures.record_error("/mmr/v1/players/abc", 404, b"");
         assert!(captures.snapshot()[0].1.contains("\"ok\": true"));
         assert_eq!(captures.snapshot().len(), 1);
+    }
+
+    // -- review fix round 1: tokens quoted inside longer strings ------------
+
+    #[test]
+    fn a_jwt_ending_a_sentence_is_redacted_and_the_dot_stays() {
+        let e = excerpt(format!("token was {JWT}. Retry later.").as_bytes(), 200);
+        assert_eq!(e, format!("token was {REDACTED}. Retry later."));
+        // Dotted text that is not a token is left alone.
+        assert_eq!(
+            excerpt(b"see eyJ.a.b for more", 200),
+            "see eyJ.a.b for more"
+        );
+    }
+
+    #[test]
+    fn a_jwt_quoted_inside_a_longer_json_string_is_redacted_in_the_excerpt() {
+        let body = json!({
+            "errorCode": "BAD_CLAIMS",
+            "message": format!("invalid bearer {JWT} for player"),
+            "list": [format!("a {JWT} b")],
+            "nested": {"detail": format!("x{JWT}")},
+        });
+        let e = excerpt(body.to_string().as_bytes(), 400);
+        assert!(!e.contains(JWT), "{e}");
+        assert!(!e.contains("eyJ"), "{e}");
+        assert!(e.contains("BAD_CLAIMS"), "{e}");
+        assert!(
+            e.contains("invalid bearer") && e.contains("for player"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn a_jwt_quoted_inside_a_longer_json_string_is_redacted_in_the_error_dump() {
+        let captures = RawCaptures::new();
+        let body = json!({
+            "errorCode": "BAD_CLAIMS",
+            "message": format!("invalid bearer {JWT} for player"),
+        });
+        captures.record_error("/mmr/v1/players/abc", 400, body.to_string().as_bytes());
+        let dump = &captures.error_snapshot()[0];
+        assert!(
+            !dump.contents.contains(JWT) && !dump.contents.contains("eyJ"),
+            "{}",
+            dump.contents
+        );
+        assert!(
+            dump.contents.contains("invalid bearer"),
+            "{}",
+            dump.contents
+        );
+        assert_eq!(dump.ext, "json", "still JSON");
+    }
+
+    #[test]
+    fn a_jwt_quoted_inside_a_longer_json_string_is_redacted_in_a_2xx_capture() {
+        let captures = RawCaptures::new();
+        let body = json!({"Subject": "x", "note": format!("token was {JWT}.")});
+        captures.record("/mmr/v1/players/abc", body.to_string().as_bytes());
+        let stored = &captures.snapshot()[0].1;
+        assert!(!stored.contains(JWT) && !stored.contains("eyJ"), "{stored}");
+        assert!(stored.contains("token was"), "{stored}");
+    }
+
+    #[test]
+    fn an_error_dump_shortens_full_puuids_but_a_2xx_capture_keeps_them() {
+        let captures = RawCaptures::new();
+        let body = json!({"errorCode": "NOT_FOUND", "message": format!("no player {PUUID}")});
+        captures.record_error("/mmr/v1/players/abc", 404, body.to_string().as_bytes());
+        captures.record("/mmr/v1/players/abc", body.to_string().as_bytes());
+        let dump = &captures.error_snapshot()[0];
+        assert!(!dump.contents.contains(PUUID), "{}", dump.contents);
+        assert!(
+            dump.contents.contains("no player aaaaaaaa"),
+            "{}",
+            dump.contents
+        );
+        assert_eq!(dump.ext, "json");
+        // A 2xx capture is a fixture: untouched.
+        assert!(captures.snapshot()[0].1.contains(PUUID));
     }
 }

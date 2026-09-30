@@ -3,10 +3,12 @@
 //! No Tauri dependency lives here so this crate stays unit-testable on any
 //! platform (including the Linux dev VPS). `model` assembles the cards the
 //! UI shows; `names` (hidden-name rules) and `party` (party detection)
-//! decide two of their fields from what `db` knows.
+//! decide two of their fields from what `db` knows; `matchview` builds the
+//! Match Details scoreboard from a stored match.
 
 pub mod db;
 pub mod lockfile;
+pub mod matchview;
 pub mod model;
 pub mod mystats;
 pub mod names;

@@ -19,18 +19,27 @@ use rusqlite::{params, Connection, OptionalExtension, Result};
 use serde_json::{json, Map, Value};
 
 use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow, Repo};
-use opd1_core::model::{match_summary, EncounterCount, MatchSummary, MyStats};
+use opd1_core::model::{
+    hero_stats, match_summary, EncounterCount, HeroStats, MatchSummary, MyStats,
+};
 use opd1_core::mystats::{self, MyStatsInput};
+use opd1_core::names::KnownName;
 use opd1_core::party::SharedRef;
 use opd1_core::stats::Act;
 use opd1_riot::endpoints::PlayerMmrResponse;
 use opd1_riot::to_core::current_rank_from_mmr;
 
 use crate::roster::is_ffa_queue;
+use crate::sync::TEAMMATE_WINDOW;
 
 /// `app_state` key holding the user's own puuid (R31) — lets the Closed
 /// stage show the user's card before the Riot client is ever reached.
 pub const SELF_PUUID_KEY: &str = "self_puuid";
+
+/// `app_state` key holding the user's own last-known loadout as
+/// `RawLoadout` JSON (R90) — shown in their Details while VALORANT is
+/// closed.
+pub const SELF_LOADOUT_KEY: &str = "self_loadout";
 
 /// The queue key Riot uses for ranked in `QueueSkills`.
 const COMPETITIVE: &str = "competitive";
@@ -120,12 +129,19 @@ pub fn load_player(conn: &Connection, puuid: &str) -> Result<Option<StoredPlayer
 // MMR snapshot (trimmed)
 // ---------------------------------------------------------------------
 
+/// The shape version `trim_mmr` writes. Version 2 added
+/// `NumberOfWinsWithPlacements` (the act win rate counts placement wins);
+/// a snapshot without a `SnapshotVersion` is version 1 and is refetched
+/// once by [`mmr_refresh_needed`].
+pub const MMR_SNAPSHOT_VERSION: i64 = 2;
+
 /// The MMR snapshot stored in `mmr_snapshots.json`: Riot's own response
 /// shape (so it parses straight back as a `PlayerMmrResponse` and goes
 /// through the same `to_core` conversions as a live response), trimmed to
-/// the competitive queue and the six fields the card math uses. A full
-/// MMR response carries every queue and every field (tens of KB per
-/// player); every player ever seen gets a snapshot, so lightness wins.
+/// the competitive queue and the seven fields the card math uses, plus a
+/// `SnapshotVersion`. A full MMR response carries every queue and every
+/// field (tens of KB per player); every player ever seen gets a snapshot,
+/// so lightness wins.
 pub fn trim_mmr(resp: &PlayerMmrResponse) -> Value {
     let mut seasons = Map::new();
     if let Some(comp) = resp.queue_skills.get(COMPETITIVE) {
@@ -137,6 +153,7 @@ pub fn trim_mmr(resp: &PlayerMmrResponse) -> Value {
                     "CompetitiveTier": s.competitive_tier,
                     "RankedRating": s.ranked_rating,
                     "NumberOfWins": s.number_of_wins,
+                    "NumberOfWinsWithPlacements": s.number_of_wins_with_placements,
                     "NumberOfGames": s.number_of_games,
                     "WinsByTier": s.wins_by_tier,
                 }),
@@ -145,8 +162,36 @@ pub fn trim_mmr(resp: &PlayerMmrResponse) -> Value {
     }
     json!({
         "Subject": resp.subject,
+        "SnapshotVersion": MMR_SNAPSHOT_VERSION,
         "QueueSkills": { COMPETITIVE: { "SeasonalInfoBySeasonID": seasons } }
     })
+}
+
+/// Whether `puuid`'s MMR must be fetched again: there is no snapshot, a new
+/// competitive match landed since it (`last_comp_match_id` differs from
+/// `latest_comp_match_id`, as `Repo::needs_mmr_refresh` decides), or the
+/// stored snapshot predates [`MMR_SNAPSHOT_VERSION`] (an old shape is
+/// refetched once, even when no new match landed). One SELECT: both checks
+/// read the same row.
+pub fn mmr_refresh_needed(repo: &Repo, puuid: &str, latest_comp_match_id: &str) -> Result<bool> {
+    Ok(match repo.load_mmr_snapshot(puuid)? {
+        None => true,
+        Some(snap) => {
+            snap.last_comp_match_id.as_deref() != Some(latest_comp_match_id)
+                || snapshot_version(&snap.json) < MMR_SNAPSHOT_VERSION
+        }
+    })
+}
+
+/// The `SnapshotVersion` of a stored snapshot; 0 when it has none or
+/// doesn't parse (either way it's refetched).
+fn snapshot_version(json: &str) -> i64 {
+    #[derive(serde::Deserialize)]
+    struct Version {
+        #[serde(rename = "SnapshotVersion", default)]
+        version: i64,
+    }
+    serde_json::from_str::<Version>(json).map_or(0, |v| v.version)
 }
 
 /// A stored snapshot back into Riot's type; `None` if it doesn't parse
@@ -170,7 +215,9 @@ pub struct PlayerDb {
     pub row: Option<StoredPlayer>,
     /// Their name as shown in a finished match the user played in
     /// (`Repo::known_name`) — displayed only while they're incognito.
-    pub remembered: Option<(String, String)>,
+    /// `map_id` is the stored Riot path; it is converted to a uuid only
+    /// where a `DisplayName` is built (R84).
+    pub remembered: Option<KnownName>,
     /// Matches shared with the user; `None` when there are none (no ⟲
     /// badge for strangers, R52) and always for the user themself.
     pub encounters: Option<EncounterCount>,
@@ -188,11 +235,10 @@ pub fn load_player_db(repo: &Repo, self_puuid: Option<&str>, puuid: &str) -> Res
         .and_then(|snap| parse_mmr_snapshot(&snap.json));
     let (remembered, encounters) = match self_puuid {
         Some(me) if me != puuid => {
-            let e = repo.encounters(me, puuid)?;
-            let count = (e.with + e.against > 0).then_some(EncounterCount {
-                with: e.with,
-                against: e.against,
-            });
+            // One COUNT query: the card only needs the two numbers, not the
+            // shared matches themselves (those are Player Details').
+            let (with, against) = repo.encounter_counts(me, puuid)?;
+            let count = (with + against > 0).then_some(EncounterCount { with, against });
             (repo.known_name(me, puuid)?, count)
         }
         _ => (None, None),
@@ -346,6 +392,15 @@ pub fn recent_matches(
     Ok(rows.iter().map(match_summary).collect())
 }
 
+/// R116: Player Details' hero K/D and HS% — pooled over `puuid`'s
+/// [`TEAMMATE_WINDOW`] (20) newest current-act (`start_ms >= act_start_ms`)
+/// competitive matches, the window the Details sync fetches for Top 3, so it
+/// costs no extra request. See [`hero_stats`] for what counts.
+pub fn act_hero_stats(repo: &Repo, puuid: &str, act_start_ms: i64) -> Result<HeroStats> {
+    let rows = repo.comp_matches(puuid, act_start_ms..i64::MAX, TEAMMATE_WINDOW)?;
+    Ok(hero_stats(&rows))
+}
+
 // ---------------------------------------------------------------------
 // My Stats
 // ---------------------------------------------------------------------
@@ -466,6 +521,96 @@ mod tests {
     }
 
     #[test]
+    fn trim_mmr_keeps_wins_with_placements_and_version() {
+        let resp: PlayerMmrResponse = serde_json::from_value(json!({
+            "Subject": "p1",
+            "QueueSkills": {"competitive": {"SeasonalInfoBySeasonID": {
+                "act-1": {
+                    "SeasonID": "act-1", "CompetitiveTier": 15, "RankedRating": 42,
+                    "NumberOfWins": 34, "NumberOfWinsWithPlacements": 39,
+                    "NumberOfGames": 61, "WinsByTier": null
+                },
+                "act-0": {
+                    "SeasonID": "act-0", "CompetitiveTier": 12, "RankedRating": 7,
+                    "NumberOfWins": 5, "NumberOfGames": 9, "WinsByTier": null
+                }
+            }}}
+        }))
+        .unwrap();
+        let trimmed = trim_mmr(&resp);
+        assert_eq!(trimmed["SnapshotVersion"], json!(MMR_SNAPSHOT_VERSION));
+        assert_eq!(MMR_SNAPSHOT_VERSION, 2);
+
+        let back = parse_mmr_snapshot(&trimmed.to_string()).unwrap();
+        let seasons = &back.queue_skills["competitive"].seasonal_info_by_season_id;
+        assert_eq!(seasons["act-1"].number_of_wins, 34);
+        assert_eq!(seasons["act-1"].number_of_wins_with_placements, Some(39));
+        // A season Riot sent without the field keeps `None` (the card then
+        // falls back to `NumberOfWins`).
+        assert_eq!(seasons["act-0"].number_of_wins_with_placements, None);
+    }
+
+    #[test]
+    fn old_snapshot_forces_mmr_refresh() {
+        let r = repo();
+        let save = |json: String| {
+            r.save_mmr_snapshot(&MmrSnapshot {
+                puuid: "p1".into(),
+                json,
+                last_comp_match_id: Some("m1".into()),
+                fetched_ms: 1,
+            })
+            .unwrap();
+        };
+        assert!(mmr_refresh_needed(&r, "p1", "m1").unwrap(), "no snapshot");
+
+        // A snapshot from before `SnapshotVersion`: refetched once even
+        // though no new competitive match landed.
+        save(r#"{"Subject":"p1","QueueSkills":{}}"#.into());
+        assert!(mmr_refresh_needed(&r, "p1", "m1").unwrap());
+
+        // A current snapshot: only a new competitive match refreshes it.
+        let resp: PlayerMmrResponse =
+            serde_json::from_value(json!({"Subject": "p1", "QueueSkills": {}})).unwrap();
+        save(trim_mmr(&resp).to_string());
+        assert!(!mmr_refresh_needed(&r, "p1", "m1").unwrap());
+        assert!(mmr_refresh_needed(&r, "p1", "m2").unwrap());
+    }
+
+    #[test]
+    fn load_player_db_keeps_remembered_riot_path() {
+        let r = repo();
+        let m = Match {
+            match_id: "m1".into(),
+            map_id: "/Game/Maps/Bonsai/Bonsai".into(),
+            queue_id: "competitive".into(),
+            start_ms: 777,
+            winning_team: None,
+            is_ranked: true,
+            rounds_played: None,
+            game_length_ms: None,
+        };
+        r.upsert_match(
+            &m,
+            &[],
+            &[
+                mp("me", "Blue", "pa", Some(("Me", "1"))),
+                mp("h1", "Red", "pb", Some(("Seen", "AFTER"))),
+            ],
+        )
+        .unwrap();
+        let db = load_player_db(&r, Some("me"), "h1").unwrap();
+        let remembered = db.remembered.unwrap();
+        // The stored Riot path; the shell converts it to a uuid only when
+        // it builds a DisplayName (R84).
+        assert_eq!(
+            remembered.map_id.as_deref(),
+            Some("/Game/Maps/Bonsai/Bonsai")
+        );
+        assert_eq!(remembered.start_ms, Some(777));
+    }
+
+    #[test]
     fn load_player_db_reads_snapshot_last5_and_row() {
         let r = repo();
         r.save_mmr_snapshot(&MmrSnapshot {
@@ -502,6 +647,8 @@ mod tests {
             ls: 0,
             game_name: name.map(|(n, _)| n.to_string()),
             tag_line: name.map(|(_, t)| t.to_string()),
+            competitive_tier: None,
+            damage: None,
         }
     }
 
@@ -514,6 +661,7 @@ mod tests {
             winning_team: None,
             is_ranked: false,
             rounds_played: None,
+            game_length_ms: None,
         };
         r.upsert_match(&m, &[], players).unwrap();
     }
@@ -572,7 +720,15 @@ mod tests {
         );
 
         let db = load_player_db(&r, Some("me"), "h1").unwrap();
-        assert_eq!(db.remembered, Some(("Seen".into(), "AFTER".into())));
+        assert_eq!(
+            db.remembered,
+            Some(KnownName {
+                name: "Seen".into(),
+                tag: "AFTER".into(),
+                map_id: Some("/Game/Maps/Ascent/Ascent".into()),
+                start_ms: Some(100),
+            })
+        );
         assert_eq!(
             db.encounters,
             Some(EncounterCount {
@@ -626,17 +782,20 @@ mod tests {
             winning_team: Some("Blue".into()),
             is_ranked: true,
             rounds_played: Some(23),
+            game_length_ms: None,
         };
         let teams = [
             MatchTeam {
                 team_id: "Blue".into(),
                 won: true,
                 rounds_won: Some(13),
+                rounds_won_h1: None,
             },
             MatchTeam {
                 team_id: "Red".into(),
                 won: false,
                 rounds_won: Some(10),
+                rounds_won_h1: None,
             },
         ];
         let p = MatchPlayer {
@@ -654,6 +813,10 @@ mod tests {
             ls: 3,
             game_name: None,
             tag_line: None,
+            // Riot's rank during the match (14) differs from the RR row's
+            // tier after it (15): the summary shows the former (R81).
+            competitive_tier: Some(14),
+            damage: None,
         };
         r.upsert_match(&m, &teams, &[p]).unwrap();
         r.upsert_comp_updates(
@@ -679,7 +842,11 @@ mod tests {
         assert_eq!(s.result, MatchResultKind::Win);
         assert_eq!((s.rounds_won, s.rounds_lost), (Some(13), Some(10)));
         assert_eq!(s.rr_earned, Some(21));
-        assert_eq!((s.kills, s.deaths, s.assists), (20, 10, 4));
+        assert_eq!(
+            (s.kills, s.deaths, s.assists),
+            (Some(20), Some(10), Some(4))
+        );
+        assert_eq!(s.tier, Some(14), "the at-match rank, not tier_after");
         assert_eq!(s.kd, Some(2.0));
         assert_eq!(s.acs, Some(5000.0 / 23.0));
         assert_eq!(s.hs_pct, Some(1.0 / 6.0));
@@ -702,6 +869,7 @@ mod tests {
             winning_team: Some(if won { "Blue" } else { "Red" }.into()),
             is_ranked: queue == "competitive",
             rounds_played: Some(20),
+            game_length_ms: None,
         };
         let (blue, red) = if won { (13, 7) } else { (7, 13) };
         let teams = [
@@ -709,11 +877,13 @@ mod tests {
                 team_id: "Blue".into(),
                 won,
                 rounds_won: Some(blue),
+                rounds_won_h1: None,
             },
             MatchTeam {
                 team_id: "Red".into(),
                 won: !won,
                 rounds_won: Some(red),
+                rounds_won_h1: None,
             },
         ];
         let me = MatchPlayer {
@@ -966,6 +1136,7 @@ mod tests {
             winning_team: None,
             is_ranked: true,
             rounds_played: None,
+            game_length_ms: None,
         };
         r.upsert_match(&m, &[], &[]).unwrap();
         // Details arrived first: an unrated match would count as landed…

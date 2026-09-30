@@ -1,3 +1,5 @@
+> **Superseded (2026-09-29).** Current status lives in docs/plan.md (Phase 2), docs/DECISIONS.md and README.md. The next /handoff replaces this file.
+
 # Handoff: OPD1 TRCKER, session 2 → session 3 (2026-09-27)
 
 **Next session's job, in order:**

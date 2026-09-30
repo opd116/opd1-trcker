@@ -7,6 +7,7 @@
 //! - `roster` — pure roster/stage decisions (unit-tested)
 //! - `store` — DB helpers over `opd1_core::db::repo::Repo`
 //! - `details` — Player Details assembly
+//! - `match_details` — Match Details scoreboard (DB read + fetch-once)
 //! - `imgproto` — the `img` URI scheme
 //! - `commands` — IPC commands
 
@@ -14,6 +15,7 @@ mod commands;
 mod details;
 mod imgproto;
 mod logbuf;
+mod match_details;
 #[cfg(test)]
 mod pipeline_tests;
 mod poll;
@@ -94,6 +96,7 @@ pub fn run() {
             commands::meta,
             commands::live_state,
             commands::player_details,
+            commands::match_details,
             commands::my_stats,
             commands::copy_log,
             commands::dump_raw,

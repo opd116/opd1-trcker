@@ -10,9 +10,11 @@ pub mod repo;
 
 /// Ordered, append-only list of migrations. Each entry is applied exactly
 /// once (tracked by `PRAGMA user_version`, which lands at `MIGRATIONS.len()`
-/// once all of them have run); a later task adds to this list, never edits
-/// an existing entry.
-const MIGRATIONS: &[&str] = &[include_str!("schema.sql")];
+/// once all of them have run). A committed migration is frozen: migration 1
+/// (`schema.sql`) froze at `c9ad7f4` (R89) and `tests/db.rs`'s
+/// `migration1_is_frozen` fails the day anyone edits it. A later task only
+/// appends to this list; there is no self-heal and no in-place edit.
+const MIGRATIONS: &[&str] = &[include_str!("schema.sql"), include_str!("migration2.sql")];
 
 /// Opens (creating if needed) the SQLite database at `path`, sets its
 /// pragmas, and applies any migrations from [`MIGRATIONS`] not yet

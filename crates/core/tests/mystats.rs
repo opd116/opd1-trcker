@@ -79,6 +79,7 @@ fn row(id: &str, start_ms: i64, r: R) -> CompMatchRow {
         season_id: Some(season_at(start_ms).into()),
         tier_before: Some(15),
         tier_after: Some(15),
+        tier: None,
     }
 }
 
@@ -515,7 +516,10 @@ fn last5_newest_first_with_match_stats() {
     let m = &s.last5[0];
     assert_eq!(m.result, MatchResultKind::Win);
     assert_eq!((m.rounds_won, m.rounds_lost), (Some(13), Some(7)));
-    assert_eq!((m.kills, m.deaths, m.assists), (20, 10, 5));
+    assert_eq!(
+        (m.kills, m.deaths, m.assists),
+        (Some(20), Some(10), Some(5))
+    );
     assert_eq!(m.kd, Some(2.0));
     assert_eq!(m.acs, Some(200.0));
     assert_eq!(m.hs_pct, Some(0.2));
@@ -910,8 +914,9 @@ fn last_7_days_crosses_the_act_start() {
     assert!(s.rank.changes.is_empty());
 }
 
-/// m7: a match whose details had no stats for the user (stored 0/0/0,
-/// no rounds) has an unknown K/D — like its ACS — not a counted 0.
+/// m7 + R102: a match whose details had no stats for the user (stored
+/// 0/0/0, no rounds) has an unknown K/D/A, K/D, ACS and HS% — not counted
+/// zeros. The UI shows `—` for each.
 #[test]
 fn match_without_player_stats_has_unknown_kd() {
     let a = act();
@@ -920,21 +925,51 @@ fn match_without_player_stats_has_unknown_kd() {
     (blank.kills, blank.deaths, blank.assists, blank.score) = (0, 0, 0, 0);
     (blank.hs, blank.bs, blank.ls) = (0, 0, 0);
     blank.rounds = None;
-    let matches = vec![blank, row("full", ACT_START + 2 * DAY, R::W)];
+    // Even stray shots recorded for a row without stats are no HS%.
+    let mut stray = row("stray", ACT_START + 3 * DAY, R::W);
+    (stray.kills, stray.deaths, stray.assists, stray.score) = (0, 0, 0, 0);
+    stray.rounds = None;
+    let matches = vec![blank, row("full", ACT_START + 2 * DAY, R::W), stray];
     let v = serde_json::to_value(build(input(&a, &matches, &[], &n))).unwrap();
-    let kd_acs: Vec<(&str, &serde_json::Value, &serde_json::Value)> = v["last5"]
+    let null = json!(null);
+    let stat_line: Vec<(&str, Vec<&serde_json::Value>)> = v["last5"]
         .as_array()
         .unwrap()
         .iter()
-        .map(|m| (m["matchId"].as_str().unwrap(), &m["kd"], &m["acs"]))
+        .map(|m| {
+            let cells = ["kills", "deaths", "assists", "kd", "acs"]
+                .into_iter()
+                .map(|key| &m[key])
+                .collect();
+            (m["matchId"].as_str().unwrap(), cells)
+        })
         .collect();
     assert_eq!(
-        kd_acs,
+        stat_line,
         [
-            ("full", &json!(2.0), &json!(200.0)),
-            ("blank", &json!(null), &json!(null)),
+            ("stray", vec![&null; 5]),
+            (
+                "full",
+                vec![
+                    &json!(20),
+                    &json!(10),
+                    &json!(5),
+                    &json!(2.0),
+                    &json!(200.0)
+                ]
+            ),
+            ("blank", vec![&null; 5]),
         ]
     );
+    let hs: Vec<&serde_json::Value> = v["last5"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| &m["hsPct"])
+        .collect();
+    assert_eq!(hs[0], &null, "no stats row: no HS%, even with stray shots");
+    assert!((hs[1].as_f64().unwrap() - 0.2).abs() < 1e-6);
+    assert_eq!(hs[2], &null);
 }
 
 /// m8: the RR-economy insight needs 5 ranked games on each side, and its

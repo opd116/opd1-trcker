@@ -124,15 +124,47 @@ pub struct PregameMatchResponse {
 }
 
 /// Skins/sprays for a pregame match. Riot's payload nulls out most of this
-/// until characters are locked, and no field here was called out as
-/// needed yet (loadout display is a later task), so we keep it as opaque
-/// JSON rather than guessing at the shape.
+/// until characters are locked. Each `Loadouts[]` entry carries `Subject`
+/// and `Items` at the top level (no `Loadout` wrapper, unlike core-game);
+/// they stay opaque JSON here and `roster::extract_pregame_loadouts` reads
+/// the four weapons out.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PregameLoadoutsResponse {
     #[serde(rename = "Loadouts")]
     pub loadouts: Vec<Value>,
     #[serde(rename = "LoadoutsValid")]
     pub loadouts_valid: bool,
+}
+
+// ---------------------------------------------------------------------
+// The user's own loadout (personalization)
+// ---------------------------------------------------------------------
+
+/// One gun of `personalization/v2/players/{puuid}/playerloadout` (techchrism
+/// `PlayerLoadout.ts`): the weapon uuid and what is equipped on it. Charm
+/// fields, `SkinLevelID` and `Attachments` are ignored.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LoadoutGun {
+    /// The weapon's uuid (`/v1/weapons/{uuid}`); the knife is in the list too.
+    #[serde(rename = "ID")]
+    pub id: String,
+    /// The equipped skin's uuid (`/v1/weapons/skins/{uuid}`).
+    #[serde(rename = "SkinID", default)]
+    pub skin_id: String,
+    /// The equipped chroma's uuid.
+    #[serde(rename = "ChromaID", default)]
+    pub chroma_id: String,
+}
+
+/// `personalization/v2/players/{puuid}/playerloadout` — "only works for
+/// your own PUUID" (techchrism), so the app calls it for the user only
+/// (R90). `Sprays`, `Identity`, `Incognito` and the rest are ignored.
+#[derive(Debug, Clone, Deserialize)]
+pub struct PlayerLoadoutResponse {
+    #[serde(rename = "Subject")]
+    pub subject: String,
+    #[serde(rename = "Guns", default, deserialize_with = "null_to_default")]
+    pub guns: Vec<LoadoutGun>,
 }
 
 // ---------------------------------------------------------------------
@@ -189,6 +221,11 @@ pub struct SeasonalInfo {
     pub ranked_rating: i64,
     #[serde(rename = "NumberOfWins")]
     pub number_of_wins: i64,
+    /// Wins including the placement games, which `NumberOfWins` leaves out
+    /// (the act win rate counts them). Absent on older responses and old
+    /// stored snapshots, so it is optional: `NumberOfWins` stands in.
+    #[serde(rename = "NumberOfWinsWithPlacements", default)]
+    pub number_of_wins_with_placements: Option<i64>,
     #[serde(rename = "NumberOfGames")]
     pub number_of_games: i64,
     #[serde(rename = "WinsByTier")]
@@ -298,6 +335,14 @@ pub struct PlayerRoundStats {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RoundResult {
+    /// Zero-based round number (`MatchDetails.ts`); rounds 0..=11 are the
+    /// first half of a 12-round-half queue. Optional so a payload variant
+    /// without it can't fail the whole decode.
+    #[serde(default)]
+    pub round_num: Option<i64>,
+    /// The team id that won the round (`""` on a round nobody won).
+    #[serde(default)]
+    pub winning_team: Option<String>,
     pub player_stats: Vec<PlayerRoundStats>,
 }
 
@@ -326,6 +371,10 @@ pub struct MatchPlayer {
     /// `MatchDetailsResponse` decode when it's `null`.
     #[serde(default)]
     pub stats: Option<MatchPlayerStats>,
+    /// Riot's rank for the player during this match (`MatchDetails.ts`;
+    /// `0` when unranked). Optional: absent in older captures.
+    #[serde(default)]
+    pub competitive_tier: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -374,6 +423,10 @@ pub struct MatchInfo {
     /// failing the decode.
     #[serde(default)]
     pub completion_state: String,
+    /// How long the game ran (`MatchDetails.ts`). Optional: absent in older
+    /// captures.
+    #[serde(default)]
+    pub game_length_millis: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -503,6 +556,17 @@ impl RiotSession {
     ) -> Result<PregameLoadoutsResponse, RiotError> {
         self.glz(&format!("/pregame/v1/matches/{match_id}/loadouts"))
             .await
+    }
+
+    /// The user's own equipped skins (R90): a read-only pd `GET`, made once
+    /// per connect. It takes no puuid: it always asks for the session's own
+    /// ([`Self::self_puuid`]), so a caller cannot ask for anyone else's.
+    pub async fn player_loadout(&self) -> Result<PlayerLoadoutResponse, RiotError> {
+        let puuid = self.self_puuid();
+        self.pd(&format!(
+            "/personalization/v2/players/{puuid}/playerloadout"
+        ))
+        .await
     }
 
     pub async fn coregame_player(&self, puuid: &str) -> Result<MatchRef, RiotError> {

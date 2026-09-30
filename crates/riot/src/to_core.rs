@@ -92,7 +92,12 @@ pub fn seasonal_map_from_mmr(resp: &PlayerMmrResponse) -> SeasonalMap {
                 SeasonInfo {
                     competitive_tier: clamp_u8(info.competitive_tier),
                     wins_by_tier,
-                    number_of_wins: clamp_u32(info.number_of_wins),
+                    // Placement wins count toward the act win rate; fall
+                    // back to `NumberOfWins` when Riot doesn't send them.
+                    number_of_wins: clamp_u32(
+                        info.number_of_wins_with_placements
+                            .unwrap_or(info.number_of_wins),
+                    ),
                     number_of_games: clamp_u32(info.number_of_games),
                 },
             )
@@ -169,6 +174,45 @@ fn aggregate_shots(subject: &str, round_results: &[RoundResult]) -> (i64, i64, i
     (hs, bs, ls)
 }
 
+/// Σ `damage` dealt by `subject` over every round's `playerStats`, or
+/// `None` when the player appears in no round (no round results, or a
+/// player without stats): unknown damage is not "0".
+fn total_damage(subject: &str, round_results: &[RoundResult]) -> Option<i64> {
+    let mut total = None;
+    for round in round_results {
+        for player_stats in round.player_stats.iter().filter(|p| p.subject == subject) {
+            let dealt: i64 = player_stats.damage.iter().map(|d| d.damage).sum();
+            *total.get_or_insert(0) += dealt;
+        }
+    }
+    total
+}
+
+/// Queues whose halves are the first 12 rounds (competitive, unrated and
+/// premier). Swiftplay and Spike Rush swap sides after 3-4 rounds and
+/// Deathmatch has no sides, so "rounds 0..=11" would be meaningless there.
+const TWELVE_ROUND_HALF_QUEUES: [&str; 3] = ["competitive", "unrated", "premier"];
+
+/// A team's wins among rounds `roundNum` 0..=11, or `None` when the queue
+/// has no such halves, the payload carries no round results, or no round
+/// carries both `roundNum` and `winningTeam` (both are optional on the
+/// wire; without them the halves are unknown, never a counted 0).
+fn first_half_wins(queue_id: &str, team_id: &str, round_results: &[RoundResult]) -> Option<i64> {
+    if !TWELVE_ROUND_HALF_QUEUES.contains(&queue_id)
+        || !round_results
+            .iter()
+            .any(|r| r.round_num.is_some() && r.winning_team.is_some())
+    {
+        return None;
+    }
+    let wins = round_results
+        .iter()
+        .filter(|r| r.round_num.is_some_and(|n| n < 12))
+        .filter(|r| r.winning_team.as_deref() == Some(team_id))
+        .count();
+    Some(wins as i64)
+}
+
 /// The single winning team id, or `None` for a draw/no-winner (ruling
 /// R29) — including the degenerate "more than one team marked `won`"
 /// case, which shouldn't happen in real data but shouldn't be reported as
@@ -191,6 +235,8 @@ fn winning_team_id(teams: &[crate::endpoints::MatchTeam]) -> Option<String> {
 /// match-details is self-sufficient, and threading those four fields
 /// through from a separate, earlier call (the original design's rationale)
 /// is exactly the kind of cross-call coupling that's easy to get wrong.
+/// Phase 2 adds the game length, each player's rank during the match and
+/// damage dealt, and each team's first-half rounds (see the helpers above).
 /// `winning_team` cross-checks `matchInfo.completionState`: a
 /// `"VoteDraw"` completion always means no winner, even if `teams`
 /// somehow disagreed (e.g. reported a spurious single `won: true`).
@@ -219,6 +265,7 @@ pub fn match_from_details(
         winning_team,
         is_ranked: info.is_ranked,
         rounds_played,
+        game_length_ms: info.game_length_millis,
     };
 
     let teams: Vec<MatchTeam> = details
@@ -228,6 +275,7 @@ pub fn match_from_details(
             team_id: t.team_id.clone(),
             won: t.won,
             rounds_won: t.rounds_won,
+            rounds_won_h1: first_half_wins(&info.queue_id, &t.team_id, &details.round_results),
         })
         .collect();
 
@@ -255,6 +303,8 @@ pub fn match_from_details(
                 ls,
                 game_name: non_empty(&p.game_name),
                 tag_line: non_empty(&p.tag_line),
+                competitive_tier: p.competitive_tier,
+                damage: total_damage(&p.subject, &details.round_results),
             }
         })
         .collect();

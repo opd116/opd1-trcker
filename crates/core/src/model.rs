@@ -29,7 +29,7 @@ use std::collections::HashMap;
 use serde::{Serialize, Serializer};
 
 use crate::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow};
-use crate::names::display_name;
+use crate::names::{display_name, KnownName};
 use crate::presence::Stage;
 use crate::stats::{self, Act, SeasonalMap};
 
@@ -111,10 +111,24 @@ impl<T: Serialize> Serialize for Field<T> {
     rename_all_fields = "camelCase"
 )]
 pub enum DisplayName {
-    Visible { name: String, tag: String },
-    Remembered { name: String, tag: String },
+    Visible {
+        name: String,
+        tag: String,
+    },
+    /// A hidden player's name the user learned in a finished match they
+    /// played. `from_map_id` is a valorant-api uuid, never a Riot
+    /// `/Game/...` path (`KnownName::with_map_uuid`); both source fields
+    /// are `null` on the wire when unknown.
+    Remembered {
+        name: String,
+        tag: String,
+        from_map_id: Option<String>,
+        from_start_ms: Option<i64>,
+    },
     HiddenPlayer,
-    HiddenAgent { agent_id: String },
+    HiddenAgent {
+        agent_id: String,
+    },
 }
 
 /// A per-group party stripe (CLAUDE.md's "Party detection"), from
@@ -234,6 +248,14 @@ pub struct PlayerCard {
     pub hs_pct: Field<f32>,
     #[serde(skip_serializing_if = "Field::is_loading")]
     pub act_winrate: Field<f32>,
+    /// The current act's wins (placement games included, as Riot's
+    /// `NumberOfWinsWithPlacements`; `NumberOfWins` when that's absent).
+    /// `actWinrate` is `act_wins / act_games`. `null` when MMR is missing,
+    /// the current act has no entry, or it has no games.
+    #[serde(skip_serializing_if = "Field::is_loading")]
+    pub act_wins: Field<u32>,
+    #[serde(skip_serializing_if = "Field::is_loading")]
+    pub act_games: Field<u32>,
     #[serde(skip_serializing_if = "Field::is_loading")]
     pub last5: Field<Vec<LastFiveEntry>>,
     /// `None` when not in a detected party — and always for the user and
@@ -243,6 +265,8 @@ pub struct PlayerCard {
     /// their own party.
     pub encounters: Option<EncounterCount>,
     pub team: Team,
+    /// This card is the user's own.
+    pub is_self: bool,
     pub is_self_party: bool,
 }
 
@@ -278,19 +302,32 @@ pub struct MatchSummary {
     pub rounds_won: Option<i64>,
     pub rounds_lost: Option<i64>,
     pub agent_id: Option<String>,
-    pub kills: i64,
-    pub deaths: i64,
-    pub assists: i64,
+    /// The stat line is `None` (`null`, shown as `—`) when the match's
+    /// details had no stats row for the player (stored 0/0/0 with no
+    /// rounds): an unknown value is never a counted zero (R102). The same
+    /// goes for `kd`, `acs` and `hs_pct` below.
+    pub kills: Option<i64>,
+    pub deaths: Option<i64>,
+    pub assists: Option<i64>,
     /// `stats::kd` (zero deaths -> the kill count, ruling R5). `None`
-    /// exactly when `acs` is: no stats for the player (the stored 0/0/0
-    /// is no counted zero).
+    /// exactly when the stat line is.
     pub kd: Option<f32>,
-    /// Average combat score: score / rounds played. `None` when the
-    /// match-details had no stats for the player (no rounds played).
+    /// Average combat score: score / rounds played. `None` without stats.
     pub acs: Option<f32>,
-    /// Headshot fraction 0..1 (R5); `None` when no shot landed.
+    /// Headshot fraction 0..1 (R5); `None` when no shot landed or the
+    /// player has no stats row.
     pub hs_pct: Option<f32>,
     pub rr_earned: Option<i32>,
+    /// The player's rank during the match (R81), `None` when unknown or
+    /// below 3 (unranked); see [`display_tier`].
+    pub tier: Option<u8>,
+}
+
+/// A stored tier as the UI shows it: `None` below 3 (unranked, placements,
+/// unrated queues) and for a value no tier table has, so the UI draws no
+/// rank icon rather than a wrong one.
+pub fn display_tier(tier: Option<i64>) -> Option<u8> {
+    tier.and_then(|t| u8::try_from(t).ok()).filter(|&t| t >= 3)
 }
 
 /// One stored competitive match as a [`MatchSummary`] — shared by Player
@@ -298,8 +335,9 @@ pub struct MatchSummary {
 /// a valorant-api uuid (`""` when unknown).
 pub fn match_summary(row: &CompMatchRow) -> MatchSummary {
     // `match_from_details` stores no round count when the player's stats
-    // were missing.
+    // were missing: then the whole stat line is unknown (R102).
     let rounds = row.rounds.filter(|&r| r > 0);
+    let has_stats = rounds.is_some();
     MatchSummary {
         match_id: row.match_id.clone(),
         map_id: row.map_id.clone(),
@@ -308,13 +346,44 @@ pub fn match_summary(row: &CompMatchRow) -> MatchSummary {
         rounds_won: row.rounds_won,
         rounds_lost: row.rounds_lost,
         agent_id: row.agent_id.clone(),
-        kills: row.kills,
-        deaths: row.deaths,
-        assists: row.assists,
-        kd: rounds.map(|_| stats::kd(row.kills, row.deaths)),
+        kills: has_stats.then_some(row.kills),
+        deaths: has_stats.then_some(row.deaths),
+        assists: has_stats.then_some(row.assists),
+        kd: has_stats.then(|| stats::kd(row.kills, row.deaths)),
         acs: rounds.map(|r| row.score as f32 / r as f32),
-        hs_pct: stats::hs_pct(row.hs, row.bs, row.ls),
+        hs_pct: stats::hs_pct(row.hs, row.bs, row.ls).filter(|_| has_stats),
         rr_earned: row.rr_earned.map(|v| v as i32),
+        tier: display_tier(row.tier),
+    }
+}
+
+/// Player Details' hero K/D and HS% (R116): pooled over `rows`, the 20
+/// newest current-act competitive matches, the window the Details sync
+/// fetches for Top 3. Only rows with a stats row count
+/// (R102): a match without one adds no kills, deaths or shots and is not
+/// in `matches`. No such row: everything is `None` / 0.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct HeroStats {
+    pub kd: Option<f32>,
+    /// Headshots / shots landed, 0..1.
+    pub hs_pct: Option<f32>,
+    /// How many matches `kd` and `hs_pct` are computed over.
+    pub matches: u32,
+}
+
+pub fn hero_stats(rows: &[CompMatchRow]) -> HeroStats {
+    let counted: Vec<&CompMatchRow> = rows
+        .iter()
+        .filter(|r| r.rounds.is_some_and(|n| n > 0))
+        .collect();
+    if counted.is_empty() {
+        return HeroStats::default();
+    }
+    let sum = |f: fn(&CompMatchRow) -> i64| counted.iter().map(|r| f(r)).sum::<i64>();
+    HeroStats {
+        kd: Some(stats::kd(sum(|r| r.kills), sum(|r| r.deaths))),
+        hs_pct: stats::hs_pct(sum(|r| r.hs), sum(|r| r.bs), sum(|r| r.ls)),
+        matches: counted.len() as u32,
     }
 }
 
@@ -326,17 +395,51 @@ pub struct TeammateSummary {
     pub count: u32,
 }
 
-/// Vandal/Phantom/Operator/Sheriff's equipped chroma uuid, or `None` when
-/// not equipped/not resolvable.
-#[derive(Debug, Clone, PartialEq, Serialize, Default)]
+/// One equipped weapon skin, named (R97/R83): `skin_name` is the skin's
+/// display name minus the trailing weapon word (`"Reaver Vandal"` ->
+/// `"Reaver"`), `chroma_name` the `X` of the chroma's `(Variant N X)`
+/// (`None` for the base chroma), `tier_id` the skin's content-tier uuid
+/// (`None` for default and battle-pass skins).
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Loadout {
-    pub vandal: Option<String>,
-    pub phantom: Option<String>,
-    pub operator: Option<String>,
-    pub sheriff: Option<String>,
+pub struct WeaponSkin {
+    pub chroma_id: String,
+    pub skin_name: String,
+    pub chroma_name: Option<String>,
+    pub tier_id: Option<String>,
 }
 
+/// Vandal/Phantom/Operator/Sheriff, each with the R23 tri-state (R97):
+/// the key is absent while the skin's name is still resolving
+/// ([`Field::Loading`]), `null` when the player has no such skin or it
+/// can't be known ([`Field::Missing`]), else the [`WeaponSkin`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Loadout {
+    #[serde(skip_serializing_if = "Field::is_loading")]
+    pub vandal: Field<WeaponSkin>,
+    #[serde(skip_serializing_if = "Field::is_loading")]
+    pub phantom: Field<WeaponSkin>,
+    #[serde(skip_serializing_if = "Field::is_loading")]
+    pub operator: Field<WeaponSkin>,
+    #[serde(skip_serializing_if = "Field::is_loading")]
+    pub sheriff: Field<WeaponSkin>,
+}
+
+impl Default for Loadout {
+    /// Nothing known: all four weapons [`Field::Missing`] (`null`).
+    fn default() -> Self {
+        Self {
+            vandal: Field::Missing,
+            phantom: Field::Missing,
+            operator: Field::Missing,
+            sheriff: Field::Missing,
+        }
+    }
+}
+
+/// One shared match in Player Details' Encounters, from the user's side
+/// (`result`, `rounds_*`, `self_*`) with the other player as `them_*`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EncounterDetailRow {
@@ -345,8 +448,18 @@ pub struct EncounterDetailRow {
     pub map_id: String,
     pub start_ms: i64,
     pub with: bool,
-    /// `None` for a draw / no team winner (ruling R29).
-    pub self_won: Option<bool>,
+    /// The user's result (`Draw` for no team winner, ruling R29).
+    pub result: MatchResultKind,
+    /// The user's team's rounds won / the opponent's (`None` when the
+    /// match has no exactly-two-team score).
+    pub rounds_won: Option<i64>,
+    pub rounds_lost: Option<i64>,
+    pub duration_ms: Option<i64>,
+    pub them_agent_id: Option<String>,
+    /// Ranks during that match (R81), `None` below 3; see [`display_tier`].
+    pub them_tier: Option<u8>,
+    pub self_agent_id: Option<String>,
+    pub self_tier: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -359,6 +472,77 @@ pub struct PlayerDetails {
     pub top_teammates: Vec<TeammateSummary>,
     pub loadout: Loadout,
     pub encounters: Vec<EncounterDetailRow>,
+    /// R116: the hero's K/D over the player's most recent (up to 20)
+    /// competitive matches of the current act; `null` when there is none.
+    pub hero_kd: Option<f32>,
+    /// R116: HS% (0..1) over the same set.
+    pub hero_hs: Option<f32>,
+    /// R116: how many matches `hero_kd` / `hero_hs` use (0..=20).
+    pub hero_matches: u32,
+}
+
+// ---------------------------------------------------------------------
+// MatchDetailsView (Task 15): the Match Details scoreboard
+// ---------------------------------------------------------------------
+
+/// Whose side the scoreboard is drawn from: the user's when the user
+/// played the match (`self`), else the focus player's (`focus`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Perspective {
+    #[serde(rename = "self")]
+    SelfView,
+    Focus,
+}
+
+/// `match_details(matchId, focusPuuid)`: built by
+/// [`crate::matchview::build_match_view`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchDetailsView {
+    pub match_id: String,
+    /// A valorant-api map uuid (`""` when unknown), never a Riot path.
+    pub map_id: String,
+    pub queue_id: String,
+    pub start_ms: i64,
+    pub duration_ms: Option<i64>,
+    pub perspective: Perspective,
+    /// `[0]` is the perspective team. A mode without two teams (Deathmatch)
+    /// is one block with an empty `team_id` and no result or score.
+    pub teams: Vec<MatchTeamView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MatchTeamView {
+    pub team_id: String,
+    pub result: Option<MatchResultKind>,
+    pub rounds_won: Option<i64>,
+    /// Rounds won in the first half (rounds 1–12), when known.
+    pub first_half: Option<i64>,
+    /// Sorted by ACS descending, rows without ACS last.
+    pub players: Vec<ScoreRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScoreRow {
+    pub puuid: String,
+    pub name: DisplayName,
+    pub agent_id: Option<String>,
+    /// The player's rank during the match (R81); `None` below 3.
+    pub tier: Option<u8>,
+    /// `None` (JSON `null`, the UI shows `—`) when the player has no stats
+    /// row in the match (R124): unknown is never a counted 0. Same rule as
+    /// `acs`, `adr` and `hs_pct`, and as `MatchSummary` (R102).
+    pub kills: Option<i64>,
+    pub deaths: Option<i64>,
+    pub assists: Option<i64>,
+    pub acs: Option<f32>,
+    pub adr: Option<f32>,
+    pub hs_pct: Option<f32>,
+    pub is_self: bool,
+    pub is_focus: bool,
 }
 
 // ---------------------------------------------------------------------
@@ -531,10 +715,11 @@ pub struct Identity {
     /// `CoreGamePlayer` (In Game) has no `CharacterSelectionState` at all —
     /// every player in a started match already has an agent locked, so a
     /// 5b caller building an `Identity` from a core-game roster must pass
-    /// `"locked"` here itself (any non-empty value works; `"locked"` is
-    /// the real value pregame uses once a character is confirmed).
-    /// Passing `""` for a core-game player would incorrectly hide their
-    /// already-known agent (see [`build_card`]'s agent-select handling).
+    /// `"locked"` here itself. The value must be `"locked"` (R99: only a
+    /// locked pick shows an agent; `"selected"`, `""` or anything else
+    /// hides it). Passing `""` for a core-game player would incorrectly
+    /// hide their already-known agent (see [`build_card`]'s agent-select
+    /// handling).
     pub character_selection_state: String,
     /// `""` when not yet known (e.g. before name-service resolves) —
     /// [`build_card`] treats an empty `game_name`/`tag_line` pair as
@@ -593,6 +778,8 @@ pub struct BuildCardInput<'a> {
     pub current_act_id: &'a str,
     pub now_ms: i64,
     pub team: Team,
+    /// The card is the user's own (`PlayerCard::is_self`).
+    pub is_self: bool,
     /// The user or a member of the user's own party (CLAUDE.md: they get
     /// no party stripe and no encounter badge — [`build_card`] drops
     /// `party`/`encounters` for them).
@@ -600,20 +787,21 @@ pub struct BuildCardInput<'a> {
     /// The player's name as the user saw it after a finished match the
     /// user personally played in (`Repo::known_name`) — shown only when
     /// the player is incognito now (CLAUDE.md "Hidden names" exception).
-    pub remembered: Option<(String, String)>,
+    pub remembered: Option<KnownName>,
     pub party: Option<PartyMark>,
     pub encounters: Option<EncounterCount>,
 }
 
-/// The agent a card shows: `character_id`, but only once it's selected —
-/// an empty `CharacterSelectionState` means no agent yet, whether or not
-/// `CharacterID` is already populated (CLAUDE.md: never a placeholder
-/// agent).
+/// The agent a card shows: `character_id`, but only once it's locked (R99).
+/// `CharacterSelectionState` is `""` before a pick, `"selected"` while the
+/// player only hovers an agent, and `"locked"` once it's confirmed; a
+/// hover changes nothing (CLAUDE.md: never a placeholder agent). Core-game
+/// rows pass `"locked"` themselves (see [`Identity::character_selection_state`]).
 pub fn shown_agent<'a>(character_id: &'a str, selection_state: &str) -> Option<&'a str> {
-    if selection_state.is_empty() || character_id.is_empty() {
-        None
-    } else {
+    if selection_state.eq_ignore_ascii_case("locked") && !character_id.is_empty() {
         Some(character_id)
+    } else {
+        None
     }
 }
 
@@ -639,13 +827,15 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
         current_act_id,
         now_ms,
         team,
+        is_self,
         is_self_party,
         remembered,
         party,
         encounters,
     } = input;
 
-    // CLAUDE.md: agent head icon "only after the agent is selected".
+    // CLAUDE.md: agent head icon "only after the agent is selected" — R99:
+    // locked, not merely hovered.
     let agent_id = shown_agent(&identity.character_id, &identity.character_selection_state)
         .map(str::to_string);
 
@@ -699,8 +889,14 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
         .cloned()
         .collect();
 
-    let (rank, prev_act_tier, peak, act_winrate) =
-        build_mmr_fields(&mmr, &started_acts, current_act_id, now_ms);
+    let MmrFields {
+        rank,
+        prev_act_tier,
+        peak,
+        act_winrate,
+        act_wins,
+        act_games,
+    } = build_mmr_fields(&mmr, &started_acts, current_act_id, now_ms);
     let (kd, hs_pct, last5_out) = build_last5_fields(&last5, &comp_updates);
 
     PlayerCard {
@@ -715,15 +911,26 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
         kd,
         hs_pct,
         act_winrate,
+        act_wins,
+        act_games,
         last5: last5_out,
         party,
         encounters,
         team,
+        is_self,
         is_self_party,
     }
 }
 
-type MmrFields = (Field<RankInfo>, Field<u8>, Field<PeakInfo>, Field<f32>);
+/// The MMR-derived card fields, resolved together (one Riot call).
+struct MmrFields {
+    rank: Field<RankInfo>,
+    prev_act_tier: Field<u8>,
+    peak: Field<PeakInfo>,
+    act_winrate: Field<f32>,
+    act_wins: Field<u32>,
+    act_games: Field<u32>,
+}
 
 fn build_mmr_fields(
     mmr: &Field<MmrInput>,
@@ -732,18 +939,22 @@ fn build_mmr_fields(
     now_ms: i64,
 ) -> MmrFields {
     match mmr {
-        Field::Loading => (
-            Field::Loading,
-            Field::Loading,
-            Field::Loading,
-            Field::Loading,
-        ),
-        Field::Missing => (
-            Field::Missing,
-            Field::Missing,
-            Field::Missing,
-            Field::Missing,
-        ),
+        Field::Loading => MmrFields {
+            rank: Field::Loading,
+            prev_act_tier: Field::Loading,
+            peak: Field::Loading,
+            act_winrate: Field::Loading,
+            act_wins: Field::Loading,
+            act_games: Field::Loading,
+        },
+        Field::Missing => MmrFields {
+            rank: Field::Missing,
+            prev_act_tier: Field::Missing,
+            peak: Field::Missing,
+            act_winrate: Field::Missing,
+            act_wins: Field::Missing,
+            act_games: Field::Missing,
+        },
         Field::Value(mmr_input) => {
             let rank = match mmr_input.current_rank {
                 Some(cr) => Field::Value(RankInfo {
@@ -772,15 +983,28 @@ fn build_mmr_fields(
                 None => Field::Missing,
             };
 
-            let act_winrate = mmr_input
+            // The current act's record; no entry, or no games, leaves the
+            // win rate and both counts unknown.
+            let act = mmr_input
                 .seasons
                 .get(current_act_id)
+                .filter(|info| info.number_of_games > 0);
+            let act_winrate = act
                 .and_then(|info| {
                     stats::winrate(info.number_of_wins as i64, info.number_of_games as i64)
                 })
                 .into();
+            let act_wins = act.map(|info| info.number_of_wins).into();
+            let act_games = act.map(|info| info.number_of_games).into();
 
-            (rank, prev_act_tier, peak, act_winrate)
+            MmrFields {
+                rank,
+                prev_act_tier,
+                peak,
+                act_winrate,
+                act_wins,
+                act_games,
+            }
         }
     }
 }

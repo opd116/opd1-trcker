@@ -7,6 +7,8 @@
 //!   start so it never misses the first snapshot).
 //! - `player_details(puuid)` — cached details now; a background sync then
 //!   emits `"details"` if it found more.
+//! - `match_details(matchId, focusPuuid)` — one match as the Match Details
+//!   scoreboard, from the DB (fetched once when it isn't stored yet).
 //! - `my_stats()` — the user's My Stats for the current act, from the DB
 //!   only (no Riot call); `null` while the user or the act is unknown.
 //! - `copy_log()` — the last 500 log lines (R30; the UI copies them).
@@ -18,7 +20,7 @@ use std::sync::Arc;
 use serde::Serialize;
 use tauri::State;
 
-use opd1_core::model::{LiveState, MyStats, PlayerDetails};
+use opd1_core::model::{LiveState, MatchDetailsView, MyStats, PlayerDetails};
 use opd1_riot::assets::Meta;
 
 use crate::logbuf::short;
@@ -37,6 +39,19 @@ fn is_uuid(s: &str) -> bool {
         })
 }
 
+/// Both ids of a `match_details` call must be uuids — they end up in a DB
+/// key and a Riot URL path, the same check `player_details` applies to its
+/// puuid. The match id is checked first.
+fn check_match_args(match_id: &str, focus_puuid: &str) -> Result<(), String> {
+    if !is_uuid(match_id) {
+        return Err("invalid match id".into());
+    }
+    if !is_uuid(focus_puuid) {
+        return Err("invalid player id".into());
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn meta(state: AppStateRef<'_>) -> Result<Meta, String> {
     state.ensure_tables(false).await?;
@@ -53,15 +68,51 @@ pub async fn player_details(
     puuid: String,
     state: AppStateRef<'_>,
 ) -> Result<PlayerDetails, String> {
-    if !is_uuid(&puuid) {
+    player_details_for(state.inner(), &puuid).await
+}
+
+/// `player_details` without the Tauri wrapper: the cached details now, with
+/// two background jobs behind them, each emitting `"details"` when it
+/// changed the result:
+/// - the Riot sync ([`crate::sync::sync_details`]), at most every 120s per
+///   player (`claim_details_sync`);
+/// - the skin-name fetch (R83, R97), whenever a loadout skin's name isn't
+///   known yet — from valorant-api only, so it is *not* gated by the 120s
+///   claim. While it runs the answer carries that weapon's key absent
+///   (resolving); when it ends, success or failure, the details are rebuilt
+///   and a name still unknown is `null`.
+pub(crate) async fn player_details_for(
+    st: &Arc<AppState>,
+    puuid: &str,
+) -> Result<PlayerDetails, String> {
+    if !is_uuid(puuid) {
         return Err("invalid player id".into());
     }
-    let st = state.inner().clone();
+    let (st, puuid) = (st.clone(), puuid.to_string());
+
+    // Marked before the build, so the answer itself has the resolving keys
+    // absent (R97).
+    // The guard ends the mark when dropped: on an early error, and if the
+    // resolving task panics (R97).
+    let resolving =
+        crate::details::skins_pending(&st, &puuid).then(|| st.begin_skin_resolve(&puuid));
     let details = crate::details::build(&st, &puuid).await?;
+
+    if let Some(guard) = resolving {
+        let (st, puuid, before) = (st.clone(), puuid.clone(), details.clone());
+        tauri::async_runtime::spawn(async move {
+            crate::details::resolve_skins(&st, &puuid).await;
+            // Ended before the rebuild, so a name still unknown is `null`.
+            drop(guard);
+            rebuild_and_emit(&st, &puuid, &before).await;
+        });
+    }
 
     if let Some(session) = st.session() {
         if st.claim_details_sync(&puuid) {
             let before = details.clone();
+            let puuid = puuid.clone();
+            let st = st.clone();
             tauri::async_runtime::spawn(async move {
                 if crate::sync::sync_details(&st, &session, &puuid)
                     .await
@@ -71,18 +122,34 @@ pub async fn player_details(
                 }
                 // The card on screen may have gained matches too.
                 st.reload_slot(&puuid).await;
-                match crate::details::build(&st, &puuid).await {
-                    Ok(fresh) if fresh != before => {
-                        log::debug!("details for {} updated", short(&puuid));
-                        st.emit_details(&fresh);
-                    }
-                    Ok(_) => {}
-                    Err(e) => log::warn!("details rebuild failed: {e}"),
-                }
+                rebuild_and_emit(&st, &puuid, &before).await;
             });
         }
     }
     Ok(details)
+}
+
+/// Rebuilds `puuid`'s details and emits them when they differ from
+/// `before` (what the UI was last given).
+async fn rebuild_and_emit(st: &Arc<AppState>, puuid: &str, before: &PlayerDetails) {
+    match crate::details::build(st, puuid).await {
+        Ok(fresh) if fresh != *before => {
+            log::debug!("details for {} updated", short(puuid));
+            st.emit_details(&fresh);
+        }
+        Ok(_) => {}
+        Err(e) => log::warn!("details rebuild failed: {e}"),
+    }
+}
+
+#[tauri::command]
+pub async fn match_details(
+    match_id: String,
+    focus_puuid: String,
+    state: AppStateRef<'_>,
+) -> Result<MatchDetailsView, String> {
+    check_match_args(&match_id, &focus_puuid)?;
+    crate::match_details::load(state.inner(), &match_id, &focus_puuid).await
 }
 
 #[tauri::command]
@@ -246,6 +313,7 @@ mod tests {
             winning_team: Some("Blue".into()),
             is_ranked: true,
             rounds_played: Some(20),
+            game_length_ms: None,
         };
         let me = MatchPlayer {
             puuid: ME.into(),
@@ -262,6 +330,8 @@ mod tests {
             ls: 0,
             game_name: None,
             tag_line: None,
+            competitive_tier: None,
+            damage: None,
         };
         repo.upsert_match(&m, &[], &[me])?;
         repo.upsert_comp_updates(
@@ -335,6 +405,35 @@ mod tests {
         assert!(is_uuid("aaaaaaaa-0000-0000-0000-000000000001"));
         assert!(!is_uuid("../../etc"));
         assert!(!is_uuid(""));
+    }
+
+    #[test]
+    fn match_details_args_must_be_uuids() {
+        // Both ids reach a DB key and a URL path: the same shape check
+        // `player_details` applies to its puuid.
+        let id = "1a2b3c4d-0000-0000-0000-000000000010";
+        assert_eq!(
+            check_match_args("not-a-match", ME),
+            Err("invalid match id".to_string())
+        );
+        assert_eq!(
+            check_match_args("../../etc/passwd", ME),
+            Err("invalid match id".to_string())
+        );
+        assert_eq!(
+            check_match_args(id, "../x"),
+            Err("invalid player id".to_string())
+        );
+        assert_eq!(
+            check_match_args(id, ""),
+            Err("invalid player id".to_string())
+        );
+        assert_eq!(check_match_args(id, ME), Ok(()));
+        // The match id is checked first.
+        assert_eq!(
+            check_match_args("", "../x"),
+            Err("invalid match id".to_string())
+        );
     }
 
     #[test]

@@ -4,7 +4,8 @@
     "mapId": "/Game/Maps/Ascent/Ascent",
     "gameStartMillis": 1758970000000,
     "queueId": "competitive",
-    "isRanked": true
+    "isRanked": true,
+    "gameLengthMillis": 2280000
   },
   "players": [
     {
@@ -98,6 +99,28 @@
           "stayedInSpawn": false
         }
       ],
+      "playerEconomies": [],
+      "playerScores": []
+    },
+    {
+      "roundNum": 11,
+      "roundResult": "Eliminated",
+      "roundCeremony": "CeremonyDefault",
+      "winningTeam": "Red",
+      "plantSite": "",
+      "roundResultCode": "Elimination",
+      "playerStats": [],
+      "playerEconomies": [],
+      "playerScores": []
+    },
+    {
+      "roundNum": 12,
+      "roundResult": "Eliminated",
+      "roundCeremony": "CeremonyDefault",
+      "winningTeam": "Blue",
+      "plantSite": "",
+      "roundResultCode": "Elimination",
+      "playerStats": [],
       "playerEconomies": [],
       "playerScores": []
     }

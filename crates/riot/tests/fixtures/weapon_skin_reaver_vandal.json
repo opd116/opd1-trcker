@@ -1,0 +1,26 @@
+{
+  "status": 200,
+  "data": {
+    "uuid": "30388628-42f0-606c-82c0-73ad43de997f",
+    "displayName": "Reaver Vandal",
+    "contentTierUuid": "60bca009-4182-7998-dee7-b8a2558dc369",
+    "chromas": [
+      {
+        "uuid": "2bd28382-48c6-8579-83e8-e9b64b783de3",
+        "displayName": "Reaver Vandal"
+      },
+      {
+        "uuid": "b2a065c0-4632-ccaa-f496-7681dc2a6185",
+        "displayName": "Reaver Vandal Level 4\r\n(Variant 1 Red)"
+      },
+      {
+        "uuid": "db4461e5-40dd-1173-3b64-e5836f92f4dd",
+        "displayName": "Reaver Vandal Level 4\r\n(Variant 2 Black)"
+      },
+      {
+        "uuid": "b2619c1c-4974-4f06-f37b-c68b1d6d7bd1",
+        "displayName": "Reaver Vandal Level 4\r\n(Variant 3 White)"
+      }
+    ]
+  }
+}

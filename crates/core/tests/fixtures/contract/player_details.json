@@ -1,0 +1,192 @@
+{
+  "card": {
+    "actGames": 60,
+    "actWinrate": 0.5,
+    "actWins": 30,
+    "agentId": "agent-jett",
+    "cardId": "card-uuid",
+    "encounters": {
+      "against": 1,
+      "with": 2
+    },
+    "hsPct": 0.25,
+    "isSelf": false,
+    "isSelfParty": false,
+    "kd": 2.0,
+    "last5": [
+      {
+        "result": "win",
+        "rrEarned": 19,
+        "startMs": 2300
+      },
+      {
+        "result": "loss",
+        "rrEarned": -18,
+        "startMs": 2200
+      },
+      {
+        "result": "win",
+        "rrEarned": 21,
+        "startMs": 2100
+      }
+    ],
+    "level": 187,
+    "name": {
+      "fromMapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+      "fromStartMs": 1758970000000,
+      "kind": "remembered",
+      "name": "Rival",
+      "tag": "ENEMY"
+    },
+    "party": {
+      "confirmed": true,
+      "group": 0
+    },
+    "peak": {
+      "actEndMs": 2000,
+      "actLabel": "V26 A4",
+      "actName": "V26 ACT IV",
+      "actStartMs": 1000,
+      "sinceActEndMs": 500,
+      "tier": 17
+    },
+    "prevActTier": 16,
+    "puuid": "puuid-known",
+    "rank": {
+      "rr": 42,
+      "tier": 15
+    },
+    "team": "enemy"
+  },
+  "encounters": [
+    {
+      "durationMs": 2460000,
+      "mapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+      "matchId": "enc-1",
+      "result": "loss",
+      "roundsLost": 13,
+      "roundsWon": 10,
+      "selfAgentId": "agent-jett",
+      "selfTier": 21,
+      "startMs": 1758970000000,
+      "themAgentId": "agent-reyna",
+      "themTier": 24,
+      "with": false
+    },
+    {
+      "durationMs": null,
+      "mapId": "",
+      "matchId": "enc-2",
+      "result": "draw",
+      "roundsLost": null,
+      "roundsWon": null,
+      "selfAgentId": null,
+      "selfTier": null,
+      "startMs": 1758883600000,
+      "themAgentId": null,
+      "themTier": null,
+      "with": true
+    }
+  ],
+  "heroHs": 0.25,
+  "heroKd": 1.5,
+  "heroMatches": 12,
+  "loadout": {
+    "operator": null,
+    "phantom": {
+      "chromaId": "b2a065c0-4632-ccaa-f496-7681dc2a6185",
+      "chromaName": null,
+      "skinName": "Standard",
+      "tierId": null
+    },
+    "vandal": {
+      "chromaId": "b2a065c0-4632-ccaa-f496-7681dc2a6185",
+      "chromaName": "Red",
+      "skinName": "Reaver",
+      "tierId": "60bca009-4182-7998-dee7-b8a2558dc369"
+    }
+  },
+  "recent": [
+    {
+      "acs": null,
+      "agentId": "agent-jett",
+      "assists": null,
+      "deaths": null,
+      "hsPct": null,
+      "kd": null,
+      "kills": null,
+      "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+      "matchId": "m3",
+      "result": "win",
+      "roundsLost": 11,
+      "roundsWon": 13,
+      "rrEarned": null,
+      "startMs": 2300,
+      "tier": null
+    },
+    {
+      "acs": 200.0,
+      "agentId": "agent-jett",
+      "assists": 4,
+      "deaths": 10,
+      "hsPct": 0.25,
+      "kd": 2.0,
+      "kills": 20,
+      "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+      "matchId": "m2",
+      "result": "loss",
+      "roundsLost": 13,
+      "roundsWon": 9,
+      "rrEarned": 21,
+      "startMs": 2200,
+      "tier": null
+    },
+    {
+      "acs": 200.0,
+      "agentId": "agent-jett",
+      "assists": 4,
+      "deaths": 10,
+      "hsPct": 0.25,
+      "kd": 2.0,
+      "kills": 20,
+      "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+      "matchId": "m1",
+      "result": "win",
+      "roundsLost": 11,
+      "roundsWon": 13,
+      "rrEarned": 21,
+      "startMs": 2100,
+      "tier": 15
+    }
+  ],
+  "topTeammates": [
+    {
+      "count": 5,
+      "name": {
+        "kind": "visible",
+        "name": "Mate",
+        "tag": "ONE"
+      },
+      "puuid": "puuid-mate-1"
+    },
+    {
+      "count": 3,
+      "name": {
+        "fromMapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+        "fromStartMs": 1758970000000,
+        "kind": "remembered",
+        "name": "Rival",
+        "tag": "ENEMY"
+      },
+      "puuid": "puuid-mate-2"
+    },
+    {
+      "count": 1,
+      "name": {
+        "agentId": "agent-sova",
+        "kind": "hiddenAgent"
+      },
+      "puuid": "puuid-mate-3"
+    }
+  ]
+}

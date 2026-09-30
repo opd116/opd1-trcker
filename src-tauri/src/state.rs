@@ -5,7 +5,7 @@
 //! synchronous work (never across an `.await`); SQLite work always goes
 //! through [`AppState::db`] (`spawn_blocking`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -14,8 +14,8 @@ use tauri::{AppHandle, Emitter};
 
 use opd1_core::db::repo::Repo;
 use opd1_core::model::{
-    build_card, shown_agent, BuildCardInput, Field, Identity, LiveState, Loadout, MmrInput,
-    PartyMark, PlayerCard, PlayerDetails, Team,
+    build_card, shown_agent, BuildCardInput, Field, Identity, LiveState, MmrInput, PartyMark,
+    PlayerCard, PlayerDetails, Team,
 };
 use opd1_core::party::detect_parties;
 use opd1_core::presence::Stage;
@@ -25,8 +25,8 @@ use opd1_riot::to_core::{current_rank_from_mmr, seasonal_map_from_mmr};
 use opd1_riot::RiotSession;
 
 use crate::logbuf::short;
-use crate::roster::{current_act, RosterPlayer};
-use crate::store::{PlayerDb, StoredPlayer};
+use crate::roster::{current_act, RawLoadout, RosterPlayer};
+use crate::store::{PlayerDb, StoredPlayer, SELF_LOADOUT_KEY};
 
 /// A failed asset-table load isn't retried more often than this (offline
 /// first run: `meta()` and every `img` request would otherwise each hit
@@ -75,6 +75,36 @@ pub enum Job {
     Names(Vec<(String, bool)>),
     /// The per-player sync of one puuid.
     Sync(String),
+    /// One step of the own-history backfill (R101): only handed out when no
+    /// `Names` or `Sync` job is left, so it is always behind live cards.
+    Backfill,
+}
+
+/// One own-history backfill run (R101; `sync::backfill_step` advances it).
+/// It lives in the [`LiveModel`], so a step that yields to a live job — or a
+/// worker aborted by a stage change — resumes from the same cursor. The
+/// stored anchor moves only when a run *finishes*: a run that ends early
+/// (disconnect, account switch, a Riot error) is dropped, and the next one
+/// starts over from the old anchor (ids already stored are skipped).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillRun {
+    /// The last finished run's newest `(match_id, start_ms)`; `None` on the
+    /// first run ever.
+    pub anchor: Option<(String, i64)>,
+    /// The current act's start, first run only (`None` when the act tables
+    /// aren't loaded; each page looks it up again until it is known).
+    pub act_start_ms: Option<i64>,
+    /// The next match-history `startIndex`.
+    pub next_index: u32,
+    /// History entries looked at so far (the first run's cap).
+    pub scanned: u32,
+    /// Page 0's first entry; becomes the anchor when the run finishes.
+    pub newest: Option<(String, i64)>,
+    /// Ids from the current page still to fetch, kept when a step yields.
+    pub pending: VecDeque<String>,
+    /// The last page reached a stop (the anchor, the act start, the cap, or
+    /// the end of the history); the run finishes once `pending` is empty.
+    pub done: bool,
 }
 
 /// The live stage/roster plus the session-scoped bookkeeping the sync
@@ -88,8 +118,17 @@ pub struct LiveModel {
     pub map_id: Option<String>,
     /// Display/sync order (`roster::order_players`).
     pub slots: Vec<Slot>,
-    /// Equipped chromas from the current core-game match (Player Details).
-    pub loadouts: HashMap<String, Loadout>,
+    /// Equipped skins of the current match's players (Player Details):
+    /// core-game loadouts In Game, pre-game loadouts (allies) in Agent
+    /// Select (R83). Skin names resolve later, from valorant-api.
+    pub loadouts: HashMap<String, RawLoadout>,
+    /// The user's own equipped skins, read once per connect from the pd
+    /// personalization endpoint (R90) — so their Details shows skins
+    /// outside a match too. Cleared when the account changes; also restored
+    /// at startup from the copy kept in `app_state` (Closed stage), so this
+    /// field *is* the stored copy's in-memory form: `details` never reads
+    /// `app_state` itself (see `AppState::new`).
+    pub self_loadout: Option<RawLoadout>,
     pub coregame_match_id: Option<String>,
     pub self_puuid: Option<String>,
     /// The user's own Riot ID from the local chat session
@@ -111,12 +150,20 @@ pub struct LiveModel {
     /// Players whose per-player sync ran (since the last reset): a field
     /// still unknown after that is Missing, not Loading.
     pub synced: HashSet<String>,
+    /// The subset of `synced` whose match-history call answered this cycle:
+    /// only these take part in party detection (a failed history leaves the
+    /// stored one from an earlier session, which would draw a false
+    /// stripe). Cleared and pruned together with `synced`.
+    pub party_ready: HashSet<String>,
     /// The worker currently entitled to run (R45). Set and cleared only
     /// under this model's lock, together with the "is there work?" check,
     /// so no roster change can fall between a worker deciding to exit and
     /// a new one being refused.
     worker_id: Option<u64>,
     next_worker_id: u64,
+    /// The own-history backfill run in progress, if any (R101). Cleared when
+    /// the account changes or the session drops.
+    pub backfill: Option<BackfillRun>,
     /// The last built/emitted state (`live_state()` returns it).
     pub current: LiveState,
     last_bytes: Vec<u8>,
@@ -130,6 +177,7 @@ impl LiveModel {
             map_id: None,
             slots: Vec::new(),
             loadouts: HashMap::new(),
+            self_loadout: None,
             coregame_match_id: None,
             self_puuid,
             self_name: None,
@@ -138,8 +186,10 @@ impl LiveModel {
             known_names: HashMap::new(),
             names_attempted: HashSet::new(),
             synced: HashSet::new(),
+            party_ready: HashSet::new(),
             worker_id: None,
             next_worker_id: 0,
+            backfill: None,
             current: LiveState {
                 stage: Stage::Closed,
                 map_id: None,
@@ -154,7 +204,14 @@ impl LiveModel {
     }
 
     /// Builds the full `LiveState` (pure; `now_ms` should be [`card_clock`]).
-    pub fn build(&self, acts: &[Act], now_ms: i64) -> LiveState {
+    /// `map_uuid` turns a stored Riot map path into a valorant-api uuid (for
+    /// a remembered name's source map).
+    pub fn build(
+        &self,
+        acts: &[Act],
+        now_ms: i64,
+        map_uuid: &dyn Fn(&str) -> Option<String>,
+    ) -> LiveState {
         let current_act_id = current_act(acts, now_ms)
             .map(|a| a.id.as_str())
             .unwrap_or("");
@@ -167,7 +224,7 @@ impl LiveModel {
                 .iter()
                 .map(|s| {
                     let party = marks.get(&s.roster.puuid).copied();
-                    self.card_for(s, acts, current_act_id, now_ms, party)
+                    self.card_for(s, acts, current_act_id, now_ms, party, map_uuid)
                 })
                 .collect(),
         }
@@ -179,9 +236,11 @@ impl LiveModel {
     /// every build: it's a few comparisons over at most 10 players, all
     /// from the slots' DB bundles (no request, no query).
     ///
-    /// Only players whose sync ran this cycle take part (R53): a cached
-    /// history from an earlier session could link players who no longer
-    /// play together. Their mark appears on the publish after their sync.
+    /// Only players whose history was synced this cycle take part (R53):
+    /// a cached history from an earlier session could link players who no
+    /// longer play together — and so could the stored one of a player whose
+    /// history call failed now (`party_ready`, not just `synced`). Their
+    /// mark appears on the publish after their sync.
     pub fn party_marks(&self) -> HashMap<String, PartyMark> {
         if !matches!(self.stage, Stage::Pregame | Stage::Ingame) {
             return HashMap::new();
@@ -190,7 +249,7 @@ impl LiveModel {
         let synced: Vec<&Slot> = self
             .slots
             .iter()
-            .filter(|s| self.synced.contains(&s.roster.puuid))
+            .filter(|s| self.party_ready.contains(&s.roster.puuid))
             .collect();
         let players: Vec<(String, Team)> = synced
             .iter()
@@ -211,7 +270,8 @@ impl LiveModel {
 
     /// One card. `party` is this player's mark from [`Self::party_marks`]
     /// (`None` off screen, e.g. Player Details for someone not in the
-    /// roster).
+    /// roster). `map_uuid` converts a remembered name's stored Riot map path
+    /// (`KnownName::with_map_uuid`, R95).
     pub fn card_for(
         &self,
         slot: &Slot,
@@ -219,6 +279,7 @@ impl LiveModel {
         current_act_id: &str,
         now_ms: i64,
         party: Option<PartyMark>,
+        map_uuid: &dyn Fn(&str) -> Option<String>,
     ) -> PlayerCard {
         let r = &slot.roster;
         let is_self = r.puuid == self.self_id();
@@ -273,7 +334,9 @@ impl LiveModel {
             identity: Identity {
                 puuid: r.puuid.clone(),
                 incognito,
-                hide_account_level: r.hide_account_level || r.account_level == 0,
+                // R100: a hidden level shows for the user's own card only;
+                // an unknown level (0) is `—` for everyone.
+                hide_account_level: (r.hide_account_level && !is_self) || r.account_level == 0,
                 account_level: r.account_level,
                 card_id: r.card_id.clone(),
                 character_id: r.character_id.clone(),
@@ -288,13 +351,17 @@ impl LiveModel {
             current_act_id,
             now_ms,
             team: r.team,
+            is_self,
             // CLAUDE.md: the user and their party get no stripe and no
             // encounter badge (build_card drops both for them).
             is_self_party: r.is_self_party || is_self,
             remembered: if is_self {
                 None
             } else {
-                slot.db.remembered.clone()
+                slot.db
+                    .remembered
+                    .clone()
+                    .map(|known| known.with_map_uuid(map_uuid))
             },
             party,
             encounters: slot.db.encounters,
@@ -303,8 +370,8 @@ impl LiveModel {
         card
     }
 
-    /// Players shown hidden right now, with the agent their card shows (if
-    /// selected) — R18: their names must not leak through Player Details'
+    /// Players shown hidden right now, with the agent their card shows (once
+    /// locked, R99) — R18: their names must not leak through Player Details'
     /// Top Teammates either; there they're shown by the same rules as on
     /// their card. The user's own name is known locally (chat session) and
     /// is not hidden from the user.
@@ -345,8 +412,30 @@ impl LiveModel {
             .cloned()
     }
 
+    /// A `Names` or `Sync` job is waiting: what the backfill must yield to.
+    pub fn live_job_pending(&self) -> bool {
+        !self.names_needed().is_empty() || self.next_unsynced().is_some()
+    }
+
     pub fn has_pending_work(&self) -> bool {
-        self.next_unsynced().is_some() || !self.names_needed().is_empty()
+        self.live_job_pending() || self.backfill.is_some()
+    }
+
+    /// R101: starts an own-history backfill run. A no-op while one is
+    /// active, so a second trigger (a match ended mid-run) keeps its cursor.
+    pub fn start_backfill(&mut self, anchor: Option<(String, i64)>, act_start_ms: Option<i64>) {
+        if self.backfill.is_some() {
+            return;
+        }
+        self.backfill = Some(BackfillRun {
+            anchor,
+            act_start_ms,
+            next_index: 0,
+            scanned: 0,
+            newest: None,
+            pending: VecDeque::new(),
+            done: false,
+        });
     }
 
     /// R45: claims the worker slot if there is work and no worker owns it
@@ -375,6 +464,10 @@ impl LiveModel {
         }
         if let Some(puuid) = self.next_unsynced() {
             return Some(Job::Sync(puuid));
+        }
+        // Lowest priority: only with no live job left.
+        if self.backfill.is_some() {
+            return Some(Job::Backfill);
         }
         self.worker_id = None;
         None
@@ -419,6 +512,8 @@ pub fn settle_card(card: &mut PlayerCard, names_done: bool, data_done: bool) {
         settle(&mut card.kd);
         settle(&mut card.hs_pct);
         settle(&mut card.act_winrate);
+        settle(&mut card.act_wins);
+        settle(&mut card.act_games);
         settle(&mut card.last5);
     }
 }
@@ -485,6 +580,11 @@ pub struct AppState {
     acts: RwLock<Arc<Vec<Act>>>,
     tables: tokio::sync::Mutex<TablesStatus>,
     details_synced: Mutex<HashMap<String, Instant>>,
+    /// Players whose skin names are being fetched right now, with how many
+    /// fetches run (R97): while a puuid is in here its Details loadout
+    /// weapons are still "resolving" (absent keys); once it leaves, an
+    /// unknown name is `null`.
+    skins_inflight: Mutex<HashMap<String, usize>>,
     /// `app_data_dir()/debug` — where `dump_raw` writes.
     pub debug_dir: PathBuf,
 }
@@ -497,15 +597,40 @@ impl AppState {
         debug_dir: PathBuf,
         self_puuid: Option<String>,
     ) -> Self {
+        // R90: the user's own last-known loadout, kept in `app_state` by
+        // `sync::fetch_self_loadout`, so their Details shows their skins
+        // while VALORANT is closed. A copy that doesn't parse is ignored.
+        //
+        // It is restored once, here, into `live.self_loadout` rather than
+        // read from `app_state` inside every `details::build` (Task 15
+        // review F1/F4): `details::skins_pending` and `resolve_skins` are
+        // synchronous over `&AppState` and need the `RawLoadout` *before*
+        // the build, to mark its skins "resolving" (R97) and fetch their
+        // names in the Closed stage, where nothing else supplies it. Memory
+        // and `app_state` never drift: a read writes both (the stored copy
+        // only on change) and an account switch clears both, so the source
+        // order stays match loadout, then the user's own read, then null.
+        let stored_loadout: Option<RawLoadout> = match repo.get_state(SELF_LOADOUT_KEY) {
+            Ok(json) => json.and_then(|json| serde_json::from_str(&json).ok()),
+            Err(e) => {
+                // A DB read failure would otherwise silently hide the
+                // user's Closed-stage skins; copy-log shows it.
+                log::warn!("stored self loadout unreadable: {e}");
+                None
+            }
+        };
+        let mut live = LiveModel::new(self_puuid);
+        live.self_loadout = stored_loadout;
         Self {
             sink,
             repo: Arc::new(Mutex::new(repo)),
             assets: Arc::new(assets),
             session: RwLock::new(None),
-            live: Mutex::new(LiveModel::new(self_puuid)),
+            live: Mutex::new(live),
             acts: RwLock::new(Arc::new(Vec::new())),
             tables: tokio::sync::Mutex::new(TablesStatus::default()),
             details_synced: Mutex::new(HashMap::new()),
+            skins_inflight: Mutex::new(HashMap::new()),
             debug_dir,
         }
     }
@@ -635,7 +760,7 @@ impl AppState {
                 live.map_id = self.map_uuid(&path);
             }
         }
-        let state = live.build(&acts, card_clock(now_ms()));
+        let state = live.build(&acts, card_clock(now_ms()), &|p| self.map_uuid(p));
         let bytes = serde_json::to_vec(&state).unwrap_or_default();
         if bytes == live.last_bytes {
             return;
@@ -678,6 +803,40 @@ impl AppState {
         self.publish();
     }
 
+    /// R97: `true` only while a skin-name fetch for `puuid` runs (between
+    /// [`Self::begin_skin_resolve`] and [`Self::end_skin_resolve`]). A
+    /// Details loadout weapon whose name isn't known is "resolving" (its
+    /// key absent) exactly then, so a skeleton never outlives the attempt.
+    pub fn skins_resolving(&self, puuid: &str) -> bool {
+        lock(&self.skins_inflight).contains_key(puuid)
+    }
+
+    /// Marks a skin-name fetch for `puuid` as running (see
+    /// [`Self::skins_resolving`]) until the returned guard is dropped. The
+    /// guard's `Drop` ends the mark, so a panic in the fetch can never leave
+    /// a puuid resolving for the rest of the session (R97). Drop it *before*
+    /// rebuilding the details that should show the result.
+    #[must_use = "the mark ends when the guard is dropped"]
+    pub fn begin_skin_resolve(self: &Arc<Self>, puuid: &str) -> SkinResolveGuard {
+        *lock(&self.skins_inflight)
+            .entry(puuid.to_string())
+            .or_default() += 1;
+        SkinResolveGuard {
+            st: self.clone(),
+            puuid: puuid.to_string(),
+        }
+    }
+
+    fn end_skin_resolve(&self, puuid: &str) {
+        let mut inflight = lock(&self.skins_inflight);
+        if let Some(n) = inflight.get_mut(puuid) {
+            *n -= 1;
+            if *n == 0 {
+                inflight.remove(puuid);
+            }
+        }
+    }
+
     /// `true` (and records now) when `puuid`'s Player Details data hasn't
     /// been synced in the last [`DETAILS_RESYNC_AFTER`].
     pub fn claim_details_sync(&self, puuid: &str) -> bool {
@@ -693,12 +852,27 @@ impl AppState {
     }
 }
 
+/// A running skin-name fetch's mark on its puuid
+/// ([`AppState::begin_skin_resolve`]); dropping it ends the mark.
+pub struct SkinResolveGuard {
+    st: Arc<AppState>,
+    puuid: String,
+}
+
+impl Drop for SkinResolveGuard {
+    fn drop(&mut self) {
+        self.st.end_skin_resolve(&self.puuid);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use opd1_core::db::repo::MatchPlayerRow;
     use opd1_core::model::{DisplayName, EncounterCount, PartyMark};
+    use opd1_core::names::KnownName;
     use opd1_core::party::SharedRef;
+    use serde_json::Value;
 
     fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
         RosterPlayer {
@@ -754,7 +928,7 @@ mod tests {
     #[test]
     fn unsynced_player_is_loading_then_missing_once_attempted() {
         let mut m = model(vec![slot("p1", false)]);
-        let card = &m.build(&[], 0).players[0];
+        let card = &m.build(&[], 0, &|_| None).players[0];
         assert!(card.rank.is_loading());
         assert!(card.last5.is_loading());
         assert!(card.name.is_loading());
@@ -762,7 +936,7 @@ mod tests {
         // The sync ran but every call failed / returned nothing.
         m.synced.insert("p1".into());
         m.names_attempted.insert("p1".into());
-        let card = &m.build(&[], 0).players[0];
+        let card = &m.build(&[], 0, &|_| None).players[0];
         assert_eq!(card.rank, Field::Missing);
         assert_eq!(card.last5, Field::Missing);
         assert_eq!(card.kd, Field::Missing);
@@ -774,7 +948,7 @@ mod tests {
         let mut s = slot("p1", false);
         s.db.last5 = vec![row("m1", 10)];
         let m = model(vec![s]);
-        let card = &m.build(&[], 0).players[0];
+        let card = &m.build(&[], 0, &|_| None).players[0];
         assert!(matches!(card.last5, Field::Value(ref v) if v.len() == 1));
         assert!(matches!(card.kd, Field::Value(_)));
         assert!(card.rank.is_loading(), "no MMR snapshot yet and not synced");
@@ -784,7 +958,7 @@ mod tests {
     fn closed_stage_never_shows_skeletons() {
         let mut m = model(vec![slot("me", false)]);
         m.stage = Stage::Closed;
-        let json = serde_json::to_value(&m.build(&[], 0).players[0]).unwrap();
+        let json = serde_json::to_value(&m.build(&[], 0, &|_| None).players[0]).unwrap();
         for key in [
             "name",
             "rank",
@@ -793,6 +967,8 @@ mod tests {
             "kd",
             "hsPct",
             "actWinrate",
+            "actWins",
+            "actGames",
             "last5",
         ] {
             assert!(
@@ -814,7 +990,7 @@ mod tests {
         let mut m = model(vec![s]);
         m.known_names
             .insert("h1".into(), ("Real".into(), "Name".into()));
-        let card = &m.build(&[], 0).players[0];
+        let card = &m.build(&[], 0, &|_| None).players[0];
         assert_eq!(
             card.name,
             Field::Value(DisplayName::HiddenAgent {
@@ -851,7 +1027,7 @@ mod tests {
         m.known_names
             .insert("h1".into(), ("Real".into(), "Name".into()));
         m.synced.insert("h1".into());
-        let card = |m: &LiveModel| m.build(&[], 0).players[0].clone();
+        let card = |m: &LiveModel| m.build(&[], 0, &|_| None).players[0].clone();
         let leaks = |m: &LiveModel| serde_json::to_string(&card(m)).unwrap().contains("Real");
 
         // Before agent select: Hidden Player.
@@ -868,12 +1044,19 @@ mod tests {
         assert!(!leaks(&m));
         // Remembered from a match the user played: that name, in its own
         // style — still never the players-row / name-service one.
-        m.slots[0].db.remembered = Some(("Seen".into(), "AFTER".into()));
+        m.slots[0].db.remembered = Some(KnownName {
+            name: "Seen".into(),
+            tag: "AFTER".into(),
+            map_id: None,
+            start_ms: None,
+        });
         assert_eq!(
             card(&m).name,
             Field::Value(DisplayName::Remembered {
                 name: "Seen".into(),
-                tag: "AFTER".into()
+                tag: "AFTER".into(),
+                from_map_id: None,
+                from_start_ms: None,
             })
         );
         assert!(!leaks(&m));
@@ -891,6 +1074,80 @@ mod tests {
     }
 
     #[test]
+    fn card_for_maps_remembered_source() {
+        let mut s = slot("h1", true);
+        s.db.remembered = Some(KnownName {
+            name: "Seen".into(),
+            tag: "AFTER".into(),
+            // The stored Riot path (R84): converted only when the card is built.
+            map_id: Some("/Game/Maps/Bonsai/Bonsai".into()),
+            start_ms: Some(1_234),
+        });
+        let m = model(vec![s]);
+        let card_json = |lookup: &dyn Fn(&str) -> Option<String>| {
+            serde_json::to_value(&m.build(&[], 0, lookup).players[0]).unwrap()
+        };
+
+        let known =
+            card_json(&|p| (p == "/Game/Maps/Bonsai/Bonsai").then(|| "uuid-split".to_string()));
+        assert_eq!(known["name"]["kind"], "remembered");
+        assert_eq!(known["name"]["fromMapId"], "uuid-split");
+        assert_eq!(known["name"]["fromStartMs"], 1_234);
+        assert!(!known.to_string().contains("/Game/"));
+
+        // A map the tables don't know: no source map, and never the path.
+        let unknown = card_json(&|_| None);
+        assert_eq!(unknown["name"]["fromMapId"], Value::Null);
+        assert_eq!(unknown["name"]["fromStartMs"], 1_234);
+        assert!(!unknown.to_string().contains("/Game/"));
+    }
+
+    #[test]
+    fn hidden_players_ignore_hover() {
+        // R99: an incognito player who only hovers an agent has no agent
+        // yet, so Top Teammates shows them as Hidden Player, like the card.
+        let mut hover = slot("h1", true);
+        hover.roster.selection_state = "selected".into();
+        let mut locked = slot("h2", true);
+        locked.roster.selection_state = "locked".into();
+        let m = model(vec![hover, locked]);
+        assert_eq!(
+            m.hidden_players(),
+            HashMap::from([
+                ("h1".to_string(), None),
+                ("h2".to_string(), Some("agent".to_string())),
+            ])
+        );
+        let cards = m.build(&[], 0, &|_| None).players;
+        assert_eq!(cards[0].agent_id, None);
+        assert_eq!(cards[0].name, Field::Value(DisplayName::HiddenPlayer));
+        assert_eq!(cards[1].agent_id.as_deref(), Some("agent"));
+    }
+
+    #[test]
+    fn own_card_shows_level_even_when_hidden() {
+        // R100: `HideAccountLevel` hides the level for everyone but the user.
+        let hidden_level = |puuid: &str, level: u32| {
+            let mut s = slot(puuid, false);
+            s.roster.hide_account_level = true;
+            s.roster.account_level = level;
+            s
+        };
+        let m = model(vec![
+            hidden_level("me", 87),
+            hidden_level("p1", 87),
+            hidden_level("me", 0),
+        ]);
+        let cards = m.build(&[], 0, &|_| None).players;
+        assert_eq!(cards[0].level, Field::Value(87));
+        assert!(cards[0].is_self);
+        assert_eq!(cards[1].level, Field::Missing);
+        assert!(!cards[1].is_self);
+        // An unknown level (0) is `—` for everyone, the user included.
+        assert_eq!(cards[2].level, Field::Missing);
+    }
+
+    #[test]
     fn encounters_show_for_others_but_never_for_the_user_or_their_party() {
         let enc = Some(EncounterCount {
             with: 1,
@@ -905,7 +1162,9 @@ mod tests {
         let mut known = slot("known", false);
         known.db.encounters = enc;
         let stranger = slot("stranger", false);
-        let cards = model(vec![me, duo, known, stranger]).build(&[], 0).players;
+        let cards = model(vec![me, duo, known, stranger])
+            .build(&[], 0, &|_| None)
+            .players;
         let got: Vec<Option<EncounterCount>> = cards.iter().map(|c| c.encounters).collect();
         assert_eq!(got, vec![None, None, enc, None]);
     }
@@ -922,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn party_marks_come_from_synced_players_only_in_agent_select_and_in_game() {
+    fn party_marks_come_from_players_with_a_synced_history_only_in_agent_select_and_in_game() {
         let mut slots = Vec::new();
         for (p, self_party, team) in [
             ("me", true, Team::Ally),
@@ -940,7 +1199,11 @@ mod tests {
         }
         let mut m = model(slots);
         let marks = |m: &LiveModel| -> Vec<Option<PartyMark>> {
-            m.build(&[], 0).players.iter().map(|c| c.party).collect()
+            m.build(&[], 0, &|_| None)
+                .players
+                .iter()
+                .map(|c| c.party)
+                .collect()
         };
         let likely = Some(PartyMark {
             group: 0,
@@ -949,10 +1212,17 @@ mod tests {
 
         // Cached history isn't trusted before this cycle's sync (R53).
         assert_eq!(marks(&m), vec![None; 5]);
-        m.synced.extend(["me", "duo", "e1", "e2"].map(String::from));
+        for p in ["me", "duo", "e1", "e2"] {
+            m.synced.insert(p.into());
+            m.party_ready.insert(p.into());
+        }
         // e3 not synced yet: no link yet. The user's party: never.
         assert_eq!(marks(&m), vec![None, None, likely, likely, None]);
+        // Synced, but its history call failed (not `party_ready`): still no
+        // link, whatever the stored history says.
         m.synced.insert("e3".into());
+        assert_eq!(marks(&m), vec![None, None, likely, likely, None]);
+        m.party_ready.insert("e3".into());
         assert_eq!(marks(&m), vec![None, None, likely, likely, likely]);
 
         m.stage = Stage::Pregame;
@@ -978,14 +1248,14 @@ mod tests {
     fn the_users_own_name_comes_from_the_chat_session() {
         let mut m = model(vec![slot("me", true)]);
         // Unknown until the chat session was asked…
-        assert!(m.build(&[], 0).players[0].name.is_loading());
+        assert!(m.build(&[], 0, &|_| None).players[0].name.is_loading());
         m.self_name_attempted = true;
-        assert_eq!(m.build(&[], 0).players[0].name, Field::Missing);
+        assert_eq!(m.build(&[], 0, &|_| None).players[0].name, Field::Missing);
         // …then the local chat session's Riot ID, shown to the user even
         // with their own streamer-mode flag on.
         m.self_name = Some(("Shanky".into(), "OPD1".into()));
         assert_eq!(
-            m.build(&[], 0).players[0].name,
+            m.build(&[], 0, &|_| None).players[0].name,
             Field::Value(DisplayName::Visible {
                 name: "Shanky".into(),
                 tag: "OPD1".into()
@@ -995,7 +1265,7 @@ mod tests {
         // A stage reset (which clears names_attempted) keeps it settled.
         m.names_attempted.clear();
         m.self_name = None;
-        assert_eq!(m.build(&[], 0).players[0].name, Field::Missing);
+        assert_eq!(m.build(&[], 0, &|_| None).players[0].name, Field::Missing);
     }
 
     #[test]
@@ -1008,7 +1278,7 @@ mod tests {
             card_id: "c".into(),
         });
         let mut m = model(vec![s]);
-        let name = |m: &LiveModel| m.build(&[], 0).players[0].name.clone();
+        let name = |m: &LiveModel| m.build(&[], 0, &|_| None).players[0].name.clone();
         assert_eq!(
             name(&m),
             Field::Value(DisplayName::Visible {
@@ -1088,10 +1358,80 @@ mod tests {
     }
 
     #[test]
+    fn backfill_job_is_lowest_priority() {
+        let mut m = model(vec![slot("me", false), slot("p1", false)]);
+        m.start_backfill(None, None);
+        let id = m.try_start_worker().expect("work pending");
+
+        // A name is needed and slots are unsynced: both come before the run.
+        assert!(m.live_job_pending());
+        assert!(matches!(m.next_job(id), Some(Job::Names(_))));
+        m.names_attempted.extend(["p1".to_string()]);
+        assert_eq!(m.next_job(id), Some(Job::Sync("me".into())));
+        m.synced.insert("me".into());
+        assert_eq!(m.next_job(id), Some(Job::Sync("p1".into())));
+        m.synced.insert("p1".into());
+
+        // Both empty: only now the backfill.
+        assert!(!m.live_job_pending());
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
+        assert_eq!(m.next_job(id), Some(Job::Backfill), "until the run ends");
+        // A roster player added mid-run goes first again.
+        m.slots.push(slot("late", false));
+        m.names_attempted.insert("late".into());
+        assert!(m.live_job_pending());
+        assert_eq!(m.next_job(id), Some(Job::Sync("late".into())));
+        m.synced.insert("late".into());
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
+
+        // The run ended: nothing left, and the claim is released with it.
+        m.backfill = None;
+        assert_eq!(m.next_job(id), None);
+        assert!(!m.worker_running(), "claim released");
+    }
+
+    #[test]
+    fn a_backfill_run_alone_starts_a_worker() {
+        // The roster is fully synced; only the run is left. `try_start_worker`
+        // must still claim (R45), or a run started after the sync would
+        // never get a worker.
+        let mut m = model(vec![slot("me", false)]);
+        m.synced.insert("me".into());
+        assert!(m.try_start_worker().is_none(), "no run, no work");
+        m.start_backfill(None, None);
+        let id = m.try_start_worker().expect("the run is work");
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
+    }
+
+    #[test]
+    fn start_backfill_is_noop_while_running() {
+        let mut m = model(vec![slot("me", false)]);
+        let anchor = Some(("m9".to_string(), 900));
+        m.start_backfill(anchor.clone(), Some(500));
+        {
+            let run = m.backfill.as_mut().unwrap();
+            assert_eq!(run.anchor, anchor);
+            assert_eq!(run.act_start_ms, Some(500));
+            assert_eq!((run.next_index, run.scanned), (0, 0));
+            assert!(run.pending.is_empty() && run.newest.is_none() && !run.done);
+            // The run made progress…
+            run.next_index = 40;
+            run.scanned = 37;
+            run.pending.push_back("m3".into());
+        }
+        // …and a second trigger (a match ended meanwhile) must not reset it.
+        m.start_backfill(None, None);
+        let run = m.backfill.as_ref().unwrap();
+        assert_eq!(run.anchor, anchor, "same run");
+        assert_eq!((run.next_index, run.scanned), (40, 37));
+        assert_eq!(run.pending.len(), 1);
+    }
+
+    #[test]
     fn settle_only_touches_attempted_sources() {
         let mut m = model(vec![slot("p1", false)]);
         m.names_attempted.insert("p1".into());
-        let card = &m.build(&[], 0).players[0];
+        let card = &m.build(&[], 0, &|_| None).players[0];
         assert_eq!(card.name, Field::Missing);
         assert!(card.rank.is_loading(), "data not attempted yet");
     }
@@ -1101,7 +1441,7 @@ mod tests {
         let mut s = slot("p1", false);
         s.roster.hide_account_level = true;
         let m = model(vec![s]);
-        assert_eq!(m.build(&[], 0).players[0].level, Field::Missing);
+        assert_eq!(m.build(&[], 0, &|_| None).players[0].level, Field::Missing);
     }
 
     #[test]
@@ -1157,6 +1497,59 @@ mod tests {
     }
 
     #[test]
+    fn a_failing_self_loadout_read_is_logged_and_falls_back_to_none() {
+        crate::logbuf::init();
+        let dir = tempfile::tempdir().unwrap();
+        // A DB without its `app_state` table: every `get_state` errors.
+        let repo = Repo::new(opd1_core::db::open_db(std::path::Path::new(":memory:")).unwrap());
+        repo.conn().execute_batch("DROP TABLE app_state").unwrap();
+        let assets = AssetCache::with_base(dir.path().join("a"), "http://127.0.0.1:1".into());
+        let st = AppState::new(
+            Box::new(Sink(Arc::new(Recorder::default()))),
+            repo,
+            assets,
+            dir.path().join("debug"),
+            Some("me".into()),
+        );
+        assert!(lock(&st.live).self_loadout.is_none(), "falls back to None");
+        assert!(
+            crate::logbuf::snapshot().contains("stored self loadout unreadable"),
+            "the read error reaches copy-log:\n{}",
+            crate::logbuf::snapshot()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_skin_resolve_never_leaves_a_puuid_resolving() {
+        // R97: a skeleton never outlives the attempt — even when the task
+        // that holds the mark panics (a poisoned lock in the asset cache).
+        let (st, _rec, _dir) = test_state();
+        let guard = st.begin_skin_resolve("p1");
+        assert!(st.skins_resolving("p1"));
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            panic!("resolve_skins blew up");
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(!st.skins_resolving("p1"), "the guard's Drop ended the mark");
+    }
+
+    #[test]
+    fn skin_resolve_marks_count_and_end_when_dropped() {
+        let (st, _rec, _dir) = test_state();
+        let first = st.begin_skin_resolve("p1");
+        let second = st.begin_skin_resolve("p1");
+        let other = st.begin_skin_resolve("p2");
+        drop(first);
+        assert!(st.skins_resolving("p1"), "one fetch still runs");
+        drop(second);
+        assert!(!st.skins_resolving("p1"));
+        assert!(st.skins_resolving("p2"), "another player is unaffected");
+        drop(other);
+        assert!(!st.skins_resolving("p2"));
+    }
+
+    #[test]
     fn publish_emits_only_when_the_state_changes() {
         let (st, rec, _dir) = test_state();
         st.publish();
@@ -1200,7 +1593,7 @@ mod tests {
             // The last event the UI received is the model's current state…
             assert_eq!(emitted.last(), Some(&current));
             // …and it matches a fresh build (nothing newer was suppressed).
-            let fresh = lock(&st.live).build(&[], card_clock(now_ms()));
+            let fresh = lock(&st.live).build(&[], card_clock(now_ms()), &|_| None);
             assert_eq!(current, fresh);
             // Events never go backwards: each has at least as many players
             // as the one before (slots only grow in this test).

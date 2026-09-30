@@ -43,6 +43,29 @@ fn seasonal_map_from_mmr_reads_the_mmr_fixture() {
 }
 
 #[test]
+fn seasonal_map_counts_placement_wins() {
+    // `NumberOfWinsWithPlacements` (39) is what the act win rate counts:
+    // `NumberOfWins` (34) leaves the placement games out.
+    let resp: PlayerMmrResponse = serde_json::from_str(&fixture("mmr_placements.json")).unwrap();
+    let info = seasonal_map_from_mmr(&resp)
+        .remove(SEASON_ID)
+        .expect("season present");
+    assert_eq!(info.number_of_wins, 39);
+    assert_eq!(info.number_of_games, 61);
+}
+
+#[test]
+fn seasonal_map_falls_back_without_placements() {
+    // No `NumberOfWinsWithPlacements` key: `NumberOfWins` stands in.
+    let resp: PlayerMmrResponse = serde_json::from_str(&fixture("mmr_no_placements.json")).unwrap();
+    let info = seasonal_map_from_mmr(&resp)
+        .remove(SEASON_ID)
+        .expect("season present");
+    assert_eq!(info.number_of_wins, 34);
+    assert_eq!(info.number_of_games, 61);
+}
+
+#[test]
 fn seasonal_map_from_mmr_empty_when_no_competitive_queue() {
     let resp: PlayerMmrResponse =
         serde_json::from_str(&fixture("mmr_no_queue_skills.json")).unwrap();
@@ -146,6 +169,131 @@ fn match_from_details_aggregates_hs_bs_ls_and_resolves_winner() {
         .find(|p| p.puuid == "bbbbbbbb-0000-0000-0000-000000000001")
         .unwrap();
     assert_eq!((enemy.hs, enemy.bs, enemy.ls), (0, 2, 0));
+}
+
+#[test]
+fn match_from_details_parses_tier_damage_halves_length() {
+    let details: MatchDetailsResponse =
+        serde_json::from_str(&fixture("match_details.json")).unwrap();
+    let (m, teams, players) = match_from_details(&details);
+
+    assert_eq!(m.game_length_ms, Some(2_280_000));
+
+    // Riot's rank during the match, straight from `players[].competitiveTier`.
+    let tier = |puuid: &str| {
+        players
+            .iter()
+            .find(|p| p.puuid == puuid)
+            .unwrap()
+            .competitive_tier
+    };
+    assert_eq!(tier("aaaaaaaa-0000-0000-0000-000000000001"), Some(15));
+    assert_eq!(tier("bbbbbbbb-0000-0000-0000-000000000001"), Some(18));
+
+    // Σ roundResults[].playerStats[subject].damage[].damage: the fixture's
+    // one round of stats has 150 for me and 60 for the enemy.
+    let damage = |puuid: &str| players.iter().find(|p| p.puuid == puuid).unwrap().damage;
+    assert_eq!(damage("aaaaaaaa-0000-0000-0000-000000000001"), Some(150));
+    assert_eq!(damage("bbbbbbbb-0000-0000-0000-000000000001"), Some(60));
+
+    // Rounds 0..=11 count for the first half: Blue won round 0, Red won
+    // round 11; Blue's round 12 (the second half) is left out.
+    let h1 = |id: &str| {
+        teams
+            .iter()
+            .find(|t| t.team_id == id)
+            .unwrap()
+            .rounds_won_h1
+    };
+    assert_eq!(h1("Blue"), Some(1));
+    assert_eq!(h1("Red"), Some(1));
+}
+
+#[test]
+fn match_from_details_halves_only_for_half_based_queues() {
+    let halves = |queue: &str| {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fixture("match_details.json")).unwrap();
+        value["matchInfo"]["queueId"] = serde_json::json!(queue);
+        let details: MatchDetailsResponse = serde_json::from_value(value).unwrap();
+        let (_, teams, _) = match_from_details(&details);
+        teams
+            .iter()
+            .map(|t| t.rounds_won_h1)
+            .collect::<Vec<Option<i64>>>()
+    };
+    for queue in ["competitive", "unrated", "premier"] {
+        assert_eq!(halves(queue), [Some(1), Some(1)], "{queue}");
+    }
+    // Swiftplay swaps sides after 4 rounds, Spike Rush after 3, and
+    // Deathmatch has no halves: "the first 12 rounds" means nothing there.
+    for queue in ["swiftplay", "spikerush", "deathmatch", "hurm", ""] {
+        assert_eq!(halves(queue), [None, None], "{queue:?}");
+    }
+}
+
+#[test]
+fn match_from_details_without_round_results_has_no_halves_or_damage() {
+    // `roundResults: null` on a competitive match: nothing is known about
+    // the halves or the damage, which is not the same as "0".
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fixture("match_details.json")).unwrap();
+    value["roundResults"] = serde_json::Value::Null;
+    let details: MatchDetailsResponse = serde_json::from_value(value).unwrap();
+    let (_, teams, players) = match_from_details(&details);
+    assert!(teams.iter().all(|t| t.rounds_won_h1.is_none()));
+    assert!(players.iter().all(|p| p.damage.is_none()));
+    // What the payload does carry is unaffected.
+    assert_eq!(players[0].competitive_tier, Some(15));
+    assert_eq!(teams[0].rounds_won, Some(13));
+}
+
+#[test]
+fn match_from_details_rounds_without_round_num_or_winner_have_no_halves() {
+    // Round results are present, but no round carries `roundNum` (or, in
+    // the second case, `winningTeam`): the halves are unknown, and an
+    // unknown value never becomes a counted 0.
+    let halves = |strip: &[&str]| {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fixture("match_details.json")).unwrap();
+        for round in value["roundResults"].as_array_mut().unwrap() {
+            for key in strip {
+                round.as_object_mut().unwrap().remove(*key);
+            }
+        }
+        let details: MatchDetailsResponse = serde_json::from_value(value).unwrap();
+        let (_, teams, _) = match_from_details(&details);
+        teams
+            .iter()
+            .map(|t| t.rounds_won_h1)
+            .collect::<Vec<Option<i64>>>()
+    };
+    assert_eq!(halves(&["roundNum", "winningTeam"]), [None, None]);
+    assert_eq!(halves(&["roundNum"]), [None, None]);
+    assert_eq!(halves(&["winningTeam"]), [None, None]);
+    // Control: the untouched fixture still counts.
+    assert_eq!(halves(&[]), [Some(1), Some(1)]);
+}
+
+#[test]
+fn match_from_details_nulls_keep_phase2_fields_none() {
+    let details: MatchDetailsResponse =
+        serde_json::from_str(&fixture("match_details_nulls.json")).unwrap();
+    let (m, teams, players) = match_from_details(&details);
+    assert_eq!(m.game_length_ms, None);
+    assert!(teams.is_empty());
+    assert_eq!(players[0].competitive_tier, None);
+    assert_eq!(players[0].damage, None);
+
+    // An explicit `null` (rather than an absent key) is the same.
+    let mut value: serde_json::Value =
+        serde_json::from_str(&fixture("match_details_nulls.json")).unwrap();
+    value["matchInfo"]["gameLengthMillis"] = serde_json::Value::Null;
+    value["players"][0]["competitiveTier"] = serde_json::Value::Null;
+    let details: MatchDetailsResponse = serde_json::from_value(value).unwrap();
+    let (m, _, players) = match_from_details(&details);
+    assert_eq!(m.game_length_ms, None);
+    assert_eq!(players[0].competitive_tier, None);
 }
 
 #[test]

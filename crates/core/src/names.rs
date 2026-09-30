@@ -19,6 +19,35 @@
 
 use crate::model::DisplayName;
 
+/// A name the user learned in a finished match they played in
+/// (`Repo::known_name`), with where and when it was seen.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownName {
+    pub name: String,
+    pub tag: String,
+    /// The map of the match that showed the name. It is the stored Riot
+    /// path (`/Game/Maps/...`) until [`KnownName::with_map_uuid`] runs, and
+    /// a valorant-api uuid (or `None`) after it.
+    pub map_id: Option<String>,
+    /// When that match started (epoch ms).
+    pub start_ms: Option<i64>,
+}
+
+impl KnownName {
+    /// R84/R95: the one Riot-path -> valorant-api-uuid conversion of a
+    /// remembered source. `map_id` holds the stored Riot path
+    /// (`/Game/Maps/…`) until this runs, and a uuid or `None` after it; it
+    /// never holds a path once converted. Called exactly once, where the
+    /// [`DisplayName`] is built: `card_for`, `teammate_name` and
+    /// `build_match_view`. No other code converts it.
+    pub fn with_map_uuid(self, map_uuid: &dyn Fn(&str) -> Option<String>) -> KnownName {
+        KnownName {
+            map_id: self.map_id.as_deref().and_then(map_uuid),
+            ..self
+        }
+    }
+}
+
 /// `(name, tag)` only when both halves are non-empty.
 fn full((name, tag): (String, String)) -> Option<(String, String)> {
     (!name.is_empty() && !tag.is_empty()).then_some((name, tag))
@@ -31,12 +60,13 @@ fn full((name, tag): (String, String)) -> Option<(String, String)> {
 /// gets `HiddenPlayer` — a caller with a "still loading" state (the card's
 /// tri-state `name`, ruling R34) handles that case before calling.
 /// `agent_selected` is the agent shown on the card (only after it's
-/// selected — CLAUDE.md: never a placeholder agent); `""` means none.
+/// locked (R99) — CLAUDE.md: never a placeholder agent); `""` means none.
+/// `remembered` arrives already converted ([`KnownName::with_map_uuid`]).
 pub fn display_name(
     incognito: bool,
     visible: Option<(String, String)>,
     agent_selected: Option<&str>,
-    remembered: Option<(String, String)>,
+    remembered: Option<KnownName>,
 ) -> DisplayName {
     if !incognito {
         return match visible.and_then(full) {
@@ -44,8 +74,16 @@ pub fn display_name(
             None => DisplayName::HiddenPlayer,
         };
     }
-    if let Some((name, tag)) = remembered.and_then(full) {
-        return DisplayName::Remembered { name, tag };
+    if let Some(known) = remembered.filter(|k| !k.name.is_empty() && !k.tag.is_empty()) {
+        return DisplayName::Remembered {
+            name: known.name,
+            tag: known.tag,
+            // Defence in depth (R84/R95): a uuid never starts with '/', a
+            // Riot path (`/Game/…`) does. A caller that skipped
+            // `with_map_uuid` still can't put a path on the wire.
+            from_map_id: known.map_id.filter(|m| !m.starts_with('/')),
+            from_start_ms: known.start_ms,
+        };
     }
     match agent_selected.filter(|a| !a.is_empty()) {
         Some(agent) => DisplayName::HiddenAgent {

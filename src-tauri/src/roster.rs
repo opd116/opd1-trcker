@@ -9,8 +9,10 @@
 //!   ([`order_players`])
 //! - the presence "party key" that triggers a lobby party re-fetch
 //!   ([`party_key`])
-//! - equipped Vandal/Phantom/Operator/Sheriff chromas from core-game
-//!   loadouts ([`extract_loadouts`])
+//! - equipped Vandal/Phantom/Operator/Sheriff skins from core-game
+//!   loadouts ([`extract_loadouts`]), pre-game loadouts
+//!   ([`extract_pregame_loadouts`], gated by [`want_pregame_loadouts`]) and
+//!   the user's own ([`extract_player_loadout`])
 //! - Riot map path -> valorant-api map uuid ([`map_uuid`])
 //! - the current act ([`current_act`])
 //! - free-for-all queues keep the Lobby view (R41, [`view_stage`],
@@ -23,15 +25,18 @@ use std::time::Duration;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use opd1_core::model::{Loadout, Team};
+use opd1_core::model::Team;
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
 use opd1_riot::endpoints::{
     CoreGameLoadoutsResponse, CoreGameMatchResponse, PartyResponse, PlayerIdentity,
-    PregameMatchResponse,
+    PlayerLoadoutResponse, PregameLoadoutsResponse, PregameMatchResponse,
 };
+
+use crate::store::PlayerUpdate;
 
 /// One player in the current live roster: everything that arrives with the
 /// roster fetch itself (no per-player call needed).
@@ -73,6 +78,36 @@ impl RosterPlayer {
             card_id: identity.player_card_id.clone(),
             character_id: character_id.to_string(),
             selection_state: selection_state.to_string(),
+        }
+    }
+
+    /// R100: this is the user's own entry, their level is known, and it
+    /// differs from the stored row's level (`None` = no row). Such an entry
+    /// is saved even though its slot is already on screen (the Closed-stage
+    /// slot from startup, or an earlier stage), so the stored level, which
+    /// the Closed card and the user's own Player Details read, can't stay
+    /// `0` or stale.
+    pub fn own_level_stale(&self, me: &str, stored_level: Option<i64>) -> bool {
+        self.puuid == me
+            && self.account_level > 0
+            && stored_level != Some(i64::from(self.account_level))
+    }
+
+    /// The `players` row upsert for this roster player; `me` is the user's
+    /// PUUID. A level another player hides (`HideAccountLevel`) is never
+    /// stored (`0` = unknown; the upsert keeps what the row has). The user's
+    /// own level is always stored (R100): the Closed-stage card and the
+    /// user's own Player Details read it back from this row.
+    pub fn player_update(&self, me: &str) -> PlayerUpdate {
+        PlayerUpdate {
+            puuid: self.puuid.clone(),
+            name: None,
+            account_level: if self.hide_account_level && self.puuid != me {
+                0
+            } else {
+                self.account_level
+            },
+            card_id: self.card_id.clone(),
         }
     }
 }
@@ -387,25 +422,77 @@ pub const SHERIFF: &str = "e336c6b8-418d-9340-d77f-7a9e4cfe0702";
 
 /// The loadout socket that holds a weapon's equipped skin *chroma*
 /// ("Skin Variants" in techchrism's item-type table; the skin itself is
-/// socket `bcef87d6-…`, the skin level `e7c63390-…`).
+/// [`SKIN_SOCKET`], the skin level `e7c63390-…`).
 pub const CHROMA_SOCKET: &str = "3ad1b2b2-acdb-4524-852f-954a76ddae0a";
 
-fn chroma_of(items: &Value, weapon: &str) -> Option<String> {
+/// The loadout socket that holds a weapon's equipped *skin* (Scout
+/// `backend/valapi.py`): its item id is valorant-api's skin uuid.
+pub const SKIN_SOCKET: &str = "bcef87d6-209b-46c6-8b19-fbe40bd95abc";
+
+/// One equipped weapon skin as the loadout endpoints name it: the skin's
+/// uuid (`/v1/weapons/skins/{skin_id}`) and the equipped chroma's uuid.
+/// Both are stored lower-case.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EquippedSkin {
+    pub skin_id: String,
+    pub chroma_id: String,
+}
+
+/// A player's four equipped skins, before any name is known. The names
+/// resolve from valorant-api on demand (`details::resolve_skins`, R83).
+/// `None` = not equipped or not readable.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RawLoadout {
+    pub vandal: Option<EquippedSkin>,
+    pub phantom: Option<EquippedSkin>,
+    pub operator: Option<EquippedSkin>,
+    pub sheriff: Option<EquippedSkin>,
+}
+
+impl RawLoadout {
+    /// The four slots in the Details order: Vandal, Phantom, Operator,
+    /// Sheriff.
+    pub fn slots(&self) -> [&Option<EquippedSkin>; 4] {
+        [&self.vandal, &self.phantom, &self.operator, &self.sheriff]
+    }
+}
+
+/// `Sockets[socket].Item.ID` of a core-game / pre-game loadout item,
+/// lower-cased; `None` when absent or empty.
+fn socket_item(items: &Value, weapon: &str, socket: &str) -> Option<String> {
     let id = items
         .get(weapon)?
         .get("Sockets")?
-        .get(CHROMA_SOCKET)?
+        .get(socket)?
         .get("Item")?
         .get("ID")?
         .as_str()?;
     (!id.is_empty()).then(|| id.to_ascii_lowercase())
 }
 
-/// puuid -> the four equipped chromas, from `core-game/.../loadouts`.
+/// The equipped skin of `weapon`: its skin and chroma ids (a weapon
+/// without both is unknown, not half a skin).
+fn equipped(items: &Value, weapon: &str) -> Option<EquippedSkin> {
+    Some(EquippedSkin {
+        skin_id: socket_item(items, weapon, SKIN_SOCKET)?,
+        chroma_id: socket_item(items, weapon, CHROMA_SOCKET)?,
+    })
+}
+
+fn raw_loadout_of(items: &Value) -> RawLoadout {
+    RawLoadout {
+        vandal: equipped(items, VANDAL),
+        phantom: equipped(items, PHANTOM),
+        operator: equipped(items, OPERATOR),
+        sheriff: equipped(items, SHERIFF),
+    }
+}
+
+/// puuid -> the four equipped skins, from `core-game/.../loadouts`.
 /// The subject lives inside `Loadout.Subject` (techchrism's current
 /// `loadoutsSchema`); an entry without a subject is skipped rather than
 /// guessed by position.
-pub fn extract_loadouts(resp: &CoreGameLoadoutsResponse) -> HashMap<String, Loadout> {
+pub fn extract_loadouts(resp: &CoreGameLoadoutsResponse) -> HashMap<String, RawLoadout> {
     let mut out = HashMap::new();
     for entry in &resp.loadouts {
         let loadout = &entry.loadout;
@@ -413,17 +500,66 @@ pub fn extract_loadouts(resp: &CoreGameLoadoutsResponse) -> HashMap<String, Load
             continue;
         };
         let items = loadout.get("Items").unwrap_or(&Value::Null);
-        out.insert(
-            subject.to_string(),
-            Loadout {
-                vandal: chroma_of(items, VANDAL),
-                phantom: chroma_of(items, PHANTOM),
-                operator: chroma_of(items, OPERATOR),
-                sheriff: chroma_of(items, SHERIFF),
-            },
-        );
+        out.insert(subject.to_string(), raw_loadout_of(items));
     }
     out
+}
+
+/// puuid -> the four equipped skins, from `pregame/.../loadouts` (Agent
+/// Select, allies only). Unlike core-game, each `Loadouts[]` entry carries
+/// `Subject` and `Items` at the top level. An entry without a `Subject` is
+/// skipped, never matched by position (as [`extract_loadouts`]); and the
+/// map is empty unless `LoadoutsValid` — Riot nulls most of the payload
+/// until the picks are in.
+pub fn extract_pregame_loadouts(resp: &PregameLoadoutsResponse) -> HashMap<String, RawLoadout> {
+    let mut out = HashMap::new();
+    if !resp.loadouts_valid {
+        return out;
+    }
+    for entry in &resp.loadouts {
+        let Some(subject) = entry.get("Subject").and_then(Value::as_str) else {
+            continue;
+        };
+        let items = entry.get("Items").unwrap_or(&Value::Null);
+        out.insert(subject.to_string(), raw_loadout_of(items));
+    }
+    out
+}
+
+/// R90: the user's own four skins from the personalization endpoint: the
+/// `Guns[]` entry whose `ID` is the weapon (matched ignoring case), with
+/// its `SkinID` and `ChromaID` stored lower-case. A weapon that is missing
+/// from the response, or has no skin or chroma id, is `None`.
+pub fn extract_player_loadout(resp: &PlayerLoadoutResponse) -> RawLoadout {
+    let gun = |weapon: &str| {
+        let gun = resp
+            .guns
+            .iter()
+            .find(|g| g.id.eq_ignore_ascii_case(weapon))?;
+        (!gun.skin_id.is_empty() && !gun.chroma_id.is_empty()).then(|| EquippedSkin {
+            skin_id: gun.skin_id.to_ascii_lowercase(),
+            chroma_id: gun.chroma_id.to_ascii_lowercase(),
+        })
+    };
+    RawLoadout {
+        vandal: gun(VANDAL),
+        phantom: gun(PHANTOM),
+        operator: gun(OPERATOR),
+        sheriff: gun(SHERIFF),
+    }
+}
+
+/// R83: whether the Agent Select re-poll should ask for the pre-game
+/// loadouts: only until Riot answered `LoadoutsValid` once (`seen_valid`),
+/// and only while some ally has no [`RawLoadout`] yet. So at most one call
+/// per 3s re-poll, none after a valid answer, and none at all when every
+/// ally's loadout is already known.
+pub fn want_pregame_loadouts(
+    allies: &[String],
+    have: &HashMap<String, RawLoadout>,
+    seen_valid: bool,
+) -> bool {
+    !seen_valid && allies.iter().any(|puuid| !have.contains_key(puuid))
 }
 
 // ---------------------------------------------------------------------
@@ -474,6 +610,80 @@ mod tests {
             ]
         }))
         .unwrap()
+    }
+
+    fn roster_player(puuid: &str, hide_account_level: bool, account_level: u32) -> RosterPlayer {
+        RosterPlayer {
+            puuid: puuid.into(),
+            team_id: "Blue".into(),
+            team: Team::Ally,
+            is_self_party: puuid == "me",
+            incognito: false,
+            hide_account_level,
+            account_level,
+            card_id: "card-1".into(),
+            character_id: String::new(),
+            selection_state: String::new(),
+        }
+    }
+
+    #[test]
+    fn player_update_stores_the_users_own_level_even_when_hidden() {
+        // R100: the user's own level is always theirs to see, so the roster
+        // save keeps it (the Closed stage and the user's own Player Details
+        // read it back from the DB).
+        let u = roster_player("me", true, 87).player_update("me");
+        assert_eq!(u.puuid, "me");
+        assert_eq!(u.account_level, 87);
+        assert_eq!(u.card_id, "card-1");
+        assert_eq!(u.name, None);
+        assert_eq!(
+            roster_player("me", false, 87)
+                .player_update("me")
+                .account_level,
+            87
+        );
+    }
+
+    #[test]
+    fn own_level_stale_only_for_the_user_with_a_known_different_level() {
+        let me = roster_player("me", true, 87);
+        assert!(me.own_level_stale("me", None), "no row yet");
+        assert!(me.own_level_stale("me", Some(0)), "stored 0 is unknown");
+        assert!(me.own_level_stale("me", Some(80)), "levelled up since");
+        assert!(!me.own_level_stale("me", Some(87)), "already stored");
+        assert!(
+            !roster_player("me", true, 0).own_level_stale("me", Some(0)),
+            "an unknown level is never saved"
+        );
+        assert!(
+            !roster_player("x", false, 120).own_level_stale("me", None),
+            "only the user's own entry is refreshed this way"
+        );
+    }
+
+    #[test]
+    fn player_update_never_stores_another_players_hidden_level() {
+        assert_eq!(
+            roster_player("x", true, 120)
+                .player_update("me")
+                .account_level,
+            0
+        );
+        assert_eq!(
+            roster_player("x", false, 120)
+                .player_update("me")
+                .account_level,
+            120
+        );
+        // An unknown level (0) stays 0 for the user too: the DB then keeps
+        // whatever it already had.
+        assert_eq!(
+            roster_player("me", true, 0)
+                .player_update("me")
+                .account_level,
+            0
+        );
     }
 
     #[test]
@@ -706,19 +916,31 @@ mod tests {
         assert_eq!(party_key("%%%not base64"), None);
     }
 
+    /// A loadout item as core-game / pre-game send it: the skin in its
+    /// socket and the chroma in the chroma socket.
+    fn item(skin: &str, chroma: &str) -> Value {
+        json!({"ID": "w", "TypeID": "t", "Sockets": {
+            SKIN_SOCKET: {"ID": SKIN_SOCKET, "Item": {"ID": skin, "TypeID": "t"}},
+            CHROMA_SOCKET: {"ID": CHROMA_SOCKET, "Item": {"ID": chroma, "TypeID": "t"}}
+        }})
+    }
+
+    fn skin(skin_id: &str, chroma_id: &str) -> Option<EquippedSkin> {
+        Some(EquippedSkin {
+            skin_id: skin_id.into(),
+            chroma_id: chroma_id.into(),
+        })
+    }
+
     #[test]
-    fn loadouts_pick_the_chroma_socket_of_the_four_weapons() {
-        let item = |chroma: &str| {
-            json!({"ID": "w", "TypeID": "t", "Sockets": {
-                "bcef87d6-209b-46c6-8b19-fbe40bd95abc": {"ID": "s", "Item": {"ID": "skin", "TypeID": "t"}},
-                CHROMA_SOCKET: {"ID": CHROMA_SOCKET, "Item": {"ID": chroma, "TypeID": "t"}}
-            }})
-        };
+    fn extract_loadouts_reads_skin_and_chroma() {
         let resp: CoreGameLoadoutsResponse = serde_json::from_value(json!({
             "Loadouts": [
                 {"CharacterID": "c", "Loadout": {"Subject": "me", "Items": {
-                    VANDAL: item("19629AE1-4996-AE98-7742-24A240D41F99"),
-                    SHERIFF: item("0d3c5ca0-49a2-eef8-d01a-2e9dd8d5d574")
+                    VANDAL: item("30388628-42F0-606C-82C0-73AD43DE997F", "B2A065C0-4632-CCAA-F496-7681DC2A6185"),
+                    SHERIFF: item("skin-sheriff", "chroma-sheriff"),
+                    // A weapon with a skin but no chroma socket is unknown.
+                    PHANTOM: {"ID": "w", "Sockets": {SKIN_SOCKET: {"Item": {"ID": "skin-phantom"}}}}
                 }}},
                 {"CharacterID": "c", "Loadout": {"Items": {}}}
             ]
@@ -728,15 +950,171 @@ mod tests {
         assert_eq!(loadouts.len(), 1, "an entry without a subject is skipped");
         let me = &loadouts["me"];
         assert_eq!(
-            me.vandal.as_deref(),
-            Some("19629ae1-4996-ae98-7742-24a240d41f99")
+            me.vandal,
+            skin(
+                "30388628-42f0-606c-82c0-73ad43de997f",
+                "b2a065c0-4632-ccaa-f496-7681dc2a6185"
+            ),
+            "ids are stored lower-case"
+        );
+        assert_eq!(me.sheriff, skin("skin-sheriff", "chroma-sheriff"));
+        assert_eq!(me.phantom, None, "skin without chroma: not a known skin");
+        assert_eq!(me.operator, None);
+    }
+
+    fn fixture(name: &str) -> String {
+        let path = format!(
+            "{}/../crates/riot/tests/fixtures/{name}",
+            env!("CARGO_MANIFEST_DIR")
+        );
+        std::fs::read_to_string(path).unwrap_or_else(|e| panic!("missing fixture {name}: {e}"))
+    }
+
+    #[test]
+    fn pregame_loadouts_by_subject() {
+        // Built from techchrism's real pre-game capture: 3 entries, the
+        // last without a `Subject`.
+        let resp: PregameLoadoutsResponse =
+            serde_json::from_str(&fixture("pregame_loadouts.json")).unwrap();
+        assert_eq!(resp.loadouts.len(), 3);
+        let loadouts = extract_pregame_loadouts(&resp);
+        assert_eq!(
+            loadouts.len(),
+            2,
+            "the entry without a Subject is skipped, not matched by position"
+        );
+        let first = &loadouts["a6bbe1f1-a9be-457b-9b58-35db705f7499"];
+        assert_eq!(
+            first.vandal,
+            skin(
+                "30388628-42f0-606c-82c0-73ad43de997f",
+                "b2a065c0-4632-ccaa-f496-7681dc2a6185"
+            )
         );
         assert_eq!(
-            me.sheriff.as_deref(),
-            Some("0d3c5ca0-49a2-eef8-d01a-2e9dd8d5d574")
+            first.phantom,
+            skin(
+                "11111111-1111-4111-8111-111111111111",
+                "11111111-1111-4111-8111-111111111112"
+            )
         );
-        assert_eq!(me.phantom, None);
-        assert_eq!(me.operator, None);
+        assert_eq!(
+            first.sheriff,
+            skin(
+                "33333333-3333-4333-8333-333333333331",
+                "33333333-3333-4333-8333-333333333332"
+            )
+        );
+        assert_eq!(first.operator, None, "not in this entry");
+        // The second subject has other skins on other weapons.
+        let second = &loadouts["b7c1a2d3-4e5f-4a6b-8c7d-9e0f1a2b3c4d"];
+        assert_eq!(
+            second.vandal,
+            skin(
+                "44444444-4444-4444-8444-444444444441",
+                "44444444-4444-4444-8444-444444444442"
+            )
+        );
+        assert_eq!(
+            second.operator,
+            skin(
+                "55555555-5555-4555-8555-555555555551",
+                "55555555-5555-4555-8555-555555555552"
+            )
+        );
+        assert_eq!((&second.phantom, &second.sheriff), (&None, &None));
+    }
+
+    #[test]
+    fn pregame_loadouts_invalid_is_empty() {
+        let mut value: Value = serde_json::from_str(&fixture("pregame_loadouts.json")).unwrap();
+        value["LoadoutsValid"] = json!(false);
+        let resp: PregameLoadoutsResponse = serde_json::from_value(value).unwrap();
+        assert!(
+            extract_pregame_loadouts(&resp).is_empty(),
+            "Riot nulls the payload until it is valid: nothing is read"
+        );
+        let resp: PregameLoadoutsResponse =
+            serde_json::from_value(json!({"Loadouts": [], "LoadoutsValid": true})).unwrap();
+        assert!(extract_pregame_loadouts(&resp).is_empty());
+    }
+
+    #[test]
+    fn pregame_loadouts_gate() {
+        let allies: Vec<String> = ["me", "a", "b"].map(String::from).into();
+        let have = |who: &[&str]| -> HashMap<String, RawLoadout> {
+            who.iter()
+                .map(|p| (p.to_string(), RawLoadout::default()))
+                .collect()
+        };
+        // Nothing known, no valid answer yet: ask.
+        assert!(want_pregame_loadouts(&allies, &have(&[]), false));
+        // Some ally still missing: ask.
+        assert!(want_pregame_loadouts(&allies, &have(&["me", "a"]), false));
+        // A valid answer was seen: never again, even with allies missing.
+        assert!(!want_pregame_loadouts(&allies, &have(&["me"]), true));
+        assert!(!want_pregame_loadouts(&allies, &have(&[]), true));
+        // Everyone already has a loadout: nothing to ask for.
+        assert!(!want_pregame_loadouts(
+            &allies,
+            &have(&["me", "a", "b"]),
+            false
+        ));
+        // No allies (an empty roster) has nothing to ask about.
+        assert!(!want_pregame_loadouts(&[], &have(&[]), false));
+    }
+
+    #[test]
+    fn extract_player_loadout_reads_four_guns() {
+        // The real capture (techchrism `player-loadout/response.json`) with
+        // the first four `ID`s set to the four weapons — the Sheriff's in
+        // upper case, to prove matching ignores case.
+        let resp: PlayerLoadoutResponse =
+            serde_json::from_str(&fixture("player_loadout.json")).unwrap();
+        let loadout = extract_player_loadout(&resp);
+        let gun = |i: usize| {
+            skin(
+                &resp.guns[i].skin_id.to_ascii_lowercase(),
+                &resp.guns[i].chroma_id.to_ascii_lowercase(),
+            )
+        };
+        assert_eq!(loadout.vandal, gun(0));
+        assert_eq!(loadout.phantom, gun(1));
+        assert_eq!(loadout.operator, gun(2));
+        assert_eq!(loadout.sheriff, gun(3), "the upper-case Sheriff id matches");
+        assert_eq!(
+            loadout.vandal,
+            skin(
+                "19af9724-ad73-4d6b-b103-c150ce5f03da",
+                "f831fb66-b68e-4dab-acd1-d48a29bf00f4"
+            )
+        );
+
+        // Ids are stored lower-case even when Riot sends them upper-case,
+        // and a weapon that isn't in the response is `None`.
+        let resp: PlayerLoadoutResponse = serde_json::from_value(json!({
+            "Subject": "me",
+            "Guns": [
+                {"ID": VANDAL.to_uppercase(), "SkinID": "AAAAAAAA-0000-0000-0000-000000000001",
+                 "ChromaID": "BBBBBBBB-0000-0000-0000-000000000001"},
+                // A gun without a skin or chroma id is unknown too.
+                {"ID": PHANTOM, "SkinID": "", "ChromaID": "cccccccc-0000-0000-0000-000000000001"},
+                {"ID": "2f59173c-4bed-b6c3-2191-dea9b58be9c7", "SkinID": "s", "ChromaID": "c"}
+            ]
+        }))
+        .unwrap();
+        let loadout = extract_player_loadout(&resp);
+        assert_eq!(
+            loadout.vandal,
+            skin(
+                "aaaaaaaa-0000-0000-0000-000000000001",
+                "bbbbbbbb-0000-0000-0000-000000000001"
+            )
+        );
+        assert_eq!(
+            (&loadout.phantom, &loadout.operator, &loadout.sheriff),
+            (&None, &None, &None)
+        );
     }
 
     #[test]

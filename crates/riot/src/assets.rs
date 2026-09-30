@@ -12,8 +12,17 @@
 //!   `/v1/weapons/skinchromas/{uuid}` directly instead — one small
 //!   response (~400 bytes of JSON) per chroma actually seen, cached
 //!   forever after that.
+//! - `weapons/skins` (1400+ entries) are never bulk-fetched either: a skin
+//!   a player has equipped is fetched by uuid
+//!   (`/v1/weapons/skins/{uuid}`, [`AssetCache::weapon_skin`]), reduced to
+//!   its name, content tier and chroma names (~300 bytes) and kept on disk
+//!   and in memory forever after. The five content tiers *are* a bulk table
+//!   (`/v1/contenttiers`, a few hundred bytes).
 //! - `playercards` (1016 entries) are likewise never bulk-fetched — only
-//!   `/v1/playercards/{uuid}` for cards actually seen in a roster.
+//!   `/v1/playercards/{uuid}` for cards actually seen in a roster. A
+//!   playercard json cached before `largeArt` was read has no
+//!   `large_art`; the first [`AssetKind::CardLarge`] request for such a
+//!   card refetches it once (R107).
 //! - Only the *latest* competitive-tier set is kept on disk (the full
 //!   `/v1/competitivetiers` response has one table per episode revision;
 //!   older ones are discarded after picking the last array entry, per the
@@ -28,8 +37,10 @@
 //!   task-5a-report.md): agent `displayIcon` (1024x1024, shown as a ≤64px
 //!   head icon) and map `splash` (1920x1080, shown ≤1000px wide). Rank
 //!   tier icons (256x256) are downscaled too, for the same reason at a
-//!   smaller scale. Every other kind is already close to its display size
-//!   and is cached as-is.
+//!   smaller scale, and so are the player card's `largeArt` (160px wide), the
+//!   weapon-skin renders (256px wide, shown at most 108x38) and the
+//!   content-tier icons (32px, shown at 13x13). Every other kind is already
+//!   close to its display size and is cached as-is.
 //!
 //! **Fix-round 1 hardening** (see task-5a-report.md's fix-round section
 //! for the full findings this responds to):
@@ -65,6 +76,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use opd1_core::model::WeaponSkin;
 use opd1_core::stats::Act;
 
 use crate::to_core::{self, SeasonEntry};
@@ -165,6 +177,10 @@ pub enum AssetKind {
     CardSmall,
     /// `/v1/playercards/{uuid}`'s `wideArt`. `id` = player-card uuid.
     CardWide,
+    /// `/v1/playercards/{uuid}`'s `largeArt`, downscaled to 160px wide.
+    /// `id` = player-card uuid. A card without `largeArt` has no image of
+    /// this kind (`NotFound`): it never falls back to another kind.
+    CardLarge,
     /// The latest competitive-tier set's `tiers[].largeIcon` — chosen over
     /// `smallIcon` since both are the same 256x256 resolution today and
     /// `largeIcon` matches a prominent profile-card-style rank display
@@ -177,9 +193,13 @@ pub enum AssetKind {
     MapList,
     /// `/v1/maps`' `splash`. `id` = map uuid.
     MapSplash,
-    /// `/v1/weapons/skinchromas/{uuid}`'s `fullRender`. `id` = chroma
-    /// uuid.
+    /// `/v1/weapons/skinchromas/{uuid}`'s `fullRender`, downscaled to 256px
+    /// wide. `id` = chroma uuid.
     Chroma,
+    /// `/v1/contenttiers`' `displayIcon` (the Select / Deluxe / Premium /
+    /// Exclusive / Ultra badge), downscaled to 32px. `id` = content-tier
+    /// uuid (a skin's `contentTierUuid`).
+    ContentTier,
 }
 
 impl AssetKind {
@@ -188,10 +208,12 @@ impl AssetKind {
             AssetKind::Agent => "agent",
             AssetKind::CardSmall => "cardSmall",
             AssetKind::CardWide => "cardWide",
+            AssetKind::CardLarge => "cardLarge",
             AssetKind::Tier => "tier",
             AssetKind::MapList => "mapList",
             AssetKind::MapSplash => "mapSplash",
             AssetKind::Chroma => "chroma",
+            AssetKind::ContentTier => "contentTier",
         }
     }
 
@@ -202,10 +224,11 @@ impl AssetKind {
         match self {
             AssetKind::Agent => Some(128),      // 1024px source, shown <=64px
             AssetKind::Tier => Some(128),       // 256px source, shown small
+            AssetKind::CardLarge => Some(160),  // shown <=109px wide; 160 covers 150% DPI (R79)
             AssetKind::MapSplash => Some(1000), // 1920px source, shown <=1000px wide
-            AssetKind::CardSmall | AssetKind::CardWide | AssetKind::MapList | AssetKind::Chroma => {
-                None
-            }
+            AssetKind::Chroma => Some(256),     // wide render, shown <=108x38 (R79)
+            AssetKind::ContentTier => Some(32), // 256px source, shown 13x13
+            AssetKind::CardSmall | AssetKind::CardWide | AssetKind::MapList => None,
         }
     }
 }
@@ -221,9 +244,11 @@ fn validate_id(kind: AssetKind, id: &str) -> Result<(), AssetError> {
         AssetKind::Agent
         | AssetKind::CardSmall
         | AssetKind::CardWide
+        | AssetKind::CardLarge
         | AssetKind::MapList
         | AssetKind::MapSplash
-        | AssetKind::Chroma => is_valid_uuid(id),
+        | AssetKind::Chroma
+        | AssetKind::ContentTier => is_valid_uuid(id),
     };
     if ok {
         Ok(())
@@ -304,6 +329,12 @@ struct TierEntry {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+struct ContentTierEntry {
+    uuid: String,
+    display_icon: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct Manifest {
     version: String,
 }
@@ -314,17 +345,138 @@ struct Tables {
     maps: Vec<MapEntry>,
     tiers: Vec<TierEntry>,
     seasons: Vec<SeasonEntry>,
+    /// Empty when loaded from a disk cache written before content tiers
+    /// existed (see [`AssetCache::disk_cache_matches`]).
+    content_tiers: Vec<ContentTierEntry>,
+}
+
+impl Tables {
+    /// `TablesNotLoaded` while nothing was ever fetched or read from disk.
+    fn ensure_loaded(&self) -> Result<(), AssetError> {
+        if self.agents.is_empty()
+            && self.maps.is_empty()
+            && self.tiers.is_empty()
+            && self.seasons.is_empty()
+        {
+            return Err(AssetError::TablesNotLoaded);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PlayerCardEntry {
     small_art: String,
     wide_art: String,
+    /// `None` only in a json cached before `largeArt` was read (R107).
+    /// A freshly fetched entry always has it: `Some("")` records "the
+    /// card has no large art", so that isn't refetched on every request.
+    #[serde(default)]
+    large_art: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ChromaEntry {
     full_render: String,
+}
+
+/// One skin chroma, reduced to what a loadout shows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SkinChroma {
+    /// Lower-case uuid.
+    uuid: String,
+    /// The `X` of `(Variant N X)`; `None` for the base chroma.
+    name: Option<String>,
+}
+
+/// One weapon skin as `/v1/weapons/skins/{uuid}` names it, reduced to
+/// ~300 bytes: cached on disk (`skins/{uuid}.json`) and in memory forever.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SkinEntry {
+    /// The display name minus the trailing weapon word.
+    name: String,
+    tier_id: Option<String>,
+    chromas: Vec<SkinChroma>,
+}
+
+impl SkinEntry {
+    /// The skin with `chroma_id` (lower-case) equipped. A chroma the skin
+    /// doesn't list is still that skin, without a variant name.
+    fn weapon_skin(&self, chroma_id: &str) -> WeaponSkin {
+        WeaponSkin {
+            chroma_id: chroma_id.to_string(),
+            skin_name: self.name.clone(),
+            chroma_name: self
+                .chromas
+                .iter()
+                .find(|c| c.uuid == chroma_id)
+                .and_then(|c| c.name.clone()),
+            tier_id: self.tier_id.clone(),
+        }
+    }
+
+    fn from_response(data: &Value) -> Option<Self> {
+        let display_name = str_field(data, "displayName")?;
+        let chromas = data
+            .get("chromas")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|c| {
+                        Some(SkinChroma {
+                            uuid: str_field(c, "uuid")?.to_ascii_lowercase(),
+                            name: chroma_variant_name(&str_field(c, "displayName")?),
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Some(Self {
+            name: skin_display_name(&display_name),
+            tier_id: str_field(data, "contentTierUuid").filter(|t| !t.is_empty()),
+            chromas,
+        })
+    }
+}
+
+/// The four weapons a loadout shows; a skin's display name ends in its
+/// weapon's name (`"Reaver Vandal"`).
+const WEAPON_WORDS: [&str; 4] = ["Vandal", "Phantom", "Operator", "Sheriff"];
+
+/// A skin's display name minus the trailing weapon word (`"Reaver Vandal"`
+/// -> `"Reaver"`), kept as is when it doesn't end in one of the four
+/// weapons or nothing would be left.
+fn skin_display_name(display: &str) -> String {
+    let name = display.trim();
+    for word in WEAPON_WORDS {
+        let Some(split) = name.len().checked_sub(word.len() + 1) else {
+            continue;
+        };
+        if name.is_char_boundary(split)
+            && name[split..].starts_with(' ')
+            && name[split + 1..].eq_ignore_ascii_case(word)
+        {
+            let rest = name[..split].trim_end();
+            if !rest.is_empty() {
+                return rest.to_string();
+            }
+        }
+    }
+    name.to_string()
+}
+
+/// The `X` of a chroma display name's `(Variant N X)` (`"Reaver Vandal
+/// Level 4\r\n(Variant 1 Red)"` -> `"Red"`); `None` for the base chroma
+/// (named like the skin) and for anything else.
+fn chroma_variant_name(display: &str) -> Option<String> {
+    let rest = &display[display.find("(Variant ")? + "(Variant ".len()..];
+    let inner = &rest[..rest.find(')')?];
+    let (number, name) = inner.trim_start().split_once(' ')?;
+    if number.is_empty() || !number.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
 }
 
 // ---------------------------------------------------------------------
@@ -342,6 +494,13 @@ pub struct AssetCache {
     dir: PathBuf,
     tables: RwLock<Tables>,
     image_locks: ImageLocks,
+    /// Every weapon skin seen so far (lower-case skin uuid -> its reduced
+    /// entry): what [`AssetCache::weapon_skin_cached`] answers from, with
+    /// no filesystem access (R37). Filled by [`AssetCache::weapon_skin`].
+    skins: RwLock<HashMap<String, SkinEntry>>,
+    /// Per-skin async locks, so concurrent [`AssetCache::weapon_skin`]
+    /// calls for one skin make one request.
+    skin_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
 }
 
 impl AssetCache {
@@ -380,6 +539,8 @@ impl AssetCache {
             dir: cache_dir,
             tables: RwLock::new(Tables::default()),
             image_locks: Mutex::new(HashMap::new()),
+            skins: RwLock::new(HashMap::new()),
+            skin_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -389,7 +550,10 @@ impl AssetCache {
     /// file is present), loads the cached tables into memory without
     /// another network call and returns `Ok(false)`. Otherwise re-fetches
     /// every bulk table, persists them (trimmed — see the module docs),
-    /// and returns `Ok(true)`.
+    /// and returns `Ok(true)`. A current cache that only lacks
+    /// `contenttiers.json` (written before content tiers existed) fetches
+    /// just that table (`Ok(true)`); if that one fetch fails the other
+    /// four load from disk (`Ok(false)`) and the next call tries again.
     ///
     /// Fix-round item 6: if `/v1/version` itself can't be reached at all
     /// (network down), this falls back to whatever's on disk — as long as
@@ -426,10 +590,42 @@ impl AssetCache {
             return Ok(false);
         }
 
+        // A cache from before content tiers existed: its four tables are
+        // current, only `contenttiers.json` is missing. Load them from disk
+        // and fetch just `/v1/contenttiers`, not all five tables.
+        if self.only_content_tiers_missing(&version) {
+            let mut tables = blocking({
+                let dir = self.dir.clone();
+                move || load_tables_from_disk_sync(&dir)
+            })
+            .await?;
+            // A failed fetch keeps the four tables (no content-tier icons
+            // yet, like the offline fallback): the session isn't left
+            // without tables, and the file stays missing for the next try.
+            let content_tiers = match self.fetch_content_tiers().await {
+                Ok(content_tiers) => content_tiers,
+                Err(e) => {
+                    log::warn!("content tiers fetch failed, keeping the cached tables: {e}");
+                    *self.tables.write().unwrap() = tables;
+                    return Ok(false);
+                }
+            };
+            blocking({
+                let dir = self.dir.clone();
+                let content_tiers = content_tiers.clone();
+                move || write_json(&dir.join("contenttiers.json"), &content_tiers)
+            })
+            .await?;
+            tables.content_tiers = content_tiers;
+            *self.tables.write().unwrap() = tables;
+            return Ok(true);
+        }
+
         let agents = self.fetch_agents().await?;
         let maps = self.fetch_maps().await?;
         let tiers = self.fetch_latest_tiers().await?;
         let seasons = self.fetch_seasons().await?;
+        let content_tiers = self.fetch_content_tiers().await?;
 
         blocking({
             let dir = self.dir.clone();
@@ -437,12 +633,14 @@ impl AssetCache {
             let maps = maps.clone();
             let tiers = tiers.clone();
             let seasons = seasons.clone();
+            let content_tiers = content_tiers.clone();
             move || {
                 std::fs::create_dir_all(&dir).map_err(io_err)?;
                 write_json(&dir.join("agents.json"), &agents)?;
                 write_json(&dir.join("maps.json"), &maps)?;
                 write_json(&dir.join("tiers.json"), &tiers)?;
                 write_json(&dir.join("seasons.json"), &seasons)?;
+                write_json(&dir.join("contenttiers.json"), &content_tiers)?;
                 write_json(&dir.join("manifest.json"), &Manifest { version })?;
                 Ok(())
             }
@@ -454,6 +652,7 @@ impl AssetCache {
             maps,
             tiers,
             seasons,
+            content_tiers,
         };
         Ok(true)
     }
@@ -462,8 +661,20 @@ impl AssetCache {
     /// enough that this isn't routed through [`blocking`] (unlike the
     /// larger reads/writes elsewhere in this module).
     fn disk_cache_matches(&self, version: &str) -> bool {
-        let manifest_path = self.dir.join("manifest.json");
-        let Ok(bytes) = std::fs::read(&manifest_path) else {
+        self.core_cache_matches(version) && self.dir.join("contenttiers.json").is_file()
+    }
+
+    /// The cache is current (same version, the four core tables on disk)
+    /// but has no `contenttiers.json`: a cache written before content tiers
+    /// existed. The offline fallback in `refresh_tables` doesn't need the
+    /// file (`tables_files_exist`).
+    fn only_content_tiers_missing(&self, version: &str) -> bool {
+        self.core_cache_matches(version) && !self.dir.join("contenttiers.json").is_file()
+    }
+
+    /// The manifest names `version` and the four core tables are on disk.
+    fn core_cache_matches(&self, version: &str) -> bool {
+        let Ok(bytes) = std::fs::read(self.dir.join("manifest.json")) else {
             return false;
         };
         let Ok(manifest) = serde_json::from_slice::<Manifest>(&bytes) else {
@@ -472,6 +683,9 @@ impl AssetCache {
         manifest.version == version && self.tables_files_exist()
     }
 
+    /// The tables every feature needs (names, maps, tiers, acts): enough to
+    /// load from disk offline. `contenttiers.json` is checked separately,
+    /// where a missing one must trigger a refetch.
     fn tables_files_exist(&self) -> bool {
         ["agents.json", "maps.json", "tiers.json", "seasons.json"]
             .iter()
@@ -559,17 +773,28 @@ impl AssetCache {
         serde_json::from_value(data).map_err(|e| AssetError::Decode(e.to_string()))
     }
 
+    /// `/v1/contenttiers`: the five skin editions and their badge icons.
+    async fn fetch_content_tiers(&self) -> Result<Vec<ContentTierEntry>, AssetError> {
+        let value = self
+            .get_json(&format!("{}/v1/contenttiers", self.base))
+            .await?;
+        let data = data_array(&value)?;
+        Ok(data
+            .iter()
+            .filter_map(|t| {
+                Some(ContentTierEntry {
+                    uuid: str_field(t, "uuid")?.to_ascii_lowercase(),
+                    display_icon: str_field(t, "displayIcon")?,
+                })
+            })
+            .collect())
+    }
+
     // -- UI-facing lookups (require refresh_tables() to have run) ------
 
     fn tables_snapshot(&self) -> Result<Tables, AssetError> {
         let tables = self.tables.read().unwrap();
-        if tables.agents.is_empty()
-            && tables.maps.is_empty()
-            && tables.tiers.is_empty()
-            && tables.seasons.is_empty()
-        {
-            return Err(AssetError::TablesNotLoaded);
-        }
+        tables.ensure_loaded()?;
         Ok(tables.clone())
     }
 
@@ -622,8 +847,13 @@ impl AssetCache {
     /// table: "match by mapUrl"). `Ok(None)` when no cached map matches —
     /// distinct from [`AssetError::TablesNotLoaded`], which means the
     /// tables were never even fetched.
+    ///
+    /// Searches under the read lock and clones only the matched uuid: this
+    /// runs once per remembered card on every publish, so it must not copy
+    /// the whole [`Tables`] (unlike [`Self::tables_snapshot`]).
     pub fn map_uuid_for_path(&self, riot_map_path: &str) -> Result<Option<String>, AssetError> {
-        let tables = self.tables_snapshot()?;
+        let tables = self.tables.read().unwrap();
+        tables.ensure_loaded()?;
         Ok(tables
             .maps
             .iter()
@@ -736,7 +966,17 @@ impl AssetCache {
             }
             AssetKind::CardSmall => Ok(self.fetch_or_load_playercard(id).await?.small_art),
             AssetKind::CardWide => Ok(self.fetch_or_load_playercard(id).await?.wide_art),
+            AssetKind::CardLarge => self.large_art_url(id).await,
             AssetKind::Chroma => Ok(self.fetch_or_load_chroma(id).await?.full_render),
+            AssetKind::ContentTier => {
+                let tables = self.tables_snapshot()?;
+                tables
+                    .content_tiers
+                    .iter()
+                    .find(|t| t.uuid.eq_ignore_ascii_case(id))
+                    .map(|t| t.display_icon.clone())
+                    .ok_or(AssetError::NotFound)
+            }
         }
     }
 
@@ -756,6 +996,12 @@ impl AssetCache {
         if let Some(entry) = cached {
             return Ok(entry);
         }
+        self.fetch_playercard(uuid).await
+    }
+
+    /// Always hits `/v1/playercards/{uuid}` and rewrites the cached json.
+    async fn fetch_playercard(&self, uuid: &str) -> Result<PlayerCardEntry, AssetError> {
+        let path = self.dir.join("playercards").join(format!("{uuid}.json"));
 
         let value = self
             .get_json(&format!("{}/v1/playercards/{uuid}", self.base))
@@ -768,6 +1014,8 @@ impl AssetCache {
                 .ok_or_else(|| AssetError::Decode("missing smallArt".to_string()))?,
             wide_art: str_field(data, "wideArt")
                 .ok_or_else(|| AssetError::Decode("missing wideArt".to_string()))?,
+            // A card without `largeArt` must not break its small/wide art.
+            large_art: Some(str_field(data, "largeArt").unwrap_or_default()),
         };
 
         blocking({
@@ -777,6 +1025,20 @@ impl AssetCache {
         })
         .await?;
         Ok(entry)
+    }
+
+    /// R107: the `largeArt` url. A cached entry that predates `largeArt`
+    /// is refetched once (which rewrites the cache, so it can't repeat);
+    /// a card that still has none is `NotFound` — never another image kind.
+    async fn large_art_url(&self, uuid: &str) -> Result<String, AssetError> {
+        let mut entry = self.fetch_or_load_playercard(uuid).await?;
+        if entry.large_art.is_none() {
+            entry = self.fetch_playercard(uuid).await?;
+        }
+        entry
+            .large_art
+            .filter(|url| !url.is_empty())
+            .ok_or(AssetError::NotFound)
     }
 
     /// `/v1/weapons/skinchromas/{uuid}` — the single-chroma endpoint, so
@@ -813,6 +1075,87 @@ impl AssetCache {
         })
         .await?;
         Ok(entry)
+    }
+
+    // -- weapon skins -----------------------------------------------------
+
+    /// The equipped skin named from memory only, or `None` when it wasn't
+    /// resolved yet (or an id is malformed): no filesystem, no network, so
+    /// it is safe on the async runtime (R37). [`Self::weapon_skin`] fills
+    /// it.
+    pub fn weapon_skin_cached(&self, skin_id: &str, chroma_id: &str) -> Option<WeaponSkin> {
+        if !is_valid_uuid(skin_id) || !is_valid_uuid(chroma_id) {
+            return None;
+        }
+        let skins = self.skins.read().unwrap();
+        skins
+            .get(&skin_id.to_ascii_lowercase())
+            .map(|skin| skin.weapon_skin(&chroma_id.to_ascii_lowercase()))
+    }
+
+    /// The equipped skin with its names (R83, R97): the skin's name minus
+    /// the weapon word, the chroma's variant name, and the content tier.
+    /// Reads the skin's cached JSON from disk (on the blocking pool), else
+    /// fetches `/v1/weapons/skins/{skin_id}` once and caches it; either way
+    /// it lands in the memory map [`Self::weapon_skin_cached`] answers
+    /// from. A failed fetch is not cached: the next call tries again.
+    /// Malformed ids are `NotFound` before anything is built or requested.
+    pub async fn weapon_skin(
+        &self,
+        skin_id: &str,
+        chroma_id: &str,
+    ) -> Result<WeaponSkin, AssetError> {
+        if !is_valid_uuid(skin_id) || !is_valid_uuid(chroma_id) {
+            return Err(AssetError::NotFound);
+        }
+        let (skin, chroma) = (skin_id.to_ascii_lowercase(), chroma_id.to_ascii_lowercase());
+        if let Some(found) = self.weapon_skin_cached(&skin, &chroma) {
+            return Ok(found);
+        }
+
+        let lock = self.skin_lock(&skin);
+        let _guard = lock.lock().await;
+        // Another caller may have just filled it while this one waited.
+        if let Some(found) = self.weapon_skin_cached(&skin, &chroma) {
+            return Ok(found);
+        }
+
+        let path = self.dir.join("skins").join(format!("{skin}.json"));
+        let from_disk: Option<SkinEntry> = blocking({
+            let path = path.clone();
+            move || Ok(read_json(&path).ok())
+        })
+        .await?;
+        let entry = match from_disk {
+            Some(entry) => entry,
+            None => {
+                let value = self
+                    .get_json(&format!("{}/v1/weapons/skins/{skin}", self.base))
+                    .await?;
+                let entry = value
+                    .get("data")
+                    .and_then(SkinEntry::from_response)
+                    .ok_or_else(|| AssetError::Decode("missing skin displayName".to_string()))?;
+                blocking({
+                    let entry = entry.clone();
+                    move || write_json(&path, &entry)
+                })
+                .await?;
+                entry
+            }
+        };
+        let found = entry.weapon_skin(&chroma);
+        self.skins.write().unwrap().insert(skin, entry);
+        Ok(found)
+    }
+
+    fn skin_lock(&self, skin: &str) -> Arc<tokio::sync::Mutex<()>> {
+        self.skin_locks
+            .lock()
+            .unwrap()
+            .entry(skin.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 
     /// Downloads image bytes via the longer-timeout `image_client`
@@ -884,6 +1227,8 @@ fn load_tables_from_disk_sync(dir: &Path) -> Result<Tables, AssetError> {
         maps: read_json(&dir.join("maps.json"))?,
         tiers: read_json(&dir.join("tiers.json"))?,
         seasons: read_json(&dir.join("seasons.json"))?,
+        // Missing in a cache from before content tiers: none known yet.
+        content_tiers: read_json(&dir.join("contenttiers.json")).unwrap_or_default(),
     })
 }
 
@@ -945,7 +1290,9 @@ mod tests {
             AssetKind::Agent,
             AssetKind::CardSmall,
             AssetKind::CardWide,
+            AssetKind::CardLarge,
             AssetKind::Chroma,
+            AssetKind::ContentTier,
             AssetKind::MapList,
             AssetKind::MapSplash,
         ] {
@@ -961,6 +1308,46 @@ mod tests {
                 validate_id(kind, "a/../../b"),
                 Err(AssetError::NotFound)
             ));
+        }
+    }
+
+    #[test]
+    fn skin_name_drops_the_trailing_weapon_word() {
+        for (display, want) in [
+            ("Reaver Vandal", "Reaver"),
+            ("Standard Vandal", "Standard"),
+            ("Oni Phantom", "Oni"),
+            ("Sentinels of Light Operator", "Sentinels of Light"),
+            ("Prime//2.0 Sheriff", "Prime//2.0"),
+            // Case-insensitive, and stray whitespace from the API is trimmed.
+            ("Glitchpop vandal\r\n", "Glitchpop"),
+            // Not ending in one of the four weapons: kept as is.
+            ("Sheriff of Nottingham", "Sheriff of Nottingham"),
+            ("Reaver Guardian", "Reaver Guardian"),
+            // Nothing left after the weapon word: kept as is.
+            ("Vandal", "Vandal"),
+            ("", ""),
+        ] {
+            assert_eq!(skin_display_name(display), want, "{display:?}");
+        }
+    }
+
+    #[test]
+    fn chroma_name_is_the_variant_text_or_none() {
+        for (display, want) in [
+            ("Reaver Vandal Level 4\r\n(Variant 1 Red)", Some("Red")),
+            ("Neptune Odin Level 3\n(Variant 1 Black)", Some("Black")),
+            ("Some Skin (Variant 12 Deep Blue)", Some("Deep Blue")),
+            // The base chroma is named like the skin.
+            ("Reaver Vandal", None),
+            ("", None),
+            // No variant name after the number.
+            ("Skin (Variant 3)", None),
+            ("Skin (Variant 3 )", None),
+            // Only `(Variant N X)` counts.
+            ("Skin (Special Edition)", None),
+        ] {
+            assert_eq!(chroma_variant_name(display).as_deref(), want, "{display:?}");
         }
     }
 

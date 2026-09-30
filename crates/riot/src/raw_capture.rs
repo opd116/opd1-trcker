@@ -88,6 +88,13 @@ pub(crate) fn endpoint_key(path: &str) -> String {
         };
     }
 
+    // R90: `/personalization/v2/players/{puuid}/playerloadout`.
+    if path_only.starts_with("/personalization/v2/players/")
+        && path_only.ends_with("/playerloadout")
+    {
+        return "player_loadout".to_string();
+    }
+
     match path_only {
         "/chat/v4/presences" => return "presences".to_string(),
         "/name-service/v2/players" => return "names".to_string(),
@@ -304,6 +311,21 @@ mod tests {
         assert_eq!(endpoint_key("/parties/v1/parties/abc"), "party");
         assert_eq!(endpoint_key("/chat/v4/presences"), "presences");
         assert_eq!(endpoint_key("/name-service/v2/players"), "names");
+    }
+
+    #[test]
+    fn endpoint_key_names_the_player_loadout() {
+        // R90: `dump_raw` writes it as `player_loadout.json`.
+        assert_eq!(
+            endpoint_key("/personalization/v2/players/abc/playerloadout"),
+            "player_loadout"
+        );
+        assert_eq!(
+            endpoint_key(
+                "/personalization/v2/players/123e4567-e89b-12d3-a456-426614174000/playerloadout"
+            ),
+            "player_loadout"
+        );
     }
 
     #[test]

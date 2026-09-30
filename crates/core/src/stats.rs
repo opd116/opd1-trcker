@@ -36,6 +36,10 @@ pub struct SeasonInfo {
     /// `WinsByTier`. The highest tier here with at least one win is the
     /// act's contribution to [`peak`].
     pub wins_by_tier: HashMap<u8, u32>,
+    /// Wins in the act with placement games counted: Riot's
+    /// `NumberOfWinsWithPlacements`, or `NumberOfWins` when the response
+    /// has no such key. It is the numerator of the card's act win rate and
+    /// `actWins`; `number_of_games` is the matching denominator.
     pub number_of_wins: u32,
     pub number_of_games: u32,
 }

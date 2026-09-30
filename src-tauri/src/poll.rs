@@ -7,15 +7,18 @@
 //!   │  (fail → back off 5s,10s,20s,40s,60s; a rewritten    │ 5 presence errors /
 //!   │   lockfile retries at once — R47)                    │ VALORANT (re)started
 //!   ▼                                                      │ under a game-less
-//! Connected: own Riot ID from /chat/v1/session (R43)       │ session (R46)
+//! Connected: own Riot ID from /chat/v1/session (R43),      │ session (R46)
+//!   own loadout once (R90)                                 │
 //!   presence (local) every 2s (5s while closed) ───────────┘
 //!   │  own VALORANT presence absent twice → stage Closed (own card from DB)
 //!   │  view_stage(sessionLoopState, queueId) change → plan_transition():
 //!   │     MENUS   → party roster   (+ re-fetch on partyId/partySize change)
-//!   │     PREGAME → ally team      (+ re-poll every 3s for agent picks, R39)
+//!   │     PREGAME → ally team      (+ re-poll every 3s for agent picks, R39;
+//!   │                               ally skins until a valid answer, R83)
 //!   │     INGAME  → both teams + loadouts
 //!   │     PREGAME/INGAME in a free-for-all queue → stays MENUS (R41)
-//!   │     INGAME→MENUS = match end: back to Lobby + post-match follow-up
+//!   │     INGAME→MENUS = match end: back to Lobby + post-match follow-up,
+//!   │        and the own-history backfill starts (R101; also on connect)
 //!   └─ roster → cached-first cards (DB) → emit → worker syncs
 //!      self → party → allies → enemies, re-emitting after each player
 //! ```
@@ -37,14 +40,15 @@ use opd1_riot::{RiotError, RiotSession};
 
 use crate::logbuf::short;
 use crate::roster::{
-    connect_retry_delay, extract_loadouts, from_coregame, from_party, from_pregame, is_ffa_roster,
-    order_players, party_key, plan_transition, view_stage, GameVerdict, GameWatch, PartyKey,
-    RosterFetch, RosterPlayer,
+    connect_retry_delay, extract_loadouts, extract_pregame_loadouts, from_coregame, from_party,
+    from_pregame, is_ffa_roster, order_players, party_key, plan_transition, view_stage,
+    want_pregame_loadouts, GameVerdict, GameWatch, PartyKey, RosterFetch, RosterPlayer,
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
 use crate::store::{
-    load_player_db, match_landed, save_player, PlayerDb, PlayerUpdate, SELF_PUUID_KEY,
+    load_player_db, match_landed, save_player, PlayerDb, SELF_LOADOUT_KEY, SELF_PUUID_KEY,
 };
+use crate::sync::BACKFILL_ANCHOR_KEY;
 
 /// Closed: how often the lockfile's existence is checked.
 const CLOSED_CHECK: Duration = Duration::from_secs(5);
@@ -65,7 +69,8 @@ const ROSTER_RETRY_MAX: Duration = Duration::from_secs(30);
 const POST_MATCH_DELAYS: [Duration; 2] = [Duration::from_secs(30), Duration::from_secs(90)];
 
 /// Why the connected tick stopped.
-enum Stop {
+#[derive(Debug)]
+pub(crate) enum Stop {
     /// Drop the session and go back to Disconnected.
     Reconnect(&'static str),
 }
@@ -84,7 +89,7 @@ pub fn start(st: Arc<AppState>) {
     });
 }
 
-struct Poller {
+pub(crate) struct Poller {
     st: Arc<AppState>,
     local_app_data: Option<PathBuf>,
     session: Option<Arc<RiotSession>>,
@@ -101,6 +106,9 @@ struct Poller {
     party_key: Option<PartyKey>,
     self_party: HashSet<String>,
     pregame_match_id: Option<String>,
+    /// Riot answered `LoadoutsValid` for the current Agent Select: the
+    /// pre-game loadouts are not asked for again (R83).
+    pregame_loadouts_valid: bool,
     next_presence: Instant,
     next_pregame: Option<Instant>,
     roster_retry: Option<(Instant, u32)>,
@@ -117,7 +125,7 @@ struct Poller {
 }
 
 impl Poller {
-    fn new(st: Arc<AppState>) -> Self {
+    pub(crate) fn new(st: Arc<AppState>) -> Self {
         let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
         if local_app_data.is_none() {
             log::warn!("LOCALAPPDATA is not set; the Riot client can't be found");
@@ -134,6 +142,7 @@ impl Poller {
             party_key: None,
             self_party: HashSet::new(),
             pregame_match_id: None,
+            pregame_loadouts_valid: false,
             next_presence: Instant::now(),
             next_pregame: None,
             roster_retry: None,
@@ -212,26 +221,44 @@ impl Poller {
         }
     }
 
-    async fn on_connected(&mut self, session: Arc<RiotSession>) {
+    pub(crate) async fn on_connected(&mut self, session: Arc<RiotSession>) {
         let me = session.self_puuid().to_string();
         log::info!("connected to the Riot client as {}", short(&me));
         self.last_connect_error = None;
-        {
+        let switched = {
             let mut live = lock(&self.st.live);
-            if live.self_puuid.as_deref() != Some(me.as_str()) {
+            let switched = live.self_puuid.as_deref() != Some(me.as_str());
+            if switched {
                 // A different account: nothing learned about the previous
                 // one's session applies.
                 live.synced.clear();
+                live.party_ready.clear();
                 live.names_attempted.clear();
                 live.self_roster = None;
                 live.self_name = None;
+                live.self_loadout = None;
+                // R101: the previous account's run (and its cursor) is not
+                // this account's.
+                live.backfill = None;
             }
             live.self_puuid = Some(me.clone());
             live.self_name_attempted = false;
-        }
+            switched
+        };
         let key_value = me.clone();
         self.st
-            .db(move |repo| repo.set_state(SELF_PUUID_KEY, &key_value))
+            .db(move |repo| {
+                repo.set_state(SELF_PUUID_KEY, &key_value)?;
+                if switched {
+                    // The previous account's loadout copy must not show for
+                    // this one: no key is no stored loadout. Same for the
+                    // backfill anchor: another account's history can't
+                    // bound this one's (no anchor is a first run).
+                    repo.delete_state(SELF_LOADOUT_KEY)?;
+                    repo.delete_state(BACKFILL_ANCHOR_KEY)?;
+                }
+                Ok(())
+            })
             .await;
         self.st.set_session(Some(session.clone()));
         self.session = Some(session.clone());
@@ -240,6 +267,12 @@ impl Poller {
         self.next_presence = Instant::now();
         // R43: the user's own Riot ID, from the local chat session.
         let _ = crate::sync::fetch_self_name(&self.st, &session).await;
+        // R90: the user's own equipped skins, once per connect (one
+        // read-only call; a failure waits for the next connect).
+        let (st, s) = (self.st.clone(), session.clone());
+        tauri::async_runtime::spawn(async move {
+            let _ = crate::sync::fetch_self_loadout(&st, &s).await;
+        });
 
         // One cheap /v1/version check per client start (new patch → new
         // tables); the tables themselves only download when it changed.
@@ -252,10 +285,23 @@ impl Poller {
         // The user's own card, from the DB, while the first presence
         // arrives (closed-stage card if the game isn't up).
         self.enter_closed().await;
+        // R101: catch up on the matches played while the app was closed.
+        self.begin_backfill(&session).await;
+    }
+
+    /// R101: starts the own-history backfill from the stored anchor (a run
+    /// already in progress keeps going) and makes sure a worker will run it
+    /// — behind any live card work, which `LiveModel::next_job` puts first.
+    async fn begin_backfill(&mut self, session: &Arc<RiotSession>) {
+        crate::sync::start_backfill_run(&self.st).await;
+        self.ensure_worker(session);
     }
 
     async fn drop_session(&mut self) {
         self.stop_worker();
+        // R101: an interrupted run is dropped; the next connect starts over
+        // from the stored anchor, which only a finished run moves.
+        lock(&self.st.live).backfill = None;
         self.session = None;
         self.st.set_session(None);
         self.stage = Stage::Closed;
@@ -373,6 +419,10 @@ impl Poller {
         if presence.stage == Stage::Ingame {
             self.match_queue = presence.queue_id.clone();
         }
+        // R101: a match just ended. The raw presence, not the shown stage:
+        // a free-for-all keeps the Lobby view through the whole match, but
+        // its history entry is just as new.
+        let match_ended = self.presence_stage == Stage::Ingame && presence.stage == Stage::Menus;
         let view = view_stage(presence.stage, presence.queue_id.as_deref());
         if presence.stage != self.presence_stage {
             if view != presence.stage {
@@ -393,6 +443,11 @@ impl Poller {
                 // flags; the roster itself doesn't change mid-match.
                 self.refresh_self_party(session).await?;
             }
+        }
+        if match_ended {
+            // After the stage change above: the Lobby's roster is installed
+            // (and its worker running) before the backfill is queued.
+            self.begin_backfill(session).await;
         }
         Ok(())
     }
@@ -453,6 +508,7 @@ impl Poller {
             live.loadouts.clear();
             if t.reset_synced {
                 live.synced.clear();
+                live.party_ready.clear();
                 live.names_attempted.clear();
             }
             ended
@@ -474,6 +530,7 @@ impl Poller {
         self.stage = next;
         self.party_key = key;
         self.pregame_match_id = None;
+        self.pregame_loadouts_valid = false;
         self.next_pregame = None;
         self.roster_retry = None;
 
@@ -553,7 +610,7 @@ impl Poller {
         }
     }
 
-    async fn fetch_pregame(
+    pub(crate) async fn fetch_pregame(
         &mut self,
         session: &Arc<RiotSession>,
         me: &str,
@@ -567,6 +624,10 @@ impl Poller {
         let m = session.pregame_match(&match_id).await?;
         let roster = from_pregame(&m, me, &self.self_party);
         log::info!("agent select: {} allies", roster.len());
+        if self.pregame_match_id.as_deref() != Some(match_id.as_str()) {
+            // A new Agent Select: its loadouts start unknown.
+            self.pregame_loadouts_valid = false;
+        }
         self.pregame_match_id = Some(match_id);
         self.next_pregame = Some(Instant::now() + PREGAME_REPOLL);
         self.apply_roster(session, Stage::Pregame, Some(m.map_id), roster)
@@ -575,8 +636,9 @@ impl Poller {
     }
 
     /// R39: re-read the pregame match only to pick up agent selections
-    /// (applied in place; the worker isn't restarted).
-    async fn pregame_repoll(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
+    /// (applied in place; the worker isn't restarted). R83: on the same
+    /// re-poll the allies' skins are asked for, until Riot answers valid.
+    pub(crate) async fn pregame_repoll(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
         let Some(match_id) = self.pregame_match_id.clone() else {
             return Ok(());
         };
@@ -584,14 +646,54 @@ impl Poller {
             Ok(m) => {
                 let me = session.self_puuid().to_string();
                 let roster = from_pregame(&m, &me, &self.self_party);
+                let allies: Vec<String> = roster.iter().map(|p| p.puuid.clone()).collect();
                 self.apply_roster(session, Stage::Pregame, Some(m.map_id), roster)
                     .await;
-                Ok(())
+                self.pregame_loadouts_step(session, &match_id, &allies)
+                    .await
             }
             Err(RiotError::ClientGone) => Err(Stop::Reconnect("Riot client closed")),
             // Typically 404 right as Agent Select ends — presence moves on.
             Err(e) => {
                 log::debug!("pregame re-poll: {e}");
+                Ok(())
+            }
+        }
+    }
+
+    /// R83: at most one `pregame/.../loadouts` call per re-poll, and only
+    /// while [`want_pregame_loadouts`]: not once Riot answered
+    /// `LoadoutsValid`, nor when every ally's skins are already known. Riot
+    /// nulls the payload until the picks are in, so the first answers can
+    /// be invalid; a valid one is merged into `live.loadouts` (Details).
+    async fn pregame_loadouts_step(
+        &mut self,
+        session: &Arc<RiotSession>,
+        match_id: &str,
+        allies: &[String],
+    ) -> Result<(), Stop> {
+        let want = {
+            let live = lock(&self.st.live);
+            want_pregame_loadouts(allies, &live.loadouts, self.pregame_loadouts_valid)
+        };
+        if !want {
+            return Ok(());
+        }
+        match session.pregame_loadouts(match_id).await {
+            Ok(resp) => {
+                if resp.loadouts_valid {
+                    self.pregame_loadouts_valid = true;
+                }
+                let found = extract_pregame_loadouts(&resp);
+                if !found.is_empty() {
+                    lock(&self.st.live).loadouts.extend(found);
+                }
+                Ok(())
+            }
+            Err(RiotError::ClientGone) => Err(Stop::Reconnect("Riot client closed")),
+            // Typically 404 right as Agent Select ends — presence moves on.
+            Err(e) => {
+                log::debug!("pregame loadouts: {e}");
                 Ok(())
             }
         }
@@ -641,7 +743,8 @@ impl Poller {
 
     /// Installs a roster: cached-first slots (DB) → publish → worker.
     /// Players already on screen keep their DB bundle; only new ones are
-    /// read (and get a `players` row upsert).
+    /// read (and get a `players` row upsert), plus the user's own row when
+    /// their level is new or changed (R100).
     async fn apply_roster(
         &mut self,
         session: &Arc<RiotSession>,
@@ -656,7 +759,18 @@ impl Poller {
             let live = lock(&self.st.live);
             roster
                 .iter()
-                .filter(|p| !live.slots.iter().any(|s| s.roster.puuid == p.puuid))
+                .filter(
+                    |p| match live.slots.iter().find(|s| s.roster.puuid == p.puuid) {
+                        None => true,
+                        // R100: the user's slot is already on screen (the
+                        // Closed one from startup); their level is still
+                        // saved when it is new or changed.
+                        Some(s) => {
+                            let stored = s.db.row.as_ref().map(|r| r.account_level);
+                            p.own_level_stale(&me, stored)
+                        }
+                    },
+                )
                 .cloned()
                 .collect()
         };
@@ -669,20 +783,7 @@ impl Poller {
                 .db(move |repo| {
                     let mut out = HashMap::new();
                     for p in &new_players {
-                        save_player(
-                            repo.conn(),
-                            &PlayerUpdate {
-                                puuid: p.puuid.clone(),
-                                name: None,
-                                account_level: if p.hide_account_level {
-                                    0
-                                } else {
-                                    p.account_level
-                                },
-                                card_id: p.card_id.clone(),
-                            },
-                            now,
-                        )?;
+                        save_player(repo.conn(), &p.player_update(&me), now)?;
                         out.insert(p.puuid.clone(), load_player_db(repo, Some(&me), &p.puuid)?);
                     }
                     Ok(out)
@@ -698,13 +799,19 @@ impl Poller {
             let slots: Vec<Slot> = roster
                 .into_iter()
                 .map(|r| {
-                    let db = live
-                        .slots
-                        .iter()
-                        .find(|s| s.roster.puuid == r.puuid)
-                        .map(|s| s.db.clone())
-                        .or_else(|| loaded.remove(&r.puuid))
-                        .unwrap_or_default();
+                    let db = match live.slots.iter().find(|s| s.roster.puuid == r.puuid) {
+                        Some(s) => {
+                            let mut db = s.db.clone();
+                            // The user's freshly saved `players` row (own
+                            // level, R100) replaces the stale one; the rest
+                            // of the bundle stays the worker's.
+                            if let Some(fresh) = loaded.remove(&r.puuid) {
+                                db.row = fresh.row;
+                            }
+                            db
+                        }
+                        None => loaded.remove(&r.puuid).unwrap_or_default(),
+                    };
                     Slot { roster: r, db }
                 })
                 .collect();
@@ -816,6 +923,7 @@ impl Poller {
                 .collect();
             for p in party {
                 live.synced.remove(&p);
+                live.party_ready.remove(&p);
             }
         }
         self.ensure_worker(session);
@@ -837,4 +945,280 @@ fn lockfile_path(local_app_data: &Path) -> PathBuf {
         .join("Riot Client")
         .join("Config")
         .join("lockfile")
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, ResponseTemplate};
+
+    use super::*;
+    use crate::pipeline_tests::backfill::{
+        history_path, mount_feed, requests, run_active, store_anchor, stored_anchor, Feed,
+    };
+    use crate::pipeline_tests::{card_json, harness, roster, Harness, ME};
+    use crate::store::{save_player, PlayerUpdate};
+    use crate::sync::{anchor_json, BACKFILL_ANCHOR_KEY};
+
+    /// Waits (up to ~5s) for a finished backfill run's anchor.
+    async fn wait_for_anchor(st: &AppState) -> Option<(String, i64)> {
+        for _ in 0..250 {
+            if let Some(a) = stored_anchor(st).await {
+                return Some(a);
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        None
+    }
+
+    /// Answers `/chat/v4/presences` with the user's VALORANT presence in
+    /// `state` (`MENUS` / `PREGAME` / `INGAME`) and `queue`.
+    async fn mock_presence(h: &Harness, state: &str, queue: &str) {
+        let private = BASE64.encode(
+            json!({"sessionLoopState": state, "queueId": queue, "partyId": "party-1"}).to_string(),
+        );
+        Mock::given(method("GET"))
+            .and(path("/chat/v4/presences"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "presences": [{"puuid": ME, "product": "valorant", "private": private}]
+            })))
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+    }
+
+    /// The `page` requests the backfill made (`endIndex=20`; a per-player
+    /// sync asks for `0..2`).
+    async fn backfill_pages(h: &Harness) -> usize {
+        requests(&h.server)
+            .await
+            .iter()
+            .filter(|r| r.url.path() == history_path())
+            .filter(|r| {
+                r.url
+                    .query_pairs()
+                    .any(|(k, v)| k == "endIndex" && v == "20")
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn on_connected_starts_a_backfill_run_and_a_worker_finishes_it() {
+        let h = harness().await;
+        mount_feed(&h.server, Feed::new(5)).await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+
+        // A first run (no anchor yet): it ends at the oldest entry and the
+        // anchor is the newest.
+        let anchor = wait_for_anchor(&h.st).await.expect("the run finished");
+        assert_eq!(anchor.0, crate::pipeline_tests::backfill::entry_id(0));
+        assert_eq!(backfill_pages(&h).await, 1);
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_match_end_starts_a_backfill_run() {
+        // INGAME -> MENUS: the match ended; the backfill runs from the stored
+        // anchor (entry 3 of 5): entries 0..3 are fetched, then it moves.
+        let h = harness().await;
+        let base = crate::pipeline_tests::backfill::base_ms();
+        mount_feed(&h.server, Feed::new(5)).await;
+        store_anchor(&h.st, 3, base).await;
+        mock_presence(&h, "MENUS", "unrated").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Ingame;
+        poller.presence_stage = Stage::Ingame;
+        lock(&h.st.live).stage = Stage::Ingame;
+
+        poller.presence_tick(&h.session).await.unwrap();
+
+        for _ in 0..250 {
+            if stored_anchor(&h.st).await.map(|a| a.0)
+                == Some(crate::pipeline_tests::backfill::entry_id(0))
+            {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            stored_anchor(&h.st).await.map(|a| a.0),
+            Some(crate::pipeline_tests::backfill::entry_id(0)),
+            "the anchor moved to the newest entry"
+        );
+        assert_eq!(poller.stage, Stage::Menus);
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_deathmatch_end_starts_a_backfill_run_too() {
+        // A free-for-all keeps the Lobby view (`stage` stays Menus through
+        // the whole match), but the raw presence still goes INGAME -> MENUS.
+        let h = harness().await;
+        mount_feed(&h.server, Feed::new(5)).await;
+        mock_presence(&h, "MENUS", "deathmatch").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.presence_stage = Stage::Ingame;
+        lock(&h.st.live).stage = Stage::Menus;
+
+        poller.presence_tick(&h.session).await.unwrap();
+
+        assert!(wait_for_anchor(&h.st).await.is_some(), "the run finished");
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn other_stage_changes_do_not_start_a_backfill_run() {
+        let h = harness().await;
+        mount_feed(&h.server, Feed::new(5)).await;
+        mock_presence(&h, "PREGAME", "unrated").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.presence_stage = Stage::Menus;
+
+        poller.presence_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(400)).await;
+
+        assert_eq!(backfill_pages(&h).await, 0);
+        assert!(!run_active(&h.st));
+        assert_eq!(stored_anchor(&h.st).await, None);
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn an_account_switch_clears_the_run_and_the_anchor() {
+        let h = harness().await;
+        // Slow answers: the new account's run cannot finish before we look.
+        let mut feed = Feed::new(50);
+        feed.details_delay = Some(Duration::from_millis(100));
+        mount_feed(&h.server, feed).await;
+        // The previous account's stale run and anchor.
+        lock(&h.st.live).self_puuid = Some("previous-account".into());
+        lock(&h.st.live).start_backfill(Some(("stale".into(), 1)), None);
+        let stale = anchor_json(&("stale".to_string(), 1));
+        h.st.db(move |repo| repo.set_state(BACKFILL_ANCHOR_KEY, &stale))
+            .await
+            .unwrap();
+
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+
+        assert_eq!(
+            stored_anchor(&h.st).await,
+            None,
+            "the previous account's anchor must not steer the new account's run"
+        );
+        {
+            let live = lock(&h.st.live);
+            let run = live.backfill.as_ref().expect("the new account's own run");
+            assert_eq!(run.anchor, None, "a first run, not the stale one");
+        }
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn reconnecting_the_same_account_keeps_its_anchor() {
+        let h = harness().await;
+        let mut feed = Feed::new(50);
+        feed.details_delay = Some(Duration::from_millis(100));
+        mount_feed(&h.server, feed).await;
+        let base = crate::pipeline_tests::backfill::base_ms();
+        lock(&h.st.live).self_puuid = Some(ME.into());
+        store_anchor(&h.st, 40, base).await;
+
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+
+        assert_eq!(
+            stored_anchor(&h.st).await.map(|a| a.0),
+            Some(crate::pipeline_tests::backfill::entry_id(40))
+        );
+        let run_anchor = lock(&h.st.live)
+            .backfill
+            .as_ref()
+            .and_then(|r| r.anchor.clone());
+        assert_eq!(
+            run_anchor.map(|a| a.0),
+            Some(crate::pipeline_tests::backfill::entry_id(40))
+        );
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn dropping_the_session_ends_the_run() {
+        let h = harness().await;
+        lock(&h.st.live).start_backfill(None, None);
+        let mut poller = Poller::new(h.st.clone());
+        poller.session = Some(h.session.clone());
+        poller.drop_session().await;
+        assert!(!run_active(&h.st), "the next connect starts over");
+    }
+
+    /// R100 through the real `apply_roster`: the user already has a `players`
+    /// row (level 0: it was created before their level was known) and the
+    /// app started with the Closed-stage slot on screen, so the user is not a
+    /// "new" player when the roster arrives. Their level (87, with
+    /// `HideAccountLevel` on) must still reach the DB, or the Closed card
+    /// the app opens on shows `Lv —`.
+    #[tokio::test]
+    async fn own_level_is_stored_when_the_closed_slot_is_already_on_screen() {
+        let h = harness().await;
+        let now = now_ms();
+        h.st.db(move |repo| {
+            save_player(
+                repo.conn(),
+                &PlayerUpdate {
+                    puuid: ME.into(),
+                    name: Some(("Me".into(), "OPD1".into())),
+                    account_level: 0,
+                    card_id: "card".into(),
+                },
+                now,
+            )
+        })
+        .await
+        .unwrap();
+        // What `lib.rs` does at startup.
+        let db =
+            h.st.db(|repo| load_player_db(repo, Some(ME), ME))
+                .await
+                .unwrap();
+        lock(&h.st.live).slots = vec![closed_self_slot(ME, db).unwrap()];
+
+        let mut me = roster(ME, false);
+        me.hide_account_level = true;
+        me.account_level = 87;
+        let mut poller = Poller::new(h.st.clone());
+        poller
+            .apply_roster(&h.session, Stage::Menus, None, vec![me])
+            .await;
+        poller.stop_worker();
+
+        let stored =
+            h.st.db(|repo| load_player_db(repo, Some(ME), ME))
+                .await
+                .unwrap();
+        assert_eq!(stored.row.unwrap().account_level, 87, "stored in the DB");
+        let on_screen = lock(&h.st.live)
+            .slots
+            .iter()
+            .find(|s| s.roster.puuid == ME)
+            .and_then(|s| s.db.row.clone())
+            .unwrap();
+        assert_eq!(
+            on_screen.account_level, 87,
+            "the on-screen row follows, so the next roster does not re-save"
+        );
+
+        // The app goes back to Closed and re-reads the row.
+        poller.enter_closed().await;
+        let card = card_json(&h.st, ME);
+        assert_eq!(card["isSelf"], json!(true));
+        assert_eq!(card["level"], json!(87));
+    }
 }

@@ -32,10 +32,12 @@ pub fn parse_path(path: &str) -> Option<(AssetKind, &str)> {
         "agent" => AssetKind::Agent,
         "cardSmall" => AssetKind::CardSmall,
         "cardWide" => AssetKind::CardWide,
+        "cardLarge" => AssetKind::CardLarge,
         "tier" => AssetKind::Tier,
         "mapList" => AssetKind::MapList,
         "mapSplash" => AssetKind::MapSplash,
         "chroma" => AssetKind::Chroma,
+        "contentTier" => AssetKind::ContentTier,
         _ => return None,
     };
     Some((kind, id))
@@ -96,9 +98,11 @@ mod tests {
             ("agent", AssetKind::Agent),
             ("cardSmall", AssetKind::CardSmall),
             ("cardWide", AssetKind::CardWide),
+            ("cardLarge", AssetKind::CardLarge),
             ("mapList", AssetKind::MapList),
             ("mapSplash", AssetKind::MapSplash),
             ("chroma", AssetKind::Chroma),
+            ("contentTier", AssetKind::ContentTier),
         ] {
             assert_eq!(parse_path(&format!("/{name}/{UUID}")), Some((kind, UUID)));
         }

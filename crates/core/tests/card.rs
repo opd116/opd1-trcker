@@ -2,10 +2,12 @@
 //! and the pure [`build_card`]. No DB, no network — every input is a
 //! plain `opd1_core` value.
 
-use opd1_core::db::repo::{CompUpdateRow, MatchPlayerRow};
+use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow};
 use opd1_core::model::{
-    build_card, BuildCardInput, CurrentRank, Field, Identity, MatchResultKind, MmrInput, Team,
+    build_card, hero_stats, match_summary, shown_agent, BuildCardInput, CurrentRank, Field,
+    Identity, MatchResultKind, MmrInput, Team,
 };
+use opd1_core::names::KnownName;
 use opd1_core::stats::Act;
 
 const CURRENT_ACT_ID: &str = "act-current";
@@ -85,6 +87,7 @@ fn base_input(identity: Identity) -> BuildCardInput<'static> {
         current_act_id: CURRENT_ACT_ID,
         now_ms: 2_500,
         team: Team::Ally,
+        is_self: false,
         is_self_party: false,
         remembered: None,
         party: None,
@@ -124,18 +127,52 @@ fn card_builds_with_partial_data() {
 }
 
 #[test]
-fn card_hides_agent_until_selected() {
-    let mut not_selected = identity();
-    not_selected.character_selection_state = String::new();
-    let card = build_card(base_input(not_selected));
-    assert_eq!(card.agent_id, None);
+fn card_shows_agent_only_when_locked() {
+    // R99: only a locked pick counts. `""` (nothing yet) and `"selected"`
+    // (a hover) show no agent; `character_id` being filled changes nothing.
+    assert_eq!(shown_agent("agent-1", ""), None);
+    assert_eq!(shown_agent("agent-1", "selected"), None);
+    assert_eq!(shown_agent("agent-1", "locked"), Some("agent-1"));
+    assert_eq!(shown_agent("agent-1", "LOCKED"), Some("agent-1"));
+    assert_eq!(shown_agent("", "locked"), None);
 
-    for state in ["selected", "locked"] {
-        let mut selected = identity();
-        selected.character_selection_state = state.to_string();
-        let card = build_card(base_input(selected));
-        assert_eq!(card.agent_id.as_deref(), Some("agent-1"));
+    for (state, expected) in [("", None), ("selected", None), ("locked", Some("agent-1"))] {
+        let mut id = identity();
+        id.character_selection_state = state.to_string();
+        let card = build_card(base_input(id));
+        assert_eq!(card.agent_id.as_deref(), expected, "state {state:?}");
     }
+}
+
+#[test]
+fn hovered_agent_is_not_selected() {
+    // R99: hovering an agent changes nothing on the card.
+    let mut hover = identity();
+    hover.character_selection_state = "selected".to_string();
+    let card = build_card(base_input(hover.clone()));
+    assert_eq!(card.agent_id, None);
+    let json = serde_json::to_value(&card).unwrap();
+    assert_eq!(json["agentId"], serde_json::Value::Null);
+
+    // A hidden player who only hovers stays `Hidden Player`, not the agent.
+    let mut hidden_hover = hover;
+    hidden_hover.incognito = true;
+    let json = serde_json::to_value(build_card(base_input(hidden_hover))).unwrap();
+    assert_eq!(json["name"], serde_json::json!({ "kind": "hiddenPlayer" }));
+    assert_eq!(json["agentId"], serde_json::Value::Null);
+
+    // Once locked: the agent shows, and a hidden player shows the agent name.
+    let mut locked = identity();
+    locked.character_selection_state = "locked".to_string();
+    let json = serde_json::to_value(build_card(base_input(locked.clone()))).unwrap();
+    assert_eq!(json["agentId"], serde_json::json!("agent-1"));
+    locked.incognito = true;
+    let json = serde_json::to_value(build_card(base_input(locked))).unwrap();
+    assert_eq!(
+        json["name"],
+        serde_json::json!({ "kind": "hiddenAgent", "agentId": "agent-1" })
+    );
+    assert_eq!(json["agentId"], serde_json::json!("agent-1"));
 }
 
 #[test]
@@ -351,9 +388,14 @@ fn display_name_json_covers_all_four_variants() {
         serde_json::to_value(DisplayName::Remembered {
             name: "Rival".to_string(),
             tag: "ENEMY".to_string(),
+            from_map_id: None,
+            from_start_ms: None,
         })
         .unwrap(),
-        serde_json::json!({ "kind": "remembered", "name": "Rival", "tag": "ENEMY" })
+        serde_json::json!({
+            "kind": "remembered", "name": "Rival", "tag": "ENEMY",
+            "fromMapId": null, "fromStartMs": null
+        })
     );
     assert_eq!(
         serde_json::to_value(DisplayName::HiddenPlayer).unwrap(),
@@ -542,8 +584,13 @@ fn last5_is_capped_at_five_even_with_more_rows_passed_in() {
 // Task 6: remembered names, party marks, encounters
 // ---------------------------------------------------------------------
 
-fn remembered(name: &str, tag: &str) -> Option<(String, String)> {
-    Some((name.to_string(), tag.to_string()))
+fn remembered(name: &str, tag: &str) -> Option<KnownName> {
+    Some(KnownName {
+        name: name.to_string(),
+        tag: tag.to_string(),
+        map_id: None,
+        start_ms: None,
+    })
 }
 
 #[test]
@@ -564,7 +611,9 @@ fn incognito_card_shows_a_remembered_name_before_and_after_pick() {
             card.name,
             Field::Value(DisplayName::Remembered {
                 name: "Rival".into(),
-                tag: "ENEMY".into()
+                tag: "ENEMY".into(),
+                from_map_id: None,
+                from_start_ms: None,
             }),
             "selection state {state:?}"
         );
@@ -653,4 +702,264 @@ fn self_party_card_never_gets_party_mark_or_encounters() {
     let card = build_card(input);
     assert_eq!(card.party, None);
     assert_eq!(card.encounters, None);
+}
+
+// ---------------------------------------------------------------------
+// Task 14: isSelf, act W/L (with placements), remembered-name source
+// ---------------------------------------------------------------------
+
+fn mmr_with_current_act(wins: u32, games: u32) -> Field<MmrInput> {
+    use opd1_core::stats::SeasonInfo;
+    use std::collections::HashMap;
+
+    Field::Value(MmrInput {
+        seasons: HashMap::from([(
+            CURRENT_ACT_ID.to_string(),
+            SeasonInfo {
+                competitive_tier: 15,
+                wins_by_tier: HashMap::from([(15, 3)]),
+                number_of_wins: wins,
+                number_of_games: games,
+            },
+        )]),
+        current_rank: Some(CurrentRank { tier: 15, rr: 42 }),
+    })
+}
+
+#[test]
+fn card_is_self_true_only_for_self() {
+    let mut mine = base_input(identity());
+    mine.is_self = true;
+    let json = serde_json::to_value(build_card(mine)).unwrap();
+    assert_eq!(json["isSelf"], serde_json::json!(true));
+
+    let json = serde_json::to_value(build_card(base_input(identity()))).unwrap();
+    assert_eq!(json["isSelf"], serde_json::json!(false));
+}
+
+#[test]
+fn act_wins_games_tri_state() {
+    // Loading: both keys absent, like every other MMR-derived field.
+    let mut input = base_input(identity());
+    input.mmr = Field::Loading;
+    let json = serde_json::to_value(build_card(input)).unwrap();
+    let obj = json.as_object().unwrap();
+    assert!(!obj.contains_key("actWins"), "got {json}");
+    assert!(!obj.contains_key("actGames"), "got {json}");
+
+    // Missing MMR: present and null.
+    let json = serde_json::to_value(build_card(base_input(identity()))).unwrap();
+    assert_eq!(json["actWins"], serde_json::Value::Null);
+    assert_eq!(json["actGames"], serde_json::Value::Null);
+
+    // MMR without a current-act entry: null too, and so is the win rate.
+    let mut input = base_input(identity());
+    input.mmr = Field::Value(MmrInput {
+        seasons: std::collections::HashMap::new(),
+        current_rank: None,
+    });
+    let json = serde_json::to_value(build_card(input)).unwrap();
+    assert_eq!(json["actWins"], serde_json::Value::Null);
+    assert_eq!(json["actGames"], serde_json::Value::Null);
+    assert_eq!(json["actWinrate"], serde_json::Value::Null);
+
+    // A current act with 39 wins (placements included) in 61 games.
+    let mut input = base_input(identity());
+    input.mmr = mmr_with_current_act(39, 61);
+    let json = serde_json::to_value(build_card(input)).unwrap();
+    assert_eq!(json["actWins"], serde_json::json!(39));
+    assert_eq!(json["actGames"], serde_json::json!(61));
+    let rate = json["actWinrate"].as_f64().unwrap();
+    assert!((rate - 39.0 / 61.0).abs() < 1e-3, "actWinrate {rate}");
+}
+
+#[test]
+fn act_wins_games_null_when_no_games() {
+    let mut input = base_input(identity());
+    input.mmr = mmr_with_current_act(0, 0);
+    let json = serde_json::to_value(build_card(input)).unwrap();
+    assert_eq!(json["actWins"], serde_json::Value::Null);
+    assert_eq!(json["actGames"], serde_json::Value::Null);
+    assert_eq!(json["actWinrate"], serde_json::Value::Null);
+}
+
+#[test]
+fn remembered_name_serializes_source() {
+    let mut hidden = identity();
+    hidden.incognito = true;
+
+    let mut input = base_input(hidden.clone());
+    input.remembered = Some(KnownName {
+        name: "Rival".into(),
+        tag: "ENEMY".into(),
+        map_id: Some("uuid-split".into()),
+        start_ms: Some(1_234),
+    });
+    let json = serde_json::to_value(build_card(input)).unwrap();
+    assert_eq!(
+        json["name"],
+        serde_json::json!({
+            "kind": "remembered", "name": "Rival", "tag": "ENEMY",
+            "fromMapId": "uuid-split", "fromStartMs": 1234
+        })
+    );
+
+    // Without a source both keys are still there, as null.
+    let mut input = base_input(hidden);
+    input.remembered = remembered("Rival", "ENEMY");
+    let json = serde_json::to_value(build_card(input)).unwrap();
+    let name = json["name"].as_object().unwrap();
+    assert_eq!(name["fromMapId"], serde_json::Value::Null);
+    assert_eq!(name["fromStartMs"], serde_json::Value::Null);
+}
+
+// ---------------------------------------------------------------------
+// Task 15: MatchSummary.tier (R81) and the no-stats match (R102)
+// ---------------------------------------------------------------------
+
+/// A stored competitive match of the player: 20/10/5, 4000 score over 20
+/// rounds (ACS 200), 10/30/10 shots (HS 20%).
+fn comp_row() -> CompMatchRow {
+    CompMatchRow {
+        match_id: "m1".into(),
+        map_id: "map-uuid".into(),
+        start_ms: 1_000,
+        winning_team: Some("Blue".into()),
+        team_id: "Blue".into(),
+        agent_id: Some("agent-jett".into()),
+        kills: 20,
+        deaths: 10,
+        assists: 5,
+        score: 4000,
+        rounds: Some(20),
+        hs: 10,
+        bs: 30,
+        ls: 10,
+        rounds_won: Some(13),
+        rounds_lost: Some(7),
+        rr_earned: Some(18),
+        season_id: Some("act".into()),
+        tier_before: Some(14),
+        tier_after: Some(15),
+        tier: Some(14),
+    }
+}
+
+#[test]
+fn match_summary_tier_below_3_is_null() {
+    let tier_of = |tier: Option<i64>| {
+        let summary = match_summary(&CompMatchRow { tier, ..comp_row() });
+        serde_json::to_value(summary).unwrap()["tier"].clone()
+    };
+    assert_eq!(tier_of(Some(15)), serde_json::json!(15));
+    assert_eq!(tier_of(Some(3)), serde_json::json!(3));
+    // Below 3 is unranked (placements, unrated queues): no rank shown.
+    for unranked in [Some(0), Some(1), Some(2), None] {
+        assert_eq!(tier_of(unranked), serde_json::Value::Null, "{unranked:?}");
+    }
+    // A value no tier table has never reaches the wire as a wrapped u8.
+    assert_eq!(tier_of(Some(300)), serde_json::Value::Null);
+    assert_eq!(tier_of(Some(-4)), serde_json::Value::Null);
+}
+
+#[test]
+fn match_summary_without_a_stats_row_is_null_not_zero() {
+    // R102: match-details had no stats for the player (stored 0/0/0, no
+    // rounds): every stat is unknown, never a counted zero.
+    let mut blank = comp_row();
+    (blank.kills, blank.deaths, blank.assists, blank.score) = (0, 0, 0, 0);
+    blank.rounds = None;
+    let json = serde_json::to_value(match_summary(&blank)).unwrap();
+    for key in ["kills", "deaths", "assists", "kd", "acs", "hsPct"] {
+        assert_eq!(json[key], serde_json::Value::Null, "{key} must be null");
+        assert!(json.get(key).is_some(), "{key} is present, not absent");
+    }
+    // The rest of the row still shows.
+    assert_eq!(json["result"], "win");
+    assert_eq!(json["roundsWon"], serde_json::json!(13));
+    assert_eq!(json["rrEarned"], serde_json::json!(18));
+
+    // A zero round count is the same "no stats" (never a divide by zero).
+    let mut zero_rounds = comp_row();
+    zero_rounds.rounds = Some(0);
+    let json = serde_json::to_value(match_summary(&zero_rounds)).unwrap();
+    assert_eq!(json["kills"], serde_json::Value::Null);
+    assert_eq!(json["acs"], serde_json::Value::Null);
+
+    // With stats a real zero stays a zero: 0 kills is a counted result.
+    let mut winless = comp_row();
+    (winless.kills, winless.deaths, winless.assists) = (0, 12, 0);
+    let json = serde_json::to_value(match_summary(&winless)).unwrap();
+    assert_eq!(json["kills"], serde_json::json!(0));
+    assert_eq!(json["assists"], serde_json::json!(0));
+    assert_eq!(json["kd"], serde_json::json!(0.0));
+}
+
+// ---------------------------------------------------------------------
+// R116: Player Details hero K/D and HS% over the act's recent matches
+// ---------------------------------------------------------------------
+
+fn stat_row(id: &str, kills: i64, deaths: i64, shots: (i64, i64, i64)) -> CompMatchRow {
+    let mut r = comp_row();
+    r.match_id = id.into();
+    (r.kills, r.deaths) = (kills, deaths);
+    (r.hs, r.bs, r.ls) = shots;
+    r
+}
+
+fn no_stats_row(id: &str) -> CompMatchRow {
+    let mut r = stat_row(id, 0, 0, (0, 0, 0));
+    r.score = 0;
+    r.rounds = None;
+    r
+}
+
+#[test]
+fn hero_stats_pool_kills_deaths_and_shots_over_the_matches() {
+    // 30 kills / 20 deaths; 15 headshots of 60 shots.
+    let rows = [
+        stat_row("a", 20, 10, (10, 30, 10)),
+        stat_row("b", 10, 10, (5, 5, 0)),
+    ];
+    let hero = hero_stats(&rows);
+    assert_eq!(hero.matches, 2);
+    assert_eq!(hero.kd, Some(1.5), "pooled kills / pooled deaths");
+    assert_eq!(hero.hs_pct, Some(0.25), "pooled headshots / pooled shots");
+}
+
+#[test]
+fn hero_stats_count_only_matches_with_a_stats_row() {
+    // R102: a match without stats is no counted zero — it adds neither a
+    // death-free kill/death pair nor to the match count.
+    let rows = [
+        stat_row("a", 20, 10, (10, 30, 10)),
+        no_stats_row("blank"),
+        stat_row("b", 10, 10, (5, 5, 0)),
+    ];
+    let hero = hero_stats(&rows);
+    assert_eq!(hero.matches, 2);
+    assert_eq!(hero.kd, Some(1.5));
+    assert_eq!(hero.hs_pct, Some(0.25));
+}
+
+#[test]
+fn hero_stats_are_null_without_act_matches() {
+    let none = hero_stats(&[]);
+    assert_eq!((none.kd, none.hs_pct, none.matches), (None, None, 0));
+    // Matches exist but none has stats: still nothing to average.
+    let blank = hero_stats(&[no_stats_row("x"), no_stats_row("y")]);
+    assert_eq!((blank.kd, blank.hs_pct, blank.matches), (None, None, 0));
+}
+
+#[test]
+fn hero_stats_edge_cases() {
+    // No death at all: K/D is the kill count (R5), not infinity.
+    let flawless = hero_stats(&[stat_row("a", 25, 0, (10, 10, 5))]);
+    assert_eq!(flawless.kd, Some(25.0));
+    // Stats but not one shot landed: K/D known, HS% unknown.
+    let no_shots = hero_stats(&[stat_row("a", 4, 8, (0, 0, 0))]);
+    assert_eq!(
+        (no_shots.kd, no_shots.hs_pct, no_shots.matches),
+        (Some(0.5), None, 1)
+    );
 }

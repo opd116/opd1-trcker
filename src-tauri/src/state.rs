@@ -462,6 +462,9 @@ impl LiveModel {
             },
             party,
             encounters: slot.db.encounters,
+            // R154: read only for a player with no snapshot, used only when
+            // MMR is not a value.
+            stored_tier: slot.db.stored_tier,
         });
         settle_card(&mut card, names_done, data_done);
         card
@@ -1289,10 +1292,11 @@ impl Drop for SkinResolveGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use opd1_core::db::repo::{MatchPlayerRow, NameAsk};
+    use opd1_core::db::repo::{CompUpdateRow, MatchPlayerRow, NameAsk, StoredTier};
     use opd1_core::model::{DisplayName, EncounterCount, PartyMark, RememberedSource};
     use opd1_core::names::KnownName;
     use opd1_core::party::SharedRef;
+    use opd1_riot::endpoints::PlayerMmrResponse;
     use serde_json::{json, Value};
 
     fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
@@ -2140,6 +2144,145 @@ mod tests {
         s.roster.hide_account_level = true;
         let m = model(vec![s]);
         assert_eq!(m.build(&[], 0, &|_| None).players[0].level, Field::Missing);
+    }
+
+    // -- R154: the rank from stored matches when MMR has no answer ------
+
+    const ACT_ID: &str = "act-now";
+    /// A card built at `NOW`, inside `acts_now()`'s only act.
+    const NOW: i64 = 10_000_000;
+
+    fn acts_now() -> Vec<Act> {
+        vec![Act {
+            id: ACT_ID.into(),
+            name: "ACT V".into(),
+            episode_name: "V26".into(),
+            start_ms: 5_000_000,
+            end_ms: 20_000_000,
+        }]
+    }
+
+    fn update(id: &str, season: &str, start_ms: i64, tier: i64, rr: i64) -> CompUpdateRow {
+        CompUpdateRow {
+            match_id: id.into(),
+            season_id: season.into(),
+            tier_after: tier,
+            tier_before: Some(tier),
+            rr_after: rr,
+            rr_earned: 10,
+            map_id: None,
+            start_ms,
+        }
+    }
+
+    fn rank_of(m: &LiveModel) -> Field<opd1_core::model::RankInfo> {
+        m.build(&acts_now(), NOW, &|_| None).players[0].rank.clone()
+    }
+
+    fn ranked(tier: u8, rr: Option<u16>) -> Field<opd1_core::model::RankInfo> {
+        Field::Value(opd1_core::model::RankInfo { tier, rr })
+    }
+
+    #[test]
+    fn no_snapshot_the_card_shows_the_newest_current_act_rank_at_once() {
+        let mut s = slot("p1", false);
+        s.db.comp = vec![
+            update("m2", ACT_ID, 9_000_000, 15, 42),
+            update("m1", ACT_ID, 8_000_000, 14, 90),
+            update("m0", "act-before", 4_000_000, 20, 10),
+        ];
+        let mut m = model(vec![s]);
+        // Not synced yet: the cached rank shows, the rest is still loading.
+        let card = &m.build(&acts_now(), NOW, &|_| None).players[0];
+        assert_eq!(card.rank, ranked(15, Some(42)), "tier and exact RR");
+        assert!(card.peak.is_loading() && card.prev_act_tier.is_loading());
+        // The sync ran and MMR never answered: the rank stays, the rest is `—`.
+        m.synced.insert("p1".into());
+        let card = &m.build(&acts_now(), NOW, &|_| None).players[0];
+        assert_eq!(card.rank, ranked(15, Some(42)));
+        assert_eq!(card.peak, Field::Missing);
+        assert_eq!(card.prev_act_tier, Field::Missing);
+        assert_eq!(card.act_winrate, Field::Missing);
+        assert_eq!(card.act_wins, Field::Missing);
+        assert_eq!(card.act_games, Field::Missing);
+    }
+
+    #[test]
+    fn no_snapshot_and_no_update_the_card_shows_the_stored_match_tier_without_rr() {
+        let mut s = slot("p1", false);
+        s.db.stored_tier = Some(StoredTier {
+            start_ms: 8_000_000,
+            tier: 14,
+        });
+        let mut m = model(vec![s]);
+        m.synced.insert("p1".into());
+        assert_eq!(rank_of(&m), ranked(14, None));
+    }
+
+    #[test]
+    fn a_previous_act_row_or_match_is_no_rank() {
+        let mut s = slot("p1", false);
+        s.db.comp = vec![update("old", "act-before", 4_000_000, 20, 10)];
+        s.db.stored_tier = Some(StoredTier {
+            start_ms: 4_500_000,
+            tier: 20,
+        });
+        let mut m = model(vec![s]);
+        assert!(rank_of(&m).is_loading(), "nothing known: a skeleton");
+        m.synced.insert("p1".into());
+        assert_eq!(rank_of(&m), Field::Missing, "as before R154");
+    }
+
+    #[test]
+    fn a_snapshot_is_the_authority_even_with_a_newer_update_row() {
+        let mmr: PlayerMmrResponse = serde_json::from_value(json!({
+            "Subject": "p1",
+            "QueueSkills": {"competitive": {"SeasonalInfoBySeasonID": {ACT_ID: {
+                "SeasonID": ACT_ID, "CompetitiveTier": 12, "RankedRating": 33,
+                "NumberOfWins": 6, "NumberOfGames": 10, "WinsByTier": {"12": 4}
+            }}}}
+        }))
+        .unwrap();
+        let mut s = slot("p1", false);
+        s.db.mmr = Some(mmr);
+        s.db.comp = vec![update("m", ACT_ID, 9_500_000, 18, 77)];
+        s.db.stored_tier = Some(StoredTier {
+            start_ms: 9_600_000,
+            tier: 19,
+        });
+        let m = model(vec![s]);
+        assert_eq!(rank_of(&m), ranked(12, Some(33)));
+    }
+
+    #[test]
+    fn the_closed_stage_own_card_shows_the_fallback() {
+        // No MMR snapshot of the user, only what their matches stored.
+        let db = PlayerDb {
+            row: Some(StoredPlayer {
+                game_name: "Me".into(),
+                tag_line: "1".into(),
+                account_level: 50,
+                card_id: "card".into(),
+            }),
+            comp: vec![update("m", ACT_ID, 9_000_000, 15, 42)],
+            ..PlayerDb::default()
+        };
+        let mut m = LiveModel::new(Some("me".into()));
+        m.stage = Stage::Closed;
+        m.slots = vec![closed_self_slot("me", db).unwrap()];
+        assert_eq!(rank_of(&m), ranked(15, Some(42)));
+
+        // Only a stored match's tier: the tier shows, the RR is `—`.
+        let db = PlayerDb {
+            row: m.slots[0].db.row.clone(),
+            stored_tier: Some(StoredTier {
+                start_ms: 9_000_000,
+                tier: 14,
+            }),
+            ..PlayerDb::default()
+        };
+        m.slots = vec![closed_self_slot("me", db).unwrap()];
+        assert_eq!(rank_of(&m), ranked(14, None));
     }
 
     #[test]

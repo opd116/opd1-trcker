@@ -2,10 +2,10 @@
 //! and the pure [`build_card`]. No DB, no network — every input is a
 //! plain `opd1_core` value.
 
-use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow};
+use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, MatchPlayerRow, StoredTier};
 use opd1_core::model::{
     build_card, hero_stats, match_summary, shown_agent, BuildCardInput, CurrentRank, Field,
-    Identity, MatchResultKind, MmrInput, RememberedSource, Team,
+    Identity, MatchResultKind, MmrInput, RankInfo, RememberedSource, Team,
 };
 use opd1_core::names::KnownName;
 use opd1_core::stats::Act;
@@ -92,6 +92,7 @@ fn base_input(identity: Identity) -> BuildCardInput<'static> {
         remembered: None,
         party: None,
         encounters: None,
+        stored_tier: None,
     }
 }
 
@@ -274,7 +275,10 @@ fn card_resolves_rank_peak_prev_act_tier_and_winrate_from_mmr() {
 
     assert_eq!(
         card.rank,
-        Field::Value(opd1_core::model::RankInfo { tier: 15, rr: 42 })
+        Field::Value(RankInfo {
+            tier: 15,
+            rr: Some(42)
+        })
     );
     assert_eq!(card.prev_act_tier, Field::Value(14));
     match card.act_winrate {
@@ -1000,5 +1004,239 @@ fn hero_stats_edge_cases() {
     assert_eq!(
         (no_shots.kd, no_shots.hs_pct, no_shots.matches),
         (Some(0.5), None, 1)
+    );
+}
+
+// ---------------------------------------------------------------------
+// R154: the rank from stored matches when there is no MMR answer
+// ---------------------------------------------------------------------
+
+/// One stored `comp_updates` row: `season`, the tier after the match, the
+/// RR after it and when the match started.
+fn update(id: &str, season: &str, start_ms: i64, tier_after: i64, rr_after: i64) -> CompUpdateRow {
+    CompUpdateRow {
+        match_id: id.to_string(),
+        season_id: season.to_string(),
+        tier_after,
+        tier_before: Some(tier_after),
+        rr_after,
+        rr_earned: 10,
+        map_id: None,
+        start_ms,
+    }
+}
+
+/// A card of a player with no MMR snapshot (`mmr` as given) and `updates`.
+fn no_snapshot(mmr: Field<MmrInput>, updates: Vec<CompUpdateRow>) -> BuildCardInput<'static> {
+    let mut input = base_input(identity());
+    input.mmr = mmr;
+    input.comp_updates = Field::Value(updates);
+    input
+}
+
+fn rank(tier: u8, rr: Option<u16>) -> Field<RankInfo> {
+    Field::Value(RankInfo { tier, rr })
+}
+
+#[test]
+fn no_snapshot_the_rank_is_the_newest_current_act_comp_update() {
+    // The rows come oldest first here on purpose: "newest" is by match
+    // start, not by position. An older act's row with a later start is
+    // impossible, but one from another act must never win.
+    let updates = vec![
+        update("a", CURRENT_ACT_ID, 2_100, 14, 90),
+        update("c", CURRENT_ACT_ID, 2_400, 15, 42),
+        update("b", CURRENT_ACT_ID, 2_300, 14, 99),
+        update("old", PREV_ACT_ID, 1_500, 20, 5),
+    ];
+    let card = build_card(no_snapshot(Field::Missing, updates));
+    assert_eq!(
+        card.rank,
+        rank(15, Some(42)),
+        "tier and RR of the newest row"
+    );
+}
+
+#[test]
+fn no_snapshot_the_rank_skips_current_act_rows_that_are_not_ranked() {
+    // Placement games end at tier 0..=2: the newest *ranked* row counts.
+    let updates = vec![
+        update("placement", CURRENT_ACT_ID, 2_400, 2, 0),
+        update("ranked", CURRENT_ACT_ID, 2_300, 13, 7),
+    ];
+    let card = build_card(no_snapshot(Field::Missing, updates));
+    assert_eq!(card.rank, rank(13, Some(7)));
+}
+
+#[test]
+fn no_snapshot_the_rank_shows_while_the_rest_still_loads() {
+    // It is cached data: known before the sync ends, so the rank does not
+    // wait for it. Everything else that comes from MMR is still loading.
+    let card = build_card(no_snapshot(
+        Field::Loading,
+        vec![update("m", CURRENT_ACT_ID, 2_400, 15, 42)],
+    ));
+    assert_eq!(card.rank, rank(15, Some(42)));
+    assert_eq!(card.prev_act_tier, Field::Loading);
+    assert_eq!(card.peak, Field::Loading);
+    assert_eq!(card.act_winrate, Field::Loading);
+    assert_eq!(card.act_wins, Field::Loading);
+    assert_eq!(card.act_games, Field::Loading);
+}
+
+#[test]
+fn no_snapshot_only_the_rank_is_filled_in_everything_else_stays_as_it_was() {
+    let mut input = no_snapshot(
+        Field::Missing,
+        vec![update("m", CURRENT_ACT_ID, 2_400, 15, 42)],
+    );
+    input.stored_tier = Some(StoredTier {
+        start_ms: 2_400,
+        tier: 15,
+    });
+    let card = build_card(input);
+    assert_eq!(card.rank, rank(15, Some(42)));
+    assert_eq!(card.prev_act_tier, Field::Missing);
+    assert_eq!(card.peak, Field::Missing);
+    assert_eq!(card.act_winrate, Field::Missing);
+    assert_eq!(card.act_wins, Field::Missing);
+    assert_eq!(card.act_games, Field::Missing);
+}
+
+#[test]
+fn no_snapshot_a_previous_act_row_is_no_rank() {
+    // Only last act's rows (and a last act's stored match): nothing says
+    // what the player is *now*.
+    let mut input = no_snapshot(
+        Field::Missing,
+        vec![update("old", PREV_ACT_ID, 1_500, 20, 5)],
+    );
+    input.stored_tier = Some(StoredTier {
+        start_ms: 1_800,
+        tier: 20,
+    });
+    assert_eq!(build_card(input).rank, Field::Missing);
+
+    // Still loading: stays a skeleton, not a wrong rank.
+    let card = build_card(no_snapshot(
+        Field::Loading,
+        vec![update("old", PREV_ACT_ID, 1_500, 20, 5)],
+    ));
+    assert_eq!(card.rank, Field::Loading);
+}
+
+#[test]
+fn no_snapshot_and_no_comp_update_the_rank_is_the_tier_of_a_stored_match_with_no_rr() {
+    // Path (b): the tier Match Details shows, in a match of the current
+    // act. The RR is not known.
+    let mut input = no_snapshot(Field::Missing, vec![]);
+    input.stored_tier = Some(StoredTier {
+        start_ms: 2_100,
+        tier: 14,
+    });
+    let card = build_card(input);
+    assert_eq!(card.rank, rank(14, None));
+
+    // The act's own start counts as in the act; a match before it does not.
+    for (start_ms, shown) in [(2_000, true), (1_999, false)] {
+        let mut input = no_snapshot(Field::Missing, vec![]);
+        input.stored_tier = Some(StoredTier { start_ms, tier: 14 });
+        assert_eq!(
+            build_card(input).rank,
+            if shown {
+                rank(14, None)
+            } else {
+                Field::Missing
+            },
+            "match at {start_ms}"
+        );
+    }
+}
+
+#[test]
+fn a_comp_update_beats_a_stored_match_tier() {
+    let mut input = no_snapshot(
+        Field::Missing,
+        vec![update("m", CURRENT_ACT_ID, 2_100, 15, 42)],
+    );
+    input.stored_tier = Some(StoredTier {
+        start_ms: 2_400,
+        tier: 17,
+    });
+    assert_eq!(build_card(input).rank, rank(15, Some(42)));
+}
+
+#[test]
+fn a_stored_match_tier_needs_the_current_act_to_be_known() {
+    // No act tables: "the current act" is unknown, so nothing is in it.
+    let mut input = no_snapshot(Field::Missing, vec![]);
+    input.current_act_id = "";
+    input.stored_tier = Some(StoredTier {
+        start_ms: 2_400,
+        tier: 14,
+    });
+    assert_eq!(build_card(input).rank, Field::Missing);
+
+    let mut input = no_snapshot(Field::Missing, vec![update("m", "", 2_400, 15, 42)]);
+    input.current_act_id = "";
+    assert_eq!(
+        build_card(input).rank,
+        Field::Missing,
+        "an unknown act is not a season named \"\""
+    );
+}
+
+#[test]
+fn a_snapshot_is_the_authority_over_newer_stored_rows() {
+    // MMR says tier 15 / 42 RR; a newer comp-update row and a stored match
+    // say otherwise. The snapshot wins.
+    let mmr = Field::Value(MmrInput {
+        seasons: std::collections::HashMap::new(),
+        current_rank: Some(CurrentRank { tier: 15, rr: 42 }),
+    });
+    let mut input = no_snapshot(mmr, vec![update("m", CURRENT_ACT_ID, 2_400, 18, 77)]);
+    input.stored_tier = Some(StoredTier {
+        start_ms: 2_450,
+        tier: 19,
+    });
+    assert_eq!(build_card(input).rank, rank(15, Some(42)));
+}
+
+#[test]
+fn a_snapshot_with_no_rank_this_act_stays_missing() {
+    // MMR answered: the player has no rank this act (placements). That is
+    // an answer; stored rows must not contradict it.
+    let mmr = Field::Value(MmrInput {
+        seasons: std::collections::HashMap::new(),
+        current_rank: None,
+    });
+    let mut input = no_snapshot(mmr, vec![update("m", CURRENT_ACT_ID, 2_400, 18, 77)]);
+    input.stored_tier = Some(StoredTier {
+        start_ms: 2_450,
+        tier: 19,
+    });
+    assert_eq!(build_card(input).rank, Field::Missing);
+}
+
+#[test]
+fn the_rank_rr_is_always_on_the_wire_number_or_null() {
+    // The key is present either way; `null` is "the tier is known, the RR
+    // is not".
+    let exact = serde_json::to_value(build_card(no_snapshot(
+        Field::Missing,
+        vec![update("m", CURRENT_ACT_ID, 2_400, 15, 42)],
+    )))
+    .unwrap();
+    assert_eq!(exact["rank"], serde_json::json!({ "tier": 15, "rr": 42 }));
+
+    let mut input = no_snapshot(Field::Missing, vec![]);
+    input.stored_tier = Some(StoredTier {
+        start_ms: 2_100,
+        tier: 14,
+    });
+    let unknown = serde_json::to_value(build_card(input)).unwrap();
+    assert_eq!(
+        unknown["rank"],
+        serde_json::json!({ "tier": 14, "rr": null })
     );
 }

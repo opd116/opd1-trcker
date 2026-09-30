@@ -21,6 +21,7 @@ use serde_json::{json, Value};
 
 use opd1_core::db::repo::{
     CompMatchRow, CompUpdateRow, Match, MatchPlayer, MatchPlayerRow, MatchTeam, StoredMatch,
+    StoredTier,
 };
 use opd1_core::matchview::{build_match_view, MatchViewInput};
 use opd1_core::model::{
@@ -208,6 +209,7 @@ fn card(identity: Identity, team: Team) -> BuildCardInput<'static> {
         remembered: None,
         party: None,
         encounters: None,
+        stored_tier: None,
     }
 }
 
@@ -234,8 +236,9 @@ fn remembered(
     )
 }
 
-/// The nine card shapes of the live state: the seven of R23/R32 and, at the
-/// end, one remembered name of each source not yet shown (R145).
+/// The eleven card shapes of the live state: the seven of R23/R32, one
+/// remembered name of each source not yet shown (R145) and, at the end, the
+/// two ranks read off stored matches when MMR has no answer (R154).
 fn live_cards() -> Vec<PlayerCard> {
     // 1. The user: visible and full, outline flag, no party or encounters.
     let mut me = card(
@@ -340,6 +343,31 @@ fn live_cards() -> Vec<PlayerCard> {
     seen.remembered = remembered(RememberedSource::Seen, None, Some(SEEN_MS));
     let seen = build_card(seen);
 
+    // 10. No MMR answer, but a stored RR row of the current act (R154, path
+    //     a): the rank with its exact RR. Everything else from MMR is `null`.
+    let from_update = build_card(BuildCardInput {
+        mmr: Field::Missing,
+        ..card(
+            identity("puuid-rank-update", false, true, ("Silent", "MMR")),
+            Team::Ally,
+        )
+    });
+
+    // 11. No MMR answer and no RR row (R154, path b): the tier a stored
+    //     match of the current act shows, the RR unknown — `"rr": null`.
+    let from_match = build_card(BuildCardInput {
+        mmr: Field::Missing,
+        comp_updates: Field::Value(Vec::new()),
+        stored_tier: Some(StoredTier {
+            start_ms: 2_300,
+            tier: 14,
+        }),
+        ..card(
+            identity("puuid-rank-match", false, true, ("Silent", "MATCH")),
+            Team::Enemy,
+        )
+    });
+
     vec![
         me,
         known,
@@ -350,6 +378,8 @@ fn live_cards() -> Vec<PlayerCard> {
         missing,
         other_match,
         seen,
+        from_update,
+        from_match,
     ]
 }
 
@@ -371,6 +401,17 @@ fn live_state_matches_golden() {
     assert_eq!(json[8]["name"]["source"], "seen");
     assert_eq!(json[8]["name"]["fromMapId"], Value::Null);
     assert_eq!(json[8]["name"]["fromStartMs"], json!(SEEN_MS));
+    // R154: with MMR unanswered the rank still shows — an exact RR from the
+    // newest RR row, or `null` from a stored match's tier — and the other
+    // MMR fields stay `null`; with MMR answered the RR is a plain number.
+    assert_eq!(json[0]["rank"], json!({ "tier": 15, "rr": 42 }));
+    assert_eq!(json[9]["rank"], json!({ "tier": 15, "rr": 42 }));
+    assert_eq!(json[10]["rank"], json!({ "tier": 14, "rr": null }));
+    for i in [9, 10] {
+        for key in ["prevActTier", "peak", "actWinrate", "actWins", "actGames"] {
+            assert_eq!(json[i][key], Value::Null, "card {i}: {key}");
+        }
+    }
     assert_eq!(json[3]["name"]["kind"], "hiddenPlayer");
     assert_eq!(json[3]["agentId"], Value::Null);
     assert_eq!(json[4]["name"]["kind"], "hiddenAgent");
@@ -853,6 +894,8 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
         ])
     );
     assert_eq!(keys(&cards[0]["rank"]), spec(&["tier", "rr"]));
+    // R154: the RR key is there even when the RR is not known (`null`).
+    assert_eq!(keys(&cards[10]["rank"]), spec(&["tier", "rr"]));
     assert_eq!(
         keys(&cards[0]["last5"][0]),
         spec(&["result", "rrEarned", "startMs"])

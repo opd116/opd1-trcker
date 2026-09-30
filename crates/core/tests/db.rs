@@ -6,7 +6,7 @@ use std::path::Path;
 use opd1_core::db::open_db;
 use opd1_core::db::repo::{
     self, CompUpdateRow, EncounterRow, HistoryEntry, Match, MatchPlayer, MatchTeam, MmrSnapshot,
-    Player, Repo,
+    Player, Repo, StoredTier,
 };
 
 fn repo_in_memory() -> Repo {
@@ -1289,6 +1289,92 @@ fn comp_matches_tier_prefers_match_tier_then_comp_update() {
             ("legacy", Some(21), Some(21))
         ],
         "tier = the at-match rank first; tier_after stays the RR row's, for My Stats' math"
+    );
+}
+
+/// A competitive-queue match with `puuid`'s stored tier in it.
+fn tiered_match(repo: &Repo, id: &str, queue: &str, start_ms: i64, puuid: &str, tier: Option<i64>) {
+    let mut m = sample_match(id, start_ms, Some("Blue"));
+    m.queue_id = queue.to_string();
+    let mut p = sample_player(puuid, "Blue", "Name", "TAG");
+    p.competitive_tier = tier;
+    repo.upsert_match(&m, &[], &[p]).unwrap();
+}
+
+#[test]
+fn newest_ranked_match_tier_is_the_newest_ranked_competitive_row_of_the_player() {
+    // R154 (b): the tier Match Details shows for the player, from the
+    // newest competitive match in which it is a ranked one.
+    let repo = repo_in_memory();
+    tiered_match(&repo, "old", "competitive", 1_000, "p", Some(12));
+    tiered_match(&repo, "newest-ranked", "competitive", 2_000, "p", Some(14));
+    // Newer, but no ranked tier: unranked (0), placements (2), unknown.
+    tiered_match(&repo, "unranked", "competitive", 3_000, "p", Some(0));
+    tiered_match(&repo, "placement", "competitive", 3_500, "p", Some(2));
+    tiered_match(&repo, "unknown", "competitive", 3_800, "p", None);
+    // Newer, ranked, but not a competitive match.
+    tiered_match(&repo, "unrated", "unrated", 4_000, "p", Some(20));
+    // Somebody else's tier in a competitive match.
+    tiered_match(
+        &repo,
+        "other",
+        "competitive",
+        5_000,
+        "someone-else",
+        Some(25),
+    );
+
+    assert_eq!(
+        repo.newest_ranked_match_tier("p").unwrap(),
+        Some(StoredTier {
+            start_ms: 2_000,
+            tier: 14
+        })
+    );
+    assert_eq!(repo.newest_ranked_match_tier("nobody").unwrap(), None);
+}
+
+#[test]
+fn newest_ranked_match_tier_is_none_without_a_ranked_row() {
+    let repo = repo_in_memory();
+    tiered_match(&repo, "m", "competitive", 1_000, "p", Some(0));
+    tiered_match(&repo, "u", "unrated", 2_000, "p", Some(20));
+    assert_eq!(repo.newest_ranked_match_tier("p").unwrap(), None);
+}
+
+#[test]
+fn newest_ranked_match_tier_is_index_backed() {
+    // Run for every player with no MMR snapshot: the player's rows are
+    // found by the `match_players(puuid)` index and each match by its
+    // primary key — never a table scan, whatever the stored history.
+    let repo = repo_in_memory();
+    let mut stmt = repo
+        .conn()
+        .prepare(&format!(
+            "EXPLAIN QUERY PLAN {}",
+            repo::NEWEST_RANKED_MATCH_TIER_SQL
+        ))
+        .unwrap();
+    let plan: Vec<String> = stmt
+        .query_map(rusqlite::params!["p"], |r| r.get::<_, String>(3))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    let joined = plan.join("\n");
+    assert!(
+        plan.iter().any(|d| d.starts_with("SEARCH")
+            && d.contains("match_players")
+            && d.contains("idx_match_players_puuid")),
+        "match_players must be read through its puuid index:\n{joined}"
+    );
+    assert!(
+        !plan.iter().any(|d| d.starts_with("SCAN")),
+        "no table may be scanned:\n{joined}"
+    );
+    assert!(
+        plan.iter()
+            .any(|d| d.starts_with("SEARCH") && d.contains("matches")),
+        "matches must be read by key:\n{joined}"
     );
 }
 

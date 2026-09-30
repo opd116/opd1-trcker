@@ -406,6 +406,94 @@
         "tier": 15
       },
       "team": "enemy"
+    },
+    {
+      "actGames": null,
+      "actWinrate": null,
+      "actWins": null,
+      "agentId": "agent-jett",
+      "cardId": "card-uuid",
+      "encounters": null,
+      "hsPct": 0.25,
+      "isSelf": false,
+      "isSelfParty": false,
+      "kd": 2.0,
+      "last5": [
+        {
+          "result": "win",
+          "rrEarned": 19,
+          "startMs": 2300
+        },
+        {
+          "result": "loss",
+          "rrEarned": -18,
+          "startMs": 2200
+        },
+        {
+          "result": "win",
+          "rrEarned": 21,
+          "startMs": 2100
+        }
+      ],
+      "level": 187,
+      "name": {
+        "kind": "visible",
+        "name": "Silent",
+        "tag": "MMR"
+      },
+      "party": null,
+      "peak": null,
+      "prevActTier": null,
+      "puuid": "puuid-rank-update",
+      "rank": {
+        "rr": 42,
+        "tier": 15
+      },
+      "team": "ally"
+    },
+    {
+      "actGames": null,
+      "actWinrate": null,
+      "actWins": null,
+      "agentId": "agent-jett",
+      "cardId": "card-uuid",
+      "encounters": null,
+      "hsPct": 0.25,
+      "isSelf": false,
+      "isSelfParty": false,
+      "kd": 2.0,
+      "last5": [
+        {
+          "result": "win",
+          "rrEarned": null,
+          "startMs": 2300
+        },
+        {
+          "result": "loss",
+          "rrEarned": null,
+          "startMs": 2200
+        },
+        {
+          "result": "win",
+          "rrEarned": null,
+          "startMs": 2100
+        }
+      ],
+      "level": 187,
+      "name": {
+        "kind": "visible",
+        "name": "Silent",
+        "tag": "MATCH"
+      },
+      "party": null,
+      "peak": null,
+      "prevActTier": null,
+      "puuid": "puuid-rank-match",
+      "rank": {
+        "rr": null,
+        "tier": 14
+      },
+      "team": "enemy"
     }
   ],
   "stage": "ingame"

@@ -598,7 +598,7 @@ async fn worker_names_only_visible_players_and_settles_failures() {
             tag: "TAG".into()
         })
     );
-    assert!(matches!(me.rank, Field::Value(r) if r.tier == 15 && r.rr == 42));
+    assert!(matches!(me.rank, Field::Value(r) if r.tier == 15 && r.rr == Some(42)));
     assert_eq!((me.party, me.encounters), (None, None));
     assert!(matches!(me.last5, Field::Value(ref v) if v.len() == 1));
     assert_eq!(me.kd, Field::Value(2.0));
@@ -1199,3 +1199,8 @@ pub(crate) mod backfill;
 /// R150's names-fill tests (their own file; same harness).
 #[cfg(test)]
 mod names_fill;
+
+/// R154's rank tests: the rank when MMR has no answer (their own file; same
+/// harness).
+#[cfg(test)]
+mod rank;

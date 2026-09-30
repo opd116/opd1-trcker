@@ -535,23 +535,42 @@ test("party stripe and tab paint above the card grid", async ({ page }) => {
   expect(await hit(".stripe", stripe.width / 2, stripe.height - 20), "stripe hit").toBe(true);
 });
 
-// F8 (task 17 review; ruling pending, this pins today's behaviour): Lobby and Closed have no agent to show, and the
-// card stays identical to every other stage's (CLAUDE.md "the card is identical everywhere"): the same empty
-// 40×40 `--raised` box, never an image.
-for (const scene of ["lobby3", "closed"]) {
-  test(`${scene}: every card keeps the empty 40×40 agent box, no image`, async ({ page }) => {
+// F8 (task 17 review, ruled in fix round 2: keep): the agent box is one look in every stage. Lobby and Closed have no
+// agent to show, and the card stays identical to every other stage's (CLAUDE.md "the card is identical everywhere";
+// R99 calls this state "the empty agent slot"): the same empty 40×40 `--raised` div that Agent Select draws before a
+// lock, never an image and never a skeleton shape. The cards around it are populated (no `.sk` anywhere), so the box
+// reads as a slot beside real values, not as a loading card.
+type BoxLook = { tag: string; w: number; h: number; bg: string; radius: string; cls: string };
+const emptyAgentBoxes = (page: Page): Promise<BoxLook[]> =>
+  page.locator(".live .card .who .agent").evaluateAll((els) =>
+    els
+      .filter((el) => el.tagName === "DIV")
+      .map((el) => {
+        const r = el.getBoundingClientRect();
+        const cs = getComputedStyle(el);
+        return { tag: el.tagName, w: r.width, h: r.height, bg: cs.backgroundColor, radius: cs.borderTopLeftRadius, cls: el.className.replace(/ svelte-\S+/g, "") };
+      }),
+  );
+
+test("the empty agent box is one look in every stage (Agent Select before a lock = Lobby = Closed)", async ({ page }) => {
+  await openScene(page, "pregame");
+  const reference = (await emptyAgentBoxes(page))[0]; // an ally who has not locked (R99)
+  expect(reference, "pregame has an unpicked ally").toBeDefined();
+  near(reference!.w, 40, "reference w");
+  near(reference!.h, 40, "reference h");
+  expect(reference!.bg).toBe(await varRgb(page, "--raised"));
+  expect(reference!.radius).toBe("6px");
+
+  for (const scene of ["lobby1", "lobby3", "lobby5", "closed"]) {
     await openScene(page, scene);
     const cards = page.locator(".live .card");
-    expect(await cards.count()).toBeGreaterThan(0);
-    for (let i = 0; i < (await cards.count()); i++) {
-      const agent = cards.nth(i).locator(".who .agent");
-      await expect(agent, `card ${i}`).toHaveCount(1);
-      expect(await agent.evaluate((el) => el.tagName), `card ${i} is not an img`).toBe("DIV");
-      const b = await box(agent);
-      near(b.width, 40, `card ${i} agent w`);
-      near(b.height, 40, `card ${i} agent h`);
-      expect(await css(agent, "background-color")).toBe(await varRgb(page, "--raised"));
-    }
-    await expect(page.locator(".live .card .who img")).toHaveCount(0);
-  });
-}
+    const n = await cards.count();
+    expect(n, scene).toBeGreaterThan(0);
+    // Every card is populated: no skeleton shape, so the box is not read as one.
+    await expect(page.locator(".live .card .sk"), `${scene}: no skeleton shape inside a card`).toHaveCount(0);
+    await expect(page.locator(".live .card .who img"), `${scene}: no agent image`).toHaveCount(0);
+    const boxes = await emptyAgentBoxes(page);
+    expect(boxes.length, `${scene}: every card has the empty box`).toBe(n);
+    for (const b of boxes) expect(b, scene).toEqual(reference);
+  }
+});

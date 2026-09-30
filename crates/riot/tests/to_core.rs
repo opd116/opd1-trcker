@@ -249,6 +249,33 @@ fn match_from_details_without_round_results_has_no_halves_or_damage() {
 }
 
 #[test]
+fn match_from_details_rounds_without_round_num_or_winner_have_no_halves() {
+    // Round results are present, but no round carries `roundNum` (or, in
+    // the second case, `winningTeam`): the halves are unknown, and an
+    // unknown value never becomes a counted 0.
+    let halves = |strip: &[&str]| {
+        let mut value: serde_json::Value =
+            serde_json::from_str(&fixture("match_details.json")).unwrap();
+        for round in value["roundResults"].as_array_mut().unwrap() {
+            for key in strip {
+                round.as_object_mut().unwrap().remove(*key);
+            }
+        }
+        let details: MatchDetailsResponse = serde_json::from_value(value).unwrap();
+        let (_, teams, _) = match_from_details(&details);
+        teams
+            .iter()
+            .map(|t| t.rounds_won_h1)
+            .collect::<Vec<Option<i64>>>()
+    };
+    assert_eq!(halves(&["roundNum", "winningTeam"]), [None, None]);
+    assert_eq!(halves(&["roundNum"]), [None, None]);
+    assert_eq!(halves(&["winningTeam"]), [None, None]);
+    // Control: the untouched fixture still counts.
+    assert_eq!(halves(&[]), [Some(1), Some(1)]);
+}
+
+#[test]
 fn match_from_details_nulls_keep_phase2_fields_none() {
     let details: MatchDetailsResponse =
         serde_json::from_str(&fixture("match_details_nulls.json")).unwrap();

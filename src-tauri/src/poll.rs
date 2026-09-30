@@ -246,8 +246,8 @@ impl Poller {
                 repo.set_state(SELF_PUUID_KEY, &key_value)?;
                 if switched {
                     // The previous account's loadout copy must not show for
-                    // this one (an unreadable value is no loadout).
-                    repo.set_state(SELF_LOADOUT_KEY, "")?;
+                    // this one: no key is no stored loadout.
+                    repo.delete_state(SELF_LOADOUT_KEY)?;
                 }
                 Ok(())
             })

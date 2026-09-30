@@ -139,6 +139,41 @@ async fn session_threads_product_session_version_into_remote_headers() {
 }
 
 #[tokio::test]
+async fn player_loadout_reads_only_the_sessions_own_puuid() {
+    // R90: the personalization endpoint is asked for the user's own puuid
+    // and nothing else; the method takes no puuid, so no caller can send
+    // another player's.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    mount_sessions_with_version(&server, "release-09.08-shipping-11-3200000").await;
+    let session = connect_against(tmp.path(), &server).await;
+
+    let own = format!("/personalization/v2/players/{SELF_PUUID}/playerloadout");
+    Mock::given(method("GET"))
+        .and(path(own.clone()))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"Subject": SELF_PUUID, "Guns": []})),
+        )
+        .mount(&server)
+        .await;
+
+    let loadout = session.player_loadout().await.expect("own loadout");
+    assert!(loadout.guns.is_empty());
+    let asked: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .filter(|p| p.starts_with("/personalization/"))
+        .collect();
+    assert_eq!(asked, [own]);
+}
+
+#[tokio::test]
 async fn session_falls_back_to_presence_client_version() {
     let tmp = TempDir::new();
     write_shooter_log(tmp.path());

@@ -550,7 +550,10 @@ impl AssetCache {
     /// file is present), loads the cached tables into memory without
     /// another network call and returns `Ok(false)`. Otherwise re-fetches
     /// every bulk table, persists them (trimmed — see the module docs),
-    /// and returns `Ok(true)`.
+    /// and returns `Ok(true)`. A current cache that only lacks
+    /// `contenttiers.json` (written before content tiers existed) fetches
+    /// just that table (`Ok(true)`); if that one fetch fails the other
+    /// four load from disk (`Ok(false)`) and the next call tries again.
     ///
     /// Fix-round item 6: if `/v1/version` itself can't be reached at all
     /// (network down), this falls back to whatever's on disk — as long as
@@ -585,6 +588,33 @@ impl AssetCache {
             .await?;
             *self.tables.write().unwrap() = tables;
             return Ok(false);
+        }
+
+        // A cache from before content tiers existed: its four tables are
+        // current, only `contenttiers.json` is missing. Load them from disk
+        // and fetch just `/v1/contenttiers`, not all five tables.
+        if self.only_content_tiers_missing(&version) {
+            let mut tables = blocking({
+                let dir = self.dir.clone();
+                move || load_tables_from_disk_sync(&dir)
+            })
+            .await?;
+            // A failed fetch keeps the four tables (no content-tier icons
+            // yet, like the offline fallback): the session isn't left
+            // without tables, and the file stays missing for the next try.
+            let Ok(content_tiers) = self.fetch_content_tiers().await else {
+                *self.tables.write().unwrap() = tables;
+                return Ok(false);
+            };
+            blocking({
+                let dir = self.dir.clone();
+                let content_tiers = content_tiers.clone();
+                move || write_json(&dir.join("contenttiers.json"), &content_tiers)
+            })
+            .await?;
+            tables.content_tiers = content_tiers;
+            *self.tables.write().unwrap() = tables;
+            return Ok(true);
         }
 
         let agents = self.fetch_agents().await?;
@@ -627,20 +657,26 @@ impl AssetCache {
     /// enough that this isn't routed through [`blocking`] (unlike the
     /// larger reads/writes elsewhere in this module).
     fn disk_cache_matches(&self, version: &str) -> bool {
-        let manifest_path = self.dir.join("manifest.json");
-        let Ok(bytes) = std::fs::read(&manifest_path) else {
+        self.core_cache_matches(version) && self.dir.join("contenttiers.json").is_file()
+    }
+
+    /// The cache is current (same version, the four core tables on disk)
+    /// but has no `contenttiers.json`: a cache written before content tiers
+    /// existed. The offline fallback in `refresh_tables` doesn't need the
+    /// file (`tables_files_exist`).
+    fn only_content_tiers_missing(&self, version: &str) -> bool {
+        self.core_cache_matches(version) && !self.dir.join("contenttiers.json").is_file()
+    }
+
+    /// The manifest names `version` and the four core tables are on disk.
+    fn core_cache_matches(&self, version: &str) -> bool {
+        let Ok(bytes) = std::fs::read(self.dir.join("manifest.json")) else {
             return false;
         };
         let Ok(manifest) = serde_json::from_slice::<Manifest>(&bytes) else {
             return false;
         };
-        // A cache written before content tiers existed has no
-        // `contenttiers.json`: it counts as stale (refetched once) even
-        // though its version is current. The offline fallback in
-        // `refresh_tables` doesn't need it (`tables_files_exist`).
-        manifest.version == version
-            && self.tables_files_exist()
-            && self.dir.join("contenttiers.json").is_file()
+        manifest.version == version && self.tables_files_exist()
     }
 
     /// The tables every feature needs (names, maps, tiers, acts): enough to

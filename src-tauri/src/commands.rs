@@ -92,25 +92,18 @@ pub(crate) async fn player_details_for(
 
     // Marked before the build, so the answer itself has the resolving keys
     // absent (R97).
-    let resolve = crate::details::skins_pending(&st, &puuid);
-    if resolve {
-        st.begin_skin_resolve(&puuid);
-    }
-    let details = match crate::details::build(&st, &puuid).await {
-        Ok(details) => details,
-        Err(e) => {
-            if resolve {
-                st.end_skin_resolve(&puuid);
-            }
-            return Err(e);
-        }
-    };
+    // The guard ends the mark when dropped: on an early error, and if the
+    // resolving task panics (R97).
+    let resolving =
+        crate::details::skins_pending(&st, &puuid).then(|| st.begin_skin_resolve(&puuid));
+    let details = crate::details::build(&st, &puuid).await?;
 
-    if resolve {
+    if let Some(guard) = resolving {
         let (st, puuid, before) = (st.clone(), puuid.clone(), details.clone());
         tauri::async_runtime::spawn(async move {
             crate::details::resolve_skins(&st, &puuid).await;
-            st.end_skin_resolve(&puuid);
+            // Ended before the rebuild, so a name still unknown is `null`.
+            drop(guard);
             rebuild_and_emit(&st, &puuid, &before).await;
         });
     }

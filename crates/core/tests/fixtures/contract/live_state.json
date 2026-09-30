@@ -165,26 +165,52 @@
       "team": "enemy"
     },
     {
-      "actGames": null,
-      "actWinrate": null,
-      "actWins": null,
+      "actGames": 60,
+      "actWinrate": 0.5,
+      "actWins": 30,
       "agentId": null,
       "cardId": "card-uuid",
       "encounters": null,
-      "hsPct": null,
+      "hsPct": 0.25,
       "isSelf": false,
       "isSelfParty": false,
-      "kd": null,
-      "last5": null,
+      "kd": 2.0,
+      "last5": [
+        {
+          "result": "win",
+          "rrEarned": 19,
+          "startMs": 2300
+        },
+        {
+          "result": "loss",
+          "rrEarned": -18,
+          "startMs": 2200
+        },
+        {
+          "result": "win",
+          "rrEarned": 21,
+          "startMs": 2100
+        }
+      ],
       "level": 187,
       "name": {
         "kind": "hiddenPlayer"
       },
       "party": null,
-      "peak": null,
-      "prevActTier": null,
+      "peak": {
+        "actEndMs": 2000,
+        "actLabel": "V26 A4",
+        "actName": "V26 ACT IV",
+        "actStartMs": 1000,
+        "sinceActEndMs": 500,
+        "tier": 17
+      },
+      "prevActTier": 16,
       "puuid": "puuid-hidden",
-      "rank": null,
+      "rank": {
+        "rr": 42,
+        "tier": 15
+      },
       "team": "enemy"
     },
     {

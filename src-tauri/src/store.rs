@@ -392,10 +392,10 @@ pub fn recent_matches(
     Ok(rows.iter().map(match_summary).collect())
 }
 
-/// R116: Player Details' hero K/D and HS% — pooled over `puuid`'s most
-/// recent [`TEAMMATE_WINDOW`] (20) competitive matches of the current act
-/// (`start_ms >= act_start_ms`), the same set Top 3 Teammates reads, so it
-/// costs no request. See [`hero_stats`] for what counts.
+/// R116: Player Details' hero K/D and HS% — pooled over `puuid`'s
+/// [`TEAMMATE_WINDOW`] (20) newest current-act (`start_ms >= act_start_ms`)
+/// competitive matches, the window the Details sync fetches for Top 3, so it
+/// costs no extra request. See [`hero_stats`] for what counts.
 pub fn act_hero_stats(repo: &Repo, puuid: &str, act_start_ms: i64) -> Result<HeroStats> {
     let rows = repo.comp_matches(puuid, act_start_ms..i64::MAX, TEAMMATE_WINDOW)?;
     Ok(hero_stats(&rows))

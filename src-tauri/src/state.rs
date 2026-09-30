@@ -548,13 +548,17 @@ impl AppState {
         // the build, to mark its skins "resolving" (R97) and fetch their
         // names in the Closed stage, where nothing else supplies it. Memory
         // and `app_state` never drift: a read writes both (the stored copy
-        // only on change) and an account switch blanks both, so the source
+        // only on change) and an account switch clears both, so the source
         // order stays match loadout, then the user's own read, then null.
-        let stored_loadout: Option<RawLoadout> = repo
-            .get_state(SELF_LOADOUT_KEY)
-            .ok()
-            .flatten()
-            .and_then(|json| serde_json::from_str(&json).ok());
+        let stored_loadout: Option<RawLoadout> = match repo.get_state(SELF_LOADOUT_KEY) {
+            Ok(json) => json.and_then(|json| serde_json::from_str(&json).ok()),
+            Err(e) => {
+                // A DB read failure would otherwise silently hide the
+                // user's Closed-stage skins; copy-log shows it.
+                log::warn!("stored self loadout unreadable: {e}");
+                None
+            }
+        };
         let mut live = LiveModel::new(self_puuid);
         live.self_loadout = stored_loadout;
         Self {
@@ -748,15 +752,22 @@ impl AppState {
     }
 
     /// Marks a skin-name fetch for `puuid` as running (see
-    /// [`Self::skins_resolving`]); every call needs its
-    /// [`Self::end_skin_resolve`].
-    pub fn begin_skin_resolve(&self, puuid: &str) {
+    /// [`Self::skins_resolving`]) until the returned guard is dropped. The
+    /// guard's `Drop` ends the mark, so a panic in the fetch can never leave
+    /// a puuid resolving for the rest of the session (R97). Drop it *before*
+    /// rebuilding the details that should show the result.
+    #[must_use = "the mark ends when the guard is dropped"]
+    pub fn begin_skin_resolve(self: &Arc<Self>, puuid: &str) -> SkinResolveGuard {
         *lock(&self.skins_inflight)
             .entry(puuid.to_string())
             .or_default() += 1;
+        SkinResolveGuard {
+            st: self.clone(),
+            puuid: puuid.to_string(),
+        }
     }
 
-    pub fn end_skin_resolve(&self, puuid: &str) {
+    fn end_skin_resolve(&self, puuid: &str) {
         let mut inflight = lock(&self.skins_inflight);
         if let Some(n) = inflight.get_mut(puuid) {
             *n -= 1;
@@ -778,6 +789,19 @@ impl AppState {
         map.insert(puuid.to_string(), now);
         log::debug!("details sync claimed for {}", short(puuid));
         true
+    }
+}
+
+/// A running skin-name fetch's mark on its puuid
+/// ([`AppState::begin_skin_resolve`]); dropping it ends the mark.
+pub struct SkinResolveGuard {
+    st: Arc<AppState>,
+    puuid: String,
+}
+
+impl Drop for SkinResolveGuard {
+    fn drop(&mut self) {
+        self.st.end_skin_resolve(&self.puuid);
     }
 }
 
@@ -1340,6 +1364,59 @@ mod tests {
             Some("me".into()),
         );
         (Arc::new(st), rec, dir)
+    }
+
+    #[test]
+    fn a_failing_self_loadout_read_is_logged_and_falls_back_to_none() {
+        crate::logbuf::init();
+        let dir = tempfile::tempdir().unwrap();
+        // A DB without its `app_state` table: every `get_state` errors.
+        let repo = Repo::new(opd1_core::db::open_db(std::path::Path::new(":memory:")).unwrap());
+        repo.conn().execute_batch("DROP TABLE app_state").unwrap();
+        let assets = AssetCache::with_base(dir.path().join("a"), "http://127.0.0.1:1".into());
+        let st = AppState::new(
+            Box::new(Sink(Arc::new(Recorder::default()))),
+            repo,
+            assets,
+            dir.path().join("debug"),
+            Some("me".into()),
+        );
+        assert!(lock(&st.live).self_loadout.is_none(), "falls back to None");
+        assert!(
+            crate::logbuf::snapshot().contains("stored self loadout unreadable"),
+            "the read error reaches copy-log:\n{}",
+            crate::logbuf::snapshot()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_panicking_skin_resolve_never_leaves_a_puuid_resolving() {
+        // R97: a skeleton never outlives the attempt — even when the task
+        // that holds the mark panics (a poisoned lock in the asset cache).
+        let (st, _rec, _dir) = test_state();
+        let guard = st.begin_skin_resolve("p1");
+        assert!(st.skins_resolving("p1"));
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            panic!("resolve_skins blew up");
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        assert!(!st.skins_resolving("p1"), "the guard's Drop ended the mark");
+    }
+
+    #[test]
+    fn skin_resolve_marks_count_and_end_when_dropped() {
+        let (st, _rec, _dir) = test_state();
+        let first = st.begin_skin_resolve("p1");
+        let second = st.begin_skin_resolve("p1");
+        let other = st.begin_skin_resolve("p2");
+        drop(first);
+        assert!(st.skins_resolving("p1"), "one fetch still runs");
+        drop(second);
+        assert!(!st.skins_resolving("p1"));
+        assert!(st.skins_resolving("p2"), "another player is unaffected");
+        drop(other);
+        assert!(!st.skins_resolving("p2"));
     }
 
     #[test]

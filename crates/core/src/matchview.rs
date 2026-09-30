@@ -69,6 +69,14 @@ fn stored_name(p: &MatchPlayer) -> Option<(String, String)> {
     ))
 }
 
+/// Whether a row has no full `(name, tag)` stored in its match (R74:
+/// match-details blanks the names of players who hid them). Unlike
+/// [`needs_seen_name`] it ignores who is hidden on the live screen: the names
+/// fill asks about such a row whoever it is (R153).
+pub fn lacks_stored_name(p: &MatchPlayer) -> bool {
+    stored_name(p).is_none()
+}
+
 /// Whether a row other than the user's is not shown by its stored name:
 /// hidden on the live screen now (R93), or without a stored name (R74). The
 /// shell looks up a remembered name (`Repo::known_name`) for exactly these

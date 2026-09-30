@@ -12,6 +12,8 @@
 //!   forgotten, so nothing is rebuilt or emitted for it.
 //! - `match_details(matchId, focusPuuid)` — one match as the Match Details
 //!   scoreboard, from the DB (fetched once when it isn't stored yet).
+//! - `close_match()` — the UI left the Match Details page: the open match is
+//!   forgotten, so no `"match"` event is built or emitted for it.
 //! - `my_stats()` — the user's My Stats for the current act, from the DB
 //!   only (no Riot call); `null` while the user or the act is unknown.
 //! - `copy_log()` — the last 500 log lines (R30; the UI copies them).
@@ -126,6 +128,13 @@ pub(crate) async fn player_details_for(
                 // The card on screen may have gained matches too.
                 st.reload_slot(&puuid).await;
                 crate::details::refresh(&st, &puuid).await;
+                // R153: the sync may have stored matches that put new
+                // teammates into the Top 3; the ones now shown unnamed are
+                // asked too (a puuid already queued or answered blank is not
+                // asked again: `queue_name_fill`, `Repo::names_to_ask`).
+                if let Some(page) = st.open_details_of(&puuid) {
+                    st.queue_name_fill(details_asks(&page));
+                }
             });
         }
     }
@@ -133,17 +142,29 @@ pub(crate) async fn player_details_for(
 }
 
 /// R150: the names a Player Details page lacks: the hero's own (a card with
-/// no name at all) and the Top 3 teammates shown as Hidden Player (no name in
-/// any stored match or `players` row). On demand — only puuids never asked
-/// before. Players hidden on the live screen are dropped when queued
-/// (`LiveModel::queue_name_fill`).
+/// no name at all, or one shown hidden without a remembered name) and the
+/// Top 3 teammates shown as Hidden Player or by their agent (no name in any
+/// stored match or `players` row). On demand — only puuids never asked
+/// before. Queued at any stage and sent between matches only; a player shown
+/// hidden is asked too (R153), and whatever comes back still shows in the
+/// hidden style (remembered), never as a plain name (R18).
 fn details_asks(details: &PlayerDetails) -> Vec<NameAsk> {
-    let hero = (details.card.name == Field::Missing && !details.card.is_self)
-        .then(|| details.card.puuid.clone());
+    let unnamed = |name: &DisplayName| {
+        matches!(
+            name,
+            DisplayName::HiddenPlayer | DisplayName::HiddenAgent { .. }
+        )
+    };
+    let hero_unnamed = match &details.card.name {
+        Field::Missing => true,
+        Field::Value(name) => unnamed(name),
+        _ => false,
+    };
+    let hero = (hero_unnamed && !details.card.is_self).then(|| details.card.puuid.clone());
     let mates = details
         .top_teammates
         .iter()
-        .filter(|t| t.name == DisplayName::HiddenPlayer)
+        .filter(|t| unnamed(&t.name))
         .map(|t| t.puuid.clone());
     hero.into_iter()
         .chain(mates)
@@ -164,6 +185,20 @@ pub fn close_details(state: AppStateRef<'_>) {
 /// `close_details` without the Tauri wrapper.
 pub(crate) fn close_details_for(st: &Arc<AppState>) {
     st.close_details();
+}
+
+/// The UI left the Match Details page (Back, or another page): nothing is
+/// open any more, so a closed scoreboard is never rebuilt or emitted to.
+/// Closing with nothing open does nothing; a later `match_details` or
+/// `player_details` call works as before.
+#[tauri::command]
+pub fn close_match(state: AppStateRef<'_>) {
+    close_match_for(state.inner());
+}
+
+/// `close_match` without the Tauri wrapper.
+pub(crate) fn close_match_for(st: &Arc<AppState>) {
+    st.close_match();
 }
 
 #[tauri::command]

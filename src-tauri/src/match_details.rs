@@ -7,7 +7,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use opd1_core::db::repo::NameAsk;
-use opd1_core::matchview::{build_match_view, needs_known_name, needs_seen_name, MatchViewInput};
+use opd1_core::matchview::{
+    build_match_view, lacks_stored_name, needs_known_name, needs_seen_name, MatchViewInput,
+};
 use opd1_core::model::MatchDetailsView;
 use opd1_core::names::KnownName;
 
@@ -20,9 +22,9 @@ use crate::sync::fetch_missing_details;
 /// (no session, the fetch failed, or the id names no match).
 ///
 /// R150: the view is also recorded as the open Match Details, and the rows
-/// that have no name anywhere (and aren't hidden on the live screen) are
-/// queued for the names fill: they show the names when it answers, through a
-/// `"match"` event ([`refresh_open`]).
+/// that have no name anywhere are queued for the names fill (a player shown
+/// hidden included, R153; the fill sends between matches only): they show the
+/// names when it answers, through a `"match"` event ([`refresh_open`]).
 ///
 /// The caller has already validated both ids (`commands::check_match_args`).
 pub async fn load(
@@ -111,13 +113,15 @@ async fn read(
                 }
             }
             // R150: a row with no name in this match, none in the `players`
-            // table and none remembered from any match, that is not hidden
-            // on the live screen, is worth asking name-service about.
+            // table and none remembered from any match is worth asking
+            // name-service about — also one hidden on the live screen now
+            // (R153): the fill only sends between matches, and the answer
+            // still shows in the hidden style for that player.
             let asks: Vec<NameAsk> = stored
                 .players
                 .iter()
                 .filter(|p| p.puuid != me)
-                .filter(|p| needs_seen_name(p, &hidden))
+                .filter(|p| lacks_stored_name(p))
                 .filter(|p| !seen.contains_key(&p.puuid) && !remembered.contains_key(&p.puuid))
                 .map(|p| NameAsk {
                     puuid: p.puuid.clone(),

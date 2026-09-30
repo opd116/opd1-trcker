@@ -1491,6 +1491,110 @@ fn encounter_counts_equal_encounters_len() {
 }
 
 #[test]
+fn encounters_count_competitive_matches_only() {
+    // R156 (user, 2026-09-30): the badge and the Details list are the
+    // competitive matches in which the user met the player. Deathmatch and
+    // every other queue add nothing, with or against.
+    let shared = |repo: &Repo, id: &str, start: i64, queue: &str, other_team: &str| {
+        let mut m = sample_match(id, start, Some("Blue"));
+        m.queue_id = queue.to_string();
+        repo.upsert_match(
+            &m,
+            &[],
+            &[
+                sample_player("self", "Blue", "Self", "111"),
+                sample_player("other", other_team, "Other", "222"),
+            ],
+        )
+        .unwrap();
+    };
+
+    // Only other queues: nothing, in both the count and the list.
+    let repo = repo_in_memory();
+    for (i, queue) in ["deathmatch", "unrated", "spikerush", "swiftplay", ""]
+        .into_iter()
+        .enumerate()
+    {
+        shared(&repo, &format!("with-{i}"), 1_000 + i as i64, queue, "Blue");
+        shared(&repo, &format!("vs-{i}"), 2_000 + i as i64, queue, "Red");
+    }
+    assert_eq!(repo.encounter_counts("self", "other").unwrap(), (0, 0));
+    let none = repo.encounters("self", "other").unwrap();
+    assert_eq!((none.with, none.against, none.matches.len()), (0, 0, 0));
+
+    // Competitive ones count, the others still do not.
+    shared(&repo, "comp-with", 10_000, "competitive", "Blue");
+    shared(&repo, "comp-vs", 11_000, "competitive", "Red");
+    shared(&repo, "dm-later", 12_000, "deathmatch", "Red");
+    assert_eq!(repo.encounter_counts("self", "other").unwrap(), (1, 1));
+    let e = repo.encounters("self", "other").unwrap();
+    assert_eq!((e.with, e.against), (1, 1));
+    let ids: Vec<&str> = e.matches.iter().map(|r| r.match_id.as_str()).collect();
+    assert_eq!(ids, ["comp-vs", "comp-with"], "newest first");
+
+    // Only the encounter rules changed: a Deathmatch still names the player
+    // for the remembered-name lookup (any match).
+    let dm_only = repo_in_memory();
+    let named = sample_player("other", "Red", "Known", "DM");
+    let mut m = sample_match("dm", 1_000, None);
+    m.queue_id = "deathmatch".into();
+    dm_only
+        .upsert_match(
+            &m,
+            &[],
+            &[sample_player("self", "Blue", "Self", "111"), named],
+        )
+        .unwrap();
+    assert_eq!(dm_only.encounter_counts("self", "other").unwrap(), (0, 0));
+    assert!(dm_only.known_name("self", "other").unwrap().is_some());
+}
+
+#[test]
+fn the_encounter_queries_are_index_backed() {
+    // R156 adds the queue check: it must stay a key seek on `matches`, and
+    // neither query may scan a base table.
+    let repo = repo_in_memory();
+    for (name, sql) in [
+        ("encounters", repo::ENCOUNTERS_SQL),
+        ("encounter_counts", repo::ENCOUNTER_COUNTS_SQL),
+    ] {
+        let mut stmt = repo
+            .conn()
+            .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(rusqlite::params!["self", "other"], |r| {
+                r.get::<_, String>(3)
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        println!("{name} plan:\n{}", plan.join("\n"));
+        let scans: Vec<&String> = plan.iter().filter(|d| d.starts_with("SCAN")).collect();
+        assert!(
+            scans.is_empty(),
+            "{name}: table scan in the plan: {scans:?}"
+        );
+        // (alias, index and key); SQLite says `COVERING INDEX` when the
+        // query reads nothing else from the row.
+        for (alias, seek) in [
+            ("mp_self", "idx_match_players_puuid (puuid=?)"),
+            (
+                "mp_other",
+                "sqlite_autoindex_match_players_1 (match_id=? AND puuid=?)",
+            ),
+            ("m", "sqlite_autoindex_matches_1 (match_id=?)"),
+        ] {
+            assert!(
+                plan.iter()
+                    .any(|d| d.starts_with(&format!("SEARCH {alias} USING")) && d.ends_with(seek)),
+                "{name}: no `{alias}` seek by {seek} in {plan:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn match_rows_returns_teams_players_with_tiers() {
     let repo = repo_in_memory();
     let mut m = sample_match("m1", 1_000, Some("Blue"));

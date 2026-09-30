@@ -39,6 +39,13 @@ where
 /// player. [`RiotSession::names`] only accepts these, which makes CLAUDE.md's
 /// "never request a hidden player's name from any endpoint" a type-level
 /// guarantee instead of a convention a caller could forget to follow.
+///
+/// The live-stage lookup (Agent Select, In Game) builds one from the roster's
+/// real `Incognito` flag, so a hidden player is never asked about during a
+/// match. The between-matches names fill (R150, R153) passes `false` on
+/// purpose for players who hid their name *during* a finished match — the
+/// game's own Match History shows those names once it is over — and is itself
+/// barred from running while a match is on (`LiveModel::between_matches`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisiblePuuid(String);
 

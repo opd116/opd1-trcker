@@ -3,7 +3,7 @@
 // files, contract.test.ts walks the goldens (and the demo fixtures) with them, contract.test-d.ts ties them to the
 // types below. Rulings: R5 (rates are 0..1 fractions), R10 (enum shapes), R23 (tri-state fields), R97 (per-weapon
 // tri-state), R99 (agent set only on lock), R102 / R124 (a match without a stats row sends null, never a counted 0),
-// R116 / R120 (Details hero stats).
+// R116 / R120 (Details hero stats), R154 (a rank's RR may be unknown).
 //
 // Tri-state convention for loadable fields:
 //   key absent (undefined) → still loading → skeleton
@@ -40,7 +40,8 @@ export type DisplayName =
 
 export interface Rank {
   tier: number;
-  rr: number;
+  /** R154: null when the MMR request failed and the tier came from the player's stored matches (the exact RR is unknown). */
+  rr: number | null;
 }
 
 export interface Peak {

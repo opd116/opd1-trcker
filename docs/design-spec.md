@@ -329,6 +329,7 @@ The party stripe and tab (§3.9) come **before** the grid in the markup, as in t
 - Text column: `flex-direction:column; gap:2px; min-width:0`.
   - Tier name 15px/600 `nowrap`.
   - Line 2: 12px/500 `--text2` `nowrap`: `<span 13px/600 --text tab>{rr}</span> RR`.
+  - **R154:** `rank.rr` is `null` when the MMR request failed and the tier came from the player's stored matches. The tier icon and name draw as usual and the number is `—` (`<span>—</span> RR`): same markup, same positions, no extra text or badge, no tooltip. The Details hero does the same (§6.2). `rr: 0` is a real RR.
 - `rank === null` **[C]**, or `rank.tier < 3` (Unrated and the unused tiers 1–2; **R129**): an empty 40×40 box (layout kept), then `—` 15px/600 `--text2`, with no line 2. A tier below 3 renders exactly like `null`, the same rule as the Prev row.
 - The tier name's right edge must stay ≤ x 463 in card coordinates, because the party tab occupies x 464–485, y 22–42.
 
@@ -594,7 +595,7 @@ Map names, agent names (hidden-agent cards, Details `shortName`, Top-3 and toolt
 | Col | Content |
 |---|---|
 | 1 | Column, gap 4, `min-width:0`.<br>**Name wrapper:** `min-width:0; display:flex; align-items:baseline; gap:6px`. Variants as §3.4 at name 22px/600 (hidden: 22px/500 italic `--text-soft`), tag 15px/500 `--text2`, eye-off 16×16, underline offset 5px. Same tooltips.<br>**Meta row:** `display:flex; align-items:center; font-size:12px; font-weight:500; color:var(--text2); nowrap`. It holds `<span width:64px flex:none>Lv <span 14px --text tab>{level}</span></span>`, then the ⟲ badge: `display:flex; align-items:center; gap:3px; font-size:14px; font-weight:600; tab`, colour inherited `--text2`, SVG 13×13, count; tooltip as the card. The badge follows the §3.5 visibility rule. |
-| 2 | Current rank: flex, center, gap 12. `<img tier>` 48×48, then a column with gap 2, `nowrap`: tier name 18px/600; line 2 12px/500 `--text2` with `<span 14px/600 --text tab>{rr}</span> RR`. Null: empty 48 box, then `—` 18px/600 `--text2`. No tooltip. |
+| 2 | Current rank: flex, center, gap 12. `<img tier>` 48×48, then a column with gap 2, `nowrap`: tier name 18px/600; line 2 12px/500 `--text2` with `<span 14px/600 --text tab>{rr}</span> RR`. Null: empty 48 box, then `—` 18px/600 `--text2`. **R154:** `rank.rr` null (RR unknown) keeps the icon and tier name and shows `—` in the number's place (`— RR`). No tooltip. |
 | 3 | Peak: flex, center, gap 10 (tooltip group = the whole block **[C]**). `<img tier>` 28×28, then a column with gap 2, `nowrap`. Row: baseline, gap 6: `Peak` 12px/500 `--text2`, tier name 15px/600. Below: when-text 12px/500 `--text2` `tab`. Null: `Peak` then `—` 15px/600. |
 | 4 | Prev: flex, center, gap 10. `<img tier>` 24×24 (`grayscale(0.7)`, `opacity 0.75`), present only if a prev tier exists. Then a baseline row, gap 6, `nowrap`: `Prev` 12px/500 `--text2`, name 15px/500 `--text2`; or `—` **15px/500** `--text2` (weight pinned to 500, see §1.7). No tooltip. |
 
@@ -813,7 +814,7 @@ interface PlayerCard {
   level?: number | null;                // tri-state — FIX. null when the player hides it (HideAccountLevel), except on the user's own card (isSelf), which always carries the level (R100)
   cardId: string;
   agentId: string | null;               // set only after the lock (R99; a hover leaves it null)
-  rank?: { tier: number; rr: number } | null;
+  rank?: { tier: number; rr: number | null } | null;   // R154: rr is null when the MMR request failed (the tier then comes from the stored matches)
   prevActTier?: number | null;
   peak?: { tier: number; actLabel: string; actName: string; sinceActEndMs: number | null;
            actStartMs: number; actEndMs: number } | null;
@@ -894,7 +895,7 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
 | Hidden agent name | `card.name.agentId` → `meta.agents` | existing |
 | ⟲ count + tip | `card.encounters.{with,against}` | existing |
 | Lv | `card.level` | existing |
-| Current rank | `card.rank.{tier,rr}`, `meta.tiers` | existing |
+| Current rank | `card.rank.{tier,rr}` (`rr` may be null, R154), `meta.tiers` | existing |
 | Peak row + tip | `card.peak.{tier,actLabel,actName,sinceActEndMs,actStartMs,actEndMs}` | existing |
 | Prev row | `card.prevActTier` | existing |
 | K/D, HS% (Live card) | `card.kd`, `card.hsPct` (last 5 competitive) | existing |
@@ -974,6 +975,7 @@ The contract tests pin a no-stats `ScoreRow` as `kills`, `deaths`, `assists`, `a
 | `ingame-loading` | `players: []`, `mapId: null` |
 | `ingame-nometa` | the `ingame` roster with `meta` still pending (§5.8: skeleton bars for the map name, tier names and the hidden agent name) |
 | `ingame-remembered` | the `ingame` roster with three remembered cards, one per source (R145): Rook `ownMatch`, Nyx `otherMatch`, Kilo `seen` (no map). Drives the three remembered tooltips of §4.2 (`tips-live.spec.ts`) |
+| `ingame-rr-unknown` | the `ingame` roster with two cards whose `rank.rr` is `null` (R154): Sable (left column, Diamond 3) and Mara (right column, Immortal 1), tiers as in `ingame`. Their Current rank shows the tier and `— RR`; a click on Mara opens the Details hero the same way (`fit-live.spec.ts`) |
 | `details` | Mara (Show more visible, 3 encounters, 1 live teammate) |
 | `details-longnames` | a focus player named `WWWWWWWWWWWWWWWW#WWWWW` (hero name truncates, tag whole; encounters header ellipsizes); Top 3 = three 16-char `W` names, one of them live (they wrap, never overlap the icons or the count); loadout skin lines `Protocol 781-A · Sunrise`-length (ellipsis) |
 | `details-partial` | the hero card with per-field loading: name, level, rank, peak, stats and last5 each absent (§6.2 bars), recent rows present; one loadout weapon absent (resolving) and one `null` (R97) |

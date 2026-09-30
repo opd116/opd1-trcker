@@ -14,7 +14,7 @@ import type { DisplayName, LiveState, MatchDetailsView, Meta, PlayerCard, Player
 const NAMES: SceneName[] = [
   "boot", "closed", "closed-empty", "lobby1", "lobby2", "lobby2-loading", "lobby2-unranked", "lobby3", "lobby4", "lobby5",
   "pregame", "pregame-nomap", "pregame-loading", "ingame", "ingame-longnames", "ingame-parties4", "ingame-partial",
-  "ingame-unranked", "ingame-loading", "ingame-nometa", "ingame-remembered",
+  "ingame-unranked", "ingame-loading", "ingame-nometa", "ingame-remembered", "ingame-rr-unknown",
   "details", "details-more", "details-self", "details-hidden", "details-empty", "details-loading", "details-longnames",
   "details-partial", "details-nostats",
   "match", "match-enc", "match-hidden", "match-dm", "match-loading", "match-longnames", "match-nostats",
@@ -171,6 +171,19 @@ describe("live scenes", () => {
     // The design's roster is untouched elsewhere: `ingame` keeps exactly Rook (own match) as its one remembered card.
     const inGame = players("ingame").flatMap((c) => (c.name?.kind === "remembered" ? [c.name] : []));
     expect(inGame.map((n) => [n.name, n.source])).toEqual([["Rook", "ownMatch"]]);
+  });
+
+  it("ingame-rr-unknown (R154): two cards whose RR is unknown (null) with their tier kept, the rest is the ingame roster", () => {
+    const base = players("ingame");
+    const unknown = players("ingame-rr-unknown").filter((c) => c.rank && c.rank.rr === null);
+    expect(unknown.map((c) => (c.name && "name" in c.name ? c.name.name : "?"))).toEqual(["Sable", "Mara"]);
+    for (const c of unknown) {
+      const was = base.find((b) => b.puuid === c.puuid)!.rank!;
+      expect(c.rank, "the tier is the one the design has").toEqual({ tier: was.tier, rr: null });
+    }
+    // Nothing else moved: with the two ranks put back it is the ingame roster.
+    const restored = players("ingame-rr-unknown").map((c) => (unknown.includes(c) ? { ...c, rank: base.find((b) => b.puuid === c.puuid)!.rank } : c));
+    expect(restored).toEqual(base);
   });
 
   it("wire invariant in every scene: the self card is isSelfParty, and own-party cards carry no party or encounters", () => {

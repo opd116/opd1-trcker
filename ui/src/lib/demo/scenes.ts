@@ -34,7 +34,7 @@ import { LONGEST_NAME, LONGEST_TAG, peak } from "./fixtures";
 export type SceneName =
   | "boot" | "closed" | "closed-empty" | "lobby1" | "lobby2" | "lobby2-loading" | "lobby2-unranked" | "lobby3" | "lobby4" | "lobby5"
   | "pregame" | "pregame-nomap" | "pregame-loading" | "ingame" | "ingame-longnames" | "ingame-parties4" | "ingame-partial" | "ingame-unranked"
-  | "ingame-loading" | "ingame-nometa" | "ingame-remembered"
+  | "ingame-loading" | "ingame-nometa" | "ingame-remembered" | "ingame-rr-unknown"
   | "details" | "details-more" | "details-self" | "details-hidden" | "details-empty" | "details-loading" | "details-longnames" | "details-partial"
   | "details-nostats"
   | "match" | "match-enc" | "match-hidden" | "match-dm" | "match-loading" | "match-longnames" | "match-nostats";
@@ -110,6 +110,16 @@ function rememberedSources(): PlayerCard[] {
   const p = roster();
   p[9]!.name = { kind: "remembered", name: "Nyx", tag: "0420", ...REMEMBERED, source: "otherMatch" };
   p[6]!.name = { kind: "remembered", name: "Kilo", tag: "2210", source: "seen", fromMapId: null, fromStartMs: Date.UTC(2026, 8, 20, 18, 5) };
+  return p;
+}
+
+/**
+ * R154: the MMR request failed for two cards, so their tier comes from the stored matches and the exact RR is unknown
+ * (`rr: null`): Sable (left column) and Mara (right column). Everything else is the design's roster.
+ */
+function rrUnknown(): PlayerCard[] {
+  const p = roster();
+  for (const i of [1, 5]) p[i]!.rank = { tier: p[i]!.rank!.tier, rr: null };
   return p;
 }
 
@@ -363,6 +373,7 @@ export const SCENES: Record<SceneName, Scene> = {
   "ingame-loading": { live: state("ingame", null, []), route: LIVE_ROUTE },
   "ingame-nometa": { live: ingame(), route: LIVE_ROUTE, meta: "pending" },
   "ingame-remembered": { live: ingame(rememberedSources()), route: LIVE_ROUTE },
+  "ingame-rr-unknown": { live: ingame(rrUnknown()), route: LIVE_ROUTE },
 
   details: { live: ingame(), route: details(MARA), details: rosterDetails() },
   "details-more": { live: ingame(), route: details(MARA, true), details: rosterDetails() },

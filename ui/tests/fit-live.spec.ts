@@ -13,14 +13,15 @@ import {
   checkNoStatusText,
   checkPrevNames,
   decorationInk,
+  detailsChecks,
   liveChecks,
 } from "./checks";
-import { ACCENTS, FONTS, fontSlug, openScene, pointerAway, SHOTS_DIR, TIER_LABELS, varRgb, watchFontCdn, type ThemeParams } from "./harness";
+import { ACCENTS, FONTS, fontSlug, openScene, pointerAway, shotFull, SHOTS_DIR, TIER_LABELS, varRgb, waitPage, watchFontCdn, type ThemeParams } from "./harness";
 
 const LIVE_SCENES = [
   "closed", "closed-empty", "boot", "lobby1", "lobby2", "lobby3", "lobby4", "lobby5", "lobby2-loading", "lobby2-unranked",
   "pregame", "pregame-nomap", "pregame-loading", "ingame", "ingame-longnames", "ingame-parties4", "ingame-partial",
-  "ingame-unranked", "ingame-loading", "ingame-nometa", "ingame-remembered",
+  "ingame-unranked", "ingame-loading", "ingame-nometa", "ingame-remembered", "ingame-rr-unknown",
 ];
 
 mkdirSync(SHOTS_DIR, { recursive: true });
@@ -739,4 +740,77 @@ test("check 5 reports a clipped underline and a vertically cut text", async ({ p
   const cut = await checkClipping(page);
   expect(cut.length).toBeGreaterThan(0);
   for (const p of cut) expect(p).toMatch(/is cut vertically by span\.pname$/);
+});
+
+// ── R154: the MMR request failed, the tier came from the stored matches and the RR is unknown (`rr: null`) ──────────
+// The tier icon and name stay as they are, `—` stands where the number goes, and nothing else changes or moves.
+const flat = async (l: Locator) => (await l.innerText()).replace(/\s+/g, " ").trim();
+
+/** Where each part of a rank block sits, relative to `origin`. The RR line's width follows its number, so it has no `w`. */
+async function rankGeometry(origin: Locator, block: Locator, parts: { icon: string; tier: string; rr: string; num: string }) {
+  const o = await box(origin);
+  const rel = async (sel: string) => {
+    const b = await box(block.locator(sel));
+    return { x: b.x - o.x, y: b.y - o.y, w: b.width, h: b.height };
+  };
+  const [icon, tier, rr, num] = await Promise.all([rel(parts.icon), rel(parts.tier), rel(parts.rr), rel(parts.num)]);
+  return { icon, tier, rr: { x: rr.x, y: rr.y, h: rr.h }, num: { x: num.x, y: num.y, h: num.h } };
+}
+
+test("ingame-rr-unknown (R154): the card shows the tier and — for the RR; the icon, the name and every position are as with a number", async ({ page }) => {
+  await openScene(page, "ingame");
+  const known = cardNamed(page, "Mara");
+  await expect(known.locator(".rank .rr .v")).toHaveText("19");
+  const cardText = await flat(known);
+  const iconSrc = await known.locator(".rank img.icon").getAttribute("src");
+  const geo = await rankGeometry(known, known.locator(".rank"), { icon: "img.icon", tier: ".tier", rr: ".rr", num: ".rr .v" });
+
+  await openScene(page, "ingame-rr-unknown");
+  // Two cards have an unknown RR (Sable on the left, Mara on the right); every other card still shows its number.
+  await expect(page.locator(".live .card .rank .rr .v")).toHaveCount(10);
+  await expect(page.locator(".live .card .rank .rr .v").filter({ hasText: /^—$/ })).toHaveCount(2);
+  await expect(cardNamed(page, "Sable").locator(".rank .tier")).toHaveText(TIER_LABELS[20 - 3]!);
+  await expect(cardNamed(page, "Sable").locator(".rank .rr .v")).toHaveText("—");
+
+  const mara = cardNamed(page, "Mara");
+  await expect(mara.locator(".rank .tier")).toHaveText(TIER_LABELS[24 - 3]!);
+  await expect(mara.locator(".rank .rr .v")).toHaveText("—");
+  await expect(mara.locator(".rank .rr")).toHaveText("— RR");
+  expect(await mara.locator(".rank img.icon").getAttribute("src")).toBe(iconSrc);
+  // No extra text and no badge: the card's text is the same with only the number replaced.
+  expect(await flat(mara)).toBe(cardText.replace("19 RR", "— RR"));
+  await expect(mara.locator(".rank .sk, .rank svg")).toHaveCount(0);
+  // No layout shift: the icon, the tier name and the RR line sit where they sit with a number (the icon and the name are the same size).
+  expect(await rankGeometry(mara, mara.locator(".rank"), { icon: "img.icon", tier: ".tier", rr: ".rr", num: ".rr .v" })).toEqual(geo);
+  await expect(page.locator(".live .card .rank .rr")).toHaveCount(10);
+  // The tooltip: the current rank has none (spec §3.6), so there is no RR text to leave out.
+  await mara.locator(".rank").hover();
+  await page.waitForTimeout(600);
+  await expect(page.locator(".tip")).toHaveCount(0);
+});
+
+test("ingame-rr-unknown (R154): the Details hero shows the tier and — for the RR, at the hero's own positions; the page fits", async ({ page }) => {
+  await openScene(page, "details");
+  const hero0 = page.locator(".details .hero");
+  await expect(hero0.locator(".hrank .rr .v")).toHaveText("19");
+  const heroText = await flat(hero0.locator(".hrank"));
+  const iconSrc = await hero0.locator(".hrank img.ri").getAttribute("src");
+  const geo = await rankGeometry(hero0, hero0.locator(".hrank"), { icon: "img.ri", tier: ".rname", rr: ".rr", num: ".rr .v" });
+
+  await openScene(page, "ingame-rr-unknown");
+  await cardNamed(page, "Mara").click({ position: { x: 20, y: 70 } });
+  await waitPage(page, "loaded");
+  const hero = page.locator(".details .hero");
+  await expect(hero.locator(".nm")).toHaveText(/Mara\s*#7788/);
+  await expect(hero.locator(".hrank .rname")).toHaveText(TIER_LABELS[24 - 3]!);
+  await expect(hero.locator(".hrank .rr .v")).toHaveText("—");
+  await expect(hero.locator(".hrank .rr")).toHaveText("— RR");
+  expect(await hero.locator(".hrank img.ri").getAttribute("src")).toBe(iconSrc);
+  expect(await flat(hero.locator(".hrank"))).toBe(heroText.replace("19 RR", "— RR"));
+  await expect(hero.locator(".hrank .sk, .hrank svg")).toHaveCount(0);
+  expect(await rankGeometry(hero, hero.locator(".hrank"), { icon: "img.ri", tier: ".rname", rr: ".rr", num: ".rr .v" })).toEqual(geo);
+
+  await pointerAway(page);
+  expect(await detailsChecks(page, "ingame-rr-unknown", "Barlow")).toEqual([]);
+  await shotFull(page, "ingame-rr-unknown__details-hero");
 });

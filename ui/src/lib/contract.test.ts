@@ -141,6 +141,12 @@ describe("the walker can fail (a check that cannot fail proves nothing)", () => 
     expect(problems({ tier: null, rr: 42 }, "Rank", "r")).toEqual(["r.tier: null is not one of number"]);
   });
 
+  it("R154: a Rank's rr may be null (the tier comes from stored matches when the MMR request failed), its tier never", () => {
+    expect(problems({ tier: 15, rr: null }, "Rank", "r")).toEqual([]);
+    expect(problems({ tier: 15, rr: "42" }, "Rank", "r")).toEqual(["r.rr: string is not one of number|null"]);
+    expect(problems({ tier: 15 }, "Rank", "r")).toEqual(["r.rr: required key of Rank is missing"]); // null, not absent
+  });
+
   it("an optional key may be absent, and null only where the kinds say so", () => {
     const card = LIVE.players[0]!;
     const { level: _l, ...noLevel } = card;

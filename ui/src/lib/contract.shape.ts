@@ -66,7 +66,7 @@ const numOrNull = { kinds: ["number", "null"] } satisfies Desc;
 // `satisfies` (not an annotation) keeps every literal's own type, so `keyof typeof shapes.X` is the exact
 // key set the descriptor spells and the type tests compare it with the TS type's (R96).
 export const shapes = {
-  Rank: { tier: num, rr: num } satisfies ShapeOf<Rank>,
+  Rank: { tier: num, rr: numOrNull } satisfies ShapeOf<Rank>,
 
   Peak: {
     tier: num,

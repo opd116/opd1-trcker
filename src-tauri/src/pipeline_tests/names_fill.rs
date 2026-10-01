@@ -1625,12 +1625,14 @@ async fn a_match_open_that_lost_queues_no_names() {
     assert!(h.st.take_worker_kick(), "control: unnamed rows are queued");
     crate::commands::close_match_for(&h.st);
 
-    // `join!` polls the open first (ticket, then the DB read), then the
-    // close, which voids it before the read ends.
+    // The DB is held, so the open takes its ticket and cannot finish; the
+    // close then voids it; only then does the read run.
     let focus = pid(1);
-    let (view, ()) = tokio::join!(crate::match_details::load(&h.st, "n-lost", &focus), async {
-        crate::commands::close_match_key_for(&h.st, Some("n-lost"))
-    });
+    let hold = super::ui_open::hold_db(&h.st);
+    let open = super::ui_open::parked(crate::match_details::load(&h.st, "n-lost", &focus)).await;
+    crate::commands::close_match_key_for(&h.st, Some("n-lost"));
+    drop(hold);
+    let view = open.await;
     assert_eq!(view.unwrap(), control, "still answered");
     assert_eq!(h.st.open_match_args(), None, "not open");
     assert!(!h.st.take_worker_kick(), "no name ask for a closed page");

@@ -940,7 +940,10 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
     // is read off the player's stored matches; nothing else is.
     if !matches!(mmr, Field::Value(_)) {
         if let Some(stored) = rank_without_mmr(
-            &comp_updates,
+            match &comp_updates {
+                Field::Value(rows) => Some(rows.as_slice()),
+                _ => None,
+            },
             live_tier,
             stored_tier,
             ordered_acts,
@@ -1064,7 +1067,8 @@ fn build_mmr_fields(
 }
 
 /// R154 + R161: the current rank of a player MMR has no answer for, from what
-/// is at hand, in order:
+/// is at hand, in order (My Stats' rank card runs the same chain, R167, with no
+/// `live_tier`; `comp_updates` is `None` while the rows are not loaded):
 /// 1. the newest `comp_updates` row (by match start) of the current act whose
 ///    `tier_after` is a ranked tier ([`display_tier`]): that tier and the RR
 ///    after the match — exact;
@@ -1077,15 +1081,15 @@ fn build_mmr_fields(
 /// `None` when none applies — a previous act's row or match says nothing
 /// about the player's rank now — or when step 1 or 3 needs the current act
 /// and it is unknown (`current_act_id` empty, or not in `ordered_acts`).
-fn rank_without_mmr(
-    comp_updates: &Field<Vec<CompUpdateRow>>,
+pub fn rank_without_mmr(
+    comp_updates: Option<&[CompUpdateRow]>,
     live_tier: Option<u8>,
     stored_tier: Option<StoredTier>,
     ordered_acts: &[Act],
     current_act_id: &str,
 ) -> Option<RankInfo> {
     if !current_act_id.is_empty() {
-        if let Field::Value(updates) = comp_updates {
+        if let Some(updates) = comp_updates {
             let newest = updates
                 .iter()
                 .filter(|u| u.season_id == current_act_id)

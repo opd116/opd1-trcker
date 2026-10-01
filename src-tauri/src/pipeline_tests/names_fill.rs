@@ -16,7 +16,7 @@ use opd1_riot::endpoints::MatchDetailsResponse;
 
 use super::*;
 use crate::state::{Job, NAME_FILL_QUEUE_MAX};
-use crate::sync::{fill_names_step, store_details, NAME_BATCH_MAX};
+use crate::sync::{fill_names_step, store_details, sync_player, NAME_BATCH_MAX};
 
 /// A valid uuid for test player `i`.
 fn pid(i: u32) -> String {
@@ -458,6 +458,228 @@ async fn a_player_hidden_in_the_match_that_just_ended_is_asked_and_remembered_ne
         }
         assert_eq!(puts(&h.server).await.len(), 1, "no request mid-match");
     }
+}
+
+/// How many `live` events the sink has been given so far.
+fn live_events(h: &Harness) -> usize {
+    h.rec.live.lock().unwrap().len()
+}
+
+#[tokio::test]
+async fn a_fill_that_names_hidden_roster_players_rebuilds_their_cards_in_one_publish() {
+    // R167 (A m4): HIDDEN and STRANGER are in the Lobby party, shown hidden.
+    // The fill learns both names (and one of a player who is not on screen):
+    // their cards show the remembered name at once — not at the next roster
+    // change — and the fill publishes once, not once per name.
+    let h = harness().await;
+    back_to_the_lobby(&h, Some(HIDDEN)).await;
+    {
+        let slot = slot_for(&h.st, STRANGER, true).await;
+        let mut live = lock(&h.st.live);
+        live.synced.insert(STRANGER.into());
+        live.slots.push(slot);
+        live.note_hidden();
+    }
+    mount_name_service(
+        &h.server,
+        &[
+            (HIDDEN.to_string(), "Real", "HID"),
+            (STRANGER.to_string(), "Other", "STR"),
+            (pid(1), "Away", "OFF"),
+        ],
+    )
+    .await;
+    h.st.publish();
+    for p in [HIDDEN, STRANGER] {
+        assert_eq!(card_json(&h.st, p)["name"]["kind"], "hiddenAgent", "{p}");
+    }
+
+    lock(&h.st.live).queue_name_fill([
+        ask(HIDDEN, Some(1)),
+        ask(STRANGER, Some(1)),
+        ask(&pid(1), Some(1)),
+    ]);
+    let before = live_events(&h);
+    run_fill(&h).await;
+
+    assert_eq!(puts(&h.server).await.len(), 1, "one request");
+    for (p, name, tag) in [(HIDDEN, "Real", "HID"), (STRANGER, "Other", "STR")] {
+        let shown = card_json(&h.st, p)["name"].clone();
+        assert_eq!(shown["kind"], "remembered", "{p}");
+        assert_eq!(
+            (shown["name"].as_str(), shown["tag"].as_str()),
+            (Some(name), Some(tag))
+        );
+        assert_eq!(shown["source"], "seen");
+    }
+    assert_eq!(
+        live_events(&h) - before,
+        1,
+        "one publish for the whole fill"
+    );
+
+    // A fill whose names are all of players off screen changes no card.
+    lock(&h.st.live).queue_name_fill([ask(&pid(2), Some(2))]);
+    mount_name_service(&h.server, &[(pid(2), "Gone", "OFF")]).await;
+    let before = live_events(&h);
+    run_fill(&h).await;
+    assert_eq!(live_events(&h), before, "nothing on screen changed");
+}
+
+/// Mounts what the sync of roster player `p` needs: no rank updates, a
+/// history of the given competitive matches (newest first) and the details of
+/// each, whose other players (`others`, `p` included) have blank names.
+async fn mount_player_history(h: &Harness, p: &str, matches: &[(&str, i64)], others: &[String]) {
+    let first = |body: Value, path: String| {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(1)
+    };
+    first(
+        json!({"Subject": p, "Matches": []}),
+        format!("/mmr/v1/players/{p}/competitiveupdates"),
+    )
+    .mount(&h.server)
+    .await;
+    first(
+        json!({"Subject": p, "QueueSkills": {}}),
+        format!("/mmr/v1/players/{p}"),
+    )
+    .mount(&h.server)
+    .await;
+    first(
+        json!({"Subject": p, "History": matches.iter().map(|(id, start)| json!(
+            {"MatchID": id, "GameStartTime": start, "QueueID": "competitive"}
+        )).collect::<Vec<_>>()}),
+        format!("/match-history/v1/history/{p}"),
+    )
+    .mount(&h.server)
+    .await;
+    for (id, start) in matches {
+        mount_match(&h.server, id, "competitive", *start, others).await;
+    }
+}
+
+#[tokio::test]
+async fn a_roster_players_sync_that_stores_matches_queues_their_participants_for_the_fill() {
+    // R167 (A concern): the matches phase of a roster player stores matches
+    // the user never played; the players of those whose names match-details
+    // blanked are queued like the Details sync queues what its page lacks —
+    // and, like every ask, sent between matches only.
+    let h = harness().await;
+    let p = pid(7);
+    let others = vec![p.clone(), pid(1), pid(2)];
+    let (old, new) = (now_ms() - 5 * 86_400_000, now_ms() - 3 * 86_400_000);
+    mount_player_history(&h, &p, &[("mx-new", new), ("mx-old", old)], &others).await;
+    mount_name_service(&h.server, &[(pid(1), "One", "T1")]).await;
+    {
+        // Agent Select: a roster player is being synced during a match.
+        let slot = slot_for(&h.st, &p, false).await;
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Pregame;
+        live.in_match = true;
+        live.slots.push(slot);
+        // The live cards are done: the fill is the only work there is.
+        live.synced.insert(p.clone());
+        live.names_attempted.insert(p.clone());
+    }
+
+    sync_player(&h.st, &h.session, &p).await.unwrap();
+
+    let queued: Vec<(String, Option<i64>)> = {
+        let mut q: Vec<_> = lock(&h.st.live)
+            .name_fill
+            .iter()
+            .map(|a| (a.puuid.clone(), a.match_start_ms))
+            .collect();
+        q.sort();
+        q
+    };
+    // Each puuid once, with its newest stored match; never the user.
+    assert_eq!(
+        queued,
+        [
+            (pid(1), Some(new)),
+            (pid(2), Some(new)),
+            (p.clone(), Some(new)),
+        ]
+    );
+
+    // During the match nothing is sent, and nothing is lost.
+    fill_names_step(&h.st, &h.session).await.unwrap();
+    assert!(puts(&h.server).await.is_empty(), "no request in a match");
+    assert_eq!(lock(&h.st.live).name_fill.len(), 3);
+
+    // The match is over: one request for all three.
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Menus;
+        live.in_match = false;
+    }
+    run_fill(&h).await;
+    assert_eq!(puts(&h.server).await.len(), 1);
+    assert_eq!(
+        seen(&h.st, pid(1)).await,
+        Some(("One".to_string(), "T1".to_string()))
+    );
+
+    // Synced again with nothing new: nothing is queued (both matches are
+    // stored already, the fill's markers cover the rest).
+    sync_player(&h.st, &h.session, &p).await.unwrap();
+    assert!(
+        lock(&h.st.live).name_fill.is_empty(),
+        "no new match, no ask"
+    );
+}
+
+#[tokio::test]
+async fn a_roster_syncs_burst_of_asks_does_not_starve_the_match_that_just_ended() {
+    // R167 fix round 1: during a match the roster's matches phase fills the
+    // queue (low priority, soft cap) with strangers' histories. The match that
+    // ends afterwards keeps all its asks, and they are sent first.
+    let h = harness().await;
+    let p = pid(7);
+    let crowd: Vec<String> = (100..220).map(pid).collect();
+    let (hist_start, end_start) = (now_ms() - 3 * 86_400_000, now_ms() - 30 * 60_000);
+    mount_player_history(&h, &p, &[("mx-crowd", hist_start)], &crowd).await;
+    mount_name_service(&h.server, &[]).await;
+    {
+        let slot = slot_for(&h.st, &p, false).await;
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.in_match = true;
+        live.slots.push(slot);
+        live.synced.insert(p.clone());
+        live.names_attempted.insert(p.clone());
+    }
+    sync_player(&h.st, &h.session, &p).await.unwrap();
+    assert_eq!(
+        lock(&h.st.live).name_fill.len(),
+        crate::state::NAME_FILL_LOW_MAX,
+        "the roster's asks stop at the soft cap"
+    );
+
+    // The match ends; its details arrive and are stored.
+    let others: Vec<String> = (1..=9).map(pid).collect();
+    mount_match(&h.server, "m-end", "competitive", end_start, &others).await;
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Menus;
+        live.in_match = false;
+    }
+    match_ends_now(&h);
+    store_match(&h, "m-end").await;
+    assert_eq!(
+        lock(&h.st.live).name_fill.len(),
+        crate::state::NAME_FILL_LOW_MAX + 9,
+        "all nine kept, behind nothing"
+    );
+
+    run_fill(&h).await;
+    let sent = puts(&h.server).await;
+    assert_eq!(sent[0].len(), NAME_BATCH_MAX);
+    assert_eq!(sent[0][..9], others[..], "the match end goes first");
 }
 
 #[tokio::test]

@@ -410,6 +410,18 @@ pub async fn fetch_missing_details(
         .map(|_| ())
 }
 
+/// R167: the low-priority asks one stored match raises: its players whose
+/// names match-details left blank, each tagged with the match's start.
+fn match_asks(start_ms: i64, others: Vec<String>) -> Vec<NameAsk> {
+    others
+        .into_iter()
+        .map(|puuid| NameAsk {
+            puuid,
+            match_start_ms: Some(start_ms),
+        })
+        .collect()
+}
+
 /// How a [`fetch_missing_details_full`] went.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DetailsFetch {
@@ -442,6 +454,19 @@ pub async fn fetch_missing_details_full(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
     ids: Vec<String>,
+) -> Result<DetailsFetch, Gone> {
+    fetch_missing_details_asking(st, session, ids, false).await
+}
+
+/// [`fetch_missing_details_full`]; with `ask_names` (R167: a roster player's
+/// matches phase) the players of each match it stores whose names were blank
+/// are queued for the names fill at low priority **as the match is stored**,
+/// so a client that goes away mid-call loses none of the stored matches' asks.
+async fn fetch_missing_details_asking(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    ids: Vec<String>,
+    ask_names: bool,
 ) -> Result<DetailsFetch, Gone> {
     let ids = dedupe(ids);
     if ids.is_empty() {
@@ -492,8 +517,12 @@ pub async fn fetch_missing_details_full(
         match joined {
             Ok((id, Ok(details))) => {
                 // A failed write is logged; the live sync goes on (partial).
-                if store_details(st, details).await.is_none() {
-                    incomplete = true;
+                match store_details(st, details).await {
+                    Some((start_ms, others)) if ask_names => {
+                        st.queue_name_fill_low(match_asks(start_ms, others));
+                    }
+                    Some(_) => {}
+                    None => incomplete = true,
                 }
                 // Stored: whoever waits on this id can read it now.
                 claimed.remove(&id);
@@ -668,7 +697,11 @@ pub async fn sync_matches(
     };
     // A history that did not answer, held or failed, leaves no fresh history
     // (`history_ok`): party marks wait. Only a real failure is `partial`.
-    let fetched = fetch_missing_details_full(st, session, ids).await?;
+    // R167: the players of the matches this phase stores are queued as each
+    // is stored (low priority), named between matches like the Details
+    // sync's (`LiveModel::take_fill` holds them in a match;
+    // `Repo::names_to_ask` drops the known and the already-asked).
+    let fetched = fetch_missing_details_asking(st, session, ids, true).await?;
     partial |= fetched.incomplete;
     if let Some(left) = fetched.held {
         hold(left);
@@ -1578,15 +1611,14 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
         if !live.between_matches() {
             return Ok(());
         }
+        // Kept next to the door although `take_fill` already dropped these:
+        // an account switch while the DB was read can make a taken ask the
+        // user's, and `held.asks` must not mark it spent.
         held.asks.retain(|a| live.fill_allowed(&a.puuid));
-        // `false`: between matches a player who hid their name *during* the
-        // match is asked about on purpose (R153) — the `VisiblePuuid` claim
-        // for this door is "not asked during a live stage", which the stage
-        // checks above guarantee.
-        held.asks
-            .iter()
-            .filter_map(|a| VisiblePuuid::new(a.puuid.clone(), false))
-            .collect()
+        // Between matches a player who hid their name *during* the match is
+        // asked about on purpose (R153); `fill_visible` builds them only
+        // while no match runs (R167).
+        live.fill_visible(&held.asks)
     };
     if visible.is_empty() {
         return Ok(());
@@ -1630,11 +1662,16 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
         asks.len()
     );
     let now = now_ms();
-    let learned_any = !learned.is_empty();
+    let named_ids: Vec<String> = learned.iter().map(|(p, _, _)| p.clone()).collect();
+    let learned_any = !named_ids.is_empty();
     let stored = st
         .db(move |repo| repo.record_name_answers(&learned, &blank, now))
         .await;
     if stored.is_some() && learned_any {
+        // R167: a player on the roster right now (a hidden Lobby party member,
+        // R153) shows the remembered name at once: their cards are rebuilt and
+        // published once for the whole fill.
+        st.reload_slots(&named_ids).await;
         // The open Player Details and Match Details show the new names.
         crate::details::refresh_open(st).await;
         crate::match_details::refresh_open(st).await;

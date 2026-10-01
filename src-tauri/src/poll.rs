@@ -289,7 +289,7 @@ impl Poller {
                 live.backfill = None;
                 // R150: nor are its queued name asks and its last match end
                 // (their hidden players were just forgotten above).
-                live.name_fill.clear();
+                live.clear_name_fill();
                 live.match_end_ms = None;
                 // R155: nor are its pending rank retries.
                 live.rank_retries.clear();

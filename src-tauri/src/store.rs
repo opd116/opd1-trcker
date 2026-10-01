@@ -423,7 +423,9 @@ pub fn act_hero_stats(repo: &Repo, puuid: &str, act_start_ms: i64) -> Result<Her
 /// My Stats for the user (`me`) over `act`, from the DB only: the act's
 /// competitive matches (read a day past its dates; `mystats::build` picks
 /// the act's by Riot season), its RR rows plus any from the last 7 days,
-/// and the stored MMR snapshot's rank.
+/// and the stored MMR snapshot's rank (R167: without a snapshot, the live
+/// card's fallback — the newest current-act RR row, else a stored current-act
+/// match's tier, RR unknown).
 /// `map_names` is valorant-api map uuid -> name (insight text);
 /// `utc_offset_ms` gives the local offset at an instant (weekday and
 /// time-of-day buckets).
@@ -445,15 +447,27 @@ pub fn load_my_stats(
     // The act's RR rows, plus any season's for "last 7 days".
     let comp_updates =
         season_or_recent_comp_updates(repo.conn(), me, &act.id, now_ms - mystats::LAST_7_DAYS_MS)?;
-    let current_rank = repo
+    let snapshot = repo
         .load_mmr_snapshot(me)?
-        .and_then(|snap| parse_mmr_snapshot(&snap.json))
-        .and_then(|resp| current_rank_from_mmr(&resp, &act.id));
+        .and_then(|snap| parse_mmr_snapshot(&snap.json));
+    let current_rank = snapshot
+        .as_ref()
+        .and_then(|resp| current_rank_from_mmr(resp, &act.id));
+    // R167: the live card's fallback (R154) — only without a snapshot, one
+    // indexed read, no request. A snapshot is the authority.
+    let has_mmr = snapshot.is_some();
+    let stored_tier = if has_mmr {
+        None
+    } else {
+        repo.newest_ranked_match_tier(me)?
+    };
     Ok(mystats::build(MyStatsInput {
         act,
         matches: &matches,
         comp_updates: &comp_updates,
         current_rank,
+        has_mmr,
+        stored_tier,
         map_names,
         now_ms,
         utc_offset_ms,
@@ -1225,6 +1239,74 @@ mod tests {
                     "matches": 6, "positive": false}])
         );
         assert_eq!(v["rank"]["netRr"], json!(30), "the act's rows only");
+    }
+
+    /// R167: My Stats' rank card runs the live card's fallback chain when no
+    /// MMR snapshot of the user is stored — and only then.
+    #[test]
+    fn my_stats_rank_falls_back_like_the_live_card_without_a_snapshot() {
+        let (day, hour) = (86_400_000, 3_600_000);
+        let act = Act {
+            id: "act-cur".into(),
+            name: "ACT V".into(),
+            episode_name: "V26".into(),
+            start_ms: 100 * day,
+            end_ms: 160 * day,
+        };
+        let none = |_: &str| None;
+        let utc = |_: i64| 0;
+        let rank = |r: &Repo| {
+            let stats =
+                load_my_stats(r, "me", &act, 102 * day, &none, &HashMap::new(), &utc).unwrap();
+            (stats.rank.tier, stats.rank.rr)
+        };
+
+        // (a) a current-act RR row names the rank: tier and exact RR.
+        let r = repo();
+        r.upsert_comp_updates("me", &[rr_row("c1", "act-cur", 100 * day + hour, 10)])
+            .unwrap();
+        assert_eq!(rank(&r), (Some(15), Some(42)));
+
+        // (b) no RR row, but a current-act competitive match carries a tier
+        // for the user: that tier, RR unknown (`null` on the wire).
+        let r = repo();
+        let ranked = MatchPlayer {
+            competitive_tier: Some(17),
+            ..mp("me", "Blue", "pa", None)
+        };
+        stored_match(
+            &r,
+            "m1",
+            "competitive",
+            101 * day,
+            std::slice::from_ref(&ranked),
+        );
+        assert_eq!(rank(&r), (Some(17), None));
+        let v = serde_json::to_value(
+            load_my_stats(&r, "me", &act, 102 * day, &none, &HashMap::new(), &utc).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(v["rank"]["rr"], json!(null));
+        assert_eq!(v["rank"]["rrToNext"], json!(null));
+
+        // (c) the same match from the previous act says nothing about now.
+        let r = repo();
+        stored_match(&r, "old", "competitive", 90 * day, &[ranked]);
+        assert_eq!(rank(&r), (None, None));
+
+        // (d) a snapshot answered, with no rank this act: it stays so, the RR
+        // row does not fill it in.
+        let r = repo();
+        r.save_mmr_snapshot(&MmrSnapshot {
+            puuid: "me".into(),
+            json: r#"{"Subject":"me","QueueSkills":{}}"#.into(),
+            last_comp_match_id: None,
+            fetched_ms: 1,
+        })
+        .unwrap();
+        r.upsert_comp_updates("me", &[rr_row("c1", "act-cur", 100 * day + hour, 10)])
+            .unwrap();
+        assert_eq!(rank(&r), (None, None));
     }
 
     #[test]

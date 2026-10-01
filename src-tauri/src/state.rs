@@ -27,6 +27,7 @@ use opd1_riot::assets::{AssetCache, Meta};
 use opd1_riot::endpoints::ContentActs;
 use opd1_riot::to_core::{current_rank_from_mmr, seasonal_map_from_mmr};
 use opd1_riot::RiotSession;
+use opd1_riot::VisiblePuuid;
 
 use crate::logbuf::short;
 use crate::rank_retry::{RankRetries, RANK_RETRY_DELAYS};
@@ -89,6 +90,12 @@ pub struct Slot {
 /// `sync::BACKFILL_FILL_MAX` per run, and Details a handful: a full queue is
 /// a burst nobody needs, and it is dropped rather than grown.
 pub const NAME_FILL_QUEUE_MAX: usize = 300;
+
+/// R167: the soft cap on low-priority asks (a roster player's matches phase,
+/// `LiveModel::queue_name_fill_low`): they never take more than this many of
+/// the [`NAME_FILL_QUEUE_MAX`] places, so a mid-match burst of strangers'
+/// histories leaves room for the match-end and Details asks.
+pub const NAME_FILL_LOW_MAX: usize = 100;
 
 /// R150: how long before a match end a match can have started and still be
 /// the one that just ended. A game runs well under an hour; the slack covers
@@ -459,7 +466,16 @@ pub struct LiveModel {
     /// R150: the asks waiting for the names fill (`Job::FillNames`), oldest
     /// first, one per puuid. In memory only: a restart loses them, and the
     /// next match end, Details open or backfill asks again.
+    ///
+    /// R167: two priorities in one deque. High asks (match end, Player and
+    /// Match Details, a backfill, asks put back by a dropped step) sit in
+    /// front; low asks ([`Self::name_fill_low`]: a roster player's matches
+    /// phase) sit behind them, so `take_fill` serves the high ones first.
     pub name_fill: VecDeque<NameAsk>,
+    /// R167: the puuids of `name_fill` that are low priority. Always at the
+    /// back of the deque; a stale entry (the deque was cleared) is harmless:
+    /// only puuids found in the deque count.
+    name_fill_low: HashSet<String>,
     /// R150: when the last match ended (epoch ms) — In Game to Menus, a
     /// free-for-all one included — until the next one starts. A match stored
     /// meanwhile that the user played in, that started shortly before, is the
@@ -518,6 +534,7 @@ impl LiveModel {
             next_worker_id: 0,
             backfill: None,
             name_fill: VecDeque::new(),
+            name_fill_low: HashSet::new(),
             match_end_ms: None,
             last_match_end: None,
             rank_retries: RankRetries::default(),
@@ -1105,13 +1122,76 @@ impl LiveModel {
             if !self.fill_allowed(&ask.puuid) {
                 continue;
             }
-            if let Some(queued) = self.name_fill.iter_mut().find(|q| q.puuid == ask.puuid) {
+            // R167: a high ask for a puuid queued low promotes it: it leaves
+            // the low part (it is re-inserted below, in front of it).
+            let promoted = self.name_fill_low.remove(&ask.puuid);
+            if let Some(i) = self.name_fill.iter().position(|q| q.puuid == ask.puuid) {
+                let mut queued = self.name_fill.remove(i).expect("position is in range");
                 // `None` (on demand) is older than any match.
                 queued.match_start_ms = queued.match_start_ms.max(ask.match_start_ms);
-            } else if self.name_fill.len() < NAME_FILL_QUEUE_MAX {
+                if promoted {
+                    let at = self.name_fill.len() - self.low_count();
+                    self.name_fill.insert(at, queued);
+                } else {
+                    self.name_fill.insert(i, queued);
+                }
+                continue;
+            }
+            // R167: a full queue makes room for a high ask by dropping its
+            // oldest low ones; with none left it takes no new puuid.
+            while self.name_fill.len() >= NAME_FILL_QUEUE_MAX {
+                let Some(i) = self
+                    .name_fill
+                    .iter()
+                    .position(|q| self.name_fill_low.contains(&q.puuid))
+                else {
+                    break;
+                };
+                if let Some(evicted) = self.name_fill.remove(i) {
+                    self.name_fill_low.remove(&evicted.puuid);
+                }
+            }
+            if self.name_fill.len() < NAME_FILL_QUEUE_MAX {
+                let at = self.name_fill.len() - self.low_count();
+                self.name_fill.insert(at, ask);
+            }
+        }
+    }
+
+    /// R167: queues low-priority asks (a roster player's matches phase stored
+    /// matches whose players have no name). Like [`Self::queue_name_fill`],
+    /// but they go behind every high ask, never evict anything, and take at
+    /// most [`NAME_FILL_LOW_MAX`] places. A puuid already queued (either
+    /// priority) keeps its place and takes the newer match.
+    pub fn queue_name_fill_low(&mut self, asks: impl IntoIterator<Item = NameAsk>) {
+        for ask in asks {
+            if !self.fill_allowed(&ask.puuid) {
+                continue;
+            }
+            if let Some(queued) = self.name_fill.iter_mut().find(|q| q.puuid == ask.puuid) {
+                queued.match_start_ms = queued.match_start_ms.max(ask.match_start_ms);
+            } else if self.name_fill.len() < NAME_FILL_QUEUE_MAX
+                && self.low_count() < NAME_FILL_LOW_MAX
+            {
+                self.name_fill_low.insert(ask.puuid.clone());
                 self.name_fill.push_back(ask);
             }
         }
+    }
+
+    /// Empties the names-fill queue and its low-priority set together (an
+    /// account switch, R150).
+    pub fn clear_name_fill(&mut self) {
+        self.name_fill.clear();
+        self.name_fill_low.clear();
+    }
+
+    /// How many of the queued asks are low priority.
+    fn low_count(&self) -> usize {
+        self.name_fill
+            .iter()
+            .filter(|q| self.name_fill_low.contains(&q.puuid))
+            .count()
     }
 
     /// R150, R153 (user, 2026-09-30) with R16: whether the names fill may ask
@@ -1135,6 +1215,24 @@ impl LiveModel {
         !puuid.is_empty() && puuid != self.self_id()
     }
 
+    /// R167: the names fill's `VisiblePuuid`s for `asks` — the only place
+    /// that builds them with [`VisiblePuuid::between_matches`]. **Empty while
+    /// a match is running** ([`Self::between_matches`]: Agent Select, In
+    /// Game, a free-for-all match), so the claim "no live stage" is checked at
+    /// the door itself and not only where the asks leave the queue
+    /// ([`Self::take_fill`]). Asks [`Self::fill_allowed`] refuses (the user, an
+    /// empty id) are left out. Whether a player was hidden does not matter
+    /// between matches (R153).
+    pub fn fill_visible(&self, asks: &[NameAsk]) -> Vec<VisiblePuuid> {
+        if !self.between_matches() {
+            return Vec::new();
+        }
+        asks.iter()
+            .filter(|a| self.fill_allowed(&a.puuid))
+            .filter_map(|a| VisiblePuuid::between_matches(a.puuid.clone()))
+            .collect()
+    }
+
     /// R150: takes up to `n` asks off the queue, oldest first — **none while a
     /// match is running** ([`Self::between_matches`]): the asks stay queued,
     /// the fill is paused, and they go out after the match. Asks that
@@ -1149,6 +1247,7 @@ impl LiveModel {
             let Some(ask) = self.name_fill.pop_front() else {
                 break;
             };
+            self.name_fill_low.remove(&ask.puuid);
             if self.fill_allowed(&ask.puuid) {
                 taken.push(ask);
             }
@@ -1979,6 +2078,16 @@ impl AppState {
         self.worker_kick.store(true, Ordering::Release);
     }
 
+    /// R167: [`Self::queue_name_fill`] at low priority
+    /// (`LiveModel::queue_name_fill_low`).
+    pub fn queue_name_fill_low(&self, asks: Vec<NameAsk>) {
+        if asks.is_empty() {
+            return;
+        }
+        lock(&self.live).queue_name_fill_low(asks);
+        self.worker_kick.store(true, Ordering::Release);
+    }
+
     /// R165: Riot no longer has this match (404): remembered for the session.
     pub fn note_details_404(&self, match_id: &str) {
         let mut set = lock(&self.details_404);
@@ -2098,6 +2207,50 @@ impl AppState {
             let mut live = lock(&self.live);
             if let Some(slot) = live.slots.iter_mut().find(|s| s.roster.puuid == puuid) {
                 slot.db = db;
+            }
+        }
+        self.publish();
+    }
+
+    /// R167: [`Self::reload_slot`] for several players at once: the DB bundle
+    /// of each of `puuids` that is on screen is read afresh (one DB call),
+    /// and the cards are published **once**. Nothing is read or published
+    /// when none of them is on screen.
+    pub async fn reload_slots(&self, puuids: &[String]) {
+        let (on_screen, me) = {
+            let live = lock(&self.live);
+            let on_screen: Vec<String> = puuids
+                .iter()
+                .filter(|p| live.slots.iter().any(|s| &s.roster.puuid == *p))
+                .cloned()
+                .collect();
+            (on_screen, live.self_puuid.clone())
+        };
+        if on_screen.is_empty() {
+            return;
+        }
+        let ids = on_screen.clone();
+        let Some(bundles) = self
+            .db(move |repo| {
+                ids.iter()
+                    .map(|p| {
+                        Ok((
+                            p.clone(),
+                            crate::store::load_player_db(repo, me.as_deref(), p)?,
+                        ))
+                    })
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await
+        else {
+            return;
+        };
+        {
+            let mut live = lock(&self.live);
+            for (puuid, db) in bundles {
+                if let Some(slot) = live.slots.iter_mut().find(|s| s.roster.puuid == puuid) {
+                    slot.db = db;
+                }
             }
         }
         self.publish();
@@ -3072,7 +3225,7 @@ mod tests {
         assert_eq!(m.next_job(id), Some(Job::RankRetry("p1".into())));
         m.note_rank_sync("p1", false, true);
         assert_eq!(m.next_job(id), Some(Job::FillNames));
-        m.name_fill.clear();
+        m.clear_name_fill();
         assert_eq!(m.next_job(id), Some(Job::Backfill));
         // A retry that comes due while the backfill runs is taken before its
         // next step: the run's own yield check sees it.
@@ -3303,6 +3456,81 @@ mod tests {
     }
 
     #[test]
+    fn low_priority_asks_have_a_soft_cap_and_never_evict_anything() {
+        // R167: the roster matches phase's asks are low priority.
+        let mut m = model(vec![]);
+        m.queue_name_fill_low((0..NAME_FILL_LOW_MAX + 40).map(|i| ask(&format!("l{i}"), Some(1))));
+        assert_eq!(m.name_fill.len(), NAME_FILL_LOW_MAX, "soft cap");
+        // Room in the hard cap does not lift the soft one…
+        m.queue_name_fill_low([ask("late", Some(1))]);
+        assert_eq!(m.name_fill.len(), NAME_FILL_LOW_MAX);
+        // …and a queue full of high asks takes no low one.
+        let mut m = model(vec![]);
+        m.queue_name_fill((0..NAME_FILL_QUEUE_MAX).map(|i| ask(&format!("h{i}"), None)));
+        m.queue_name_fill_low([ask("l", Some(1))]);
+        assert_eq!(m.name_fill.len(), NAME_FILL_QUEUE_MAX);
+        assert!(!m.name_fill.iter().any(|a| a.puuid == "l"));
+    }
+
+    #[test]
+    fn high_priority_asks_go_first_and_evict_the_oldest_low_ones_when_full() {
+        let mut m = model(vec![]);
+        m.queue_name_fill_low((0..NAME_FILL_LOW_MAX).map(|i| ask(&format!("l{i}"), Some(1))));
+        m.queue_name_fill((0..NAME_FILL_QUEUE_MAX - 50).map(|i| ask(&format!("h{i}"), Some(9))));
+        // 100 low + 250 high would be 350: the 50 oldest low ones made room.
+        assert_eq!(m.name_fill.len(), NAME_FILL_QUEUE_MAX);
+        assert!(m
+            .name_fill
+            .iter()
+            .take(NAME_FILL_QUEUE_MAX - 50)
+            .all(|a| a.puuid.starts_with('h')));
+        assert!(!m
+            .name_fill
+            .iter()
+            .any(|a| a.puuid == "l0" || a.puuid == "l49"));
+        assert!(m.name_fill.iter().any(|a| a.puuid == "l50"));
+        // No high ask was lost: all 250 are queued, in arrival order.
+        let high: Vec<&str> = m
+            .name_fill
+            .iter()
+            .map(|a| a.puuid.as_str())
+            .filter(|p| p.starts_with('h'))
+            .collect();
+        let expected: Vec<String> = (0..NAME_FILL_QUEUE_MAX - 50)
+            .map(|i| format!("h{i}"))
+            .collect();
+        assert_eq!(high, expected);
+        // A full queue of high asks takes no more (as before).
+        m.queue_name_fill((0..100).map(|i| ask(&format!("x{i}"), Some(9))));
+        m.queue_name_fill((0..100).map(|i| ask(&format!("y{i}"), Some(9))));
+        assert!(m.name_fill.len() <= NAME_FILL_QUEUE_MAX);
+        // Taken in that order: high before low.
+        m.stage = Stage::Menus;
+        let first = m.take_fill(1).pop().unwrap();
+        assert_eq!(first.puuid, "h0");
+    }
+
+    #[test]
+    fn a_high_ask_promotes_a_queued_low_one_and_a_low_ask_never_demotes() {
+        let mut m = model(vec![]);
+        m.queue_name_fill_low([ask("a", Some(1)), ask("b", Some(1))]);
+        m.queue_name_fill([ask("c", Some(5))]);
+        m.queue_name_fill([ask("b", Some(7))]);
+        // c, then the promoted b, then the low a.
+        assert_eq!(queued(&m), [("c", Some(5)), ("b", Some(7)), ("a", Some(1))]);
+        m.queue_name_fill_low([ask("c", Some(9)), ask("a", Some(3))]);
+        // c keeps its place and takes the newer match; a is still low.
+        assert_eq!(queued(&m), [("c", Some(9)), ("b", Some(7)), ("a", Some(3))]);
+        m.queue_name_fill([ask("d", None)]);
+        assert_eq!(
+            queued(&m)[2],
+            ("d", None),
+            "a high ask still lands before the low a"
+        );
+        assert_eq!(queued(&m)[3].0, "a");
+    }
+
+    #[test]
     fn the_fill_job_comes_after_live_cards_and_before_the_backfill() {
         let mut m = model(vec![slot("me", false), slot("p1", false)]);
         m.stage = Stage::Menus;
@@ -3445,6 +3673,49 @@ mod tests {
             m.in_match = false;
             let taken: Vec<String> = m.take_fill(10).into_iter().map(|a| a.puuid).collect();
             assert_eq!(taken, ["live-hidden", "was-hidden", "stranger"]);
+        }
+    }
+
+    #[test]
+    fn fill_visible_builds_nothing_while_a_match_runs() {
+        // R167: the door checks the stage itself. A live-hidden player, a
+        // player hidden earlier and a stranger are all built between matches
+        // (R153); the user and an empty id never; nothing at all during a
+        // match, whoever is asked.
+        let asks = [
+            ask("live-hidden", Some(1)),
+            ask("was-hidden", Some(1)),
+            ask("stranger", None),
+            ask("me", None),
+            ask("", None),
+        ];
+        let ids = |v: Vec<VisiblePuuid>| -> Vec<String> {
+            v.iter().map(|p| p.as_str().to_string()).collect()
+        };
+        for (stage, in_match) in [
+            (Stage::Pregame, true),
+            (Stage::Ingame, true),
+            (Stage::Menus, true),
+        ] {
+            let mut m = model(vec![slot("me", false), slot("live-hidden", true)]);
+            m.stage = stage;
+            m.in_match = in_match;
+            m.seen_hidden.insert("was-hidden".into(), None);
+            assert!(
+                m.fill_visible(&asks).is_empty(),
+                "{stage:?}/{in_match}: nothing is built"
+            );
+        }
+        for stage in [Stage::Menus, Stage::Closed] {
+            let mut m = model(vec![slot("me", false), slot("live-hidden", true)]);
+            m.stage = stage;
+            m.in_match = false;
+            m.seen_hidden.insert("was-hidden".into(), None);
+            assert_eq!(
+                ids(m.fill_visible(&asks)),
+                ["live-hidden", "was-hidden", "stranger"],
+                "{stage:?}"
+            );
         }
     }
 

@@ -154,32 +154,83 @@ async fn an_answer_with_no_active_act_keeps_the_date_rule() {
     assert_eq!(current_id(&h.st).as_deref(), Some("act-date-d"));
 }
 
-#[tokio::test]
-async fn a_later_failure_drops_riots_old_answer() {
-    let h = harness().await;
-    let n = now_ms();
+fn riot_new_act(n: i64, end: i64) -> ContentActs {
+    ContentActs {
+        current: ContentAct {
+            id: "act-new-e".into(),
+            name: "ACT V".into(),
+            episode_name: "V26".into(),
+            start_ms: Some(n - H),
+            end_ms: Some(end),
+        },
+        previous: None,
+    }
+}
+
+async fn riot_new_act_world(h: &Harness, n: i64, end: i64) {
     h.st.set_acts_for_test(vec![
         api_act("act-old-e", "ACT IV", n - 60 * D, n + D),
         api_act("act-new-e", "ACT V", n + D, n + 50 * D),
     ]);
+    h.st.set_riot_acts_for_test(Some(riot_new_act(n, end)), n);
+    assert_eq!(current_id(&h.st).as_deref(), Some("act-new-e"));
+    mount_content(h, 500, json!({})).await;
+    h.st.set_session(Some(h.session.clone()));
+}
+
+#[tokio::test]
+async fn a_later_failure_keeps_riots_answer_while_its_act_has_not_ended() {
+    // A blip at a reconnect must not swap the act for valorant-api's dates.
+    let h = harness().await;
+    let n = now_ms();
+    riot_new_act_world(&h, n, n + 50 * D).await;
+    h.st.refresh_content().await;
+    assert_eq!(current_id(&h.st).as_deref(), Some("act-new-e"));
+}
+
+#[tokio::test]
+async fn a_failure_after_riots_act_ended_falls_back_to_the_date_rule() {
+    let h = harness().await;
+    let n = now_ms();
+    riot_new_act_world(&h, n, n + 50 * D).await;
+    // The same answer, but its act ended and the answer was fetched long ago.
+    h.st.set_riot_acts_for_test(Some(riot_new_act(n - 2 * D, n - D)), n - 2 * D);
+    h.st.refresh_content().await;
+    assert_eq!(current_id(&h.st).as_deref(), Some("act-old-e"));
+}
+
+#[tokio::test]
+async fn the_true_start_is_what_date_readers_get_even_in_the_first_hour() {
+    let h = harness().await;
+    let n = now_ms();
+    // Riot's act began just after the floored hour: the card list says it began at the
+    // floored hour so cards switch now, but readers of dates want the truth.
+    let start = crate::state::card_clock(n) + 1;
+    h.st.set_acts_for_test(vec![api_act("act-old-g", "ACT IV", n - 60 * D, n + D)]);
     h.st.set_riot_acts_for_test(
         Some(ContentActs {
             current: ContentAct {
-                id: "act-new-e".into(),
+                id: "act-new-g".into(),
                 name: "ACT V".into(),
                 episode_name: "V26".into(),
-                start_ms: Some(n - H),
+                start_ms: Some(start),
                 end_ms: Some(n + 50 * D),
             },
-            previous: None,
+            previous: Some(ContentAct {
+                id: "act-old-g".into(),
+                name: "ACT IV".into(),
+                episode_name: "V26".into(),
+                start_ms: Some(n - 60 * D),
+                end_ms: Some(start),
+            }),
         }),
         n,
     );
-    assert_eq!(current_id(&h.st).as_deref(), Some("act-new-e"));
-    mount_content(&h, 500, json!({})).await;
-    h.st.set_session(Some(h.session.clone()));
-    h.st.refresh_content().await;
-    assert_eq!(current_id(&h.st).as_deref(), Some("act-old-e"));
+    let cur = h.st.current_act().unwrap();
+    assert_eq!(cur.id, "act-new-g");
+    assert_eq!(cur.start_ms, start, "the exact start, not the clock floor");
+    let listed = h.st.acts();
+    assert!(listed.last().unwrap().start_ms <= crate::state::card_clock(n));
 }
 
 #[tokio::test]
@@ -281,7 +332,31 @@ async fn a_failed_table_download_after_a_patch_keeps_the_old_acts_and_asks_again
         h._dir.path().join("debug"),
         Some(ME.into()),
     );
+    crate::logbuf::init();
+    let stale_lines = || log_lines("asset table fetch failed").len();
+    let said = stale_lines();
     st.ensure_tables(false).await.expect("the old tables load");
     assert_eq!(st.acts().len(), before);
     assert!(st.assets.tables_stale());
+    // The retry (a connect bypasses the 30 s guard) fails the same way: the
+    // stale-table line is not said again.
+    st.ensure_tables(true).await.expect("still the old tables");
+    st.ensure_tables(true).await.expect("still the old tables");
+    assert_eq!(stale_lines(), said + 1, "once per stale period");
+
+    // Healed: a full download of the new version clears the stale mark.
+    h.assets_server.reset().await;
+    mount_asset_tables(&h.assets_server).await;
+    Mock::given(method("GET"))
+        .and(path("/v1/version"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"status": 200, "data": {"version": "test-2"}})),
+        )
+        .with_priority(1)
+        .mount(&h.assets_server)
+        .await;
+    st.ensure_tables(true).await.expect("healed");
+    assert!(!st.assets.tables_stale());
+    assert_eq!(st.acts().len(), before);
 }

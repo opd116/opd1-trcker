@@ -934,6 +934,9 @@ struct ActsState {
     valid_until_ms: i64,
     /// Whether `resolved` has Riot's act folded in (else it is `base`).
     from_riot: bool,
+    /// With `from_riot`: the current act's id and true start, which the
+    /// resolved entry may have clamped to the card clock.
+    true_start: Option<(String, i64)>,
 }
 
 impl ActsState {
@@ -945,6 +948,7 @@ impl ActsState {
             resolved: empty,
             valid_until_ms: i64::MAX,
             from_riot: false,
+            true_start: None,
         }
     }
 
@@ -961,11 +965,16 @@ impl ActsState {
                 self.valid_until_ms = r.valid_until_ms.min(usable_until);
                 self.resolved = Arc::new(r.acts);
                 self.from_riot = true;
+                self.true_start = self
+                    .resolved
+                    .last()
+                    .map(|a| (a.id.clone(), r.current_start_ms));
             }
             None => {
                 self.valid_until_ms = i64::MAX;
                 self.resolved = self.base.clone();
                 self.from_riot = false;
+                self.true_start = None;
             }
         }
     }
@@ -1145,7 +1154,35 @@ impl AppState {
     pub fn current_act(&self) -> Option<Act> {
         let now = now_ms();
         let acts = self.acts_at(now);
-        current_act(&acts, now).cloned()
+        let mut act = current_act(&acts, now).cloned()?;
+        // The list may carry the hour-floored card clock as the start for the
+        // first hour of an act (so cards switch at once); everything that
+        // reads dates (backfill bound, My Stats, hero stats) wants the true
+        // start.
+        let g = self.acts.read().unwrap_or_else(PoisonError::into_inner);
+        if let Some((id, start)) = &g.true_start {
+            if *id == act.id && g.from_riot {
+                act.start_ms = *start;
+            }
+        }
+        Some(act)
+    }
+
+    /// A failed or empty ask: an earlier answer whose act has not ended
+    /// stays (a blip must not swap the act for valorant-api's dates);
+    /// otherwise the date rule answers.
+    fn drop_riot_answer_unless_valid(&self, now_ms: i64) {
+        if !self.riot_answer_still_valid(now_ms) {
+            self.set_riot_acts(None, now_ms);
+        }
+    }
+
+    /// Riot's earlier answer is still good: its act has not ended.
+    fn riot_answer_still_valid(&self, now_ms: i64) -> bool {
+        let g = self.acts.read().unwrap_or_else(PoisonError::into_inner);
+        g.riot.as_ref().is_some_and(|(r, usable_until)| {
+            now_ms < *usable_until && r.current.end_ms.is_some_and(|end| end > now_ms)
+        })
     }
 
     /// Whether Riot's content-service should be asked now: never while
@@ -1183,7 +1220,7 @@ impl AppState {
     /// becomes the current one; on any failure valorant-api's date rule
     /// stays (one log line says why). Republishes when the current act
     /// changed.
-    pub async fn refresh_content(&self) {
+    pub async fn refresh_content(self: &Arc<Self>) {
         let Some(session) = self.session() else {
             return;
         };
@@ -1205,12 +1242,12 @@ impl AppState {
                     None
                 }
                 None => {
-                    self.set_riot_acts(None, now);
+                    self.drop_riot_answer_unless_valid(now);
                     Some("no active act in the answer".to_string())
                 }
             },
             Err(e) => {
-                self.set_riot_acts(None, now);
+                self.drop_riot_answer_unless_valid(now);
                 Some(e.to_string())
             }
         };
@@ -1248,7 +1285,11 @@ impl AppState {
             c.logged = Some(key);
         }
         if current.map(|a| a.id) != before {
+            // The live cards and an open Player Details read the act. (My
+            // Stats has no push path: it takes the new act at its next
+            // `my_stats` call.)
             self.publish();
+            crate::details::refresh_open(self).await;
         }
     }
 
@@ -1313,16 +1354,25 @@ impl AppState {
                 status.loaded = true;
                 status.last_failure = self.assets.tables_stale().then(Instant::now);
                 let acts = self.assets.acts().unwrap_or_default();
-                log::info!(
-                    "asset tables {} ({} acts)",
-                    if refetched {
-                        "downloaded"
-                    } else {
-                        "loaded from cache"
-                    },
-                    acts.len()
-                );
+                let still_stale = self.assets.tables_stale();
+                // Once per stale period: a retry that fails the same way
+                // every 30 s says nothing new.
+                if !(stale && still_stale) {
+                    log::info!(
+                        "asset tables {} ({} acts)",
+                        if refetched {
+                            "downloaded"
+                        } else {
+                            "loaded from cache"
+                        },
+                        acts.len()
+                    );
+                }
                 self.set_base_acts(acts);
+                if stale && !still_stale {
+                    // Healed: the cards were built from the old tables.
+                    self.publish();
+                }
                 Ok(())
             }
             Err(e) => {

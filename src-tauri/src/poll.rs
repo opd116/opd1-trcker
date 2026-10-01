@@ -102,6 +102,8 @@ pub(crate) struct Poller {
     /// The user's own loadout was asked for under this session (R90: once
     /// per connect, at the first presence that shows VALORANT running).
     self_loadout_asked: bool,
+    /// R162: the content-service was asked for this session.
+    content_asked: bool,
     /// The client version came from the user's VALORANT presence under this
     /// session (R159: re-resolved at the first presence that has one, once per
     /// connect — no extra request).
@@ -145,6 +147,7 @@ impl Poller {
             presence_stage: Stage::Closed,
             game: GameWatch::default(),
             self_loadout_asked: false,
+            content_asked: false,
             version_from_presence_done: false,
             match_queue: None,
             presence_errors: 0,
@@ -279,6 +282,8 @@ impl Poller {
         self.game = GameWatch::default();
         // R90: asked at this session's first presence showing VALORANT.
         self.self_loadout_asked = false;
+        // R162: and the current act.
+        self.content_asked = false;
         // R159: so is the client version, from that same presence.
         self.version_from_presence_done = false;
         self.presence_errors = 0;
@@ -294,9 +299,6 @@ impl Poller {
                 st.publish();
             }
         });
-        // R162: Riot's own current act, once per connect (valorant-api's
-        // dates stand in until it answers, or if it never does).
-        self.st.spawn_content_refresh(true);
         // The user's own card, from the DB, while the first presence
         // arrives (closed-stage card if the game isn't up).
         self.enter_closed().await;
@@ -346,8 +348,11 @@ impl Poller {
 
     async fn connected_tick(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
         // R162: when the act Riot named has ended (or it never answered),
-        // ask again; a no-op otherwise.
-        self.st.spawn_content_refresh(false);
+        // ask again; a no-op otherwise. Never while VALORANT is closed: the
+        // session is stale then (R46/R137), like every other remote call.
+        if self.stage != Stage::Closed {
+            self.st.spawn_content_refresh(false);
+        }
         let now = Instant::now();
         if now >= self.next_presence {
             self.presence_tick(session).await?;
@@ -439,6 +444,7 @@ impl Poller {
         match self.game.on_presence(decoded.is_some()) {
             GameVerdict::Present => {
                 self.read_self_loadout_once(session);
+                self.content_once();
                 self.client_version_from_presence_once(session, private.as_deref());
             }
             // The session was built (or has lived) while VALORANT wasn't
@@ -529,6 +535,18 @@ impl Poller {
         tauri::async_runtime::spawn(async move {
             let _ = crate::sync::fetch_self_loadout(&st, &s).await;
         });
+    }
+
+    /// R162: Riot's own current act, asked once per session at the first
+    /// presence showing VALORANT (valorant-api's dates stand in until it
+    /// answers, or if it never does). Not at connect: the session is stale
+    /// while the game is closed (R46, R137).
+    fn content_once(&mut self) {
+        if self.content_asked {
+            return;
+        }
+        self.content_asked = true;
+        self.st.spawn_content_refresh(true);
     }
 
     /// R159: the first time this session sees the user's VALORANT presence
@@ -1457,6 +1475,35 @@ mod tests {
                     .any(|(k, v)| k == "endIndex" && v == "20")
             })
             .count()
+    }
+
+    async fn content_requests(h: &Harness) -> usize {
+        requests(&h.server)
+            .await
+            .iter()
+            .filter(|r| r.url.path().starts_with("/content-service/"))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn the_current_act_is_asked_once_when_the_game_shows_up_never_while_closed() {
+        // R162, like R137: the session is stale while VALORANT is closed.
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(content_requests(&h).await, 0, "no ask on a Closed connect");
+        // Closed ticks (the due re-ask included) ask nothing either.
+        poller.connected_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(content_requests(&h).await, 0);
+
+        // VALORANT is up: one ask, however many presences follow.
+        mock_presence(&h, "MENUS", "unrated").await;
+        poller.presence_tick(&h.session).await.unwrap();
+        poller.presence_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(content_requests(&h).await, 1);
     }
 
     #[tokio::test]

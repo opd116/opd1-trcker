@@ -601,6 +601,10 @@ pub struct ResolvedActs {
     /// Rebuild from this wall-clock time on (the current act's end, or the
     /// next hour while the card clock still reads before its start).
     pub valid_until_ms: i64,
+    /// The current act's true start (the list's own entry may carry the
+    /// hour-floored card clock for the first hour): what the backfill bound,
+    /// My Stats and the hero stats read.
+    pub current_start_ms: i64,
 }
 
 /// Folds Riot's current/previous act into valorant-api's act table. Riot's
@@ -654,6 +658,7 @@ pub fn resolve_acts(api: &[Act], riot: &ContentActs, now_ms: i64) -> Option<Reso
     Some(ResolvedActs {
         acts,
         valid_until_ms: valid_until,
+        current_start_ms: true_start,
     })
 }
 
@@ -1394,6 +1399,7 @@ mod tests {
             card_now + H,
             "rebuilt at the next hour with the true start"
         );
+        assert_eq!(r.current_start_ms, start, "the true start is kept apart");
         let later = resolve_acts(&api(), &riot, card_now + H).unwrap();
         assert_eq!(later.acts.last().unwrap().start_ms, start);
         assert_eq!(later.valid_until_ms, 300 * D);

@@ -649,14 +649,16 @@ impl AssetCache {
             // none. The manifest keeps the old version, so the next
             // `refresh_tables` fetches again.
             Err(e) if self.tables_files_exist() => {
-                log::warn!("asset table fetch failed, keeping the cached tables: {e}");
+                // Said once per stale period, not at every retry.
+                if !self.stale.swap(true, Ordering::Relaxed) {
+                    log::warn!("asset table fetch failed, keeping the cached tables: {e}");
+                }
                 let tables = blocking({
                     let dir = self.dir.clone();
                     move || load_tables_from_disk_sync(&dir)
                 })
                 .await?;
                 *self.tables.write().unwrap() = tables;
-                self.stale.store(true, Ordering::Relaxed);
                 return Ok(false);
             }
             Err(e) => return Err(e),

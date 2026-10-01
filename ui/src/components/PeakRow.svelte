@@ -1,6 +1,7 @@
 <!-- Peak row (spec §3.6): icon + tier name + the act it was reached in. The tooltip covers the whole group [C]. -->
 <script lang="ts">
   import { assetUrl } from "../lib/assets";
+  import { retryImg } from "../lib/imgRetry";
   import { peakLabel } from "../lib/format";
   import { tierLabel } from "../lib/meta";
   import { meta } from "../lib/stores";
@@ -24,7 +25,7 @@
       <span class="dash">—</span>
     {:else}
       <div class="pgroup" use:tip={peakTip(peak)}>
-        <img class="pi" src={assetUrl("tier", peak.tier)} alt="" />
+        <img {@attach retryImg} class="pi" src={assetUrl("tier", peak.tier)} alt="" />
         <span class="pname">{#if name === undefined}<Skel w={60} h={10} />{:else}{name ?? "—"}{/if}</span>
         <span class="when">{peakLabel(peak)}</span>
       </div>

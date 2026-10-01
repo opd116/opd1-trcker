@@ -1,6 +1,7 @@
 <!-- Average Party Rank in the Lobby top bar (spec §2.3) [C], built from the card's label/value and rank parts. -->
 <script lang="ts">
   import { assetUrl } from "../lib/assets";
+  import { retryImg } from "../lib/imgRetry";
   import { avgPartyRank } from "../lib/live";
   import { tierLabel } from "../lib/meta";
   import { meta } from "../lib/stores";
@@ -27,7 +28,7 @@
         <div class="ebox"></div>
         <span class="dash">—</span>
       {:else}
-        <img src={assetUrl("tier", apr.tier)} alt="" />
+        <img {@attach retryImg} src={assetUrl("tier", apr.tier)} alt="" />
         {#if name === undefined}<Skel w={52} h={12} block />{:else}<span class="tname">{name ?? "—"}</span>{/if}
       {/if}
     </div>

@@ -4,6 +4,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../lib/assets";
+  import { retryBg } from "../lib/imgRetry";
   import { level } from "../lib/format";
   import { showEncounters, showParty } from "../lib/live";
   import type { PlayerCard } from "../lib/types";
@@ -31,7 +32,7 @@
 
 <div class="card" role="button" tabindex="0" onclick={open} {onkeydown}>
   <div class="art">
-    <div class="art-img" style:background-image={`url("${assetUrl("cardLarge", card.cardId)}")`}></div>
+    <div class="art-img" {@attach card.cardId ? retryBg(assetUrl("cardLarge", card.cardId)) : undefined}></div>
     <div class="art-fade"></div>
   </div>
   {#if card.party && showParty(card)}

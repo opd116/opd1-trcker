@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { retryImg, retryBg } from "../../lib/imgRetry";
   import { kd2, level, pct0, peakLabel, rr } from "../../lib/format";
   import { showEncounters } from "../../lib/live";
   import { isRankedTier, tierLabel } from "../../lib/meta";
@@ -54,11 +55,11 @@
 {#if details && card}
   <div class="hero">
     <div class="hart">
-      <div class="hart-img" style:background-image={card.cardId ? `url("${assetUrl("cardLarge", card.cardId)}")` : undefined}></div>
+      <div class="hart-img" {@attach card.cardId ? retryBg(assetUrl("cardLarge", card.cardId)) : undefined}></div>
       <div class="hart-fade"></div>
     </div>
     {#if card.agentId}
-      <img class="hagent" src={assetUrl("agent", card.agentId)} alt="" />
+      <img {@attach retryImg} class="hagent" src={assetUrl("agent", card.agentId)} alt="" />
     {:else}
       <div class="hagent"></div>
     {/if}
@@ -81,7 +82,7 @@
           <div class="ri"></div>
           <span class="rdash">—</span>
         {:else}
-          <img class="ri" src={assetUrl("tier", ranked.tier)} alt="" />
+          <img {@attach retryImg} class="ri" src={assetUrl("tier", ranked.tier)} alt="" />
           <div class="rcol">
             <span class="rname">{#if rankName === undefined}<Skel w={90} h={13} />{:else}{rankName ?? "—"}{/if}</span>
             <span class="rr"><span class="v">{rr(ranked.rr)}</span> RR</span>
@@ -97,7 +98,7 @@
         {:else if peak === null}
           <div class="prow"><span class="lbl">Peak</span><span class="pdash">—</span></div>
         {:else}
-          <img class="pi" src={assetUrl("tier", peak.tier)} alt="" />
+          <img {@attach retryImg} class="pi" src={assetUrl("tier", peak.tier)} alt="" />
           <div class="pcol">
             <div class="prow">
               <span class="lbl">Peak</span><span class="pname">{#if peakName === undefined}<Skel w={90} h={13} />{:else}{peakName ?? "—"}{/if}</span>
@@ -113,7 +114,7 @@
           <Skel w={24} h={24} r="50%" block />
           <Skel w={90} h={13} block />
         {:else}
-          {#if isRankedTier(prev)}<img class="vi" src={assetUrl("tier", prev)} alt="" />{/if}
+          {#if isRankedTier(prev)}<img {@attach retryImg} class="vi" src={assetUrl("tier", prev)} alt="" />{/if}
           <div class="prow">
             <span class="lbl">Prev</span>
             {#if isRankedTier(prev)}

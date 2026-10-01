@@ -115,6 +115,24 @@ test.describe("close_match", () => {
     expect((await closes(page)).at(-1)).toBe(`close_match:${JSON.stringify({ matchId: A })}`);
   });
 
+  test("R163: the Live tab sends the keys too: close_match(matchId) from Match, close_details(puuid) from Details", async ({ page }) => {
+    await bootInTauri(page);
+    await openMatchA(page);
+    await page.locator("header.bar .tab.on").click();
+    await expect(page.locator(".live")).toHaveCount(1);
+    await page.waitForTimeout(300);
+    expect((await closes(page)).at(-1)).toBe(`close_match:${JSON.stringify({ matchId: A })}`);
+
+    // And from Details straight to Live.
+    await page.locator(".live .card").filter({ hasText: "Mara" }).click({ position: { x: 20, y: 70 } });
+    await waitPage(page, "loaded");
+    await page.waitForTimeout(450);
+    await page.locator("header.bar .tab.on").click();
+    await expect(page.locator(".live")).toHaveCount(1);
+    await page.waitForTimeout(300);
+    expect((await closes(page)).at(-1)).toBe(`close_details:${JSON.stringify({ puuid: MARA })}`);
+  });
+
   test("the Live tab from Match: close_match once", async ({ page }) => {
     await bootInTauri(page);
     await openMatchA(page);

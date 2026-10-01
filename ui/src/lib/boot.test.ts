@@ -813,6 +813,19 @@ describe("R163: a page that never answers, a deterministic rejection, a settled 
     });
   });
 
+  it("a timeout nobody waits for any more (the page was left) resolves quietly: nothing for the console", async () => {
+    vi.useFakeTimers();
+    const slot = detailsSlot();
+    const fetch = vi.fn(() => new Promise<PlayerDetails>(() => {}));
+    const done = slot.open("p1", fetch, { retryMs: DETAILS_RETRY_MS, timeoutMs: DETAILS_TIMEOUT_MS, settle });
+    await vi.advanceTimersByTimeAsync(100);
+    slot.close(); // Back, during the 15s
+    await vi.advanceTimersByTimeAsync(DETAILS_TIMEOUT_MS + DETAILS_RETRY_MS);
+    await expect(done).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(marker(slot)).toBeUndefined();
+  });
+
   describe("loadMeta stops when told to (the `meta` event delivered the tables)", () => {
     it("no further invoke after `stopped()` turns true", async () => {
       vi.useFakeTimers();
@@ -827,6 +840,18 @@ describe("R163: a page that never answers, a deterministic rejection, a settled 
       await vi.advanceTimersByTimeAsync(META_RETRY_FIRST_MS);
       await done;
       expect(invoke).toHaveBeenCalledTimes(1);
+    });
+
+    it("an answer that was in flight when the event arrived does not overwrite it", async () => {
+      let answer!: (m: Meta) => void;
+      const invoke = vi.fn(() => new Promise<Meta>((res) => (answer = res)));
+      let stop = false;
+      const set = vi.fn();
+      const done = loadMeta({ invoke } as unknown as Bridge, set, () => {}, () => stop);
+      stop = true; // the `meta` event came first
+      answer({ agents: {}, maps: {}, tiers: {} });
+      await done;
+      expect(set).not.toHaveBeenCalled();
     });
   });
 });

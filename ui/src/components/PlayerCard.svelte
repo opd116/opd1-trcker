@@ -23,6 +23,10 @@
 
   const open = () => onopen?.(card.puuid);
 
+  // The art's URL as a string (R163): every `live` event builds new card objects, and an attachment keyed on the
+  // object would be torn down, cleared and reloaded each time. A `$derived` string that did not change keeps it.
+  const artUrl = $derived(card.cardId ? assetUrl("cardLarge", card.cardId) : "");
+
   function onkeydown(e: KeyboardEvent) {
     if (e.key !== "Enter" && e.key !== " ") return;
     e.preventDefault();
@@ -32,7 +36,7 @@
 
 <div class="card" role="button" tabindex="0" onclick={open} {onkeydown}>
   <div class="art">
-    <div class="art-img" {@attach card.cardId ? retryBg(assetUrl("cardLarge", card.cardId)) : undefined}></div>
+    <div class="art-img" {@attach artUrl ? retryBg(artUrl) : undefined}></div>
     <div class="art-fade"></div>
   </div>
   {#if card.party && showParty(card)}

@@ -43,7 +43,9 @@ export async function loadMeta(
   let delay = META_RETRY_FIRST_MS;
   for (let attempt = 0; ; attempt++) {
     try {
-      set(await b.invoke<Meta>("meta"));
+      const m = await b.invoke<Meta>("meta");
+      // A `meta` event may have delivered the tables while this answer was in flight; the event is the newer one.
+      if (!stopped()) set(m);
       return;
     } catch (err) {
       onError(err, attempt);
@@ -113,11 +115,18 @@ export function isInvalidRejection(err: unknown): boolean {
   return (err instanceof Error ? err.message : String(err)).startsWith("invalid ");
 }
 
-/** `p`, or a rejection with "timed out" once `ms` have passed; the timer never outlives `p`. */
+/** The rejection of a call that did not answer in time (`withTimeout`). */
+export class CallTimedOut extends Error {
+  constructor(ms: number) {
+    super(`timed out after ${ms}ms`);
+  }
+}
+
+/** `p`, or a `CallTimedOut` rejection once `ms` have passed; the timer never outlives `p`. */
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const late = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms);
+    timer = setTimeout(() => reject(new CallTimedOut(ms)), ms);
   });
   return Promise.race([p, late]).finally(() => clearTimeout(timer));
 }
@@ -208,6 +217,9 @@ function keyedSlot<T>(keyOf: (payload: T) => string): Slot<T> {
         settled = null;
       }
     } catch (err) {
+      // A timeout nobody waits for any more (the page was left, replaced, or an event answered) is not an error
+      // worth logging (R163 review).
+      if (v !== version && err instanceof CallTimedOut) return;
       // Failed for good: end the skeleton, unless something newer wrote the slot or this key's payload is
       // already on screen (Back from Match keeps what it had; so does a failed `retrySettled`).
       if (v === version && current === null && opts.settle) {

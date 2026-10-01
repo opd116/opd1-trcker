@@ -50,8 +50,11 @@ pub async fn load(
     let Some((view, asks)) = found else {
         return Err("unknown match".into());
     };
-    st.set_open_match(ticket, match_id, focus_puuid, &view);
-    st.queue_name_fill(asks);
+    // R163: an open that lost (the page was left, or a newer open took over)
+    // asks for no names: nobody sees this answer.
+    if st.set_open_match(ticket, match_id, focus_puuid, &view) {
+        st.queue_name_fill(asks);
+    }
     Ok(view)
 }
 

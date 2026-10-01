@@ -171,3 +171,53 @@ async fn the_meta_event_goes_out_when_the_tables_first_load_and_when_they_refres
     h.st.ensure_tables(true).await.unwrap();
     assert_eq!(h.rec.metas.lock().unwrap().len(), 2, "refreshed");
 }
+
+/// A player with no stored name: their Details raise a name ask for the hero.
+async fn nameless(h: &Harness, puuids: &[&'static str]) {
+    let puuids = puuids.to_vec();
+    h.st.db(move |repo| {
+        for puuid in puuids {
+            save_player(
+                repo.conn(),
+                &PlayerUpdate {
+                    puuid: puuid.into(),
+                    name: None,
+                    account_level: 50,
+                    card_id: "card".into(),
+                },
+                now_ms(),
+            )
+            .unwrap();
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn a_details_open_that_lost_queues_no_names_and_ends_its_skin_mark() {
+    // The real command path (`player_details_for`), with the page left while
+    // the build runs: the answer is still returned, but nothing is queued for
+    // a page nobody sees (R163). OTHER is the control: opened normally, the
+    // same kind of player does raise the ask.
+    let h = harness().await;
+    nameless(&h, &[OTHER, STRANGER]).await;
+    assert!(!h.st.take_worker_kick());
+
+    crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    assert!(h.st.take_worker_kick(), "control: a nameless hero is asked");
+
+    // `join!` polls the open first (it takes its ticket, then waits on the
+    // DB), then the close, which voids it before the build ends.
+    let (opened, ()) = tokio::join!(
+        crate::commands::player_details_for(&h.st, STRANGER),
+        async { crate::commands::close_details_key_for(&h.st, Some(STRANGER)) }
+    );
+    assert_eq!(opened.unwrap().card.puuid, STRANGER, "still answered");
+    assert!(!h.st.details_open_for(STRANGER), "not open");
+    assert!(!h.st.take_worker_kick(), "no name ask for a closed page");
+    assert!(!h.st.skins_resolving(STRANGER));
+}

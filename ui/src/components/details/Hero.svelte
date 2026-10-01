@@ -22,6 +22,9 @@
   let { details }: { details: PlayerDetails | null } = $props();
 
   const card = $derived(details?.card);
+  // The art's URL as a string (R163): a `details` event builds a new card object; an attachment keyed on it would be
+  // torn down, cleared and reloaded each time, one keyed on an unchanged string is not.
+  const artUrl = $derived(card?.cardId ? assetUrl("cardLarge", card.cardId) : "");
   const ranked = $derived(card?.rank && isRankedTier(card.rank.tier) ? card.rank : null);
   const rankName = $derived(ranked ? tierLabel($meta, ranked.tier) : null);
   const peak = $derived(card?.peak);
@@ -55,7 +58,7 @@
 {#if details && card}
   <div class="hero">
     <div class="hart">
-      <div class="hart-img" {@attach card.cardId ? retryBg(assetUrl("cardLarge", card.cardId)) : undefined}></div>
+      <div class="hart-img" {@attach artUrl ? retryBg(artUrl) : undefined}></div>
       <div class="hart-fade"></div>
     </div>
     {#if card.agentId}

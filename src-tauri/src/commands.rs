@@ -111,7 +111,12 @@ pub(crate) async fn player_details_for(
     let details = crate::details::build(&st, &puuid).await?;
     // The open view: every later rebuild of it (the jobs below, and the
     // worker's sync of this player, R23) is emitted only when it changed.
-    st.set_open_details(ticket, &details);
+    if !st.set_open_details(ticket, &details) {
+        // The page was left (or a newer open took over) while this build ran:
+        // nobody sees this answer, so no name asks, skin fetch or sync for it
+        // (R163). The caller still gets its answer; the UI drops it.
+        return Ok(details);
+    }
     // R150: the names this page shows as missing, asked between matches.
     st.queue_name_fill(details_asks(&details));
 

@@ -370,6 +370,27 @@ fn act_full_name_for_hover() {
     assert_eq!(act_full_name(&act_by_label(&acts, "V26 A5")), "V26 ACT V");
 }
 
+/// R162: an act valorant-api does not know yet is named from Riot's own
+/// fields, which may lack the episode. No stray space or bare "A5" garbage.
+#[test]
+fn act_names_without_an_episode_do_not_leave_blanks() {
+    let act = |episode: &str, name: &str| opd1_core::stats::Act {
+        id: "x".into(),
+        name: name.into(),
+        episode_name: episode.into(),
+        start_ms: 0,
+        end_ms: 1,
+    };
+    assert_eq!(act_full_name(&act("", "ACT V")), "ACT V");
+    assert_eq!(act_label(&act("", "ACT V")), "A5");
+    assert_eq!(act_full_name(&act("V27", "")), "V27");
+    // Never an empty label: the act's own (Riot's) name, else a dash.
+    assert_eq!(act_label(&act("", "")), "—");
+    assert_eq!(act_label(&act("", "  Weird name ")), "Weird name");
+    assert_eq!(act_label(&act("V27", "Weird name")), "V27");
+    assert_eq!(act_full_name(&act("", "")), "");
+}
+
 // ---------------------------------------------------------------------
 // since_act_end
 // ---------------------------------------------------------------------

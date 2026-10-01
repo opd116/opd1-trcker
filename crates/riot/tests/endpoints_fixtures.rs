@@ -472,3 +472,124 @@ fn tier_fields_missing_or_null_never_fail_the_response() {
         assert_eq!(parsed.members[0].competitive_tier, want, "{tier:?}");
     }
 }
+
+// ---------------------------------------------------------------------
+// content-service (R162). The fixture is invented: there is no real
+// content-service dump on disk; the shape follows Scout's parser
+// (`ID`/`Type`/`IsActive`/`StartTime`/`EndTime`) and Riot's documented
+// `Seasons` list.
+// ---------------------------------------------------------------------
+
+use opd1_riot::endpoints::ContentSeasons;
+use serde_json::json;
+
+fn content(value: serde_json::Value) -> ContentSeasons {
+    ContentSeasons::from_value(&value)
+}
+
+const T_APR: &str = "2026-08-19T00:00:00Z";
+const T_OCT: &str = "2026-10-14T00:00:00Z";
+
+#[test]
+fn content_picks_the_active_act_and_the_one_that_ended_when_it_began() {
+    let seasons = content(serde_json::from_str(&fixture("content.json")).unwrap());
+    let acts = seasons.active_acts().expect("an active act");
+    // `Type` is compared case-insensitively ("Act" in the fixture), and
+    // the active *episode* is not the act.
+    assert_eq!(acts.current.id, "22222222-0000-0000-0000-00000000a905");
+    assert_eq!(acts.current.name, "ACT V");
+    assert_eq!(acts.current.episode_name, "V26");
+    assert_eq!(acts.current.start_ms, Some(1_787_097_600_000));
+    assert_eq!(acts.current.end_ms, Some(1_791_936_000_000));
+    let prev = acts.previous.expect("a previous act");
+    assert_eq!(prev.id, "22222222-0000-0000-0000-00000000a904");
+    assert_eq!(prev.end_ms, acts.current.start_ms);
+}
+
+#[test]
+fn content_without_an_active_act_is_none() {
+    let none = content(json!({"Seasons": [
+        {"ID": "e", "Type": "episode", "IsActive": true, "StartTime": T_APR, "EndTime": T_OCT},
+        {"ID": "a", "Type": "act", "IsActive": false, "StartTime": T_APR, "EndTime": T_OCT}
+    ]}));
+    assert!(none.active_acts().is_none());
+}
+
+#[test]
+fn content_decoding_never_fails_on_odd_shapes() {
+    for odd in [
+        json!(null),
+        json!([]),
+        json!("x"),
+        json!({}),
+        json!({"Seasons": null}),
+        json!({"Seasons": "no"}),
+        json!({"Seasons": [1, null, "s", [], {"ID": 5, "Type": 7, "IsActive": "yes"}]}),
+    ] {
+        assert!(content(odd).active_acts().is_none());
+    }
+    // One bad entry does not hide a good one; missing times stay unknown
+    // rather than failing the answer, and the id alone still names the act.
+    let seasons = content(json!({"Seasons": [
+        42,
+        {"ID": "good", "Type": "act", "IsActive": true, "StartTime": "garbage"},
+        {"Type": "act", "IsActive": true, "StartTime": T_APR, "EndTime": T_OCT}
+    ]}));
+    let acts = seasons.active_acts().expect("the good one");
+    assert_eq!(acts.current.id, "good");
+    assert_eq!(acts.current.start_ms, None);
+    assert_eq!(acts.current.end_ms, None);
+    assert!(acts.previous.is_none());
+}
+
+#[test]
+fn content_previous_act_needs_matching_times_not_just_order() {
+    let seasons = content(json!({"Seasons": [
+        {"ID": "old", "Type": "act", "IsActive": false,
+         "StartTime": "2026-01-01T00:00:00Z", "EndTime": "2026-06-01T00:00:00Z"},
+        {"ID": "now", "Type": "act", "IsActive": true,
+         "StartTime": T_APR, "EndTime": T_OCT}
+    ]}));
+    assert!(seasons.active_acts().unwrap().previous.is_none());
+}
+
+#[test]
+fn content_names_a_roman_act_from_riots_digits() {
+    // The real entries have exactly ID, Name, Type, StartTime, EndTime and
+    // IsActive: the episode is found by time, not by a parent id.
+    let seasons = content(json!({"Seasons": [
+        {"ID": "p", "Type": "episode", "Name": "Episode 9", "IsActive": true,
+         "StartTime": "2026-01-06T00:00:00Z", "EndTime": "2026-12-01T00:00:00Z"},
+        {"ID": "a", "Type": "act", "Name": "act 3", "IsActive": true,
+         "StartTime": T_APR, "EndTime": T_OCT}
+    ]}));
+    let cur = seasons.active_acts().unwrap().current;
+    assert_eq!(cur.name, "ACT III");
+    assert_eq!(cur.episode_name, "EPISODE 9", "act_label shortens it to E9");
+}
+
+#[test]
+fn content_episode_is_the_one_containing_the_acts_start() {
+    let seasons = content(json!({"Seasons": [
+        // Ended exactly when the act began: not the act's episode.
+        {"ID": "e1", "Type": "episode", "Name": "EPISODE 8",
+         "StartTime": "2026-01-01T00:00:00Z", "EndTime": T_APR},
+        // Two containing entries: the shorter span wins.
+        {"ID": "e0", "Type": "episode", "Name": "WIDE",
+         "StartTime": "2025-01-01T00:00:00Z", "EndTime": "2027-01-01T00:00:00Z"},
+        {"ID": "e2", "Type": "episode", "Name": "  V27 ",
+         "StartTime": T_APR, "EndTime": "2026-12-01T00:00:00Z"},
+        {"ID": "a", "Type": "act", "Name": "ACT VI", "IsActive": true,
+         "StartTime": T_APR, "EndTime": T_OCT}
+    ]}));
+    assert_eq!(seasons.active_acts().unwrap().current.episode_name, "V27");
+
+    // No episode contains it: empty, never a guess.
+    let none = content(json!({"Seasons": [
+        {"ID": "e", "Type": "episode", "Name": "EPISODE 1",
+         "StartTime": "2020-01-01T00:00:00Z", "EndTime": "2020-06-01T00:00:00Z"},
+        {"ID": "a", "Type": "act", "Name": "ACT VI", "IsActive": true,
+         "StartTime": T_APR, "EndTime": T_OCT}
+    ]}));
+    assert_eq!(none.active_acts().unwrap().current.episode_name, "");
+}

@@ -32,8 +32,8 @@ use opd1_core::model::{display_tier, Team};
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
 use opd1_riot::endpoints::{
-    CoreGameLoadoutsResponse, CoreGameMatchResponse, PartyResponse, PlayerIdentity,
-    PlayerLoadoutResponse, PregameLoadoutsResponse, PregameMatchResponse,
+    ContentAct, ContentActs, CoreGameLoadoutsResponse, CoreGameMatchResponse, PartyResponse,
+    PlayerIdentity, PlayerLoadoutResponse, PregameLoadoutsResponse, PregameMatchResponse,
 };
 
 use crate::store::PlayerUpdate;
@@ -633,6 +633,82 @@ pub fn current_act(acts: &[Act], now_ms: i64) -> Option<&Act> {
         .rev()
         .find(|a| a.start_ms <= now_ms)
         .filter(|a| now_ms < a.end_ms)
+}
+
+/// How long an act Riot still calls active past its own end time is kept
+/// before Riot is asked again (Riot late at a rollover).
+const RIOT_LATE_RECHECK_MS: i64 = 10 * 60_000;
+
+/// The act list with Riot's own answer folded in (R162), and when it stops
+/// being right.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedActs {
+    /// Ascending; the last act is the one Riot calls current, the one before
+    /// it the one that ended when it began. Acts valorant-api dates after
+    /// the current one are gone, so no caller can take them for current.
+    pub acts: Vec<Act>,
+    /// Rebuild from this wall-clock time on (the current act's end, or the
+    /// next hour while the card clock still reads before its start).
+    pub valid_until_ms: i64,
+    /// The current act's true start (the list's own entry may carry the
+    /// hour-floored card clock for the first hour): what the backfill bound,
+    /// My Stats and the hero stats read.
+    pub current_start_ms: i64,
+}
+
+/// Folds Riot's current/previous act into valorant-api's act table. Riot's
+/// id, start and end win; valorant-api only supplies display names (Riot's
+/// own `Name` fields stand in for an id it does not know yet). `None` when
+/// the current act has no start or end anywhere, so nothing can be said
+/// about it: the caller keeps valorant-api's date rule.
+pub fn resolve_acts(api: &[Act], riot: &ContentActs, now_ms: i64) -> Option<ResolvedActs> {
+    let known = |id: &str| api.iter().find(|a| a.id == id);
+    let build = |c: &ContentAct, start: Option<i64>, end: Option<i64>| -> Option<Act> {
+        let base = known(&c.id);
+        Some(Act {
+            id: c.id.clone(),
+            name: base.map_or_else(|| c.name.clone(), |a| a.name.clone()),
+            episode_name: base.map_or_else(|| c.episode_name.clone(), |a| a.episode_name.clone()),
+            start_ms: start.or(base.map(|a| a.start_ms))?,
+            end_ms: end.or(base.map(|a| a.end_ms))?,
+        })
+    };
+
+    let mut current = build(&riot.current, riot.current.start_ms, riot.current.end_ms)?;
+    let mut valid_until = current.end_ms;
+    if current.end_ms <= now_ms {
+        // Riot still says it is active: believe Riot, ask again soon.
+        current.end_ms = now_ms + RIOT_LATE_RECHECK_MS;
+        valid_until = current.end_ms;
+    }
+    // Cards are built with the clock floored to the hour: until the act's
+    // start is behind that clock, say it began there, and rebuild at the
+    // next hour with the true start.
+    let card_now = crate::state::card_clock(now_ms);
+    let true_start = current.start_ms;
+    if true_start > card_now {
+        current.start_ms = card_now;
+        valid_until = valid_until.min(card_now + 3_600_000);
+    }
+
+    let previous = riot.previous.as_ref().and_then(|p| {
+        // It ended when the current act began (Riot's own rule).
+        build(p, p.start_ms, Some(current.start_ms))
+    });
+    let before = previous.as_ref().map_or(true_start, |p| p.start_ms);
+    let mut acts: Vec<Act> = api
+        .iter()
+        .filter(|a| a.start_ms < before && a.id != current.id)
+        .filter(|a| previous.as_ref().is_none_or(|p| p.id != a.id))
+        .cloned()
+        .collect();
+    acts.extend(previous);
+    acts.push(current);
+    Some(ResolvedActs {
+        acts,
+        valid_until_ms: valid_until,
+        current_start_ms: true_start,
+    })
 }
 
 #[cfg(test)]
@@ -1289,5 +1365,198 @@ mod tests {
         assert_eq!(current_act(&acts, 250).unwrap().id, "future");
         assert!(current_act(&acts, 400).is_none());
         assert!(current_act(&[], 1).is_none());
+    }
+    // -- R162: the act Riot says is current ------------------------------
+
+    const H: i64 = 3_600_000;
+    const D: i64 = 24 * H;
+
+    fn api_act(id: &str, name: &str, s: i64, e: i64) -> Act {
+        Act {
+            id: id.into(),
+            name: name.into(),
+            episode_name: "V26".into(),
+            start_ms: s,
+            end_ms: e,
+        }
+    }
+
+    fn riot_act(id: &str, s: Option<i64>, e: Option<i64>) -> ContentAct {
+        ContentAct {
+            id: id.into(),
+            name: format!("riot-{id}"),
+            episode_name: "riot-ep".into(),
+            start_ms: s,
+            end_ms: e,
+        }
+    }
+
+    /// valorant-api: a(0..100D) b(100D..200D) c(200D..300D).
+    fn api() -> Vec<Act> {
+        vec![
+            api_act("a", "ACT III", 0, 100 * D),
+            api_act("b", "ACT IV", 100 * D, 200 * D),
+            api_act("c", "ACT V", 200 * D, 300 * D),
+        ]
+    }
+
+    fn ids(acts: &[Act]) -> Vec<&str> {
+        acts.iter().map(|a| a.id.as_str()).collect()
+    }
+
+    #[test]
+    fn riot_ahead_of_valorant_api_makes_riots_act_current() {
+        // Riot rolled to c two hours ago; valorant-api's dates still say b.
+        let now = 200 * D + 3 * H;
+        let riot_start = now - 3 * H;
+        let riot = ContentActs {
+            current: riot_act("c", Some(riot_start), Some(300 * D)),
+            previous: Some(riot_act("b", Some(100 * D), Some(riot_start))),
+        };
+        // valorant-api thinks c starts a day later than Riot did.
+        let mut a = api();
+        a[2].start_ms = now + D;
+        let r = resolve_acts(&a, &riot, now).unwrap();
+        assert_eq!(ids(&r.acts), ["a", "b", "c"]);
+        assert_eq!(current_act(&r.acts, now).unwrap().id, "c");
+        assert_eq!(
+            r.acts[2].start_ms, riot_start,
+            "Riot's start, not the api's"
+        );
+        assert_eq!(
+            r.acts[1].end_ms, riot_start,
+            "previous ends when current begins"
+        );
+        // Names stay valorant-api's.
+        assert_eq!(r.acts[2].name, "ACT V");
+        assert_eq!(r.acts[2].episode_name, "V26");
+    }
+
+    #[test]
+    fn valorant_api_ahead_of_riot_does_not_win() {
+        // valorant-api already says c (start 200D) but Riot still has b.
+        let now = 200 * D + H;
+        let riot = ContentActs {
+            current: riot_act("b", Some(100 * D), Some(200 * D + 3 * H)),
+            previous: Some(riot_act("a", Some(0), Some(100 * D))),
+        };
+        let r = resolve_acts(&api(), &riot, now).unwrap();
+        assert_eq!(ids(&r.acts), ["a", "b"], "the api's later act is dropped");
+        assert_eq!(current_act(&r.acts, now).unwrap().id, "b");
+        assert_eq!(r.acts[1].end_ms, 200 * D + 3 * H);
+        assert_eq!(r.valid_until_ms, 200 * D + 3 * H, "expires with Riot's end");
+    }
+
+    #[test]
+    fn an_act_valorant_api_does_not_know_uses_riots_names() {
+        let now = 250 * D;
+        let riot = ContentActs {
+            current: ContentAct {
+                name: "ACT VI".into(),
+                episode_name: "V27".into(),
+                ..riot_act("new", Some(240 * D), Some(300 * D))
+            },
+            previous: Some(riot_act("c", Some(200 * D), Some(240 * D))),
+        };
+        let r = resolve_acts(&api(), &riot, now).unwrap();
+        assert_eq!(ids(&r.acts), ["a", "b", "c", "new"]);
+        let new = r.acts.last().unwrap();
+        assert_eq!(
+            (new.name.as_str(), new.episode_name.as_str()),
+            ("ACT VI", "V27")
+        );
+        // The previous act is the api's own c: its names kept, Riot's end.
+        assert_eq!(r.acts[2].name, "ACT V");
+        assert_eq!(r.acts[2].end_ms, 240 * D);
+        assert_eq!(current_act(&r.acts, now).unwrap().id, "new");
+    }
+
+    #[test]
+    fn a_previous_act_valorant_api_does_not_know_is_still_second_to_last() {
+        let now = 250 * D;
+        let riot = ContentActs {
+            current: riot_act("new", Some(240 * D), Some(300 * D)),
+            previous: Some(riot_act("mystery", Some(220 * D), Some(240 * D))),
+        };
+        let r = resolve_acts(&api(), &riot, now).unwrap();
+        // c (api) starts at 200D, before mystery's 220D, so it stays ahead;
+        // the previous act is the one Riot named.
+        assert_eq!(ids(&r.acts), ["a", "b", "c", "mystery", "new"]);
+        assert_eq!(r.acts[3].name, "riot-mystery");
+    }
+
+    #[test]
+    fn without_a_riot_previous_the_api_acts_before_it_lead_up() {
+        let now = 250 * D;
+        let riot = ContentActs {
+            current: riot_act("c", Some(200 * D), Some(300 * D)),
+            previous: None,
+        };
+        let r = resolve_acts(&api(), &riot, now).unwrap();
+        assert_eq!(ids(&r.acts), ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn missing_riot_times_fall_back_to_the_apis_for_a_known_id() {
+        let now = 250 * D;
+        let riot = ContentActs {
+            current: riot_act("c", None, None),
+            previous: None,
+        };
+        let r = resolve_acts(&api(), &riot, now).unwrap();
+        assert_eq!(r.acts.last().unwrap().start_ms, 200 * D);
+        assert_eq!(r.acts.last().unwrap().end_ms, 300 * D);
+    }
+
+    #[test]
+    fn an_act_with_no_times_anywhere_cannot_be_resolved() {
+        let riot = ContentActs {
+            current: riot_act("nobody", None, None),
+            previous: None,
+        };
+        assert!(resolve_acts(&api(), &riot, 250 * D).is_none());
+        // Nor can one with a start but no end and no api entry.
+        let riot = ContentActs {
+            current: riot_act("nobody", Some(1), None),
+            previous: None,
+        };
+        assert!(resolve_acts(&api(), &riot, 250 * D).is_none());
+    }
+
+    #[test]
+    fn riots_act_is_current_for_the_hour_floored_card_clock_too() {
+        // Cards are built with the clock floored to the hour: an act that
+        // began 10 minutes ago must already be the current one for them.
+        let now = 250 * D + 5 * H + 30 * 60_000;
+        let start = now - 10 * 60_000;
+        let riot = ContentActs {
+            current: riot_act("c", Some(start), Some(300 * D)),
+            previous: Some(riot_act("b", Some(100 * D), Some(start))),
+        };
+        let r = resolve_acts(&api(), &riot, now).unwrap();
+        let card_now = crate::state::card_clock(now);
+        assert_eq!(current_act(&r.acts, card_now).unwrap().id, "c");
+        assert_eq!(
+            r.valid_until_ms,
+            card_now + H,
+            "rebuilt at the next hour with the true start"
+        );
+        assert_eq!(r.current_start_ms, start, "the true start is kept apart");
+        let later = resolve_acts(&api(), &riot, card_now + H).unwrap();
+        assert_eq!(later.acts.last().unwrap().start_ms, start);
+        assert_eq!(later.valid_until_ms, 300 * D);
+    }
+
+    #[test]
+    fn an_act_riot_still_calls_active_past_its_end_is_extended_briefly() {
+        // Riot late: its act's end passed, but it still says IsActive.
+        let now = 300 * D + H;
+        let riot = ContentActs {
+            current: riot_act("c", Some(200 * D), Some(300 * D)),
+            previous: Some(riot_act("b", Some(100 * D), Some(200 * D))),
+        };
+        let r = resolve_acts(&api(), &riot, now).unwrap();
+        assert_eq!(current_act(&r.acts, now).unwrap().id, "c");
+        assert!(r.valid_until_ms > now && r.valid_until_ms <= now + H);
     }
 }

@@ -1233,3 +1233,8 @@ mod live_tier;
 /// own file; same harness).
 #[cfg(test)]
 mod diagnostics;
+
+/// R162's current-act tests (Riot's content-service; their own file; same
+/// harness).
+#[cfg(test)]
+mod act;

@@ -207,6 +207,7 @@ impl VersionSource {
 enum RemoteKind {
     Pd,
     Glz,
+    Shared,
 }
 
 /// A live connection to the local Riot client, plus everything needed to
@@ -226,6 +227,8 @@ pub struct RiotSession {
     remote_client: Client,
     pd_base: String,
     glz_base: String,
+    /// `shared.{pd shard}.a.pvp.net` (content-service, R162).
+    shared_base: String,
     puuid: String,
     auth: Mutex<AuthState>,
     /// The shared rate (burst 10, 10 rps) every pd/glz call draws from. Its own
@@ -259,6 +262,11 @@ impl fmt::Debug for RiotSession {
             .field("auth", &"<redacted>")
             .finish_non_exhaustive()
     }
+}
+
+/// The content-service host for a pd shard (Scout builds it the same way).
+fn shared_base_url(pd_shard: &str) -> String {
+    format!("https://shared.{pd_shard}.a.pvp.net")
 }
 
 fn lockfile_path(local_app_data: &Path) -> PathBuf {
@@ -378,6 +386,7 @@ impl RiotSession {
             .build()
             .map_err(http_error)?;
 
+        let shared_override = pd_base_override.clone();
         let pd_base =
             pd_base_override.unwrap_or_else(|| format!("https://pd.{}.a.pvp.net", shards.pd));
         let glz_base = glz_base_override.unwrap_or_else(|| {
@@ -386,6 +395,9 @@ impl RiotSession {
                 shards.glz_region, shards.glz_shard
             )
         });
+        // A test that points pd at a mock server wants the content-service
+        // there too; production derives the host from the same shard as pd.
+        let shared_base = shared_override.unwrap_or_else(|| shared_base_url(&shards.pd));
         let valorant_api_base =
             valorant_api_base_override.unwrap_or_else(|| "https://valorant-api.com".to_string());
 
@@ -421,6 +433,7 @@ impl RiotSession {
             remote_client,
             pd_base,
             glz_base,
+            shared_base,
             puuid: entitlements.subject,
             auth: Mutex::new(AuthState {
                 access_token: entitlements.access_token,
@@ -566,6 +579,13 @@ impl RiotSession {
         self.remote(RemoteKind::Glz, Method::GET, path, None).await
     }
 
+    /// `GET`s a path on `shared.{shard}.a.pvp.net`, throttled by the global
+    /// bucket with the same 401/403/429 handling as [`pd`](Self::pd).
+    pub async fn shared<T: DeserializeOwned>(&self, path: &str) -> Result<T, RiotError> {
+        self.remote(RemoteKind::Shared, Method::GET, path, None)
+            .await
+    }
+
     /// Re-reads the lockfile and compares it against the snapshot taken at
     /// `connect()` time. Cheap (one small file read), called before every
     /// local/pd/glz call so a closed or restarted Riot client is caught
@@ -629,6 +649,7 @@ impl RiotSession {
         let base = match kind {
             RemoteKind::Pd => &self.pd_base,
             RemoteKind::Glz => &self.glz_base,
+            RemoteKind::Shared => &self.shared_base,
         };
         let url = format!("{base}{path}");
         let (access_token, entitlements_jwt, client_version) = {
@@ -1010,6 +1031,12 @@ mod tests {
             e.to_string(),
             "not sent: requests are on hold for 60s more (Riot rate limit)"
         );
+    }
+
+    #[test]
+    fn the_content_host_follows_the_pd_shard() {
+        assert_eq!(shared_base_url("eu"), "https://shared.eu.a.pvp.net");
+        assert_eq!(shared_base_url("na"), "https://shared.na.a.pvp.net");
     }
 
     #[test]

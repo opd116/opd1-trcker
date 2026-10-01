@@ -709,3 +709,173 @@ impl RiotSession {
         self.pd_put("/name-service/v2/players", &body).await
     }
 }
+
+// ---------------------------------------------------------------------
+// content-service (R162)
+// ---------------------------------------------------------------------
+
+/// One act as Riot's content-service names it. Times are `None` when Riot's
+/// answer lacks them or they do not parse: the id alone still identifies the
+/// act (valorant-api, which shares the id space, may know its dates).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentAct {
+    pub id: String,
+    /// Riot's own `Name`, normalized to valorant-api's style (`ACT 3` ->
+    /// `ACT III`). Empty when Riot gave none.
+    pub name: String,
+    /// The parent episode's `Name` (`EPISODE 9`, `V26`), empty when unknown.
+    pub episode_name: String,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+}
+
+/// The act Riot says is running and the one before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentActs {
+    pub current: ContentAct,
+    pub previous: Option<ContentAct>,
+}
+
+#[derive(Debug, Clone)]
+struct ContentSeason {
+    id: String,
+    kind: String,
+    name: String,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    is_active: bool,
+}
+
+/// Riot's `/content-service/v3/content` `Seasons` list, decoded tolerantly:
+/// whatever the shape, building one never fails. An entry that is not an
+/// object, or has no id, is dropped; a field of the wrong type is unknown.
+/// Only `ID`/`Type`/`Name`/`StartTime`/`EndTime`/`IsActive` are read: the
+/// real answer's entries have exactly those six fields (no parent id).
+#[derive(Debug, Clone, Default)]
+pub struct ContentSeasons {
+    seasons: Vec<ContentSeason>,
+}
+
+impl ContentSeasons {
+    pub fn from_value(value: &Value) -> Self {
+        let text = |o: &serde_json::Map<String, Value>, k: &str| {
+            o.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+        };
+        let time = |o: &serde_json::Map<String, Value>, k: &str| {
+            o.get(k)
+                .and_then(Value::as_str)
+                .and_then(crate::to_core::parse_iso8601_utc_ms)
+        };
+        let seasons = value
+            .get("Seasons")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_object)
+                    .map(|o| ContentSeason {
+                        id: text(o, "ID"),
+                        kind: text(o, "Type").to_ascii_lowercase(),
+                        name: text(o, "Name"),
+                        start_ms: time(o, "StartTime"),
+                        end_ms: time(o, "EndTime"),
+                        is_active: o.get("IsActive").and_then(Value::as_bool) == Some(true),
+                    })
+                    .filter(|s| !s.id.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self { seasons }
+    }
+
+    /// The active act (`Type == "act"`, case-insensitive, `IsActive`) and
+    /// the act whose `EndTime` equals its `StartTime` (Scout's rule). With
+    /// several active acts the latest-starting one wins. `None` when no act
+    /// is active.
+    pub fn active_acts(&self) -> Option<ContentActs> {
+        let acts = || self.seasons.iter().filter(|s| s.kind == "act");
+        let current = acts()
+            .filter(|s| s.is_active)
+            .max_by_key(|s| s.start_ms.unwrap_or(i64::MIN))?;
+        let previous = current
+            .start_ms
+            .and_then(|start| acts().find(|s| s.id != current.id && s.end_ms == Some(start)));
+        Some(ContentActs {
+            current: self.to_act(current),
+            previous: previous.map(|s| self.to_act(s)),
+        })
+    }
+
+    /// The act's episode is the episode entry that contains its start
+    /// (`episode.start <= act.start < episode.end`; the shortest if several),
+    /// since the real entries carry no parent id.
+    fn to_act(&self, s: &ContentSeason) -> ContentAct {
+        let episode_name = s
+            .start_ms
+            .and_then(|start| {
+                self.seasons
+                    .iter()
+                    .filter(|e| e.kind == "episode")
+                    .filter_map(|e| Some((e, e.start_ms?, e.end_ms?)))
+                    .filter(|&(_, from, to)| from <= start && start < to)
+                    .min_by_key(|&(_, from, to)| to - from)
+                    .map(|(e, _, _)| normalize_episode_name(&e.name))
+            })
+            .unwrap_or_default();
+        ContentAct {
+            id: s.id.clone(),
+            name: normalize_act_name(&s.name),
+            episode_name,
+            start_ms: s.start_ms,
+            end_ms: s.end_ms,
+        }
+    }
+}
+
+/// Riot's `EPISODE 6` (any case) is kept as `EPISODE 6`, the form
+/// `opd1_core::stats::act_label` shortens to `E6`; any other episode name
+/// (`V26`) is used as given, trimmed.
+fn normalize_episode_name(raw: &str) -> String {
+    let name = raw.trim();
+    match name.get(..8) {
+        Some(p) if p.eq_ignore_ascii_case("episode ") => {
+            format!("EPISODE {}", name[8..].trim())
+        }
+        _ => name.to_string(),
+    }
+}
+
+/// `ACT 3` / `act 3` -> `ACT III` (valorant-api's naming, which
+/// `opd1_core::stats::act_label` understands); anything else is trimmed and
+/// kept as Riot wrote it.
+fn normalize_act_name(raw: &str) -> String {
+    let name = raw.trim();
+    if let Some(rest) = name
+        .get(..3)
+        .filter(|p| p.eq_ignore_ascii_case("act"))
+        .map(|_| name[3..].trim())
+    {
+        let roman = match rest {
+            "1" => Some("I"),
+            "2" => Some("II"),
+            "3" => Some("III"),
+            "4" => Some("IV"),
+            "5" => Some("V"),
+            "6" => Some("VI"),
+            _ => None,
+        };
+        if let Some(r) = roman {
+            return format!("ACT {r}");
+        }
+    }
+    name.to_string()
+}
+
+impl RiotSession {
+    /// `GET shared.{shard}.a.pvp.net/content-service/v3/content`: the
+    /// season list, from which Riot's own active act is read (R162). Any
+    /// 2xx body decodes; only a transport or status failure is an error.
+    pub async fn content(&self) -> Result<ContentSeasons, RiotError> {
+        let body: Value = self.shared("/content-service/v3/content").await?;
+        Ok(ContentSeasons::from_value(&body))
+    }
+}

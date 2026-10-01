@@ -174,19 +174,22 @@ fn details_with(queue: &str, completion: &str, teams: serde_json::Value) -> serd
 }
 
 #[tokio::test]
-async fn a_match_that_cannot_say_who_won_is_a_failed_fetch_not_a_stored_draw() {
-    // R166 fix round 1: stored for good, so no winner means no row.
+async fn a_match_with_no_teams_or_two_winners_is_a_failed_fetch_a_draw_is_not() {
+    // R166: stored for good, so an answer with no teams or two winners is
+    // not stored; both teams `won: false` is a draw (R29).
     let (_tmp, server, session) = setup().await;
     let blue_red = |blue: bool, red: bool| json!([{"teamId": "Blue", "won": blue}, {"teamId": "Red", "won": red}]);
     let cases = [
         // (queue, completion, teams, accepted)
         ("competitive", "Completed", blue_red(true, false), true),
-        ("competitive", "Completed", blue_red(false, false), false),
+        // Both teams lost: a draw (R29), accepted and stored as one.
+        ("competitive", "Completed", blue_red(false, false), true),
         ("competitive", "Completed", blue_red(true, true), false),
         ("competitive", "Completed", json!([]), false),
         ("competitive", "Completed", serde_json::Value::Null, false),
         ("unrated", "Surrendered", blue_red(false, true), true),
         ("unrated", "Completed", json!([]), false),
+        ("unrated", "Completed", blue_red(false, false), true),
         ("premier", "Completed", json!([]), false),
         // A vote-draw has no winner by definition.
         ("competitive", "VoteDraw", blue_red(false, false), true),
@@ -217,6 +220,18 @@ async fn a_match_that_cannot_say_who_won_is_a_failed_fetch_not_a_stored_draw() {
             assert!(
                 matches!(got, Err(opd1_riot::session::RiotError::Decode(_))),
                 "{got:?}"
+            );
+        } else if teams
+            .as_array()
+            .is_some_and(|t| t.len() == 2 && t.iter().all(|t| t["won"] == json!(false)))
+            && completion != "VoteDraw"
+        {
+            // Stored as a draw: no winner, and every player's result is `D`.
+            let (stored, _, _) = opd1_riot::to_core::match_from_details(&got.unwrap());
+            assert_eq!(stored.winning_team, None, "{queue}");
+            assert_eq!(
+                opd1_core::model::match_result("Blue", stored.winning_team.as_deref()),
+                opd1_core::model::MatchResultKind::Draw
             );
         }
     }

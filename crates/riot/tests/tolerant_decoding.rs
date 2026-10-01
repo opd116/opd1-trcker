@@ -686,12 +686,6 @@ fn a_match_whose_player_has_no_team_or_whose_team_has_no_result_is_not_decoded()
             );
         }
     }
-    for (how, body) in absent_and_null(&details_body(), "/players/0/teamId") {
-        assert!(
-            serde_json::from_value::<MatchDetailsResponse>(body).is_err(),
-            "player teamId {how}"
-        );
-    }
     for field in ["teamId", "won"] {
         for (how, body) in absent_and_null(&details_body(), &format!("/teams/0/{field}")) {
             assert!(

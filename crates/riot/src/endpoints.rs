@@ -785,22 +785,22 @@ pub struct NameServiceEntry {
     pub display_name: Option<String>,
 }
 
-/// Queues whose matches always have a decided result (a winning team, or a
-/// `VoteDraw` completion): the ones with 12-round halves.
+/// Queues with 12-round halves, whose answers always list their teams.
 const WINNER_QUEUES: [&str; 3] = ["competitive", "unrated", "premier"];
 
-/// A competitive, unrated or premier match with no single winning team (and
-/// not a `VoteDraw`) is an answer with its `teams` missing, empty or without a
-/// usable result: stored, it would be a draw for good. Other queues (Deathmatch
-/// has no teams) are not checked.
+/// A competitive, unrated or premier answer whose `teams` is missing or empty,
+/// or names more than one winner, is not trustworthy and is not stored. Both
+/// teams `won: false` is a draw (R29) and is accepted, and so is a `VoteDraw`
+/// whatever its teams say. Other queues (Deathmatch has no teams) are not
+/// checked.
 fn check_winner(details: &MatchDetailsResponse) -> Result<(), RiotError> {
     let info = &details.match_info;
     if WINNER_QUEUES.contains(&info.queue_id.as_str())
         && info.completion_state != "VoteDraw"
-        && details.teams.iter().filter(|t| t.won).count() != 1
+        && (details.teams.is_empty() || details.teams.iter().filter(|t| t.won).count() > 1)
     {
         return Err(RiotError::Decode(
-            "the match has no single winning team".into(),
+            "the match lists no teams or more than one winning team".into(),
         ));
     }
     Ok(())
@@ -915,9 +915,9 @@ impl RiotSession {
             .await
     }
 
-    /// A match is stored for good, so an answer that cannot say who won is a
-    /// failed fetch (retried later like any failure), not a stored draw: see
-    /// [`check_winner`] (R166, fix round 1).
+    /// A match is stored for good, so an answer with no teams or two winners
+    /// is a failed fetch (retried later like any failure): see
+    /// [`check_winner`] (R166).
     pub async fn match_details(&self, match_id: &str) -> Result<MatchDetailsResponse, RiotError> {
         let details: MatchDetailsResponse = self
             .pd(&format!("/match-details/v1/matches/{match_id}"))

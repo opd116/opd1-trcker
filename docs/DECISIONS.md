@@ -1120,6 +1120,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R159). Each
 - **Cost:** If `mmr` still fails, R154 still shows the rank and the next log says more. gzip adds `async-compression` and friends to `Cargo.lock` (all on the existing tokio/reqwest stack).
 - **Status:** active
 
+### R164 — In Game roster first, faster roster retry and post-match checks, Peak never below the current rank
+
+- **What:** (1) In Game, the roster is applied (cards published, worker started) before the core-game loadouts are requested; the loadouts follow and are merged into `live.loadouts`, and an open Details is rebuilt, as Agent Select does (R83). A loadouts failure leaves the roster alone. (2) When presence says PREGAME or INGAME but the player endpoint is not ready, the roster retry is a flat 2 s for the first five retries, then the previous backoff (3, 6, 12, 24, 30 s); it still stops when the stage moves on. (3) The post-match rank check runs at about +10, +20, +40, +80 and +160 s instead of +30 and +90 s: each one DB lookup plus the existing re-sync, stopping at the first success. (4) Peak is never below the current rank: when the MMR snapshot's current tier is ranked (3 or more) and is at least the wins-based peak, or there is no wins-based peak, Peak is that tier in the current act (`This Act`); a tie goes to the current act (R7's most-recent rule). `stats::peak` takes the current tier and act id as a new parameter.
+- **Why:** Backend review of main 7943aff (findings 2, 7, 6, 4). The loadouts only feed Player Details, yet the ten cards waited for a 290 KB answer (up to 8 s on a timeout). Scout polls every 1 to 3.5 s, and a retry at +3, +9, +21 s left the screen with one card. Riot can publish the `comp_updates` row 35 s after a match, so +30/+90 left the Lobby rank stale for a minute or more. `WinsByTier` only holds wins at the tier a game was won at, so after a promotion or placements the Peak lagged the shown rank; Scout seeds the peak with the current tier (`live_match.py:485-496`).
+- **Cost:** The timing numbers are Claude's latency and lightness calls (at most 4 more cheap DB lookups per match end, one extra roster request every 2 s for at most 10 s). The Peak floor follows Scout. Cards of players who have never been seen at a ranked win now show a Peak equal to their current rank instead of `—`.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

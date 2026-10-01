@@ -1179,6 +1179,13 @@ impl LiveModel {
         }
     }
 
+    /// Empties the names-fill queue and its low-priority set together (an
+    /// account switch, R150).
+    pub fn clear_name_fill(&mut self) {
+        self.name_fill.clear();
+        self.name_fill_low.clear();
+    }
+
     /// How many of the queued asks are low priority.
     fn low_count(&self) -> usize {
         self.name_fill
@@ -3211,7 +3218,7 @@ mod tests {
         assert_eq!(m.next_job(id), Some(Job::RankRetry("p1".into())));
         m.note_rank_sync("p1", false, true);
         assert_eq!(m.next_job(id), Some(Job::FillNames));
-        m.name_fill.clear();
+        m.clear_name_fill();
         assert_eq!(m.next_job(id), Some(Job::Backfill));
         // A retry that comes due while the backfill runs is taken before its
         // next step: the run's own yield check sees it.
@@ -3475,6 +3482,17 @@ mod tests {
             .iter()
             .any(|a| a.puuid == "l0" || a.puuid == "l49"));
         assert!(m.name_fill.iter().any(|a| a.puuid == "l50"));
+        // No high ask was lost: all 250 are queued, in arrival order.
+        let high: Vec<&str> = m
+            .name_fill
+            .iter()
+            .map(|a| a.puuid.as_str())
+            .filter(|p| p.starts_with('h'))
+            .collect();
+        let expected: Vec<String> = (0..NAME_FILL_QUEUE_MAX - 50)
+            .map(|i| format!("h{i}"))
+            .collect();
+        assert_eq!(high, expected);
         // A full queue of high asks takes no more (as before).
         m.queue_name_fill((0..100).map(|i| ask(&format!("x{i}"), Some(9))));
         m.queue_name_fill((0..100).map(|i| ask(&format!("y{i}"), Some(9))));

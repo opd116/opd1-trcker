@@ -523,8 +523,18 @@ async fn a_details_sync_held_by_the_hold_is_not_run_again_for_a_page_that_closed
         ME.to_string(),
         Duration::from_millis(30),
     );
+    // The page is closed once the job is provably waiting out the hold (its
+    // rerun mark is set), not "100 ms after the start": no clock assumption,
+    // and the order `join!` polls the two in does not matter. The timeout
+    // only turns a job that never waits into a failure instead of a hang.
     let close = async {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while !h.st.details_rerun_waiting(ME) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the job waits out the hold");
         h.st.close_details(Some(ME));
     };
     tokio::join!(job, close);

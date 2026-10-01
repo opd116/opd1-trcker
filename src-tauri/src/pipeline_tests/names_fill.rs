@@ -601,16 +601,10 @@ async fn a_match_that_starts_between_taking_the_asks_and_the_request_sends_nothi
         let (st, session) = (h.st.clone(), h.session.clone());
         async move { fill_names_step(&st, &session).await }
     });
-    for _ in 0..1000 {
-        if lock(&h.st.live).name_fill.is_empty() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        lock(&h.st.live).name_fill.is_empty(),
-        "the step took the asks and is waiting for the DB"
-    );
+    wait_until("the step took the asks and is waiting for the DB", || {
+        lock(&h.st.live).name_fill.is_empty()
+    })
+    .await;
 
     // The match starts now, with HIDDEN on its roster shown hidden.
     {
@@ -1263,15 +1257,10 @@ async fn top_3_teammates_a_details_sync_brings_in_are_asked_too() {
     assert!(queue_of(&h).is_empty(), "nothing to ask at the first build");
 
     // The sync's rebuild shows the teammate as Hidden Player; queued then.
-    let mut queued = false;
-    for _ in 0..500 {
-        if queue_of(&h).iter().any(|(p, _)| p == &pid(1)) {
-            queued = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(queued, "the rebuilt page's unnamed teammate is queued");
+    wait_until("the rebuilt page's unnamed teammate is queued", || {
+        queue_of(&h).iter().any(|(p, _)| p == &pid(1))
+    })
+    .await;
     let queue = queue_of(&h);
     assert_eq!(
         queue.iter().filter(|(p, _)| p == &pid(1)).count(),
@@ -1666,12 +1655,14 @@ async fn a_match_open_that_lost_queues_no_names() {
     assert!(h.st.take_worker_kick(), "control: unnamed rows are queued");
     crate::commands::close_match_for(&h.st);
 
-    // `join!` polls the open first (ticket, then the DB read), then the
-    // close, which voids it before the read ends.
+    // The DB is held, so the open takes its ticket and cannot finish; the
+    // close then voids it; only then does the read run.
     let focus = pid(1);
-    let (view, ()) = tokio::join!(crate::match_details::load(&h.st, "n-lost", &focus), async {
-        crate::commands::close_match_key_for(&h.st, Some("n-lost"))
-    });
+    let hold = super::ui_open::hold_db(&h.st);
+    let open = super::ui_open::parked(crate::match_details::load(&h.st, "n-lost", &focus)).await;
+    crate::commands::close_match_key_for(&h.st, Some("n-lost"));
+    drop(hold);
+    let view = open.await;
     assert_eq!(view.unwrap(), control, "still answered");
     assert_eq!(h.st.open_match_args(), None, "not open");
     assert!(!h.st.take_worker_kick(), "no name ask for a closed page");

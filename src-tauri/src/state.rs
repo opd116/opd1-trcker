@@ -2167,6 +2167,13 @@ impl AppState {
             })
     }
 
+    /// Whether `puuid`'s Details sync is waiting out a hold to run again
+    /// ([`Self::begin_details_rerun`]); tests wait for it instead of a clock.
+    #[cfg(test)]
+    pub fn details_rerun_waiting(&self, puuid: &str) -> bool {
+        lock(&self.details_rerun).contains(puuid)
+    }
+
     /// Gives back a [`Self::claim_details_sync`]: the sync did not get its data
     /// (R160: refused by a hold, or the competitive-updates call failed), so
     /// the next open or refresh may run it again instead of waiting out the

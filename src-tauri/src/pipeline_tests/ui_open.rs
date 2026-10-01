@@ -2,9 +2,62 @@
 //! open whose build finishes after its page was left (or after a newer open)
 //! never becomes the open page. A child of `pipeline_tests` (same harness).
 
+use std::future::Future;
+use std::pin::Pin;
+use std::task::Poll;
+
 use crate::store::{save_player, PlayerUpdate};
 
 use super::*;
+
+/// The DB lock, held by another thread until this guard is dropped: every
+/// `AppState::db` call (the first await of a details or match open) parks
+/// behind it. This is what makes a lost-open test deterministic: with the DB
+/// held, an open that has taken its ticket cannot finish, whatever the
+/// scheduler does; a `join!` of the open and the close does not give that
+/// (`tokio::join!` rotates which branch it polls first, and a blocking-pool
+/// read can finish before the first poll).
+pub(super) struct DbHold {
+    release: Option<std::sync::mpsc::Sender<()>>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+pub(super) fn hold_db(st: &Arc<AppState>) -> DbHold {
+    let (held_tx, held_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let st = st.clone();
+    let thread = std::thread::spawn(move || {
+        st.db_blocking(|_| {
+            held_tx.send(()).unwrap();
+            let _ = release_rx.recv(); // Err once the guard is dropped, too
+            Ok(())
+        });
+    });
+    held_rx.recv().expect("the DB lock is held");
+    DbHold {
+        release: Some(release_tx),
+        thread: Some(thread),
+    }
+}
+
+impl Drop for DbHold {
+    fn drop(&mut self) {
+        drop(self.release.take());
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Polls `open` once, so it takes its ticket and parks on its first DB await,
+/// and hands it back to be awaited later. Only meaningful while [`hold_db`]
+/// holds the DB: then the first poll is always `Pending`.
+pub(super) async fn parked<F: Future>(open: F) -> Pin<Box<F>> {
+    let mut open = Box::pin(open);
+    let first = std::future::poll_fn(|cx| Poll::Ready(open.as_mut().poll(cx))).await;
+    assert!(first.is_pending(), "the open must be waiting on the DB");
+    open
+}
 
 /// Both players are known to the DB, so their Details can be built.
 async fn known(h: &Harness, puuids: &[&'static str]) {
@@ -210,12 +263,13 @@ async fn a_details_open_that_lost_queues_no_names_and_ends_its_skin_mark() {
         .unwrap();
     assert!(h.st.take_worker_kick(), "control: a nameless hero is asked");
 
-    // `join!` polls the open first (it takes its ticket, then waits on the
-    // DB), then the close, which voids it before the build ends.
-    let (opened, ()) = tokio::join!(
-        crate::commands::player_details_for(&h.st, STRANGER),
-        async { crate::commands::close_details_key_for(&h.st, Some(STRANGER)) }
-    );
+    // The DB is held, so the open takes its ticket and cannot finish; the
+    // close then voids it; only then does the build run.
+    let hold = hold_db(&h.st);
+    let open = parked(crate::commands::player_details_for(&h.st, STRANGER)).await;
+    crate::commands::close_details_key_for(&h.st, Some(STRANGER));
+    drop(hold);
+    let opened = open.await;
     assert_eq!(opened.unwrap().card.puuid, STRANGER, "still answered");
     assert!(!h.st.details_open_for(STRANGER), "not open");
     assert!(!h.st.take_worker_kick(), "no name ask for a closed page");

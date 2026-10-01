@@ -8,8 +8,15 @@
 use super::*;
 use crate::poll::Poller;
 
-/// Every rank call of `puuid` (competitive updates, MMR) fails, so only the
-/// roster's own tier can fill its rank.
+/// Every rank call of `puuid` (competitive updates, MMR) never gets an answer
+/// within the test (a long-delayed 500), so only the roster's own tier can
+/// fill its rank, and the card's rank fields stay `Loading` (absent in the
+/// card JSON). `Poller::fetch_*` starts the sync worker on the app's own
+/// runtime, where it runs while the test thread is busy or descheduled, and
+/// the test's `stop_worker()` only aborts it later. An instant failure would
+/// let a worker that got ahead settle the fields to `Missing` (`null`), and
+/// the assertions would be about which thread won; a call that never ends
+/// parks it in the rank phase until it is aborted, whatever the scheduler does.
 async fn rank_calls_fail(h: &Harness, puuid: &str) {
     for p in [
         format!("/mmr/v1/players/{puuid}/competitiveupdates"),
@@ -17,7 +24,7 @@ async fn rank_calls_fail(h: &Harness, puuid: &str) {
     ] {
         Mock::given(method("GET"))
             .and(path(p.as_str()))
-            .respond_with(ResponseTemplate::new(500))
+            .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(120)))
             .with_priority(1)
             .mount(&h.server)
             .await;

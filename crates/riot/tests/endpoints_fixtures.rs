@@ -425,8 +425,8 @@ fn content(value: serde_json::Value) -> ContentSeasons {
     ContentSeasons::from_value(&value)
 }
 
-const T_APR: &str = "2026-08-19T00:00:00.000Z";
-const T_OCT: &str = "2026-10-14T00:00:00.000Z";
+const T_APR: &str = "2026-08-19T00:00:00Z";
+const T_OCT: &str = "2026-10-14T00:00:00Z";
 
 #[test]
 fn content_picks_the_active_act_and_the_one_that_ended_when_it_began() {
@@ -493,12 +493,41 @@ fn content_previous_act_needs_matching_times_not_just_order() {
 
 #[test]
 fn content_names_a_roman_act_from_riots_digits() {
+    // The real entries have exactly ID, Name, Type, StartTime, EndTime and
+    // IsActive: the episode is found by time, not by a parent id.
     let seasons = content(json!({"Seasons": [
-        {"ID": "p", "Type": "episode", "Name": "EPISODE 9", "IsActive": true},
-        {"ID": "a", "ParentID": "p", "Type": "act", "Name": "act 3", "IsActive": true,
+        {"ID": "p", "Type": "episode", "Name": "Episode 9", "IsActive": true,
+         "StartTime": "2026-01-06T00:00:00Z", "EndTime": "2026-12-01T00:00:00Z"},
+        {"ID": "a", "Type": "act", "Name": "act 3", "IsActive": true,
          "StartTime": T_APR, "EndTime": T_OCT}
     ]}));
     let cur = seasons.active_acts().unwrap().current;
     assert_eq!(cur.name, "ACT III");
-    assert_eq!(cur.episode_name, "EPISODE 9");
+    assert_eq!(cur.episode_name, "EPISODE 9", "act_label shortens it to E9");
+}
+
+#[test]
+fn content_episode_is_the_one_containing_the_acts_start() {
+    let seasons = content(json!({"Seasons": [
+        // Ended exactly when the act began: not the act's episode.
+        {"ID": "e1", "Type": "episode", "Name": "EPISODE 8",
+         "StartTime": "2026-01-01T00:00:00Z", "EndTime": T_APR},
+        // Two containing entries: the shorter span wins.
+        {"ID": "e0", "Type": "episode", "Name": "WIDE",
+         "StartTime": "2025-01-01T00:00:00Z", "EndTime": "2027-01-01T00:00:00Z"},
+        {"ID": "e2", "Type": "episode", "Name": "  V27 ",
+         "StartTime": T_APR, "EndTime": "2026-12-01T00:00:00Z"},
+        {"ID": "a", "Type": "act", "Name": "ACT VI", "IsActive": true,
+         "StartTime": T_APR, "EndTime": T_OCT}
+    ]}));
+    assert_eq!(seasons.active_acts().unwrap().current.episode_name, "V27");
+
+    // No episode contains it: empty, never a guess.
+    let none = content(json!({"Seasons": [
+        {"ID": "e", "Type": "episode", "Name": "EPISODE 1",
+         "StartTime": "2020-01-01T00:00:00Z", "EndTime": "2020-06-01T00:00:00Z"},
+        {"ID": "a", "Type": "act", "Name": "ACT VI", "IsActive": true,
+         "StartTime": T_APR, "EndTime": T_OCT}
+    ]}));
+    assert_eq!(none.active_acts().unwrap().current.episode_name, "");
 }

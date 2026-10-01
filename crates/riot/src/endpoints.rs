@@ -704,7 +704,6 @@ pub struct ContentActs {
 #[derive(Debug, Clone)]
 struct ContentSeason {
     id: String,
-    parent_id: String,
     kind: String,
     name: String,
     start_ms: Option<i64>,
@@ -715,8 +714,8 @@ struct ContentSeason {
 /// Riot's `/content-service/v3/content` `Seasons` list, decoded tolerantly:
 /// whatever the shape, building one never fails. An entry that is not an
 /// object, or has no id, is dropped; a field of the wrong type is unknown.
-/// Only `ID`/`ParentID`/`Type`/`Name`/`StartTime`/`EndTime`/`IsActive` are
-/// read (Scout reads the same).
+/// Only `ID`/`Type`/`Name`/`StartTime`/`EndTime`/`IsActive` are read: the
+/// real answer's entries have exactly those six fields (no parent id).
 #[derive(Debug, Clone, Default)]
 pub struct ContentSeasons {
     seasons: Vec<ContentSeason>,
@@ -740,7 +739,6 @@ impl ContentSeasons {
                     .filter_map(Value::as_object)
                     .map(|o| ContentSeason {
                         id: text(o, "ID"),
-                        parent_id: text(o, "ParentID"),
                         kind: text(o, "Type").to_ascii_lowercase(),
                         name: text(o, "Name"),
                         start_ms: time(o, "StartTime"),
@@ -772,12 +770,21 @@ impl ContentSeasons {
         })
     }
 
+    /// The act's episode is the episode entry that contains its start
+    /// (`episode.start <= act.start < episode.end`; the shortest if several),
+    /// since the real entries carry no parent id.
     fn to_act(&self, s: &ContentSeason) -> ContentAct {
-        let episode_name = self
-            .seasons
-            .iter()
-            .find(|e| e.kind == "episode" && !s.parent_id.is_empty() && e.id == s.parent_id)
-            .map(|e| e.name.trim().to_string())
+        let episode_name = s
+            .start_ms
+            .and_then(|start| {
+                self.seasons
+                    .iter()
+                    .filter(|e| e.kind == "episode")
+                    .filter_map(|e| Some((e, e.start_ms?, e.end_ms?)))
+                    .filter(|&(_, from, to)| from <= start && start < to)
+                    .min_by_key(|&(_, from, to)| to - from)
+                    .map(|(e, _, _)| normalize_episode_name(&e.name))
+            })
             .unwrap_or_default();
         ContentAct {
             id: s.id.clone(),
@@ -786,6 +793,19 @@ impl ContentSeasons {
             start_ms: s.start_ms,
             end_ms: s.end_ms,
         }
+    }
+}
+
+/// Riot's `EPISODE 6` (any case) is kept as `EPISODE 6`, the form
+/// `opd1_core::stats::act_label` shortens to `E6`; any other episode name
+/// (`V26`) is used as given, trimmed.
+fn normalize_episode_name(raw: &str) -> String {
+    let name = raw.trim();
+    match name.get(..8) {
+        Some(p) if p.eq_ignore_ascii_case("episode ") => {
+            format!("EPISODE {}", name[8..].trim())
+        }
+        _ => name.to_string(),
     }
 }
 

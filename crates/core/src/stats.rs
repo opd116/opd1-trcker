@@ -231,7 +231,10 @@ pub fn act_label(act: &Act) -> String {
     match act_number(&act.name) {
         Some(n) if episode_part.is_empty() => format!("A{n}"),
         Some(n) => format!("{episode_part} A{n}"),
-        None => episode_part,
+        None if !episode_part.trim().is_empty() => episode_part,
+        // An act valorant-api does not know, named only by Riot (R162).
+        None if !act.name.trim().is_empty() => act.name.trim().to_string(),
+        None => "—".to_string(),
     }
 }
 

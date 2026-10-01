@@ -310,7 +310,10 @@ fn act_names_without_an_episode_do_not_leave_blanks() {
     assert_eq!(act_full_name(&act("", "ACT V")), "ACT V");
     assert_eq!(act_label(&act("", "ACT V")), "A5");
     assert_eq!(act_full_name(&act("V27", "")), "V27");
-    assert_eq!(act_label(&act("", "")), "");
+    // Never an empty label: the act's own (Riot's) name, else a dash.
+    assert_eq!(act_label(&act("", "")), "—");
+    assert_eq!(act_label(&act("", "  Weird name ")), "Weird name");
+    assert_eq!(act_label(&act("V27", "Weird name")), "V27");
     assert_eq!(act_full_name(&act("", "")), "");
 }
 

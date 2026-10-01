@@ -607,6 +607,30 @@ impl LiveModel {
         self.names_hold_until.is_some_and(|u| self.now() < u)
     }
 
+    /// R160: `true` once, when a names deferral has just run out and names or
+    /// names-fill work is waiting: the poll tick then starts a worker (the
+    /// worker exited when the deferral emptied its job list, and a pure
+    /// passing of time is no other wake-up). One-shot: the deferral is
+    /// cleared here, so a job that cannot run cannot make the tick start a
+    /// worker again and again.
+    pub fn names_wakeup_due(&mut self) -> bool {
+        let Some(until) = self.names_hold_until else {
+            return false;
+        };
+        if self.now() < until {
+            return false;
+        }
+        self.names_hold_until = None;
+        !self.names_needed().is_empty() || self.fill_ready()
+    }
+
+    /// R160: forgets a names deferral. A new session (a reconnect, another
+    /// account) has its own, empty hold: what the old one refused is not
+    /// refused now.
+    pub fn reset_names_hold(&mut self) {
+        self.names_hold_until = None;
+    }
+
     /// The clock the rank retries are timed by.
     fn now(&self) -> Instant {
         let now = Instant::now();
@@ -971,6 +995,9 @@ pub struct AppState {
     acts: RwLock<Arc<Vec<Act>>>,
     tables: tokio::sync::Mutex<TablesStatus>,
     details_synced: Mutex<HashMap<String, Instant>>,
+    /// R160: players whose Details sync is waiting out a hold to run again
+    /// (`commands::details_sync_job`): one waiting job per player.
+    details_rerun: Mutex<HashSet<String>>,
     /// Players whose skin names are being fetched right now, with how many
     /// fetches run (R97): while a puuid is in here its Details loadout
     /// weapons are still "resolving" (absent keys); once it leaves, an
@@ -1043,6 +1070,7 @@ impl AppState {
             acts: RwLock::new(Arc::new(Vec::new())),
             tables: tokio::sync::Mutex::new(TablesStatus::default()),
             details_synced: Mutex::new(HashMap::new()),
+            details_rerun: Mutex::new(HashSet::new()),
             skins_inflight: Mutex::new(HashMap::new()),
             open_details: Mutex::new(None),
             details_inflight: Mutex::new(HashMap::new()),
@@ -1410,6 +1438,18 @@ impl AppState {
             st: self.clone(),
             match_id: match_id.to_string(),
         })
+    }
+
+    /// R160: `true` when no other job of `puuid` is waiting out a hold to run
+    /// the Details sync again (and marks this one): a page reopened during the
+    /// wait does not leave two reruns. [`Self::end_details_rerun`] when the
+    /// wait is over.
+    pub fn begin_details_rerun(&self, puuid: &str) -> bool {
+        lock(&self.details_rerun).insert(puuid.to_string())
+    }
+
+    pub fn end_details_rerun(&self, puuid: &str) {
+        lock(&self.details_rerun).remove(puuid);
     }
 
     /// Gives back a [`Self::claim_details_sync`]: the sync did not get its data
@@ -2123,6 +2163,36 @@ mod tests {
         m.note_rank_sync("me", true, true);
         m.advance_clock(100_000 * S);
         assert!(m.try_start_worker().is_none(), "no third retry");
+    }
+
+    #[test]
+    fn a_names_deferral_wakes_the_worker_once_when_it_ends_and_work_is_waiting() {
+        // R160: the tick asks `names_wakeup_due`; it is true once.
+        let mut m = settled_lobby(&["me"]);
+        m.slots.push(slot("p2", false));
+        m.synced.insert("p2".into());
+        assert!(!m.names_needed().is_empty(), "p2 needs a name");
+        m.defer_names(10 * S);
+        assert!(m.names_needed().is_empty(), "deferred");
+        assert!(!m.names_wakeup_due(), "not before the end");
+        m.advance_clock(11 * S);
+        assert!(m.names_wakeup_due(), "ended, names waiting");
+        assert!(!m.names_wakeup_due(), "once");
+        assert!(!m.names_needed().is_empty());
+
+        // Nothing waiting: the deferral is cleared without a wake-up.
+        let mut m = settled_lobby(&["me"]);
+        m.defer_names(S);
+        m.advance_clock(2 * S);
+        assert!(!m.names_wakeup_due());
+
+        // A new session forgets it.
+        let mut m = settled_lobby(&["me"]);
+        m.slots.push(slot("p2", false));
+        m.defer_names(100 * S);
+        m.reset_names_hold();
+        assert!(!m.names_needed().is_empty());
+        assert!(!m.names_wakeup_due());
     }
 
     #[test]

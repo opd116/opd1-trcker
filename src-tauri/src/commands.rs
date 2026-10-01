@@ -179,7 +179,9 @@ pub(crate) async fn details_sync_job(
             }
             DetailsSync::Held(left) => {
                 st.release_details_sync(&puuid);
-                if reruns >= DETAILS_HOLD_RERUNS {
+                // One waiting rerun per player: a page reopened during the wait
+                // has its own job, which must not leave two.
+                if reruns >= DETAILS_HOLD_RERUNS || !st.begin_details_rerun(&puuid) {
                     return;
                 }
                 reruns += 1;
@@ -188,6 +190,7 @@ pub(crate) async fn details_sync_job(
                     short(&puuid)
                 );
                 tokio::time::sleep(left + slack).await;
+                st.end_details_rerun(&puuid);
                 // Only for the page still open, and only if nobody else
                 // synced this player meanwhile (a reopen's own job).
                 if !st.details_open_for(&puuid) || !st.claim_details_sync(&puuid) {

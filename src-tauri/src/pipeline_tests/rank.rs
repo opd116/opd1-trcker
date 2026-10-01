@@ -460,8 +460,9 @@ async fn open_details_of_me(h: &Harness) {
     lobby(h);
     h.st.set_session(Some(h.session.clone()));
     h.st.publish();
+    let ticket = h.st.begin_open_details(ME);
     let page = crate::details::build(&h.st, ME).await.unwrap();
-    h.st.set_open_details(&page);
+    h.st.set_open_details(ticket, &page);
 }
 
 /// A 429 on ME's competitive updates (the first request only), with this
@@ -524,7 +525,7 @@ async fn a_details_sync_held_by_the_hold_is_not_run_again_for_a_page_that_closed
     );
     let close = async {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        h.st.close_details();
+        h.st.close_details(Some(ME));
     };
     tokio::join!(job, close);
 

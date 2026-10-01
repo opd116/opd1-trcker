@@ -293,6 +293,8 @@ impl Poller {
                 // R161: nor are the tiers of its last Agent Select.
                 live.match_tiers.clear();
             }
+            // R160: a new session has its own, empty request holds.
+            live.reset_names_hold();
             live.self_puuid = Some(me.clone());
             live.self_name_attempted = false;
             switched
@@ -420,6 +422,11 @@ impl Poller {
         // queued and never waits for one, so this tick (every 2 s while
         // VALORANT runs) is what wakes it; a running worker takes it itself.
         if self.stage != Stage::Closed && lock(&self.st.live).due_rank_retry().is_some() {
+            self.ensure_worker(session);
+        }
+        // R160: a names deferral (name-service was refused by a hold) ran out
+        // and names or fill asks are waiting: the same wake-up, once.
+        if self.stage != Stage::Closed && lock(&self.st.live).names_wakeup_due() {
             self.ensure_worker(session);
         }
         Ok(())
@@ -1173,7 +1180,7 @@ mod tests {
         history_path, mount_feed, requests, run_active, store_anchor, store_anchor_for,
         stored_anchor, stored_anchor_of, Feed,
     };
-    use crate::pipeline_tests::{card_json, harness, roster, Harness, ME};
+    use crate::pipeline_tests::{card_json, harness, roster, session_with_other_wait, Harness, ME};
     use crate::store::{save_player, PlayerUpdate};
 
     /// Waits (up to ~5s) for a finished backfill run's anchor.
@@ -2112,6 +2119,98 @@ mod tests {
         poller.connected_tick(&h.session).await.unwrap();
         assert_eq!(wait_for_mmr_requests(&h, 2).await, 2, "the retry ran");
         poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_names_fill_held_by_the_hold_runs_again_after_it_without_any_other_event() {
+        // R160: name-service is refused while the `other` family is on hold.
+        // The asks stay queued, the worker exits (the deferral empties its job
+        // list) and nothing else is going to happen: the tick must start a
+        // worker once the deferral has run out, exactly once.
+        const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
+        let h = harness().await;
+        let session = session_with_other_wait(&h, Duration::from_millis(100)).await;
+        Mock::given(method("PUT"))
+            .and(path("/name-service/v2/players"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1.5"))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+        let puts = || async {
+            requests(&h.server)
+                .await
+                .iter()
+                .filter(|r| {
+                    r.method.as_str() == "PUT" && r.url.path() == "/name-service/v2/players"
+                })
+                .count()
+        };
+        let visible = [opd1_riot::VisiblePuuid::new(OTHER.to_string(), false).unwrap()];
+        let hold_set = Instant::now();
+        assert!(
+            session.names(&visible).await.is_err(),
+            "the 429 sets the hold"
+        );
+        assert_eq!(puts().await, 1);
+
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Menus;
+            live.slots = vec![Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            }];
+            live.synced.insert(ME.to_string());
+            live.names_attempted.insert(ME.to_string());
+        }
+        h.st.queue_name_fill(vec![opd1_core::db::repo::NameAsk {
+            puuid: OTHER.to_string(),
+            match_start_ms: None,
+        }]);
+
+        // The kick starts a worker; the fill is refused locally and deferred.
+        poller.connected_tick(&session).await.unwrap();
+        for _ in 0..250 {
+            if !lock(&h.st.live).worker_running() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!lock(&h.st.live).worker_running(), "the worker exited");
+        assert_eq!(puts().await, 1, "the held fill sent nothing");
+        assert_eq!(
+            lock(&h.st.live).name_fill.len(),
+            1,
+            "the ask is still queued"
+        );
+
+        // Deferred: the tick starts nothing.
+        poller.connected_tick(&session).await.unwrap();
+        assert!(!lock(&h.st.live).worker_running());
+        assert_eq!(puts().await, 1);
+
+        // The deferral and the real hold run out, with no other event.
+        // (The real hold is 1.5 s against a 100 ms bound: the refusals above
+        // have a 1.4 s margin on a slow runner.)
+        sleep(Duration::from_millis(1_600).saturating_sub(hold_set.elapsed())).await;
+        lock(&h.st.live).advance_clock(Duration::from_secs(3));
+        poller.connected_tick(&session).await.unwrap();
+        for _ in 0..250 {
+            if puts().await >= 2 {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(puts().await, 2, "the fill ran again");
+        poller.stop_worker();
+        assert!(
+            !lock(&h.st.live).names_wakeup_due(),
+            "one-shot: nothing more to wake"
+        );
     }
 
     #[tokio::test]

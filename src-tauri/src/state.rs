@@ -320,6 +320,11 @@ pub struct LiveModel {
     /// live roster; dropped with a roster change, an account switch, and when
     /// VALORANT closes.
     pub rank_retries: RankRetries,
+    /// R160: name-service answered "on hold" (`RiotError::Held`, nothing
+    /// sent): until this instant no names job is handed out
+    /// ([`Self::names_needed`], [`Self::fill_ready`]), so the worker neither
+    /// spins on a refused call nor marks anyone as asked.
+    names_hold_until: Option<Instant>,
     /// Test clock: added to "now" wherever the retries are timed, so a test
     /// moves time forward instead of sleeping (`Self::advance_clock`).
     #[cfg(test)]
@@ -356,6 +361,7 @@ impl LiveModel {
             name_fill: VecDeque::new(),
             match_end_ms: None,
             rank_retries: RankRetries::default(),
+            names_hold_until: None,
             #[cfg(test)]
             clock_offset: Duration::ZERO,
             current: LiveState {
@@ -584,6 +590,9 @@ impl LiveModel {
     /// comes from the chat session), never anyone whose `Incognito` is
     /// true, only names not known and not yet asked for.
     pub fn names_needed(&self) -> Vec<(String, bool)> {
+        if self.names_deferred() {
+            return Vec::new();
+        }
         let self_id = self.self_id();
         self.slots
             .iter()
@@ -634,7 +643,43 @@ impl LiveModel {
     /// R150: a names fill is queued and it is between matches. The asks wait
     /// in the queue through a match and run after it.
     pub fn fill_ready(&self) -> bool {
-        !self.name_fill.is_empty() && self.between_matches()
+        !self.name_fill.is_empty() && self.between_matches() && !self.names_deferred()
+    }
+
+    /// R160: no names job is handed out for `wait` (a name-service call was
+    /// refused because the `other` request family is on hold). Only ever
+    /// extended.
+    pub fn defer_names(&mut self, wait: Duration) {
+        let until = self.now() + wait;
+        self.names_hold_until = Some(self.names_hold_until.map_or(until, |u| u.max(until)));
+    }
+
+    fn names_deferred(&self) -> bool {
+        self.names_hold_until.is_some_and(|u| self.now() < u)
+    }
+
+    /// R160: `true` once, when a names deferral has just run out and names or
+    /// names-fill work is waiting: the poll tick then starts a worker (the
+    /// worker exited when the deferral emptied its job list, and a pure
+    /// passing of time is no other wake-up). One-shot: the deferral is
+    /// cleared here, so a job that cannot run cannot make the tick start a
+    /// worker again and again.
+    pub fn names_wakeup_due(&mut self) -> bool {
+        let Some(until) = self.names_hold_until else {
+            return false;
+        };
+        if self.now() < until {
+            return false;
+        }
+        self.names_hold_until = None;
+        !self.names_needed().is_empty() || self.fill_ready()
+    }
+
+    /// R160: forgets a names deferral. A new session (a reconnect, another
+    /// account) has its own, empty hold: what the old one refused is not
+    /// refused now.
+    pub fn reset_names_hold(&mut self) {
+        self.names_hold_until = None;
     }
 
     /// The clock the rank retries are timed by.
@@ -684,6 +729,31 @@ impl LiveModel {
             None if retry => log::info!("rank sync for {} failed again; giving up", short(puuid)),
             None => {}
         }
+    }
+
+    /// R160: a per-player sync of `puuid` ended (`retry`: it was a retry) and
+    /// its rank part did not run only because the mmr request family was on
+    /// hold, `left` of it still to go: nothing was sent, so no R155 retry is
+    /// used up. The player is synced again once the hold is over (+ a moment).
+    /// Same guards as [`Self::note_rank_sync`]: nothing for a player who is not
+    /// on the live roster, nor while VALORANT is closed.
+    pub fn note_rank_held(&mut self, puuid: &str, left: Duration, retry: bool) {
+        let shown = self.stage != Stage::Closed && self.shows(puuid);
+        if !shown {
+            self.rank_retries.forget(puuid);
+            return;
+        }
+        let now = self.now();
+        if retry {
+            self.rank_retries.retry_held(puuid, left, now);
+        } else {
+            self.rank_retries.first_pass_held(puuid, left, now);
+        }
+        log::info!(
+            "rank sync for {} waits for the mmr hold ({}s more); no retry used",
+            short(puuid),
+            left.as_secs_f64().ceil() as u64
+        );
     }
 
     /// R155: the first player on the live roster (display order) whose rank
@@ -977,6 +1047,9 @@ pub struct AppState {
     acts: RwLock<Arc<Vec<Act>>>,
     tables: tokio::sync::Mutex<TablesStatus>,
     details_synced: Mutex<HashMap<String, Instant>>,
+    /// R160: players whose Details sync is waiting out a hold to run again
+    /// (`commands::details_sync_job`): one waiting job per player.
+    details_rerun: Mutex<HashSet<String>>,
     /// Players whose skin names are being fetched right now, with how many
     /// fetches run (R97): while a puuid is in here its Details loadout
     /// weapons are still "resolving" (absent keys); once it leaves, an
@@ -1049,6 +1122,7 @@ impl AppState {
             acts: RwLock::new(Arc::new(Vec::new())),
             tables: tokio::sync::Mutex::new(TablesStatus::default()),
             details_synced: Mutex::new(HashMap::new()),
+            details_rerun: Mutex::new(HashSet::new()),
             skins_inflight: Mutex::new(HashMap::new()),
             open_details: Mutex::new(None),
             details_inflight: Mutex::new(HashMap::new()),
@@ -1418,6 +1492,27 @@ impl AppState {
         })
     }
 
+    /// R160: marks `puuid`'s Details sync as waiting out a hold to run again,
+    /// unless another job of that player already waits (`None`): a page
+    /// reopened during the wait does not leave two reruns. The mark ends when
+    /// the guard is dropped, on every path.
+    pub fn begin_details_rerun(self: &Arc<Self>, puuid: &str) -> Option<DetailsRerunGuard> {
+        lock(&self.details_rerun)
+            .insert(puuid.to_string())
+            .then(|| DetailsRerunGuard {
+                st: self.clone(),
+                puuid: puuid.to_string(),
+            })
+    }
+
+    /// Gives back a [`Self::claim_details_sync`]: the sync did not get its data
+    /// (R160: refused by a hold, or the competitive-updates call failed), so
+    /// the next open or refresh may run it again instead of waiting out the
+    /// 120 s.
+    pub fn release_details_sync(&self, puuid: &str) {
+        lock(&self.details_synced).remove(puuid);
+    }
+
     /// `true` (and records now) when `puuid`'s Player Details data hasn't
     /// been synced in the last [`DETAILS_RESYNC_AFTER`].
     pub fn claim_details_sync(&self, puuid: &str) -> bool {
@@ -1439,6 +1534,19 @@ struct OpenMatch {
     match_id: String,
     focus_puuid: String,
     view: MatchDetailsView,
+}
+
+/// A player's waiting Details rerun ([`AppState::begin_details_rerun`]);
+/// dropping it ends the mark.
+pub struct DetailsRerunGuard {
+    st: Arc<AppState>,
+    puuid: String,
+}
+
+impl Drop for DetailsRerunGuard {
+    fn drop(&mut self) {
+        lock(&self.st.details_rerun).remove(&self.puuid);
+    }
 }
 
 /// See [`AppState::claim_details_fetch`].
@@ -2088,6 +2196,100 @@ mod tests {
         m.advance_clock(100_000 * S);
         assert!(m.try_start_worker().is_none());
         assert_eq!(m.due_rank_retry(), None);
+    }
+
+    #[test]
+    fn a_rank_sync_held_by_the_mmr_hold_waits_for_it_and_uses_no_retry() {
+        // R160: nothing was sent, so nothing is spent: the sync is due 1.5 s
+        // after the hold ends, and both R155 retries are still there.
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_held("me", 40 * S, false);
+        assert!(!m.has_pending_work(), "waiting is not work");
+        m.advance_clock(41 * S);
+        assert_eq!(m.due_rank_retry(), None, "1.5 s of slack after the hold");
+        m.advance_clock(S);
+        let id = m.try_start_worker().expect("due");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+        assert_eq!(m.rank_retries.retries_done("me"), Some(1));
+
+        // It met the hold again (somebody's 429 extended it): given back.
+        m.note_rank_held("me", 10 * S, true);
+        assert_eq!(m.rank_retries.retries_done("me"), Some(0));
+        assert_eq!(m.next_job(id), None, "the worker does not wait");
+        m.advance_clock(12 * S);
+        let id = m.try_start_worker().expect("due again");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+
+        // A real failure now moves the usual schedule on: 60 s, then the last.
+        m.note_rank_sync("me", true, true);
+        assert_eq!(m.rank_retries.retries_done("me"), Some(1));
+        assert_eq!(m.next_job(id), None);
+        m.advance_clock(60 * S);
+        let id = m.try_start_worker().expect("the second retry");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+        m.note_rank_sync("me", true, true);
+        m.advance_clock(100_000 * S);
+        assert!(m.try_start_worker().is_none(), "no third retry");
+    }
+
+    #[test]
+    fn a_names_deferral_wakes_the_worker_once_when_it_ends_and_work_is_waiting() {
+        // R160: the tick asks `names_wakeup_due`; it is true once.
+        let mut m = settled_lobby(&["me"]);
+        m.slots.push(slot("p2", false));
+        m.synced.insert("p2".into());
+        assert!(!m.names_needed().is_empty(), "p2 needs a name");
+        m.defer_names(10 * S);
+        assert!(m.names_needed().is_empty(), "deferred");
+        assert!(!m.names_wakeup_due(), "not before the end");
+        m.advance_clock(11 * S);
+        assert!(m.names_wakeup_due(), "ended, names waiting");
+        assert!(!m.names_wakeup_due(), "once");
+        assert!(!m.names_needed().is_empty());
+
+        // Nothing waiting: the deferral is cleared without a wake-up.
+        let mut m = settled_lobby(&["me"]);
+        m.defer_names(S);
+        m.advance_clock(2 * S);
+        assert!(!m.names_wakeup_due());
+
+        // A new session forgets it.
+        let mut m = settled_lobby(&["me"]);
+        m.slots.push(slot("p2", false));
+        m.defer_names(100 * S);
+        m.reset_names_hold();
+        assert!(!m.names_needed().is_empty());
+        assert!(!m.names_wakeup_due());
+    }
+
+    #[tokio::test]
+    async fn a_waiting_details_rerun_is_one_per_player_and_ends_with_its_guard() {
+        // R160: a reopen during the wait finds the mark taken; the mark ends
+        // when the guard drops, whichever way the job leaves.
+        let h = crate::pipeline_tests::harness().await;
+        let first = h.st.begin_details_rerun("p1").expect("free");
+        assert!(h.st.begin_details_rerun("p1").is_none(), "one per player");
+        let other =
+            h.st.begin_details_rerun("p2")
+                .expect("another player is free");
+        drop(first);
+        assert!(
+            h.st.begin_details_rerun("p1").is_some(),
+            "ended with the guard"
+        );
+        drop(other);
+    }
+
+    #[test]
+    fn a_held_rank_sync_for_a_player_off_the_roster_or_while_closed_schedules_nothing() {
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_held("ghost", 5 * S, false);
+        m.stage = Stage::Closed;
+        m.note_rank_held("me", 5 * S, false);
+        m.stage = Stage::Menus;
+        m.advance_clock(100 * S);
+        assert_eq!(m.due_rank_retry(), None);
+        assert!(m.rank_retries.is_empty());
     }
 
     #[test]

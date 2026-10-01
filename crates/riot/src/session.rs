@@ -23,8 +23,8 @@ use serde_json::Value;
 use opd1_core::lockfile::parse_lockfile;
 use opd1_core::shards::{parse_client_version, parse_shards};
 
-use crate::raw_capture::{excerpt, ErrorDump, RawCaptures, LOG_EXCERPT_CHARS};
-use crate::throttle::Throttle;
+use crate::raw_capture::{excerpt, shorten_uuids, ErrorDump, RawCaptures, LOG_EXCERPT_CHARS};
+use crate::throttle::{Hold, Throttle, MAX_HOLD_SECS};
 
 /// The global remote-call bucket (every pd/glz call): burst 10, 10 rps.
 /// Values from Valorant-Scout's `backend/riot_client.py` (`_RIOT_BUCKET`).
@@ -38,7 +38,9 @@ const MMR_RPS: f64 = 0.4;
 
 /// How many times a 429 is retried (after the first attempt) before giving
 /// up with [`RiotError::RateLimited`]. Bounded so a rate-limited field
-/// "eventually becomes `—`, never hangs forever" (CLAUDE.md).
+/// "eventually becomes `—`, never hangs forever" (CLAUDE.md). The `/mmr/`
+/// family never retries in-call (R160, Scout: 0): its 429 sets the hold and
+/// returns at once, the caller retries later.
 const MAX_RATE_LIMIT_RETRIES: u32 = 2;
 
 /// Fallback backoff (seconds) when a `429` has no usable `Retry-After`,
@@ -46,11 +48,19 @@ const MAX_RATE_LIMIT_RETRIES: u32 = 2;
 /// `pd_get` backoff (`backoff = 3.0; backoff += 3.0`).
 const FALLBACK_BACKOFF_SECS: f64 = 3.0;
 
-/// A `Retry-After` value is only ever trusted up to this many seconds.
-/// Guards against a malformed or absurd header (`"inf"`, a huge number)
-/// turning into a multi-hour (or panicking, pre-fix) hold — see the Task 3
-/// fix-round report.
-const MAX_RETRY_AFTER_SECS: f64 = 30.0;
+/// R160: the longest an `other`-family call waits in the call for a hold, or
+/// for a 429's `Retry-After` before retrying. A hold with more left makes the
+/// call return [`RiotError::Held`] at once (a 429 asking for more:
+/// [`RiotError::RateLimited`]), so a 120 s hold cannot park a caller — the
+/// poll loop's live fetches among them — for minutes. The caller tries again
+/// later; the hold itself is still kept in full.
+const OTHER_MAX_WAIT: Duration = Duration::from_secs(10);
+
+/// A `Retry-After` value is honoured in full up to this many seconds (R160;
+/// the old 30 s cap was shorter than Riot's ~60 s `/mmr/` block, so the next
+/// call 429'd again). Only a sanity ceiling against a malformed or absurd
+/// header (`"inf"`, a huge number) turning into a multi-hour hold.
+const MAX_RETRY_AFTER_SECS: f64 = MAX_HOLD_SECS;
 
 /// Total-request timeouts, matching Scout's `riot_client.py` (`timeout=5`
 /// for local calls, `timeout=8` for pd/glz). Without these, a
@@ -93,8 +103,15 @@ pub enum RiotError {
     /// The local entitlements endpoint didn't return a usable token.
     AuthFailed(String),
     /// A remote call was still rate-limited after
-    /// [`MAX_RATE_LIMIT_RETRIES`] retries.
+    /// [`MAX_RATE_LIMIT_RETRIES`] retries, or Riot answered 429 and the family
+    /// is now held for longer than the call waits ([`OTHER_MAX_WAIT`]; every
+    /// `/mmr/` 429).
     RateLimited,
+    /// R160: a call was refused locally, nothing sent, because its family
+    /// (`mmr` or `other`) is on hold after a 429 — for `other`, only when more
+    /// than [`OTHER_MAX_WAIT`] is left. Carries what is left of the hold: the
+    /// caller tries again then, and it is not a failure of the data asked for.
+    Held(Duration),
     /// A network-level failure (couldn't send the request / read the
     /// response body).
     Http(String),
@@ -117,6 +134,11 @@ impl fmt::Display for RiotError {
             RiotError::ShardsUnavailable => write!(f, "the client's region/shard isn't known yet"),
             RiotError::AuthFailed(msg) => write!(f, "Riot local auth failed: {msg}"),
             RiotError::RateLimited => write!(f, "rate-limited by Riot after retrying"),
+            RiotError::Held(left) => write!(
+                f,
+                "not sent: requests are on hold for {}s more (Riot rate limit)",
+                left.as_secs_f64().ceil() as u64
+            ),
             RiotError::Http(msg) => write!(f, "HTTP error talking to Riot: {msg}"),
             RiotError::Status(code, body) if body.is_empty() => {
                 write!(f, "unexpected HTTP status {code} from Riot")
@@ -206,8 +228,19 @@ pub struct RiotSession {
     glz_base: String,
     puuid: String,
     auth: Mutex<AuthState>,
+    /// The shared rate (burst 10, 10 rps) every pd/glz call draws from. Its own
+    /// hold is never set: holds are per family (R160).
     global_throttle: Throttle,
+    /// The `/mmr/` family: its own bucket (drawn from before the global one)
+    /// and its hold, set by a 429 on any `/mmr/` path.
     mmr_throttle: Throttle,
+    /// The `other` family's hold (every pd/glz call but `/mmr/`), set by a 429
+    /// on any of them. An `/mmr/` call never looks at it, nor an `other` call
+    /// at the mmr hold.
+    other_hold: Hold,
+    /// The longest an `other` call waits in the call for a hold or a
+    /// `Retry-After` ([`OTHER_MAX_WAIT`]; a test can shorten it).
+    other_max_wait: Duration,
     /// The last response body seen at each of `call_local`/`call_remote`,
     /// for Task 5b's `dump_raw()` (via [`RiotSession::raw_captures`]). See
     /// `raw_capture.rs`'s module docs for what is/isn't captured.
@@ -397,6 +430,8 @@ impl RiotSession {
             }),
             global_throttle: Throttle::new(GLOBAL_BURST, GLOBAL_RPS),
             mmr_throttle: Throttle::new(MMR_BURST, MMR_RPS),
+            other_hold: Hold::new(),
+            other_max_wait: OTHER_MAX_WAIT,
             raw_captures: RawCaptures::new(),
         })
     }
@@ -413,6 +448,16 @@ impl RiotSession {
     #[cfg(any(test, feature = "test-support"))]
     pub fn with_global_rate(mut self, rps: f64) -> Self {
         self.global_throttle = Throttle::new(rps, rps);
+        self
+    }
+
+    /// Replaces the longest in-call wait of the `other` family
+    /// ([`OTHER_MAX_WAIT`], 10 s), so a test of what happens after a hold the
+    /// call refused does not wait out 10 s of real time. Test-only, like
+    /// [`with_global_rate`](Self::with_global_rate) (R132).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_other_max_wait(mut self, max: Duration) -> Self {
+        self.other_max_wait = max;
         self
     }
 
@@ -495,7 +540,8 @@ impl RiotSession {
     /// `GET`s a path on `pd.{shard}.a.pvp.net`, throttled (and, for
     /// `/mmr/` paths, additionally throttled by the mmr bucket). Retries
     /// once on 401/403 (re-authenticating first) and up to
-    /// [`MAX_RATE_LIMIT_RETRIES`] times on 429.
+    /// [`MAX_RATE_LIMIT_RETRIES`] times on 429 (`/mmr/` paths: never in-call,
+    /// see [`remote`](Self::remote)).
     pub async fn pd<T: DeserializeOwned>(&self, path: &str) -> Result<T, RiotError> {
         self.remote(RemoteKind::Pd, Method::GET, path, None).await
     }
@@ -618,14 +664,23 @@ impl RiotSession {
         Ok(captured)
     }
 
-    /// Throttled pd/glz call with 401/403 re-auth (once) and 429 retry
-    /// (bounded). This is where the mmr-vs-global bucket wiring lives: an
-    /// `/mmr/` path takes from the mmr bucket *and then* the global
-    /// bucket; every other remote call takes only from the global bucket.
-    /// A 429 on an mmr path holds the mmr bucket; any other 429 holds the
-    /// global bucket (which, since mmr calls also draw from the global
-    /// bucket, means a global hold conservatively slows mmr calls too —
-    /// see task-3-report.md).
+    /// Throttled pd/glz call with 401/403 re-auth (once) and 429 handling.
+    ///
+    /// R160, two request families like Scout's: `mmr` (a pd path starting
+    /// `/mmr/`) and `other`. The token bucket (rate) is shared — an `/mmr/`
+    /// call takes from the mmr bucket *and then* the global one — but a 429
+    /// holds only its own family, for Riot's full `Retry-After`:
+    ///
+    /// - `mmr`: while held, a call returns [`RiotError::Held`] at once, nothing
+    ///   sent, and never waits on the `other` hold. A 429 sets the hold and
+    ///   returns [`RiotError::RateLimited`] at once: no in-call retry (Scout:
+    ///   0), so the sync worker is never parked for Riot's ~60 s block.
+    /// - `other`: waits out an `other` hold of at most [`OTHER_MAX_WAIT`]; one
+    ///   with more left returns [`RiotError::Held`] at once, nothing sent. A
+    ///   429 is retried in-call up to [`MAX_RATE_LIMIT_RETRIES`] times, as
+    ///   before, unless its hold comes to more than [`OTHER_MAX_WAIT`]: then the
+    ///   hold is set and [`RiotError::RateLimited`] returned at once instead of
+    ///   sleeping.
     async fn remote<T: DeserializeOwned>(
         &self,
         kind: RemoteKind,
@@ -641,7 +696,15 @@ impl RiotSession {
 
         loop {
             if is_mmr {
-                self.mmr_throttle.take().await;
+                self.mmr_throttle
+                    .take_unless_held()
+                    .await
+                    .map_err(RiotError::Held)?;
+            } else {
+                self.other_hold
+                    .wait_up_to(self.other_max_wait)
+                    .await
+                    .map_err(RiotError::Held)?;
             }
             self.global_throttle.take().await;
 
@@ -653,10 +716,18 @@ impl RiotSession {
                 }
                 StatusCode::TOO_MANY_REQUESTS => {
                     let retry_after = retry_after_seconds(&resp.headers).unwrap_or(backoff);
-                    if is_mmr {
-                        self.mmr_throttle.hold_for(retry_after);
+                    let (family, left) = if is_mmr {
+                        ("mmr", self.mmr_throttle.hold_for(retry_after))
                     } else {
-                        self.global_throttle.hold_for(retry_after);
+                        ("other", self.other_hold.hold_for(retry_after))
+                    };
+                    log::warn!(
+                        "429 on {}: holding the {family} requests for {}s",
+                        shorten_uuids(path.split('?').next().unwrap_or(path)),
+                        left.as_secs_f64().ceil() as u64
+                    );
+                    if is_mmr || left > self.other_max_wait {
+                        return Err(RiotError::RateLimited);
                     }
                     backoff += FALLBACK_BACKOFF_SECS;
                     rate_limit_attempts += 1;
@@ -764,7 +835,7 @@ fn parse_json<T: DeserializeOwned>(resp: &CapturedResponse) -> Result<T, RiotErr
 /// HTTP-date form). Returns `None` for anything non-finite or negative
 /// (`"inf"`, `"nan"`, a malformed header) so the caller falls back to its
 /// own escalating backoff instead of feeding a bogus value to
-/// [`Throttle::hold_for`](crate::throttle::Throttle::hold_for) — which
+/// [`Hold::hold_for`](crate::throttle::Hold::hold_for) — which
 /// would otherwise be the last line of defense against a value that can't
 /// become a valid `Duration`. A huge-but-finite value is clamped to
 /// [`MAX_RETRY_AFTER_SECS`] rather than trusted outright.
@@ -900,6 +971,46 @@ fn version_from_valorant_api_json(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn headers_with_retry_after(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(RETRY_AFTER, HeaderValue::from_str(v).unwrap());
+        h
+    }
+
+    #[test]
+    fn retry_after_is_honoured_in_full_up_to_120s() {
+        // R160: Riot's /mmr/ block is ~60 s; the old 30 s cap earned a second
+        // 429. Only a sanity ceiling remains.
+        for (raw, want) in [("60", 60.0), ("100", 100.0), ("120", 120.0), ("0.3", 0.3)] {
+            assert_eq!(
+                retry_after_seconds(&headers_with_retry_after(raw)),
+                Some(want),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            retry_after_seconds(&headers_with_retry_after("86400")),
+            Some(120.0),
+            "garbage is capped at the ceiling"
+        );
+        for bad in ["inf", "nan", "-3", "soon"] {
+            assert_eq!(
+                retry_after_seconds(&headers_with_retry_after(bad)),
+                None,
+                "{bad}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_held_error_prints_the_family_and_the_seconds_left() {
+        let e = RiotError::Held(Duration::from_millis(59_200));
+        assert_eq!(
+            e.to_string(),
+            "not sent: requests are on hold for 60s more (Riot rate limit)"
+        );
+    }
 
     #[test]
     fn version_from_presence_value_reads_top_level_field() {

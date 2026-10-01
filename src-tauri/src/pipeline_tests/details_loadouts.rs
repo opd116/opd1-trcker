@@ -699,6 +699,16 @@ async fn player_details_resolves_skins_without_riot_sync() {
     h.st.set_session(Some(h.session.clone()));
     mount_skin(&h.assets_server, REAVER, REAVER_RED).await;
     let comp = format!("/mmr/v1/players/{OTHER}/competitiveupdates");
+    // The sync's comp-updates call answers (R160: a failed one gives the
+    // claim back), so the claim below is held for the 120 s.
+    Mock::given(method("GET"))
+        .and(path(comp.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "Subject": OTHER, "Matches": []
+        })))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
 
     // 1. Opened before any loadout arrived: all four weapons are `null`
     //    (nothing known), never absent, and no name is fetched.
@@ -713,6 +723,19 @@ async fn player_details_resolves_skins_without_riot_sync() {
     assert_eq!(skin_requests(&h).await, 0);
     // The Riot sync claimed OTHER for the next 120 s.
     assert!(!h.st.claim_details_sync(OTHER));
+    // Its background request may still be in flight (a slow runner): wait for
+    // it to land before anything counts requests.
+    for _ in 0..250 {
+        if count(&h.server, "GET", &comp).await >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        count(&h.server, "GET", &comp).await,
+        1,
+        "the first open's sync"
+    );
     let seen = details_events(&h.rec);
 
     // 2. The loadouts arrive. Reopening inside the 120 s (the sync claim
@@ -1849,4 +1872,37 @@ async fn a_failed_in_game_loadouts_request_leaves_the_roster_alone() {
     assert!(live.loadouts.is_empty());
     drop(live);
     poller.stop_worker();
+}
+
+#[tokio::test]
+async fn the_own_loadout_read_waits_for_a_hold_and_tries_again() {
+    // R160: the read is made once per connect; a call refused because the
+    // `other` family was on hold (`Held`, nothing sent) must not end it.
+    let h = harness().await;
+    let session = session_with_other_wait(&h, std::time::Duration::from_millis(100)).await;
+    let (raw, body) = fixture_loadout();
+    let loadout = format!("/personalization/v3/players/{ME}/playerloadout");
+    Mock::given(method("GET"))
+        .and(path(loadout.as_str()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.4"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    get(&h.server, &loadout, body).await;
+    // A 429 whose hold is over the (here 100 ms) bound returns at once.
+    assert!(session.player_loadout().await.is_err());
+    assert_eq!(count(&h.server, "GET", &loadout).await, 1);
+
+    crate::sync::fetch_self_loadout_after_holds(
+        &h.st,
+        &session,
+        std::time::Duration::from_millis(30),
+    )
+    .await
+    .unwrap();
+
+    // The held attempt sent nothing; the one after the hold answered.
+    assert_eq!(count(&h.server, "GET", &loadout).await, 2);
+    assert_eq!(lock(&h.st.live).self_loadout, Some(raw));
 }

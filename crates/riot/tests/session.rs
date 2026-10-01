@@ -170,8 +170,12 @@ async fn session_reauths_once_on_401_then_succeeds() {
     assert_eq!(result["Subject"], SELF_PUUID);
 }
 
+const HISTORY_PATH: &str = "/match-history/v1/history/bbbbbbbb-0000-0000-0000-000000000002";
+const OTHER_MMR_PATH: &str = "/mmr/v1/players/bbbbbbbb-0000-0000-0000-000000000002";
+
 #[tokio::test]
-async fn session_retries_after_429_honoring_retry_after() {
+async fn session_retries_a_non_mmr_call_after_429_honoring_retry_after() {
+    // Every family but mmr keeps its in-call retries (R160).
     let tmp = TempDir::new();
     write_shooter_log(tmp.path());
     let server = MockServer::start().await;
@@ -181,27 +185,25 @@ async fn session_retries_after_429_honoring_retry_after() {
     let session = connect_against(tmp.path(), &server).await;
 
     Mock::given(method("GET"))
-        .and(path(format!("/mmr/v1/players/{SELF_PUUID}")))
+        .and(path(HISTORY_PATH))
         .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.3"))
         .up_to_n_times(1)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path(format!("/mmr/v1/players/{SELF_PUUID}")))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "Subject": SELF_PUUID, "QueueSkills": {}
-        })))
+        .and(path(HISTORY_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "History": [] })))
         .mount(&server)
         .await;
 
     let start = Instant::now();
     let result: Value = session
-        .pd(&format!("/mmr/v1/players/{SELF_PUUID}"))
+        .pd(HISTORY_PATH)
         .await
         .expect("should retry after the hold and succeed");
     let elapsed = start.elapsed();
 
-    assert_eq!(result["Subject"], SELF_PUUID);
+    assert_eq!(result["History"], json!([]));
     assert!(
         elapsed >= Duration::from_millis(250),
         "expected the 429's Retry-After to be honored, got {elapsed:?}"
@@ -209,7 +211,7 @@ async fn session_retries_after_429_honoring_retry_after() {
 }
 
 #[tokio::test]
-async fn session_gives_up_after_exhausting_429_retries() {
+async fn session_gives_up_after_exhausting_429_retries_on_a_non_mmr_call() {
     let tmp = TempDir::new();
     write_shooter_log(tmp.path());
     let server = MockServer::start().await;
@@ -221,18 +223,16 @@ async fn session_gives_up_after_exhausting_429_retries() {
     // Always rate-limited, with a short Retry-After so the test stays fast
     // — this proves the field "eventually becomes an error, never hangs
     // forever" per CLAUDE.md, rather than actually waiting out real
-    // Riot-scale backoffs.
+    // Riot-scale backoffs. 3 attempts: the first and two retries.
     Mock::given(method("GET"))
-        .and(path(format!("/mmr/v1/players/{SELF_PUUID}")))
+        .and(path(HISTORY_PATH))
         .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.05"))
+        .expect(3)
         .mount(&server)
         .await;
 
     let start = Instant::now();
-    let err = session
-        .pd::<Value>(&format!("/mmr/v1/players/{SELF_PUUID}"))
-        .await
-        .unwrap_err();
+    let err = session.pd::<Value>(HISTORY_PATH).await.unwrap_err();
     let elapsed = start.elapsed();
 
     assert!(matches!(err, RiotError::RateLimited));
@@ -240,6 +240,195 @@ async fn session_gives_up_after_exhausting_429_retries() {
         elapsed < Duration::from_secs(5),
         "bounded retries should not hang, took {elapsed:?}"
     );
+}
+
+#[tokio::test]
+async fn an_mmr_429_holds_the_full_retry_after_and_returns_at_once() {
+    // R160: Riot's /mmr/ block is ~60 s. The hold is the header's value in
+    // full (no 30 s cap), the 429'd call is not retried in-call, and the next
+    // mmr call is refused locally with what is left of the hold, nothing sent.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    let session = connect_against(tmp.path(), &server).await;
+
+    Mock::given(method("GET"))
+        .and(path(OTHER_MMR_PATH))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let start = Instant::now();
+    let first = session.pd::<Value>(OTHER_MMR_PATH).await.unwrap_err();
+    assert!(
+        matches!(first, RiotError::RateLimited),
+        "the sent 429 is a plain rate-limit: {first:?}"
+    );
+
+    let second = session.pd::<Value>(OTHER_MMR_PATH).await.unwrap_err();
+    let RiotError::Held(left) = second else {
+        panic!("expected Held, got {second:?}");
+    };
+    assert!(
+        left > Duration::from_secs(55) && left <= Duration::from_secs(60),
+        "the whole 60 s is held, not 30: {left:?}"
+    );
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "neither call waited: {:?}",
+        start.elapsed()
+    );
+    assert!(RiotError::Held(left).to_string().contains("on hold"));
+    // `.expect(1)` is checked when the server drops: nothing was sent the
+    // second time.
+}
+
+#[tokio::test]
+async fn every_mmr_path_shares_the_mmr_hold_and_other_calls_do_not() {
+    // A /competitiveupdates 429 holds the whole /mmr/ family (one server
+    // bucket); a match-history call still goes out.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    let session = connect_against(tmp.path(), &server).await;
+
+    let comp = format!("{OTHER_MMR_PATH}/competitiveupdates?queue=competitive");
+    Mock::given(method("GET"))
+        .and(path(format!("{OTHER_MMR_PATH}/competitiveupdates")))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(HISTORY_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "History": [] })))
+        .mount(&server)
+        .await;
+
+    assert!(matches!(
+        session.pd::<Value>(&comp).await.unwrap_err(),
+        RiotError::RateLimited
+    ));
+    // The plain mmr path is refused locally (no mock mounted: a sent request
+    // would be a 404 `Status`).
+    assert!(matches!(
+        session.pd::<Value>(OTHER_MMR_PATH).await.unwrap_err(),
+        RiotError::Held(_)
+    ));
+    // Another family is not held.
+    let start = Instant::now();
+    let _: Value = session.pd(HISTORY_PATH).await.expect("not held");
+    assert!(start.elapsed() < Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn an_other_429_holds_only_the_other_family_and_mmr_still_answers() {
+    // R160: a match-history 429 used to hold the global bucket and so delayed
+    // mmr too. A hold over the 10 s in-call bound returns at once: the 429'd
+    // call is not retried in-call, the next `other` call is refused locally
+    // (nothing sent), and mmr is not touched.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    let session = connect_against(tmp.path(), &server).await;
+
+    Mock::given(method("GET"))
+        .and(path(HISTORY_PATH))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(OTHER_MMR_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "Subject": "x", "QueueSkills": {}
+        })))
+        .mount(&server)
+        .await;
+
+    let start = Instant::now();
+    let first = session.pd::<Value>(HISTORY_PATH).await.unwrap_err();
+    assert!(
+        matches!(first, RiotError::RateLimited),
+        "a 60 s hold is not slept out: {first:?}"
+    );
+    let second = session.pd::<Value>(HISTORY_PATH).await.unwrap_err();
+    let RiotError::Held(left) = second else {
+        panic!("expected Held, got {second:?}");
+    };
+    assert!(left > Duration::from_secs(55) && left <= Duration::from_secs(60));
+
+    let mmr: Value = session
+        .pd(OTHER_MMR_PATH)
+        .await
+        .expect("mmr must not wait on an `other` hold");
+    assert_eq!(mmr["Subject"], "x");
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "nothing waited: {:?}",
+        start.elapsed()
+    );
+    // `.expect(1)`: the second history call sent nothing.
+}
+
+#[tokio::test]
+async fn an_other_call_waits_for_a_short_hold_but_not_a_long_one() {
+    // R160's bound: a hold of at most 10 s is waited out in the call (here
+    // 0.4 s, set by a first 429); one with more left is refused at once.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    let session = connect_against(tmp.path(), &server).await;
+
+    Mock::given(method("GET"))
+        .and(path(HISTORY_PATH))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.4"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(HISTORY_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "History": [] })))
+        .mount(&server)
+        .await;
+    let start = Instant::now();
+    let _: Value = session.pd(HISTORY_PATH).await.expect("retried after 0.4 s");
+    assert!(start.elapsed() >= Duration::from_millis(350));
+}
+
+#[tokio::test]
+async fn an_mmr_hold_does_not_delay_other_calls() {
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    let session = connect_against(tmp.path(), &server).await;
+
+    Mock::given(method("GET"))
+        .and(path(OTHER_MMR_PATH))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(HISTORY_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "History": [] })))
+        .mount(&server)
+        .await;
+
+    let _ = session.pd::<Value>(OTHER_MMR_PATH).await.unwrap_err();
+    let start = Instant::now();
+    let _: Value = session.pd(HISTORY_PATH).await.expect("other family");
+    assert!(start.elapsed() < Duration::from_secs(1));
 }
 
 #[tokio::test]

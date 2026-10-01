@@ -22,6 +22,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::State;
@@ -29,8 +30,12 @@ use tauri::State;
 use opd1_core::db::repo::NameAsk;
 use opd1_core::model::{DisplayName, Field, LiveState, MatchDetailsView, MyStats, PlayerDetails};
 use opd1_riot::assets::Meta;
+use opd1_riot::RiotSession;
 
+use crate::logbuf::short;
+use crate::rank_retry::HOLD_SLACK;
 use crate::state::{lock, now_ms, AppState};
+use crate::sync::DetailsSync;
 
 type AppStateRef<'a> = State<'a, Arc<AppState>>;
 
@@ -120,26 +125,88 @@ pub(crate) async fn player_details_for(
             let puuid = puuid.clone();
             let st = st.clone();
             tauri::async_runtime::spawn(async move {
-                if crate::sync::sync_details(&st, &session, &puuid)
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                // The card on screen may have gained matches too.
-                st.reload_slot(&puuid).await;
-                crate::details::refresh(&st, &puuid).await;
-                // R153: the sync may have stored matches that put new
-                // teammates into the Top 3; the ones now shown unnamed are
-                // asked too (a puuid already queued or answered blank is not
-                // asked again: `queue_name_fill`, `Repo::names_to_ask`).
-                if let Some(page) = st.open_details_of(&puuid) {
-                    st.queue_name_fill(details_asks(&page));
-                }
+                details_sync_job(st, session, puuid, HOLD_SLACK).await;
             });
         }
     }
     Ok(details)
+}
+
+/// How many times the Details sync waits for a hold and runs again (R160).
+const DETAILS_HOLD_RERUNS: u32 = 3;
+
+/// The Riot sync behind an open Player Details page (the caller holds the
+/// 120 s claim, `claim_details_sync`), and what follows it: the card and the
+/// page are rebuilt, the names it lacks are asked.
+///
+/// R160: a sync that got nothing because a request family was on hold
+/// (`DetailsSync::Held`, nothing sent), or whose competitive-updates call
+/// failed (`Failed`), gives the claim back: it did not sync, so the next open
+/// may try at once instead of waiting out the 120 s. After a hold the sync
+/// runs again once the hold is over (`slack` after it), but only while this
+/// player's page is still the open one, and at most [`DETAILS_HOLD_RERUNS`]
+/// times. A failure is not run again by itself (the next open does).
+pub(crate) async fn details_sync_job(
+    st: Arc<AppState>,
+    session: Arc<RiotSession>,
+    puuid: String,
+    slack: Duration,
+) {
+    let mut session = session;
+    let mut reruns = 0;
+    loop {
+        let ended = crate::sync::sync_details(&st, &session, &puuid).await;
+        let Ok(ended) = ended else {
+            // The Riot client went away: nothing was synced.
+            st.release_details_sync(&puuid);
+            return;
+        };
+        // The card on screen may have gained matches too.
+        st.reload_slot(&puuid).await;
+        crate::details::refresh(&st, &puuid).await;
+        // R153: the sync may have stored matches that put new
+        // teammates into the Top 3; the ones now shown unnamed are
+        // asked too (a puuid already queued or answered blank is not
+        // asked again: `queue_name_fill`, `Repo::names_to_ask`).
+        if let Some(page) = st.open_details_of(&puuid) {
+            st.queue_name_fill(details_asks(&page));
+        }
+        match ended {
+            DetailsSync::Done => return,
+            DetailsSync::Failed => {
+                st.release_details_sync(&puuid);
+                return;
+            }
+            DetailsSync::Held(left) => {
+                st.release_details_sync(&puuid);
+                // One waiting rerun per player: a page reopened during the wait
+                // has its own job, which must not leave two.
+                if reruns >= DETAILS_HOLD_RERUNS {
+                    return;
+                }
+                let Some(waiting) = st.begin_details_rerun(&puuid) else {
+                    return;
+                };
+                reruns += 1;
+                log::debug!(
+                    "details sync of {} waits for the hold ({left:?} left)",
+                    short(&puuid)
+                );
+                tokio::time::sleep(left + slack).await;
+                drop(waiting);
+                // Only for the page still open, and only if nobody else
+                // synced this player meanwhile (a reopen's own job).
+                if !st.details_open_for(&puuid) || !st.claim_details_sync(&puuid) {
+                    return;
+                }
+                let Some(current) = st.session() else {
+                    st.release_details_sync(&puuid);
+                    return;
+                };
+                session = current;
+            }
+        }
+    }
 }
 
 /// R150: the names a Player Details page lacks: the hero's own (a card with

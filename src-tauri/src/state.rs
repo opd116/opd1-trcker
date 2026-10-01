@@ -1162,7 +1162,9 @@ impl AppState {
         let g = self.acts.read().unwrap_or_else(PoisonError::into_inner);
         if let Some((id, start)) = &g.true_start {
             if *id == act.id && g.from_riot {
-                act.start_ms = *start;
+                // Never after now: Riot's clock a few seconds ahead of ours
+                // must not leave the act empty for those seconds.
+                act.start_ms = (*start).min(now);
             }
         }
         Some(act)

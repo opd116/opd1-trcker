@@ -360,3 +360,27 @@ async fn a_failed_table_download_after_a_patch_keeps_the_old_acts_and_asks_again
     assert!(!st.assets.tables_stale());
     assert_eq!(st.acts().len(), before);
 }
+
+#[tokio::test]
+async fn an_exact_start_ahead_of_our_clock_is_never_after_now() {
+    let h = harness().await;
+    let n = now_ms();
+    // Riot's clock is 5 minutes ahead: its act "starts" in our future.
+    h.st.set_acts_for_test(vec![api_act("act-old-h", "ACT IV", n - 60 * D, n + D)]);
+    h.st.set_riot_acts_for_test(
+        Some(ContentActs {
+            current: ContentAct {
+                id: "act-new-h".into(),
+                name: "ACT V".into(),
+                episode_name: "V26".into(),
+                start_ms: Some(n + 5 * 60_000),
+                end_ms: Some(n + 50 * D),
+            },
+            previous: None,
+        }),
+        n,
+    );
+    let cur = h.st.current_act().expect("the act is current");
+    assert_eq!(cur.id, "act-new-h");
+    assert!(cur.start_ms <= now_ms(), "start {} > now", cur.start_ms);
+}

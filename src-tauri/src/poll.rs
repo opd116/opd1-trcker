@@ -1507,6 +1507,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn every_new_session_asks_for_the_current_act_once_more() {
+        // The flag resets at each connect (the game starting, an account
+        // switch), so the new session asks again, with its fresh headers.
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        mock_presence(&h, "MENUS", "unrated").await;
+        poller.on_connected(h.session.clone()).await;
+        poller.presence_tick(&h.session).await.unwrap();
+        poller.presence_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(content_requests(&h).await, 1);
+
+        poller.on_connected(h.session.clone()).await;
+        poller.presence_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(content_requests(&h).await, 2, "the new session asked once");
+    }
+
+    #[tokio::test]
+    async fn the_tick_asks_again_when_due_and_the_game_is_not_closed() {
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        // Only the re-ask is under test: no presence tick, a stage showing
+        // the game is up.
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        poller.stage = Stage::Menus;
+        poller.connected_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(content_requests(&h).await, 1, "never answered, so due");
+    }
+
+    #[tokio::test]
     async fn on_connected_queues_the_run_and_the_first_presence_starts_the_worker() {
         // R137: connecting while VALORANT is closed makes no Sync/backfill
         // call: the session is stale (R46) and would be rebuilt when the

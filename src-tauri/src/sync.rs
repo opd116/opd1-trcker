@@ -507,6 +507,13 @@ pub async fn fetch_missing_details_full(
                 held = Some(held.map_or(left, |h| h.max(left)));
                 claimed.remove(&id);
             }
+            // Riot no longer has the match (404): terminal, like the backfill
+            // (R137) treats it. A retry cannot get it, so the sync is not
+            // partial because of it.
+            Ok((id, Err(e @ RiotError::Status(404, _)))) => {
+                log::warn!("match details {} skipped: {e}", short(&id));
+                claimed.remove(&id);
+            }
             Ok((id, Err(e))) => {
                 log::warn!("match details {} failed: {e}", short(&id));
                 claimed.remove(&id);
@@ -1282,14 +1289,27 @@ async fn publish_player(
 /// R165: the rank phase of one player, then their card is published: the
 /// MMR fields (rank, peak, previous act, win rate) settle, the matches-derived
 /// ones (K/D, HS%, last 5) wait for the matches phase.
-async fn rank_step(
+///
+/// `first_pass`: the outcome is noted for the R155/R160 schedule in the same
+/// critical section as the `ranked` mark, before the awaits of the publish: a
+/// worker aborted by a stage change cannot leave a player marked ranked with
+/// the retry of its failure never recorded. (A retry is noted once, after both
+/// of its phases: [`retry_step`]; its turn was counted when it was handed out.)
+pub(crate) async fn rank_step(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
     puuid: &str,
+    first_pass: bool,
 ) -> Result<RankOutcome, Gone> {
     let outcome = sync_rank(st, session, puuid).await?;
     publish_player(st, session, puuid, |live, _| {
         live.synced.mark_ranked(puuid);
+        if first_pass {
+            match outcome.held {
+                Some(left) => live.note_rank_held(puuid, left, false),
+                None => live.note_rank_sync(puuid, outcome.failed, false),
+            }
+        }
     })
     .await;
     log::debug!("rank synced {}", short(puuid));
@@ -1299,17 +1319,28 @@ async fn rank_step(
 /// R165: the matches phase of one player, then their card is published. Party
 /// marks need the stored history to be this cycle's: the history was written
 /// and the bundle built from it was read back; either SQLite step failing
-/// leaves the slot on earlier rows.
-async fn matches_step(
+/// leaves the slot on earlier rows. `first_pass`: a partial outcome joins the
+/// R155 retries (`LiveModel::note_partial_sync`), one that only met the
+/// `other` hold waits for it and uses no retry (`note_matches_held`, R160) —
+/// noted under the same lock as the `synced` mark, like [`rank_step`].
+pub(crate) async fn matches_step(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
     puuid: &str,
+    first_pass: bool,
 ) -> Result<MatchesOutcome, Gone> {
     let outcome = sync_matches(st, session, puuid).await?;
     publish_player(st, session, puuid, |live, db_ok| {
         live.synced.insert(puuid.to_string());
         if outcome.history_ok && db_ok {
             live.party_ready.insert(puuid.to_string());
+        }
+        if first_pass {
+            match (outcome.partial, outcome.held) {
+                (true, _) => live.note_partial_sync(puuid),
+                (false, Some(left)) => live.note_matches_held(puuid, left),
+                (false, None) => {}
+            }
         }
     })
     .await;
@@ -1323,7 +1354,7 @@ async fn matches_step(
 /// stays one job loop (this is one job). R155/R160: a first-pass failure or
 /// hold schedules the player's retry. A gone client ends the job and aborts
 /// the rest of the batch (the set is dropped).
-async fn rank_batch_step(
+pub(crate) async fn rank_batch_step(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
     batch: Vec<String>,
@@ -1331,15 +1362,7 @@ async fn rank_batch_step(
     let mut set = JoinSet::new();
     for puuid in &batch {
         let (st, session, puuid) = (st.clone(), session.clone(), puuid.clone());
-        set.spawn(async move {
-            let outcome = rank_step(&st, &session, &puuid).await?;
-            let mut live = lock(&st.live);
-            match outcome.held {
-                Some(left) => live.note_rank_held(&puuid, left, false),
-                None => live.note_rank_sync(&puuid, outcome.failed, false),
-            }
-            Ok::<(), Gone>(())
-        });
+        set.spawn(async move { rank_step(&st, &session, &puuid, true).await.map(|_| ()) });
     }
     let (mut gone, mut panicked) = (false, false);
     while let Some(joined) = set.join_next().await {
@@ -1368,22 +1391,13 @@ async fn rank_batch_step(
     Ok(())
 }
 
-/// One `Job::Sync`: the matches phase of one player. A partial one joins the
-/// R155 retries (R165); one that only met the `other` family's hold waits for
-/// it and uses no retry (R160, `LiveModel::note_matches_held`).
+/// One `Job::Sync`: the matches phase of one player (R165).
 async fn sync_step(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
     puuid: String,
 ) -> Result<(), Gone> {
-    let outcome = matches_step(st, session, &puuid).await?;
-    let mut live = lock(&st.live);
-    match (outcome.partial, outcome.held) {
-        (true, _) => live.note_partial_sync(&puuid),
-        (false, Some(left)) => live.note_matches_held(&puuid, left),
-        (false, None) => {}
-    }
-    Ok(())
+    matches_step(st, session, &puuid, true).await.map(|_| ())
 }
 
 /// One `Job::RankRetry` (R155): both phases of the player again, the card
@@ -1396,8 +1410,8 @@ async fn retry_step(
     session: &Arc<RiotSession>,
     puuid: String,
 ) -> Result<(), Gone> {
-    let rank = rank_step(st, session, &puuid).await?;
-    let matches = matches_step(st, session, &puuid).await?;
+    let rank = rank_step(st, session, &puuid, false).await?;
+    let matches = matches_step(st, session, &puuid, false).await?;
     let failed = rank.failed || matches.partial;
     let held = rank.held.into_iter().chain(matches.held).max();
     let mut live = lock(&st.live);
@@ -1447,7 +1461,18 @@ async fn names_step(
             // attempted: they are asked again after a short delay, at most
             // three tries a stage (`LiveModel::note_names_failed`), and until
             // then the card keeps its skeleton or, once synced, shows `—`.
-            let retry = lock(&st.live).note_names_failed(&asked);
+            let retry = {
+                let mut live = lock(&st.live);
+                let retry = live.note_names_failed(&asked);
+                // The worker never waits: no names job is handed out until the
+                // earliest still-waiting retry (this batch's or an older
+                // one's) is due, and the poll loop's tick starts a worker then
+                // (`LiveModel::names_wakeup_due`, R160).
+                if let Some(wait) = live.names_next_wait() {
+                    live.defer_names(wait);
+                }
+                retry
+            };
             log::warn!(
                 "names for {} players failed: {e}; {}",
                 asked.len(),
@@ -1456,12 +1481,6 @@ async fn names_step(
                     None => "giving up".to_string(),
                 }
             );
-            if let Some(wait) = retry {
-                // The worker never waits: no names job is handed out for the
-                // delay, and the poll loop's tick starts a worker when it is
-                // over (`LiveModel::names_wakeup_due`, R160).
-                lock(&st.live).defer_names(wait);
-            }
             st.publish();
             return Ok(());
         }
@@ -1480,6 +1499,11 @@ async fn names_step(
         live.names_attempted.extend(asked.iter().cloned());
         for (p, n, t) in &learned {
             live.known_names.insert(p.clone(), (n.clone(), t.clone()));
+        }
+        // Players of an earlier failed lookup may still be waiting for their
+        // retry (their counts differ): keep a wake-up for the next one.
+        if let Some(wait) = live.names_next_wait() {
+            live.defer_names(wait);
         }
     }
     log::debug!("names: {} of {} resolved", learned.len(), asked.len());

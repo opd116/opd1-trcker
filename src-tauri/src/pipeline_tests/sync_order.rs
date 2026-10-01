@@ -7,33 +7,10 @@
 
 use std::time::Duration;
 
+use super::rank::{advance, drain, lobby, mmr_429_once, open_details_of_me, retries_done};
 use super::*;
 
 const S: Duration = Duration::from_secs(1);
-
-fn lobby(h: &Harness) {
-    let mut live = lock(&h.st.live);
-    live.stage = Stage::Menus;
-    live.in_match = false;
-    live.slots = vec![Slot {
-        roster: roster(ME, false),
-        db: PlayerDb::default(),
-    }];
-    live.self_roster = Some(roster(ME, false));
-}
-
-async fn drain(h: &Harness) -> bool {
-    let Some(id) = lock(&h.st.live).try_start_worker() else {
-        return false;
-    };
-    run_worker(h.st.clone(), h.session.clone(), id).await;
-    assert!(!lock(&h.st.live).worker_running(), "claim released on exit");
-    true
-}
-
-fn advance(h: &Harness, by: Duration) {
-    lock(&h.st.live).advance_clock(by);
-}
 
 /// Answers `status` on `p` (the first `times` requests, or all) ahead of the
 /// harness's own mocks.
@@ -428,4 +405,132 @@ async fn a_complete_sync_schedules_no_retry() {
     lobby(&h);
     assert!(drain(&h).await);
     assert!(lock(&h.st.live).rank_retries.is_empty());
+}
+
+#[tokio::test]
+async fn a_match_details_404_is_terminal_and_not_a_partial_sync() {
+    // Riot no longer has the match: a retry cannot get it, so no round is
+    // scheduled for it (the backfill treats 404 the same way).
+    let h = harness().await;
+    fails(&h, "GET", "/match-details/v1/matches/m2", 404, None).await;
+    lobby(&h);
+    assert!(drain(&h).await);
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m2").await,
+        1
+    );
+    assert!(lock(&h.st.live).rank_retries.is_empty(), "no retry round");
+    assert!(lock(&h.st.live).synced.contains(ME));
+    advance(&h, 100_000 * S);
+    assert!(!drain(&h).await);
+}
+
+// ---------------------------------------------------------------------
+// fix round 1: atomic notes, batch edge cases
+// ---------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_rank_failure_is_recorded_with_the_ranked_mark_even_if_the_worker_is_aborted_right_after()
+{
+    // The rank phase failed (mmr 500) and Player Details of ME is open, so the
+    // publish awaits (the details rebuild). The mark and the retry note are
+    // one critical section: whenever the player is seen ranked, the retry is
+    // already on the schedule, so an abort at that await loses nothing.
+    let h = harness().await;
+    fails(&h, "GET", &format!("/mmr/v1/players/{ME}"), 500, None).await;
+    open_details_of_me(&h).await;
+    let (st, session) = (h.st.clone(), h.session.clone());
+    let task = tokio::spawn(async move { crate::sync::rank_step(&st, &session, ME, true).await });
+    let mut seen = false;
+    for _ in 0..10_000 {
+        if lock(&h.st.live).synced.rank_done(ME) {
+            seen = true;
+            assert_eq!(retries_done(&h, ME), Some(0), "noted with the mark");
+            task.abort();
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(seen, "the rank phase was marked");
+}
+
+#[tokio::test]
+async fn a_partial_matches_phase_is_recorded_with_the_synced_mark_even_if_aborted_right_after() {
+    let h = harness().await;
+    fails(&h, "GET", "/match-details/v1/matches/m2", 500, None).await;
+    open_details_of_me(&h).await;
+    let (st, session) = (h.st.clone(), h.session.clone());
+    let task = tokio::spawn(async move {
+        crate::sync::rank_step(&st, &session, ME, true).await?;
+        crate::sync::matches_step(&st, &session, ME, true).await
+    });
+    let mut seen = false;
+    for _ in 0..10_000 {
+        if lock(&h.st.live).synced.contains(ME) {
+            seen = true;
+            assert_eq!(retries_done(&h, ME), Some(0), "noted with the mark");
+            task.abort();
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(seen);
+}
+
+#[tokio::test]
+async fn a_batch_member_that_meets_the_mmr_hold_waits_for_it_with_nothing_used() {
+    // The mmr family is on hold before the batch starts: all three players'
+    // rank calls are refused locally (nothing sent), each waits for the hold
+    // with both retries unused, and their matches phases still run.
+    let h = harness().await;
+    mmr_429_once(&h, ME, "60").await;
+    assert!(h.session.mmr(ME).await.is_err(), "the 429 sets the hold");
+    roster_of(&h, &[ME, OTHER, MATE]);
+    tokio::time::timeout(Duration::from_secs(10), drain(&h))
+        .await
+        .expect("the worker is not parked by the hold");
+    for p in [ME, OTHER, MATE] {
+        assert_eq!(retries_done(&h, p), Some(0), "{p}: held, nothing used");
+        assert!(
+            lock(&h.st.live).synced.contains(p),
+            "{p}: matches phase ran"
+        );
+    }
+    assert_eq!(
+        count(&h.server, "GET", &format!("/mmr/v1/players/{ME}")).await,
+        1
+    );
+    for p in [ME, OTHER, MATE] {
+        assert_eq!(
+            count(
+                &h.server,
+                "GET",
+                &format!("/mmr/v1/players/{p}/competitiveupdates")
+            )
+            .await,
+            0,
+            "{p}: not sent"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_client_that_goes_away_mid_batch_ends_the_worker_and_marks_nobody() {
+    let h = harness().await;
+    roster_of(&h, &[ME, OTHER, MATE]);
+    std::fs::remove_file(
+        h._dir
+            .path()
+            .join("Riot Games")
+            .join("Riot Client")
+            .join("Config")
+            .join("lockfile"),
+    )
+    .unwrap();
+    assert!(drain(&h).await);
+    let live = lock(&h.st.live);
+    for p in [ME, OTHER, MATE] {
+        assert!(!live.synced.rank_done(p), "{p}: nothing was answered");
+    }
+    assert!(live.rank_retries.is_empty(), "no retry round");
 }

@@ -202,6 +202,16 @@ impl NamesAttempted {
         self.failed.clear();
     }
 
+    /// The earliest instant a failed player's next try is due, when one is
+    /// still waiting after `now`.
+    fn next_due(&self, now: Instant) -> Option<Instant> {
+        self.failed
+            .values()
+            .map(|f| f.due)
+            .filter(|d| *d > now)
+            .min()
+    }
+
     /// The player's next try is not due yet.
     fn waiting(&self, puuid: &str, now: Instant) -> bool {
         self.failed.get(puuid).is_some_and(|f| f.due > now)
@@ -715,6 +725,15 @@ impl LiveModel {
             .iter()
             .filter_map(|p| self.names_attempted.fail(p, now))
             .min()
+    }
+
+    /// R165: how long until the earliest still-waiting names retry is due.
+    /// After every names step the worker defers names jobs to this time
+    /// ([`Self::defer_names`]), so the tick's `names_wakeup_due` wakes a worker
+    /// for every staggered retry, not just the first.
+    pub fn names_next_wait(&self) -> Option<Duration> {
+        let now = self.now();
+        self.names_attempted.next_due(now).map(|d| d - now)
     }
 
     /// The next player whose matches phase is due, in display order (self ->
@@ -3581,5 +3600,47 @@ mod tests {
         m.stage = Stage::Menus;
         m.advance_clock(100 * S);
         assert_eq!(m.due_rank_retry(), None);
+    }
+
+    #[test]
+    fn staggered_names_retries_are_each_woken() {
+        // R165 fix round: `a` is on its second failure (due +6 s) while `c`,
+        // who joined later, is on its first (due +2 s). After every names
+        // step the deferral goes to the earliest still-waiting retry, so the
+        // tick wakes a worker for `c` and then again for `a`.
+        let mut m = model(vec![slot("me", false), slot("a", false)]);
+        m.synced.extend(["me".to_string(), "a".to_string()]);
+        m.names_attempted.insert("me".into());
+        assert_eq!(m.note_names_failed(&["a".to_string()]), Some(2 * S));
+        m.advance_clock(2 * S);
+        m.slots.push(slot("c", false));
+        m.synced.insert("c".into());
+        assert_eq!(
+            m.note_names_failed(&["a".to_string(), "c".to_string()]),
+            Some(2 * S),
+            "c's first failure is the shortest wait"
+        );
+        let wait = m.names_next_wait().expect("both are waiting");
+        // (the real clock runs a few microseconds between the calls)
+        let near = |w: Duration, want: Duration| w <= want && w > want - Duration::from_millis(100);
+        assert!(near(wait, 2 * S), "{wait:?}");
+        m.defer_names(wait);
+        assert!(!m.names_wakeup_due());
+        m.advance_clock(2 * S);
+        assert!(m.names_wakeup_due(), "c is due");
+        assert_eq!(m.names_needed(), vec![("c".to_string(), false)]);
+        // c answers; a is still waiting and gets its own wake-up.
+        m.names_attempted.insert("c".into());
+        let wait = m.names_next_wait().expect("a is waiting");
+        assert!(near(wait, 4 * S), "{wait:?}");
+        m.defer_names(wait);
+        m.advance_clock(3 * S);
+        assert!(!m.names_wakeup_due());
+        m.advance_clock(S);
+        assert!(m.names_wakeup_due(), "a is due");
+        assert_eq!(m.names_needed(), vec![("a".to_string(), false)]);
+        // Nothing is waiting any more: no deferral to make.
+        m.names_attempted.insert("a".into());
+        assert_eq!(m.names_next_wait(), None);
     }
 }

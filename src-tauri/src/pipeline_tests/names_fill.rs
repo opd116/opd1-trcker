@@ -16,7 +16,7 @@ use opd1_riot::endpoints::MatchDetailsResponse;
 
 use super::*;
 use crate::state::{Job, NAME_FILL_QUEUE_MAX};
-use crate::sync::{fill_names_step, store_details, NAME_BATCH_MAX};
+use crate::sync::{fill_names_step, store_details, sync_player, NAME_BATCH_MAX};
 
 /// A valid uuid for test player `i`.
 fn pid(i: u32) -> String {
@@ -524,6 +524,113 @@ async fn a_fill_that_names_hidden_roster_players_rebuilds_their_cards_in_one_pub
     let before = live_events(&h);
     run_fill(&h).await;
     assert_eq!(live_events(&h), before, "nothing on screen changed");
+}
+
+/// Mounts what the sync of roster player `p` needs: no rank updates, a
+/// history of the given competitive matches (newest first) and the details of
+/// each, whose other players (`others`, `p` included) have blank names.
+async fn mount_player_history(h: &Harness, p: &str, matches: &[(&str, i64)], others: &[String]) {
+    let first = |body: Value, path: String| {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(1)
+    };
+    first(
+        json!({"Subject": p, "Matches": []}),
+        format!("/mmr/v1/players/{p}/competitiveupdates"),
+    )
+    .mount(&h.server)
+    .await;
+    first(
+        json!({"Subject": p, "QueueSkills": {}}),
+        format!("/mmr/v1/players/{p}"),
+    )
+    .mount(&h.server)
+    .await;
+    first(
+        json!({"Subject": p, "History": matches.iter().map(|(id, start)| json!(
+            {"MatchID": id, "GameStartTime": start, "QueueID": "competitive"}
+        )).collect::<Vec<_>>()}),
+        format!("/match-history/v1/history/{p}"),
+    )
+    .mount(&h.server)
+    .await;
+    for (id, start) in matches {
+        mount_match(&h.server, id, "competitive", *start, others).await;
+    }
+}
+
+#[tokio::test]
+async fn a_roster_players_sync_that_stores_matches_queues_their_participants_for_the_fill() {
+    // R167 (A concern): the matches phase of a roster player stores matches
+    // the user never played; the players of those whose names match-details
+    // blanked are queued like the Details sync queues what its page lacks —
+    // and, like every ask, sent between matches only.
+    let h = harness().await;
+    let p = pid(7);
+    let others = vec![p.clone(), pid(1), pid(2)];
+    let (old, new) = (now_ms() - 5 * 86_400_000, now_ms() - 3 * 86_400_000);
+    mount_player_history(&h, &p, &[("mx-new", new), ("mx-old", old)], &others).await;
+    mount_name_service(&h.server, &[(pid(1), "One", "T1")]).await;
+    {
+        // Agent Select: a roster player is being synced during a match.
+        let slot = slot_for(&h.st, &p, false).await;
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Pregame;
+        live.in_match = true;
+        live.slots.push(slot);
+        // The live cards are done: the fill is the only work there is.
+        live.synced.insert(p.clone());
+        live.names_attempted.insert(p.clone());
+    }
+
+    sync_player(&h.st, &h.session, &p).await.unwrap();
+
+    let queued: Vec<(String, Option<i64>)> = {
+        let mut q: Vec<_> = lock(&h.st.live)
+            .name_fill
+            .iter()
+            .map(|a| (a.puuid.clone(), a.match_start_ms))
+            .collect();
+        q.sort();
+        q
+    };
+    // Each puuid once, with its newest stored match; never the user.
+    assert_eq!(
+        queued,
+        [
+            (pid(1), Some(new)),
+            (pid(2), Some(new)),
+            (p.clone(), Some(new)),
+        ]
+    );
+
+    // During the match nothing is sent, and nothing is lost.
+    fill_names_step(&h.st, &h.session).await.unwrap();
+    assert!(puts(&h.server).await.is_empty(), "no request in a match");
+    assert_eq!(lock(&h.st.live).name_fill.len(), 3);
+
+    // The match is over: one request for all three.
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Menus;
+        live.in_match = false;
+    }
+    run_fill(&h).await;
+    assert_eq!(puts(&h.server).await.len(), 1);
+    assert_eq!(
+        seen(&h.st, pid(1)).await,
+        Some(("One".to_string(), "T1".to_string()))
+    );
+
+    // Synced again with nothing new: nothing is queued (both matches are
+    // stored already, the fill's markers cover the rest).
+    sync_player(&h.st, &h.session, &p).await.unwrap();
+    assert!(
+        lock(&h.st.live).name_fill.is_empty(),
+        "no new match, no ask"
+    );
 }
 
 #[tokio::test]

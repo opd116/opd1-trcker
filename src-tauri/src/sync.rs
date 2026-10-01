@@ -410,9 +410,29 @@ pub async fn fetch_missing_details(
         .map(|_| ())
 }
 
+/// R167: adds the players of a stored match that started at `start_ms` to
+/// `asks`, one ask per puuid: a puuid already there keeps the newer match.
+/// (Matches complete in any order, unlike the backfill's newest-first walk.)
+fn add_participants(asks: &mut Vec<NameAsk>, start_ms: i64, puuids: Vec<String>) {
+    for puuid in puuids {
+        match asks.iter_mut().find(|a| a.puuid == puuid) {
+            Some(ask) => ask.match_start_ms = ask.match_start_ms.max(Some(start_ms)),
+            None => asks.push(NameAsk {
+                puuid,
+                match_start_ms: Some(start_ms),
+            }),
+        }
+    }
+}
+
 /// How a [`fetch_missing_details_full`] went.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DetailsFetch {
+    /// R167: the players, other than the user, of the matches this call
+    /// stored whose names match-details left blank — one ask each, with its
+    /// newest such match. The caller that wants them named queues them
+    /// ([`sync_matches`]); the fill sends them between matches only.
+    pub participants: Vec<NameAsk>,
     /// R160: a download was refused only because the `other` request family
     /// was on hold (`Held`: nothing sent): the longest of what was left of the
     /// hold. Those ids are not stored; a caller that can run again when the
@@ -488,12 +508,16 @@ pub async fn fetch_missing_details_full(
     let mut gone = false;
     let mut incomplete = false;
     let mut held: Option<Duration> = None;
+    let mut participants: Vec<NameAsk> = Vec::new();
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((id, Ok(details))) => {
                 // A failed write is logged; the live sync goes on (partial).
-                if store_details(st, details).await.is_none() {
-                    incomplete = true;
+                match store_details(st, details).await {
+                    Some((start_ms, others)) => {
+                        add_participants(&mut participants, start_ms, others)
+                    }
+                    None => incomplete = true,
                 }
                 // Stored: whoever waits on this id can read it now.
                 claimed.remove(&id);
@@ -547,7 +571,11 @@ pub async fn fetch_missing_details_full(
             // A waited-for id that answered 404 in its own task is terminal.
             .is_some_and(|still| still.iter().any(|id| !owner.details_404(id)));
     }
-    Ok(DetailsFetch { held, incomplete })
+    Ok(DetailsFetch {
+        participants,
+        held,
+        incomplete,
+    })
 }
 
 /// The rank phase (R165): `comp_updates(0..5)`, then `mmr` when it is needed.
@@ -670,6 +698,10 @@ pub async fn sync_matches(
     // (`history_ok`): party marks wait. Only a real failure is `partial`.
     let fetched = fetch_missing_details_full(st, session, ids).await?;
     partial |= fetched.incomplete;
+    // R167: the players of the matches this phase stored, named between
+    // matches like the Details sync's (`LiveModel::take_fill` holds them in a
+    // match; `Repo::names_to_ask` drops the known and the already-asked).
+    st.queue_name_fill(fetched.participants);
     if let Some(left) = fetched.held {
         hold(left);
     }

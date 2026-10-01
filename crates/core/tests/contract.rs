@@ -210,6 +210,7 @@ fn card(identity: Identity, team: Team) -> BuildCardInput<'static> {
         party: None,
         encounters: None,
         stored_tier: None,
+        live_tier: None,
     }
 }
 

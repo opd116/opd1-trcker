@@ -31,6 +31,17 @@ where
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
+/// R161: a tier Riot's roster answers carry (`CompetitiveTier`) — a number,
+/// or nothing. An absent key, a `null` or any other kind of value is "no
+/// tier" instead of a decode error, so a surprise in this one field can never
+/// blank the whole roster.
+fn lenient_tier<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(Value::deserialize(deserializer)?.as_i64())
+}
+
 // ---------------------------------------------------------------------
 // VisiblePuuid — ruling R16
 // ---------------------------------------------------------------------
@@ -106,6 +117,12 @@ pub struct PregamePlayer {
     pub character_selection_state: String,
     #[serde(rename = "PlayerIdentity")]
     pub player_identity: PlayerIdentity,
+    /// R161: the player's current competitive tier (`0` = unranked) — real
+    /// pregame answers carry it for every player, enemies included. `None`
+    /// when absent. The neighbouring `SeasonalBadgeInfo.Rank` is not the
+    /// current tier (it is the badge the player picked) and is not read.
+    #[serde(rename = "CompetitiveTier", default, deserialize_with = "lenient_tier")]
+    pub competitive_tier: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -184,6 +201,9 @@ pub struct PlayerLoadoutResponse {
 // Core game (In Game)
 // ---------------------------------------------------------------------
 
+/// R161: core-game players carry no current tier. Their `SeasonalBadgeInfo.Rank`
+/// is the badge the player picked (an earlier act's: 21 where pregame and
+/// party said 22 for the same player), so it is not read.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CoreGamePlayer {
     #[serde(rename = "Subject")]
@@ -490,6 +510,10 @@ pub struct PartyMember {
     /// `PartyResponse` decode.
     #[serde(rename = "IsReady", default)]
     pub is_ready: Option<bool>,
+    /// R161: the member's current competitive tier (`0` = unranked); `None`
+    /// when absent.
+    #[serde(rename = "CompetitiveTier", default, deserialize_with = "lenient_tier")]
+    pub competitive_tier: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]

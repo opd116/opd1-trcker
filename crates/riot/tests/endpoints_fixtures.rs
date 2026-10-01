@@ -41,6 +41,10 @@ fn pregame_match_deserializes() {
     assert!(hidden.player_identity.incognito);
     assert!(hidden.player_identity.hide_account_level);
 
+    // R161: each player's current tier rides along (Riot's `CompetitiveTier`).
+    assert_eq!(me.competitive_tier, Some(15));
+    assert_eq!(hidden.competitive_tier, Some(18));
+
     let ally = parsed.ally_team.expect("AllyTeam should be present");
     assert_eq!(ally.players.len(), 1);
     assert!(parsed.enemy_team.is_none());
@@ -235,6 +239,8 @@ fn party_deserializes() {
     assert_eq!(parsed.members.len(), 1);
     assert_eq!(parsed.members[0].is_owner, Some(true));
     assert_eq!(parsed.members[0].is_ready, Some(true));
+    // R161: a member's current tier rides along.
+    assert_eq!(parsed.members[0].competitive_tier, Some(15));
     assert!(parsed.eligible_queues.contains(&"competitive".to_string()));
 }
 
@@ -409,4 +415,60 @@ fn pregame_loadouts_fixture_parses() {
             None
         ]
     );
+}
+
+#[test]
+fn tier_fields_missing_or_null_never_fail_the_response() {
+    // R161: `CompetitiveTier` is optional everywhere it is read — an absent
+    // key, a `null`, or a stray string leaves the tier unknown, never fails
+    // the whole roster answer.
+    let identity = serde_json::json!({
+        "Incognito": false,
+        "HideAccountLevel": false,
+        "AccountLevel": 5,
+        "PlayerCardID": "card",
+    });
+    let player = |tier: Option<serde_json::Value>| {
+        let mut p = serde_json::json!({
+            "Subject": "p",
+            "CharacterID": "",
+            "CharacterSelectionState": "",
+            "PlayerIdentity": identity,
+        });
+        if let Some(t) = tier {
+            p["CompetitiveTier"] = t;
+        }
+        p
+    };
+    let pregame = |tier: Option<serde_json::Value>| {
+        serde_json::json!({
+            "MapID": "m",
+            "Teams": [{"TeamID": "Blue", "Players": [player(tier)]}],
+            "AllyTeam": null,
+            "EnemyTeam": null,
+        })
+    };
+    for (tier, want) in [
+        (None, None),
+        (Some(serde_json::Value::Null), None),
+        (Some(serde_json::json!(0)), Some(0)),
+        (Some(serde_json::json!(24)), Some(24)),
+        (Some(serde_json::json!("x")), None),
+    ] {
+        let parsed: PregameMatchResponse = serde_json::from_value(pregame(tier.clone()))
+            .unwrap_or_else(|e| panic!("pregame tier {tier:?}: {e}"));
+        assert_eq!(
+            parsed.teams[0].players[0].competitive_tier, want,
+            "{tier:?}"
+        );
+
+        let mut member = serde_json::json!({"Subject": "p", "PlayerIdentity": identity});
+        if let Some(t) = tier.clone() {
+            member["CompetitiveTier"] = t;
+        }
+        let party = serde_json::json!({"ID": "x", "Members": [member]});
+        let parsed: PartyResponse =
+            serde_json::from_value(party).unwrap_or_else(|e| panic!("party tier {tier:?}: {e}"));
+        assert_eq!(parsed.members[0].competitive_tier, want, "{tier:?}");
+    }
 }

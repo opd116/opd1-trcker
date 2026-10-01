@@ -225,6 +225,12 @@ pub struct LiveModel {
     /// The user's own last-seen roster entry (placeholder while a roster
     /// fetch is retried).
     pub self_roster: Option<RosterPlayer>,
+    /// R161: the ranked tiers the latest Lobby or Agent Select answer
+    /// carried, both teams for Agent Select, by puuid. Replaced by each such
+    /// answer and emptied when VALORANT closes. Core-game answers carry no
+    /// tier, so an In Game roster takes its players' tiers from here
+    /// (`roster::fill_tiers`).
+    pub match_tiers: HashMap<String, u8>,
     /// Names from `names()` this run (visible, non-self players only).
     pub known_names: HashMap<String, (String, String)>,
     /// Players whose card showed them hidden the last time they were on
@@ -295,6 +301,7 @@ impl LiveModel {
             self_name: None,
             self_name_attempted: false,
             self_roster: None,
+            match_tiers: HashMap::new(),
             known_names: HashMap::new(),
             seen_hidden: HashMap::new(),
             names_attempted: HashSet::new(),
@@ -486,6 +493,7 @@ impl LiveModel {
             // R154: read only for a player with no snapshot, used only when
             // MMR is not a value.
             stored_tier: slot.db.stored_tier,
+            live_tier: r.live_tier,
         });
         settle_card(&mut card, names_done, data_done);
         card
@@ -872,6 +880,7 @@ pub fn closed_self_slot(self_puuid: &str, db: PlayerDb) -> Option<Slot> {
             card_id: row.card_id,
             character_id: String::new(),
             selection_state: String::new(),
+            live_tier: None,
         },
         db,
     })
@@ -1453,6 +1462,7 @@ mod tests {
             card_id: "card".into(),
             character_id: "agent".into(),
             selection_state: "locked".into(),
+            live_tier: None,
         }
     }
 

@@ -41,9 +41,10 @@ use opd1_riot::{RiotError, RiotSession};
 
 use crate::logbuf::short;
 use crate::roster::{
-    connect_retry_delay, extract_loadouts, extract_pregame_loadouts, from_coregame, from_party,
-    from_pregame, is_ffa_roster, order_players, party_key, plan_transition, view_stage,
-    want_pregame_loadouts, GameVerdict, GameWatch, PartyKey, RosterFetch, RosterPlayer,
+    connect_retry_delay, extract_loadouts, extract_pregame_loadouts, fill_tiers, from_coregame,
+    from_party, from_pregame, is_ffa_roster, order_players, party_key, plan_transition,
+    pregame_tiers, tiers_of, view_stage, want_pregame_loadouts, GameVerdict, GameWatch, PartyKey,
+    RosterFetch, RosterPlayer,
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
 use crate::store::{
@@ -693,10 +694,15 @@ impl Poller {
         session.party(&party_id).await
     }
 
-    async fn fetch_party(&mut self, session: &Arc<RiotSession>, me: &str) -> Result<(), RiotError> {
+    pub(crate) async fn fetch_party(
+        &mut self,
+        session: &Arc<RiotSession>,
+        me: &str,
+    ) -> Result<(), RiotError> {
         let party = self.party_response(session, me).await?;
         let roster = from_party(&party);
         self.self_party = roster.iter().map(|p| p.puuid.clone()).collect();
+        lock(&self.st.live).match_tiers = tiers_of(&roster);
         log::info!("lobby: party of {}", roster.len());
         self.apply_roster(session, Stage::Menus, None, roster).await;
         Ok(())
@@ -754,6 +760,7 @@ impl Poller {
         let match_id = session.pregame_player(me).await?.match_id;
         let m = session.pregame_match(&match_id).await?;
         let roster = from_pregame(&m, me, &self.self_party);
+        lock(&self.st.live).match_tiers = pregame_tiers(&m);
         log::info!("agent select: {} allies", roster.len());
         if self.pregame_match_id.as_deref() != Some(match_id.as_str()) {
             // A new Agent Select: its loadouts start unknown.
@@ -777,6 +784,7 @@ impl Poller {
             Ok(m) => {
                 let me = session.self_puuid().to_string();
                 let roster = from_pregame(&m, &me, &self.self_party);
+                lock(&self.st.live).match_tiers = pregame_tiers(&m);
                 let allies: Vec<String> = roster.iter().map(|p| p.puuid.clone()).collect();
                 self.apply_roster(session, Stage::Pregame, Some(m.map_id), roster)
                     .await;
@@ -833,7 +841,7 @@ impl Poller {
         }
     }
 
-    async fn fetch_ingame(
+    pub(crate) async fn fetch_ingame(
         &mut self,
         session: &Arc<RiotSession>,
         me: &str,
@@ -854,7 +862,10 @@ impl Poller {
             lock(&self.st.live).in_match = true;
             return self.fetch_party(session, me).await;
         }
-        let roster = from_coregame(&m, me, &self.self_party);
+        let mut roster = from_coregame(&m, me, &self.self_party);
+        // R161: core-game answers carry no tier; the Agent Select (or
+        // Lobby) one of this match did.
+        fill_tiers(&mut roster, &lock(&self.st.live).match_tiers);
         let loadouts = match session.coregame_loadouts(&match_id).await {
             Ok(resp) => Some(extract_loadouts(&resp)),
             Err(RiotError::ClientGone) => return Err(RiotError::ClientGone),
@@ -1029,6 +1040,7 @@ impl Poller {
             live.map_id = None;
             live.coregame_match_id = None;
             live.loadouts.clear();
+            live.match_tiers.clear();
             live.slots = slot.into_iter().collect();
             // R155: nothing is retried while VALORANT is closed.
             live.prune_rank_retries();

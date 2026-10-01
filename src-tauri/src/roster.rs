@@ -28,7 +28,7 @@ use base64::Engine as _;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use opd1_core::model::Team;
+use opd1_core::model::{display_tier, Team};
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
 use opd1_riot::endpoints::{
@@ -55,6 +55,19 @@ pub struct RosterPlayer {
     pub character_id: String,
     /// `""` | `"selected"` | `"locked"` — see `opd1_core::model::Identity`.
     pub selection_state: String,
+    /// R161: the player's current ranked tier as the roster answer carried
+    /// it (pregame / party `CompetitiveTier`), or one remembered from the
+    /// Agent Select of the same match ([`fill_tiers`]). `None` for Unranked
+    /// (tier 0, or any value below the first ranked tier) and when Riot sent
+    /// no tier. Costs no request; the card shows it only while nothing better
+    /// is known (`opd1_core::model::build_card`).
+    pub live_tier: Option<u8>,
+}
+
+/// R161: Riot's `CompetitiveTier` as a ranked tier, or `None` for Unranked
+/// (0), the unused 1 and 2, a missing field or a value no tier table has.
+fn ranked_tier(tier: Option<i64>) -> Option<u8> {
+    display_tier(tier)
 }
 
 impl RosterPlayer {
@@ -78,7 +91,14 @@ impl RosterPlayer {
             card_id: identity.player_card_id.clone(),
             character_id: character_id.to_string(),
             selection_state: selection_state.to_string(),
+            live_tier: None,
         }
+    }
+
+    /// R161: the roster answer's `CompetitiveTier` for this player.
+    fn with_tier(mut self, competitive_tier: Option<i64>) -> Self {
+        self.live_tier = ranked_tier(competitive_tier);
+        self
     }
 
     /// R100: this is the user's own entry, their level is known, and it
@@ -290,6 +310,7 @@ pub fn from_party(resp: &PartyResponse) -> Vec<RosterPlayer> {
                 "",
                 "",
             )
+            .with_tier(m.competitive_tier)
         })
         .collect()
 }
@@ -322,6 +343,7 @@ pub fn from_pregame(
                 &p.character_id,
                 &p.character_selection_state,
             )
+            .with_tier(p.competitive_tier)
         })
         .collect()
 }
@@ -347,6 +369,8 @@ pub fn from_coregame(
             } else {
                 Team::Enemy
             };
+            // Core-game answers carry no current tier (R161): `live_tier`
+            // stays `None` until `fill_tiers`.
             RosterPlayer::from_identity(
                 &p.subject,
                 &p.player_identity,
@@ -358,6 +382,39 @@ pub fn from_coregame(
             )
         })
         .collect()
+}
+
+/// R161: the current ranked tier of every player a pregame answer lists,
+/// both teams: Riot sends `CompetitiveTier` for the enemy team too, which
+/// Agent Select does not show but In Game will (core-game answers carry no
+/// tier). Unranked players are left out.
+pub fn pregame_tiers(resp: &PregameMatchResponse) -> HashMap<String, u8> {
+    resp.teams
+        .iter()
+        .chain(resp.ally_team.iter())
+        .chain(resp.enemy_team.iter())
+        .flat_map(|t| t.players.iter())
+        .filter_map(|p| Some((p.subject.clone(), ranked_tier(p.competitive_tier)?)))
+        .collect()
+}
+
+/// R161: the ranked tiers of a roster, by puuid.
+pub fn tiers_of(players: &[RosterPlayer]) -> HashMap<String, u8> {
+    players
+        .iter()
+        .filter_map(|p| Some((p.puuid.clone(), p.live_tier?)))
+        .collect()
+}
+
+/// R161: gives every player of `players` with no tier of their own the one
+/// in `known`, if any (the tiers an earlier roster of the same match
+/// carried). A tier the roster answer itself carried is never replaced.
+pub fn fill_tiers(players: &mut [RosterPlayer], known: &HashMap<String, u8>) {
+    for p in players {
+        if p.live_tier.is_none() {
+            p.live_tier = known.get(&p.puuid).copied();
+        }
+    }
 }
 
 /// Display and sync order: the user first, then the user's party, then
@@ -624,6 +681,7 @@ mod tests {
             card_id: "card-1".into(),
             character_id: String::new(),
             selection_state: String::new(),
+            live_tier: None,
         }
     }
 
@@ -789,6 +847,101 @@ mod tests {
         assert!(players[1].incognito);
         assert!(players[0].is_self_party);
         assert!(!players[1].is_self_party);
+    }
+
+    // -- R161: the live tier --------------------------------------------
+
+    fn tiered(puuid: &str, tier: Value, incognito: bool) -> Value {
+        json!({"Subject": puuid, "CharacterID": "", "CharacterSelectionState": "",
+               "CompetitiveTier": tier, "PlayerIdentity": identity(incognito)})
+    }
+
+    fn pregame_with_tiers() -> PregameMatchResponse {
+        serde_json::from_value(json!({
+            "MapID": "/Game/Maps/Ascent/Ascent",
+            "Teams": [],
+            "AllyTeam": {"TeamID": "Blue", "Players": [
+                tiered("me", json!(22), false),
+                tiered("hid", json!(19), true),
+                tiered("new", json!(0), false),
+                {"Subject": "gone", "CharacterID": "", "CharacterSelectionState": "",
+                 "PlayerIdentity": identity(false)}
+            ]},
+            "EnemyTeam": {"TeamID": "Red", "Players": [tiered("e1", json!(24), true)]}
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn pregame_roster_carries_each_allys_tier_and_treats_unranked_as_none() {
+        let players = from_pregame(&pregame_with_tiers(), "me", &HashSet::new());
+        let tier = |id: &str| players.iter().find(|p| p.puuid == id).unwrap().live_tier;
+        assert_eq!(tier("me"), Some(22));
+        assert_eq!(tier("hid"), Some(19), "rank is not part of the hidden name");
+        assert_eq!(tier("new"), None, "tier 0 is Unranked");
+        assert_eq!(tier("gone"), None, "no field, no tier");
+    }
+
+    #[test]
+    fn pregame_tiers_cover_both_teams_without_the_unranked() {
+        let tiers = pregame_tiers(&pregame_with_tiers());
+        let mut got: Vec<(&str, u8)> = tiers.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        got.sort_unstable();
+        assert_eq!(got, [("e1", 24), ("hid", 19), ("me", 22)]);
+        // The `Teams` list alone (no AllyTeam/EnemyTeam) is read too, and
+        // a player listed in both is counted once.
+        let resp: PregameMatchResponse = serde_json::from_value(json!({
+            "MapID": "", "AllyTeam": null, "EnemyTeam": null,
+            "Teams": [
+                {"TeamID": "Blue", "Players": [tiered("a", json!(15), false)]},
+                {"TeamID": "Red", "Players": [tiered("b", json!(17), false)]}
+            ]
+        }))
+        .unwrap();
+        assert_eq!(pregame_tiers(&resp).len(), 2);
+        assert_eq!(pregame_tiers(&resp)["b"], 17);
+    }
+
+    #[test]
+    fn party_roster_carries_each_members_tier() {
+        let resp: PartyResponse = serde_json::from_value(json!({
+            "ID": "p1",
+            "Members": [
+                {"Subject": "me", "CompetitiveTier": 22, "PlayerIdentity": identity(false)},
+                {"Subject": "pal", "CompetitiveTier": 0, "PlayerIdentity": identity(true)},
+                {"Subject": "nofield", "PlayerIdentity": identity(false)}
+            ]
+        }))
+        .unwrap();
+        let players = from_party(&resp);
+        assert_eq!(players[0].live_tier, Some(22));
+        assert_eq!(players[1].live_tier, None);
+        assert_eq!(players[2].live_tier, None);
+        let tiers = tiers_of(&players);
+        assert_eq!(tiers.len(), 1);
+        assert_eq!(tiers["me"], 22);
+    }
+
+    #[test]
+    fn coregame_roster_has_no_tier_of_its_own_until_filled_from_the_known_ones() {
+        let mut players = from_coregame(&coregame(), "me", &HashSet::new());
+        assert!(
+            players.iter().all(|p| p.live_tier.is_none()),
+            "core-game answers carry no current tier"
+        );
+        let known: HashMap<String, u8> = [("me".to_string(), 22), ("e1".to_string(), 24)].into();
+        fill_tiers(&mut players, &known);
+        let tier = |id: &str| players.iter().find(|p| p.puuid == id).unwrap().live_tier;
+        assert_eq!(tier("me"), Some(22));
+        assert_eq!(tier("e1"), Some(24));
+        assert_eq!(tier("a2"), None);
+
+        // A tier the roster answer itself carried is never overwritten.
+        let mut own = roster_player("x", false, 1);
+        own.live_tier = Some(30);
+        let mut one = vec![own];
+        fill_tiers(&mut one, &[("x".to_string(), 5)].into());
+        assert_eq!(one[0].live_tier, Some(30));
     }
 
     #[test]

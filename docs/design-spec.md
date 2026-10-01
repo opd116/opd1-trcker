@@ -231,9 +231,9 @@ Rule for the added colours:
 - Startup:
   - Route `live`.
   - `await listen('live')`, then `invoke('live_state')`. Apply the invoke result only if no event has arrived.
-  - `invoke('meta')`.
+  - `invoke('meta')`, retried with a backoff while it fails. `listen('meta')` (R163; `Meta`, sent when the asset tables first load or are refreshed): replace the `meta` store, and stop the invoke retries.
   - `listen('details')`: replace the open details when `payload.card.puuid` is the player open or opening. An event always wins over a `player_details` answer still in flight. Navigating to `live` forgets the open details (Match and Back keep them).
-  - `listen('match')` (R150; `MatchDetailsView`, sent when names arrive for the open Match Details): replace the open match when `payload.matchId` is the match open or opening; anything else is ignored. An event always wins over a `match_details` answer still in flight. The Match page closes the open match when it is left (Back, the Live tab, the switch to Live), so an event after that changes nothing, and calls `invoke('close_match')` (no arguments, idempotent, mirrors `close_details`), so Rust stops rebuilding and emitting it. When another match replaces the page, the old page's `close_match` is sent before the new page's `match_details`, which opens the new match again on the Rust side; the new match is never left closed.
+  - `listen('match')` (R150; `MatchDetailsView`, sent when names arrive for the open Match Details): replace the open match when `payload.matchId` is the match open or opening; anything else is ignored. An event always wins over a `match_details` answer still in flight. The Match page closes the open match when it is left (Back, the Live tab, the switch to Live), so an event after that changes nothing, and calls `invoke('close_match', { matchId })` (the key is R163's: Rust ignores a close for another match; idempotent, mirrors `close_details`, which sends `{ puuid }`), so Rust stops rebuilding and emitting it. When another match replaces the page, the old page's `close_match` is sent before the new page's `match_details`, which opens the new match again on the Rust side; the new match is never left closed.
 - Keys (no UI): Ctrl+Shift+L → `invoke('copy_log')` then `navigator.clipboard.writeText`. Ctrl+Shift+D → `invoke('dump_raw')`.
 
 ---

@@ -177,7 +177,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
   - `match-history`, `match-details`
   - `name-service/v2/players` (never for a hidden player during a live stage; after the match every participant without a stored name is asked once)
   - `parties`
-- **Throttle** every remote call with a token bucket and honor `429 Retry-After`. Reference implementation: Scout's `backend/riot_client.py`.
+- **Throttle** every remote call with a token bucket and honor `429 Retry-After` in full (sanity ceiling 120 s, R160). Holds are per family, `mmr` (`/mmr/` paths) and `other`; an mmr call during its hold returns at once and never blocks the worker. Reference implementation: Scout's `backend/riot_client.py`.
 
 ## Hard limits
 

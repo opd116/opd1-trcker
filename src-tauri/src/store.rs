@@ -1274,7 +1274,13 @@ mod tests {
             competitive_tier: Some(17),
             ..mp("me", "Blue", "pa", None)
         };
-        stored_match(&r, "m1", "competitive", 101 * day, &[ranked.clone()]);
+        stored_match(
+            &r,
+            "m1",
+            "competitive",
+            101 * day,
+            std::slice::from_ref(&ranked),
+        );
         assert_eq!(rank(&r), (Some(17), None));
         let v = serde_json::to_value(
             load_my_stats(&r, "me", &act, 102 * day, &none, &HashMap::new(), &utc).unwrap(),

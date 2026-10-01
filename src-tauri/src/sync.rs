@@ -1626,11 +1626,16 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
         asks.len()
     );
     let now = now_ms();
-    let learned_any = !learned.is_empty();
+    let named_ids: Vec<String> = learned.iter().map(|(p, _, _)| p.clone()).collect();
+    let learned_any = !named_ids.is_empty();
     let stored = st
         .db(move |repo| repo.record_name_answers(&learned, &blank, now))
         .await;
     if stored.is_some() && learned_any {
+        // R167: a player on the roster right now (a hidden Lobby party member,
+        // R153) shows the remembered name at once: their cards are rebuilt and
+        // published once for the whole fill.
+        st.reload_slots(&named_ids).await;
         // The open Player Details and Match Details show the new names.
         crate::details::refresh_open(st).await;
         crate::match_details::refresh_open(st).await;

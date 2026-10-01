@@ -2122,6 +2122,50 @@ impl AppState {
         self.publish();
     }
 
+    /// R167: [`Self::reload_slot`] for several players at once: the DB bundle
+    /// of each of `puuids` that is on screen is read afresh (one DB call),
+    /// and the cards are published **once**. Nothing is read or published
+    /// when none of them is on screen.
+    pub async fn reload_slots(&self, puuids: &[String]) {
+        let (on_screen, me) = {
+            let live = lock(&self.live);
+            let on_screen: Vec<String> = puuids
+                .iter()
+                .filter(|p| live.slots.iter().any(|s| &s.roster.puuid == *p))
+                .cloned()
+                .collect();
+            (on_screen, live.self_puuid.clone())
+        };
+        if on_screen.is_empty() {
+            return;
+        }
+        let ids = on_screen.clone();
+        let Some(bundles) = self
+            .db(move |repo| {
+                ids.iter()
+                    .map(|p| {
+                        Ok((
+                            p.clone(),
+                            crate::store::load_player_db(repo, me.as_deref(), p)?,
+                        ))
+                    })
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await
+        else {
+            return;
+        };
+        {
+            let mut live = lock(&self.live);
+            for (puuid, db) in bundles {
+                if let Some(slot) = live.slots.iter_mut().find(|s| s.roster.puuid == puuid) {
+                    slot.db = db;
+                }
+            }
+        }
+        self.publish();
+    }
+
     /// R97: `true` only while a skin-name fetch for `puuid` runs (between
     /// [`Self::begin_skin_resolve`] and [`Self::end_skin_resolve`]). A
     /// Details loadout weapon whose name isn't known is "resolving" (its

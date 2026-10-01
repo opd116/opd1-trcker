@@ -460,6 +460,72 @@ async fn a_player_hidden_in_the_match_that_just_ended_is_asked_and_remembered_ne
     }
 }
 
+/// How many `live` events the sink has been given so far.
+fn live_events(h: &Harness) -> usize {
+    h.rec.live.lock().unwrap().len()
+}
+
+#[tokio::test]
+async fn a_fill_that_names_hidden_roster_players_rebuilds_their_cards_in_one_publish() {
+    // R167 (A m4): HIDDEN and STRANGER are in the Lobby party, shown hidden.
+    // The fill learns both names (and one of a player who is not on screen):
+    // their cards show the remembered name at once — not at the next roster
+    // change — and the fill publishes once, not once per name.
+    let h = harness().await;
+    back_to_the_lobby(&h, Some(HIDDEN)).await;
+    {
+        let slot = slot_for(&h.st, STRANGER, true).await;
+        let mut live = lock(&h.st.live);
+        live.synced.insert(STRANGER.into());
+        live.slots.push(slot);
+        live.note_hidden();
+    }
+    mount_name_service(
+        &h.server,
+        &[
+            (HIDDEN.to_string(), "Real", "HID"),
+            (STRANGER.to_string(), "Other", "STR"),
+            (pid(1), "Away", "OFF"),
+        ],
+    )
+    .await;
+    h.st.publish();
+    for p in [HIDDEN, STRANGER] {
+        assert_eq!(card_json(&h.st, p)["name"]["kind"], "hiddenAgent", "{p}");
+    }
+
+    lock(&h.st.live).queue_name_fill([
+        ask(HIDDEN, Some(1)),
+        ask(STRANGER, Some(1)),
+        ask(&pid(1), Some(1)),
+    ]);
+    let before = live_events(&h);
+    run_fill(&h).await;
+
+    assert_eq!(puts(&h.server).await.len(), 1, "one request");
+    for (p, name, tag) in [(HIDDEN, "Real", "HID"), (STRANGER, "Other", "STR")] {
+        let shown = card_json(&h.st, p)["name"].clone();
+        assert_eq!(shown["kind"], "remembered", "{p}");
+        assert_eq!(
+            (shown["name"].as_str(), shown["tag"].as_str()),
+            (Some(name), Some(tag))
+        );
+        assert_eq!(shown["source"], "seen");
+    }
+    assert_eq!(
+        live_events(&h) - before,
+        1,
+        "one publish for the whole fill"
+    );
+
+    // A fill whose names are all of players off screen changes no card.
+    lock(&h.st.live).queue_name_fill([ask(&pid(2), Some(2))]);
+    mount_name_service(&h.server, &[(pid(2), "Gone", "OFF")]).await;
+    let before = live_events(&h);
+    run_fill(&h).await;
+    assert_eq!(live_events(&h), before, "nothing on screen changed");
+}
+
 #[tokio::test]
 async fn the_user_and_an_empty_id_are_never_asked() {
     let h = harness().await;

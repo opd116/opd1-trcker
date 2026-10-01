@@ -1609,7 +1609,14 @@ async fn a_match_published_after_the_next_one_started_still_queues_the_match_end
     lobby(&h);
     let others: Vec<String> = (1..=3).map(pid).collect();
     let now = now_ms();
-    mount_match(&h.server, "m-late", "competitive", now - 20 * 60_000, &others).await;
+    mount_match(
+        &h.server,
+        "m-late",
+        "competitive",
+        now - 20 * 60_000,
+        &others,
+    )
+    .await;
 
     match_ends_now(&h);
     // Any publish or worker job between the end and the next match sees it.

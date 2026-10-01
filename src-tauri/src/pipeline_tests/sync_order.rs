@@ -56,7 +56,9 @@ async fn mount_player(h: &Harness, puuid: &str) {
     let prio = |m: Mock| m.with_priority(1);
     prio(
         Mock::given(method("GET"))
-            .and(path(format!("/mmr/v1/players/{puuid}/competitiveupdates").as_str()))
+            .and(path(
+                format!("/mmr/v1/players/{puuid}/competitiveupdates").as_str(),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "Subject": puuid,
                 "Matches": [{
@@ -160,7 +162,12 @@ async fn every_players_rank_requests_go_out_before_any_history_or_match_details(
     );
     // Same request count as before the split: nothing extra, nothing less.
     assert_eq!(
-        count(&h.server, "GET", &format!("/match-history/v1/history/{OTHER}")).await,
+        count(
+            &h.server,
+            "GET",
+            &format!("/match-history/v1/history/{OTHER}")
+        )
+        .await,
         1
     );
     assert_eq!(
@@ -340,8 +347,14 @@ async fn a_match_details_download_that_failed_is_retried_and_only_the_missing_id
     lobby(&h);
 
     assert!(drain(&h).await);
-    assert_eq!(count(&h.server, "GET", "/match-details/v1/matches/m2").await, 1);
-    assert_eq!(count(&h.server, "GET", "/match-details/v1/matches/m1").await, 1);
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m2").await,
+        1
+    );
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m1").await,
+        1
+    );
     assert_eq!(
         lock(&h.st.live).rank_retries.retries_done(ME),
         Some(0),
@@ -352,10 +365,19 @@ async fn a_match_details_download_that_failed_is_retried_and_only_the_missing_id
     assert!(drain(&h).await, "the retry");
 
     // m2 again, m1 not; the lists again; mmr not (no new competitive match).
-    assert_eq!(count(&h.server, "GET", "/match-details/v1/matches/m2").await, 2);
-    assert_eq!(count(&h.server, "GET", "/match-details/v1/matches/m1").await, 1);
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m2").await,
+        2
+    );
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m1").await,
+        1
+    );
     assert_eq!(count(&h.server, "GET", &history(ME)).await, 2);
-    assert_eq!(count(&h.server, "GET", &format!("/mmr/v1/players/{ME}")).await, 1);
+    assert_eq!(
+        count(&h.server, "GET", &format!("/mmr/v1/players/{ME}")).await,
+        1
+    );
     // Complete now: the round ended.
     assert!(lock(&h.st.live).rank_retries.is_empty());
     advance(&h, 100_000 * S);
@@ -392,7 +414,10 @@ async fn a_partial_sync_that_keeps_failing_is_retried_twice_in_all() {
     assert!(drain(&h).await);
     advance(&h, 60 * S);
     assert!(drain(&h).await);
-    assert_eq!(count(&h.server, "GET", "/match-details/v1/matches/m2").await, 3);
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m2").await,
+        3
+    );
     advance(&h, 100_000 * S);
     assert!(!drain(&h).await, "no third retry");
 }

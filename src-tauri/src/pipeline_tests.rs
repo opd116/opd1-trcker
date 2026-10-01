@@ -8,6 +8,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
@@ -248,6 +249,27 @@ pub(crate) struct Harness {
     pub(crate) session: Arc<RiotSession>,
     pub(crate) st: Arc<AppState>,
     rec: Arc<Recorder>,
+}
+
+/// A second session on the harness's mock Riot client whose `other`-family
+/// in-call wait is `max` instead of 10 s (R160), so a hold the session
+/// refuses (`RiotError::Held`) can be short in a test.
+pub(crate) async fn session_with_other_wait(h: &Harness, max: Duration) -> Arc<RiotSession> {
+    Arc::new(
+        RiotSession::connect_with_overrides(
+            h._dir.path(),
+            ConnectOverrides {
+                pd_base: Some(h.server.uri()),
+                glz_base: Some(h.server.uri()),
+                valorant_api_base: Some(h.server.uri()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("connect to the mock client")
+        .with_global_rate(1_000.0)
+        .with_other_max_wait(max),
+    )
 }
 
 pub(crate) async fn harness() -> Harness {

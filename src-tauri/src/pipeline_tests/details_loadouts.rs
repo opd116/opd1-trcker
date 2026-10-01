@@ -699,6 +699,16 @@ async fn player_details_resolves_skins_without_riot_sync() {
     h.st.set_session(Some(h.session.clone()));
     mount_skin(&h.assets_server, REAVER, REAVER_RED).await;
     let comp = format!("/mmr/v1/players/{OTHER}/competitiveupdates");
+    // The sync's comp-updates call answers (R160: a failed one gives the
+    // claim back), so the claim below is held for the 120 s.
+    Mock::given(method("GET"))
+        .and(path(comp.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "Subject": OTHER, "Matches": []
+        })))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
 
     // 1. Opened before any loadout arrived: all four weapons are `null`
     //    (nothing known), never absent, and no name is fetched.
@@ -1682,4 +1692,37 @@ async fn a_late_own_loadout_answer_never_lands_on_another_account() {
             .await
             .unwrap();
     assert!(kept.is_some());
+}
+
+#[tokio::test]
+async fn the_own_loadout_read_waits_for_a_hold_and_tries_again() {
+    // R160: the read is made once per connect; a call refused because the
+    // `other` family was on hold (`Held`, nothing sent) must not end it.
+    let h = harness().await;
+    let session = session_with_other_wait(&h, std::time::Duration::from_millis(100)).await;
+    let (raw, body) = fixture_loadout();
+    let loadout = format!("/personalization/v3/players/{ME}/playerloadout");
+    Mock::given(method("GET"))
+        .and(path(loadout.as_str()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.4"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    get(&h.server, &loadout, body).await;
+    // A 429 whose hold is over the (here 100 ms) bound returns at once.
+    assert!(session.player_loadout().await.is_err());
+    assert_eq!(count(&h.server, "GET", &loadout).await, 1);
+
+    crate::sync::fetch_self_loadout_after_holds(
+        &h.st,
+        &session,
+        std::time::Duration::from_millis(30),
+    )
+    .await
+    .unwrap();
+
+    // The held attempt sent nothing; the one after the hold answered.
+    assert_eq!(count(&h.server, "GET", &loadout).await, 2);
+    assert_eq!(lock(&h.st.live).self_loadout, Some(raw));
 }

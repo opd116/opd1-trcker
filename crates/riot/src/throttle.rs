@@ -108,6 +108,21 @@ impl Hold {
             sleep(wait).await;
         }
     }
+
+    /// Like [`wait`](Self::wait), but only for a hold of at most `max`: when
+    /// more than `max` is left (now, or after another 429 extended it while
+    /// waiting) it returns `Err(what is left)` at once. R160: the `other`
+    /// family's in-call wait is bounded so a 120 s hold cannot park a caller
+    /// (the poll loop's live fetches among them) for minutes.
+    pub async fn wait_up_to(&self, max: Duration) -> Result<(), Duration> {
+        while let Some(left) = self.remaining() {
+            if left > max {
+                return Err(left);
+            }
+            sleep(left).await;
+        }
+        Ok(())
+    }
 }
 
 /// A token bucket: `burst` tokens are available immediately, refilling at
@@ -178,11 +193,6 @@ impl Throttle {
     /// is left of the hold (see [`Hold::hold_for`]).
     pub fn hold_for(&self, secs: f64) -> Duration {
         self.hold.hold_for(secs)
-    }
-
-    /// What is left of the active hold, `None` when there is none.
-    pub fn held_for(&self) -> Option<Duration> {
-        self.hold.remaining()
     }
 
     /// Refills the bucket for elapsed time, then either takes a token

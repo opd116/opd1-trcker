@@ -145,6 +145,7 @@ impl SyncedSet {
         self.synced.clear();
     }
 
+    #[cfg(test)]
     pub fn extend(&mut self, puuids: impl IntoIterator<Item = String>) {
         self.synced.extend(puuids);
     }
@@ -412,6 +413,11 @@ pub struct LiveModel {
     /// live roster; dropped with a roster change, an account switch, and when
     /// VALORANT closes.
     pub rank_retries: RankRetries,
+    /// R160: name-service answered "on hold" (`RiotError::Held`, nothing
+    /// sent): until this instant no names job is handed out
+    /// ([`Self::names_needed`], [`Self::fill_ready`]), so the worker neither
+    /// spins on a refused call nor marks anyone as asked.
+    names_hold_until: Option<Instant>,
     /// Test clock: added to "now" wherever the retries are timed, so a test
     /// moves time forward instead of sleeping (`Self::advance_clock`).
     #[cfg(test)]
@@ -448,6 +454,7 @@ impl LiveModel {
             match_end_ms: None,
             last_match_end: None,
             rank_retries: RankRetries::default(),
+            names_hold_until: None,
             #[cfg(test)]
             clock_offset: Duration::ZERO,
             current: LiveState {
@@ -680,6 +687,9 @@ impl LiveModel {
     /// R165: a player whose lookup failed is asked again only once the retry
     /// delay has passed ([`Self::note_names_failed`]).
     pub fn names_needed(&self) -> Vec<(String, bool)> {
+        if self.names_deferred() {
+            return Vec::new();
+        }
         let self_id = self.self_id();
         let now = self.now();
         self.slots
@@ -713,7 +723,7 @@ impl LiveModel {
         self.slots
             .iter()
             .map(|s| &s.roster.puuid)
-            .find(|p| !self.synced.contains(*p))
+            .find(|p| !self.synced.contains(p))
             .cloned()
     }
 
@@ -779,7 +789,19 @@ impl LiveModel {
     /// R150: a names fill is queued and it is between matches. The asks wait
     /// in the queue through a match and run after it.
     pub fn fill_ready(&self) -> bool {
-        !self.name_fill.is_empty() && self.between_matches()
+        !self.name_fill.is_empty() && self.between_matches() && !self.names_deferred()
+    }
+
+    /// R160: no names job is handed out for `wait` (a name-service call was
+    /// refused because the `other` request family is on hold). Only ever
+    /// extended.
+    pub fn defer_names(&mut self, wait: Duration) {
+        let until = self.now() + wait;
+        self.names_hold_until = Some(self.names_hold_until.map_or(until, |u| u.max(until)));
+    }
+
+    fn names_deferred(&self) -> bool {
+        self.names_hold_until.is_some_and(|u| self.now() < u)
     }
 
     /// The clock the rank retries are timed by.
@@ -878,6 +900,29 @@ impl LiveModel {
             short(puuid),
             RANK_RETRY_DELAYS.len(),
             RANK_RETRY_DELAYS[0].as_secs()
+        );
+    }
+
+    /// R160/R165: the matches phase of a first-pass sync of `puuid` found the
+    /// `other` request family on hold (`left` of it to go) and sent nothing:
+    /// not a failure, so no retry is used. The player is synced again once the
+    /// hold is over, unless a round is already pending for them (a failed or
+    /// held rank part of the same pass): that round's sync covers it. Same
+    /// guards as [`Self::note_rank_sync`].
+    pub fn note_matches_held(&mut self, puuid: &str, left: Duration) {
+        if self.stage == Stage::Closed || !self.shows(puuid) {
+            self.rank_retries.forget(puuid);
+            return;
+        }
+        if self.rank_retries.retries_done(puuid).is_some() {
+            return;
+        }
+        let now = self.now();
+        self.rank_retries.first_pass_held(puuid, left, now);
+        log::info!(
+            "sync for {} waits for the request hold ({}s more); no retry used",
+            short(puuid),
+            left.as_secs_f64().ceil() as u64
         );
     }
 
@@ -1634,6 +1679,14 @@ impl AppState {
         })
     }
 
+    /// Gives back a [`Self::claim_details_sync`]: the sync did not get its data
+    /// (R160: refused by a hold, or the competitive-updates call failed), so
+    /// the next open or refresh may run it again instead of waiting out the
+    /// 120 s.
+    pub fn release_details_sync(&self, puuid: &str) {
+        lock(&self.details_synced).remove(puuid);
+    }
+
     /// `true` (and records now) when `puuid`'s Player Details data hasn't
     /// been synced in the last [`DETAILS_RESYNC_AFTER`].
     pub fn claim_details_sync(&self, puuid: &str) -> bool {
@@ -2182,6 +2235,8 @@ mod tests {
             .try_start_worker()
             .expect("work pending -> worker claimed");
         assert!(m.try_start_worker().is_none(), "one worker at a time");
+        assert_eq!(m.next_job(id), Some(Job::Rank(vec!["me".into()])));
+        m.synced.mark_ranked("me");
         assert_eq!(m.next_job(id), Some(Job::Sync("me".into())));
         m.synced.insert("me".into());
 
@@ -2203,6 +2258,12 @@ mod tests {
         m.names_attempted.insert("late".into());
         m.slots.push(slot("later", false));
         m.names_attempted.insert("later".into());
+        assert_eq!(
+            m.next_job(id2),
+            Some(Job::Rank(vec!["late".into(), "later".into()]))
+        );
+        m.synced.mark_ranked("late");
+        m.synced.mark_ranked("later");
         assert_eq!(m.next_job(id2), Some(Job::Sync("late".into())));
         m.synced.insert("late".into());
         assert_eq!(m.next_job(id2), Some(Job::Sync("later".into())));
@@ -2234,6 +2295,12 @@ mod tests {
         assert!(m.live_job_pending());
         assert!(matches!(m.next_job(id), Some(Job::Names(_))));
         m.names_attempted.extend(["p1".to_string()]);
+        assert_eq!(
+            m.next_job(id),
+            Some(Job::Rank(vec!["me".into(), "p1".into()]))
+        );
+        m.synced.mark_ranked("me");
+        m.synced.mark_ranked("p1");
         assert_eq!(m.next_job(id), Some(Job::Sync("me".into())));
         m.synced.insert("me".into());
         assert_eq!(m.next_job(id), Some(Job::Sync("p1".into())));
@@ -2247,6 +2314,8 @@ mod tests {
         m.slots.push(slot("late", false));
         m.names_attempted.insert("late".into());
         assert!(m.live_job_pending());
+        assert_eq!(m.next_job(id), Some(Job::Rank(vec!["late".into()])));
+        m.synced.mark_ranked("late");
         assert_eq!(m.next_job(id), Some(Job::Sync("late".into())));
         m.synced.insert("late".into());
         assert_eq!(m.next_job(id), Some(Job::Backfill));
@@ -2404,6 +2473,8 @@ mod tests {
         let id = m.try_start_worker().expect("work pending");
 
         // p2 was never synced: a first pass goes before any retry.
+        assert_eq!(m.next_job(id), Some(Job::Rank(vec!["p2".into()])));
+        m.synced.mark_ranked("p2");
         assert_eq!(m.next_job(id), Some(Job::Sync("p2".into())));
         m.synced.insert("p2".into());
         // The due retry goes before the names fill and the backfill.
@@ -2650,6 +2721,12 @@ mod tests {
 
         assert!(matches!(m.next_job(id), Some(Job::Names(_))));
         m.names_attempted.insert("p1".into());
+        assert_eq!(
+            m.next_job(id),
+            Some(Job::Rank(vec!["me".into(), "p1".into()]))
+        );
+        m.synced.mark_ranked("me");
+        m.synced.mark_ranked("p1");
         assert_eq!(m.next_job(id), Some(Job::Sync("me".into())));
         m.synced.insert("me".into());
         assert_eq!(m.next_job(id), Some(Job::Sync("p1".into())));
@@ -2667,7 +2744,7 @@ mod tests {
         assert_eq!(m.next_job(id), Some(Job::FillNames));
         m.slots.push(slot("late", false));
         m.names_attempted.insert("late".into());
-        assert_eq!(m.next_job(id), Some(Job::Sync("late".into())));
+        assert_eq!(m.next_job(id), Some(Job::Rank(vec!["late".into()])));
     }
 
     #[test]
@@ -3241,10 +3318,12 @@ mod tests {
         assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
         // The retry is partial again: the same bounded schedule, 60 s later.
         m.note_rank_sync("me", true, true);
+        assert_eq!(m.next_job(id), None);
         m.advance_clock(60 * S);
         let id = m.try_start_worker().expect("the second retry");
         assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
         m.note_rank_sync("me", true, true);
+        assert_eq!(m.next_job(id), None);
         m.advance_clock(100_000 * S);
         assert!(m.try_start_worker().is_none(), "no third retry");
     }
@@ -3377,5 +3456,40 @@ mod tests {
         // Another account's end is not this account's.
         m.self_puuid = Some("other".into());
         assert_eq!(m.last_match_end_ms(), None);
+    }
+
+    #[test]
+    fn a_matches_phase_held_by_the_other_hold_waits_for_it_and_uses_no_retry() {
+        // R160 through R165: nothing was sent, so nothing is spent.
+        let mut m = settled_lobby(&["me"]);
+        m.note_matches_held("me", 10 * S);
+        assert!(!m.has_pending_work(), "waiting is not work");
+        m.advance_clock(11 * S);
+        assert_eq!(m.due_rank_retry(), None, "1.5 s of slack after the hold");
+        m.advance_clock(S);
+        assert_eq!(m.due_rank_retry().as_deref(), Some("me"));
+        let id = m.try_start_worker().expect("due");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+        assert_eq!(m.rank_retries.retries_done("me"), Some(1));
+        // Held again on the retry: the turn is given back.
+        m.note_rank_held("me", 5 * S, true);
+        assert_eq!(m.rank_retries.retries_done("me"), Some(0));
+    }
+
+    #[test]
+    fn a_matches_hold_leaves_a_round_already_pending_alone_and_ignores_strangers() {
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_sync("me", true, false);
+        m.advance_clock(15 * S);
+        m.note_matches_held("me", 100 * S);
+        m.advance_clock(5 * S);
+        assert_eq!(m.due_rank_retry().as_deref(), Some("me"), "20 s round kept");
+        let mut m = settled_lobby(&["me"]);
+        m.note_matches_held("ghost", S);
+        m.stage = Stage::Closed;
+        m.note_matches_held("me", S);
+        m.stage = Stage::Menus;
+        m.advance_clock(100 * S);
+        assert_eq!(m.due_rank_retry(), None);
     }
 }

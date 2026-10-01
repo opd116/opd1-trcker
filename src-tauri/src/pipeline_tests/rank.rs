@@ -354,25 +354,23 @@ async fn a_retry_that_only_met_the_mmr_hold_uses_no_turn() {
 
 #[tokio::test]
 async fn a_player_met_by_the_hold_in_the_first_pass_is_not_asked_and_never_blocks_the_worker() {
-    // ME's mmr 429s with a long Retry-After (60 s). OTHER is synced after:
-    // both its mmr-family calls are refused locally (nothing sent), the
-    // worker moves on at once, and OTHER waits for the hold with both of its
-    // retries still unused.
+    // ME's mmr 429s with a long Retry-After (60 s). R165 runs the rank phases
+    // three at a time: ME, HIDDEN and MATE go out together (the 429 lands
+    // while the others are in flight), OTHER is in the next batch: both its
+    // mmr-family calls are refused locally (nothing sent), the worker moves on
+    // at once, and OTHER waits for the hold with both of its retries unused.
     let h = harness().await;
     mmr_429_once(&h, ME, "60").await;
     {
         let mut live = lock(&h.st.live);
         live.stage = Stage::Ingame;
-        live.slots = vec![
-            Slot {
-                roster: roster(ME, false),
+        live.slots = [ME, HIDDEN, MATE, OTHER]
+            .iter()
+            .map(|p| Slot {
+                roster: roster(p, false),
                 db: PlayerDb::default(),
-            },
-            Slot {
-                roster: roster(OTHER, false),
-                db: PlayerDb::default(),
-            },
-        ];
+            })
+            .collect();
     }
     tokio::time::timeout(Duration::from_secs(10), drain(&h))
         .await
@@ -395,8 +393,10 @@ async fn a_player_met_by_the_hold_in_the_first_pass_is_not_asked_and_never_block
     assert_eq!(retries_done(&h, OTHER), Some(0), "held: nothing used");
 
     // OTHER is due after the hold (about 60 s + slack), not at 20 s.
-    // (ME's own 20 s retry is set aside so it does not come first.)
-    lock(&h.st.live).rank_retries.forget(ME);
+    // (The others' own 20 s retries are set aside so they do not come first.)
+    for p in [ME, HIDDEN, MATE] {
+        lock(&h.st.live).rank_retries.forget(p);
+    }
     advance(&h, 20 * S);
     assert_eq!(lock(&h.st.live).due_rank_retry(), None, "not at 20 s");
     advance(&h, 45 * S);
@@ -447,4 +447,207 @@ async fn no_retry_runs_while_valorant_is_closed() {
     advance(&h, 100_000 * S);
     assert!(!drain(&h).await, "Closed: no retry");
     assert_eq!(count(&h.server, "GET", &mmr_path(ME)).await, 1);
+}
+
+// ---------------------------------------------------------------------
+// R160: Player Details' sync and the holds
+// ---------------------------------------------------------------------
+
+/// ME's Details page, open on screen (the Lobby with the user's own card).
+async fn open_details_of_me(h: &Harness) {
+    lobby(h);
+    h.st.set_session(Some(h.session.clone()));
+    h.st.publish();
+    let page = crate::details::build(&h.st, ME).await.unwrap();
+    h.st.set_open_details(&page);
+}
+
+/// A 429 on ME's competitive updates (the first request only), with this
+/// `Retry-After`, ahead of the harness's own answer.
+async fn comp_429_once(h: &Harness, retry_after: &str) {
+    Mock::given(method("GET"))
+        .and(path(comp_path(ME).as_str()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", retry_after))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+}
+
+#[tokio::test]
+async fn a_details_sync_held_by_the_mmr_hold_gives_its_claim_back_and_runs_again_after_it() {
+    // A 429 on the live roster holds the mmr family; the user opens a card
+    // meanwhile. The Details sync's comp-updates call is refused locally
+    // (nothing sent). It must not burn the page's 120 s claim, and runs again
+    // once the hold is over, because the page is still open.
+    let h = harness().await;
+    comp_429_once(&h, "0.3").await;
+    open_details_of_me(&h).await;
+    assert!(h.session.comp_updates(ME, Some(0), Some(5)).await.is_err());
+    assert_eq!(count(&h.server, "GET", &comp_path(ME)).await, 1);
+
+    assert!(h.st.claim_details_sync(ME));
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        crate::commands::details_sync_job(
+            h.st.clone(),
+            h.session.clone(),
+            ME.to_string(),
+            Duration::from_millis(30),
+        ),
+    )
+    .await
+    .expect("the job ends");
+
+    // The 429 that set the hold, no request while it lasted, one after it.
+    assert_eq!(count(&h.server, "GET", &comp_path(ME)).await, 2);
+    // It synced in the end: the claim is held for the next 120 s.
+    assert!(!h.st.claim_details_sync(ME));
+}
+
+#[tokio::test]
+async fn a_details_sync_held_by_the_hold_is_not_run_again_for_a_page_that_closed() {
+    let h = harness().await;
+    comp_429_once(&h, "0.3").await;
+    open_details_of_me(&h).await;
+    assert!(h.session.comp_updates(ME, Some(0), Some(5)).await.is_err());
+    assert!(h.st.claim_details_sync(ME));
+    // The user left the page while the hold ran.
+    let job = crate::commands::details_sync_job(
+        h.st.clone(),
+        h.session.clone(),
+        ME.to_string(),
+        Duration::from_millis(30),
+    );
+    let close = async {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        h.st.close_details();
+    };
+    tokio::join!(job, close);
+
+    assert_eq!(count(&h.server, "GET", &comp_path(ME)).await, 1, "no rerun");
+    assert!(h.st.claim_details_sync(ME), "the claim was given back");
+}
+
+#[tokio::test]
+async fn a_details_sync_whose_comp_updates_failed_gives_its_claim_back() {
+    // Backend-review finding 8: a failed sync must not hold the 120 s.
+    let h = harness().await;
+    Mock::given(method("GET"))
+        .and(path(comp_path(ME).as_str()))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    open_details_of_me(&h).await;
+    assert!(h.st.claim_details_sync(ME));
+    crate::commands::details_sync_job(
+        h.st.clone(),
+        h.session.clone(),
+        ME.to_string(),
+        Duration::from_millis(30),
+    )
+    .await;
+    assert_eq!(count(&h.server, "GET", &comp_path(ME)).await, 1, "no rerun");
+    assert!(h.st.claim_details_sync(ME), "claimable again");
+}
+
+#[tokio::test]
+async fn a_details_sync_that_worked_keeps_its_claim() {
+    let h = harness().await;
+    open_details_of_me(&h).await;
+    assert!(h.st.claim_details_sync(ME));
+    crate::commands::details_sync_job(
+        h.st.clone(),
+        h.session.clone(),
+        ME.to_string(),
+        Duration::from_millis(30),
+    )
+    .await;
+    assert_eq!(count(&h.server, "GET", &comp_path(ME)).await, 1);
+    assert!(!h.st.claim_details_sync(ME));
+}
+
+#[tokio::test]
+async fn a_names_call_refused_by_the_other_hold_asks_nobody_and_does_not_spin_the_worker() {
+    // R160: name-service is an `other`-family call. Refused locally, nobody
+    // was asked: they are not marked as asked, and no names job is handed
+    // out until the hold is over (else the worker would spin on it).
+    let h = harness().await;
+    let session = session_with_other_wait(&h, Duration::from_millis(100)).await;
+    Mock::given(method("PUT"))
+        .and(path("/name-service/v2/players"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    let visible = [opd1_riot::VisiblePuuid::new(OTHER.to_string(), false).unwrap()];
+    assert!(session.names(&visible).await.is_err(), "the 429 sets it");
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Menus;
+        live.slots = vec![Slot {
+            roster: roster(OTHER, false),
+            db: PlayerDb::default(),
+        }];
+        assert!(!live.names_needed().is_empty());
+    }
+    let id = lock(&h.st.live).try_start_worker().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        run_worker(h.st.clone(), session.clone(), id),
+    )
+    .await
+    .expect("the worker does not spin or wait");
+
+    let puts = count(&h.server, "PUT", "/name-service/v2/players").await;
+    assert_eq!(puts, 1, "the held call sent nothing");
+    let mut live = lock(&h.st.live);
+    assert!(!live.names_attempted.contains(OTHER), "not marked as asked");
+    assert!(live.names_needed().is_empty(), "deferred through the hold");
+    // After the hold (plus the slack) they are needed again.
+    live.advance_clock(70 * S);
+    assert_eq!(live.names_needed(), vec![(OTHER.to_string(), false)]);
+}
+
+#[tokio::test]
+async fn a_match_that_could_not_be_downloaded_for_a_hold_is_synced_again_after_it() {
+    // R160: the other family's hold refuses the match-details download. The
+    // player is not "done": the held-back sync is scheduled for after the hold
+    // (nothing used of R155's retries), like a held rank part.
+    let h = harness().await;
+    let session = session_with_other_wait(&h, Duration::from_millis(100)).await;
+    // The history call 429s (holds `other` for 0.4 s, over the 100 ms bound).
+    Mock::given(method("GET"))
+        .and(path(format!("/match-history/v1/history/{ME}").as_str()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.4"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    lobby(&h);
+    let id = lock(&h.st.live).try_start_worker().unwrap();
+    run_worker(h.st.clone(), session.clone(), id).await;
+
+    // The history call was a real 429 (sent); the details download that
+    // followed was refused locally. Retries are counted from here (R165).
+    let history = format!("/match-history/v1/history/{ME}");
+    assert_eq!(count(&h.server, "GET", &history).await, 1);
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m1").await,
+        0
+    );
+    assert_eq!(retries_done(&h, ME), Some(0), "waiting for the first retry");
+    tokio::time::sleep(Duration::from_millis(450)).await;
+    // R165: the history 429 was a real (sent) failure, so the sync is a
+    // partial one on the R155 schedule (20 s) and not the held-back kind.
+    advance(&h, 20 * S);
+    let id = lock(&h.st.live).try_start_worker().expect("due");
+    run_worker(h.st.clone(), session, id).await;
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m1").await,
+        1
+    );
+    assert_eq!(retries_done(&h, ME), None, "the round ended");
 }

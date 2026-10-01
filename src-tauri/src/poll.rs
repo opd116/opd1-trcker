@@ -60,13 +60,36 @@ const PREGAME_REPOLL: Duration = Duration::from_secs(3);
 /// Consecutive presence failures (other than ClientGone) before the
 /// session is dropped and rebuilt.
 const PRESENCE_ERRORS_TO_RECONNECT: u32 = 5;
-/// Roster retry backoff: 3s, 6s, 12s, … capped.
+/// R164: presence can say PREGAME / INGAME a moment before the player
+/// endpoint answers, so the first [`ROSTER_RETRY_FLAT_TRIES`] retries come
+/// every [`ROSTER_RETRY_FLAT`]; after that the backoff is 3s, 6s, 12s, … capped.
+const ROSTER_RETRY_FLAT: Duration = Duration::from_secs(2);
+const ROSTER_RETRY_FLAT_TRIES: u32 = 5;
 const ROSTER_RETRY_BASE: Duration = Duration::from_secs(3);
 const ROSTER_RETRY_MAX: Duration = Duration::from_secs(30);
 /// After a match ends, Riot needs a moment to publish it: re-sync the party
-/// at these delays until the ended match has landed (R48: for competitive,
-/// its `comp_updates` row — RR/rank — not just its details).
-const POST_MATCH_DELAYS: [Duration; 2] = [Duration::from_secs(30), Duration::from_secs(90)];
+/// at about +10, +20, +40, +80 and +160 s (each gap is the delay since the
+/// previous check) until the ended match has landed (R48: for competitive,
+/// its `comp_updates` row — RR/rank — not just its details; R164). Each check
+/// is one DB lookup plus the existing re-sync, and the first success stops it.
+const POST_MATCH_DELAYS: [Duration; 5] = [
+    Duration::from_secs(10),
+    Duration::from_secs(10),
+    Duration::from_secs(20),
+    Duration::from_secs(40),
+    Duration::from_secs(80),
+];
+
+/// The wait before the next roster retry after `failures` failed fetches
+/// (the first one counts; `failures >= 1`).
+fn roster_retry_delay(failures: u32) -> Duration {
+    if failures <= ROSTER_RETRY_FLAT_TRIES {
+        return ROSTER_RETRY_FLAT;
+    }
+    ROSTER_RETRY_BASE
+        .saturating_mul(1 << (failures - ROSTER_RETRY_FLAT_TRIES - 1).min(4))
+        .min(ROSTER_RETRY_MAX)
+}
 
 /// Why the connected tick stopped.
 #[derive(Debug)]
@@ -118,6 +141,7 @@ pub(crate) struct Poller {
     pregame_loadouts_valid: bool,
     next_presence: Instant,
     next_pregame: Option<Instant>,
+    /// When the next roster retry is due and how many fetches failed so far.
     roster_retry: Option<(Instant, u32)>,
     post_match: Option<PostMatch>,
     /// The sync worker's task and the id its claim in `LiveModel` has.
@@ -360,10 +384,9 @@ impl Poller {
             if Instant::now() >= due {
                 self.roster_retry = None;
                 if !self.fetch_roster(session).await? {
-                    let delay = ROSTER_RETRY_BASE
-                        .saturating_mul(1 << attempt.min(4))
-                        .min(ROSTER_RETRY_MAX);
-                    self.roster_retry = Some((Instant::now() + delay, attempt + 1));
+                    let failures = attempt + 1;
+                    self.roster_retry =
+                        Some((Instant::now() + roster_retry_delay(failures), failures));
                 }
             }
         }
@@ -657,7 +680,7 @@ impl Poller {
     async fn fetch_or_retry(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
         if !self.fetch_roster(session).await? {
             self.show_self_only(session).await;
-            self.roster_retry = Some((Instant::now() + ROSTER_RETRY_BASE, 1));
+            self.roster_retry = Some((Instant::now() + roster_retry_delay(1), 1));
         }
         Ok(())
     }
@@ -833,7 +856,7 @@ impl Poller {
         }
     }
 
-    async fn fetch_ingame(
+    pub(crate) async fn fetch_ingame(
         &mut self,
         session: &Arc<RiotSession>,
         me: &str,
@@ -855,26 +878,29 @@ impl Poller {
             return self.fetch_party(session, me).await;
         }
         let roster = from_coregame(&m, me, &self.self_party);
-        let loadouts = match session.coregame_loadouts(&match_id).await {
-            Ok(resp) => Some(extract_loadouts(&resp)),
-            Err(RiotError::ClientGone) => return Err(RiotError::ClientGone),
-            Err(e) => {
-                log::warn!("loadouts failed: {e}");
-                None
-            }
-        };
         log::info!(
             "in game: {} players, match {}",
             roster.len(),
             short(&match_id)
         );
-        {
-            let mut live = lock(&self.st.live);
-            live.coregame_match_id = Some(match_id);
-            live.loadouts = loadouts.unwrap_or_default();
-        }
+        lock(&self.st.live).coregame_match_id = Some(match_id.clone());
+        // R164: the roster goes on screen (and the worker starts) first; the
+        // loadouts only feed Player Details, so a slow or failed answer never
+        // holds the ten cards back (as in Agent Select, R83).
         self.apply_roster(session, Stage::Ingame, Some(m.map_id), roster)
             .await;
+        match session.coregame_loadouts(&match_id).await {
+            Ok(resp) => {
+                let found = extract_loadouts(&resp);
+                if !found.is_empty() {
+                    lock(&self.st.live).loadouts.extend(found);
+                    // No card shows skins: an open Details is rebuilt.
+                    crate::details::refresh_open_after_live_change(&self.st).await;
+                }
+            }
+            Err(RiotError::ClientGone) => return Err(RiotError::ClientGone),
+            Err(e) => log::warn!("loadouts failed: {e}"),
+        }
         Ok(())
     }
 
@@ -1201,6 +1227,107 @@ mod tests {
         live.synced.insert(ME.into());
     }
 
+    // R164 (review finding 7): the roster retry is a flat ~2 s for the first
+    // five retries, then the old 3, 6, 12, 24, 30 s backoff.
+    #[test]
+    fn the_roster_retry_is_flat_at_first_then_backs_off() {
+        let secs: Vec<u64> = (1..=11)
+            .map(|failures| roster_retry_delay(failures).as_secs())
+            .collect();
+        assert_eq!(secs, [2, 2, 2, 2, 2, 3, 6, 12, 24, 30, 30]);
+        assert_eq!(roster_retry_delay(u32::MAX).as_secs(), 30, "never panics");
+    }
+
+    #[tokio::test]
+    async fn a_failed_first_roster_fetch_retries_in_about_two_seconds() {
+        // Presence says PREGAME, but the pregame player endpoint is not ready
+        // (this harness mounts none: 404).
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Pregame;
+        poller.fetch_or_retry(&h.session).await.unwrap();
+        let (due, failures) = poller.roster_retry.expect("a retry is scheduled");
+        assert_eq!(failures, 1);
+        let wait = due.saturating_duration_since(Instant::now());
+        assert!(
+            wait > Duration::from_millis(1_000) && wait <= Duration::from_secs(2),
+            "first retry in ~2 s, not {wait:?}"
+        );
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_failing_retry_reschedules_two_seconds_out_five_times() {
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Pregame;
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        poller.fetch_or_retry(&h.session).await.unwrap();
+        for expected in 2..=5 {
+            // Make the retry due and let the tick run it (still 404).
+            let (_, failures) = poller.roster_retry.unwrap();
+            poller.roster_retry = Some((Instant::now(), failures));
+            poller.connected_tick(&h.session).await.unwrap();
+            let (due, failures) = poller.roster_retry.expect("still retrying");
+            assert_eq!(failures, expected);
+            let wait = due.saturating_duration_since(Instant::now());
+            assert!(
+                wait > Duration::from_millis(1_000) && wait <= Duration::from_secs(2),
+                "retry {expected}: ~2 s, not {wait:?}"
+            );
+        }
+        // The sixth failure backs off to 3 s.
+        poller.roster_retry = Some((Instant::now(), 5));
+        poller.connected_tick(&h.session).await.unwrap();
+        let (due, failures) = poller.roster_retry.unwrap();
+        assert_eq!(failures, 6);
+        assert!(due.saturating_duration_since(Instant::now()) > Duration::from_millis(2_500));
+        poller.stop_worker();
+    }
+
+    // R164 (finding 6): the post-match rank check at about +10, +20, +40,
+    // +80 and +160 s after the match.
+    #[test]
+    fn the_post_match_checks_land_at_10_20_40_80_160_seconds() {
+        let mut at = 0;
+        let mut seen = Vec::new();
+        for gap in POST_MATCH_DELAYS {
+            at += gap.as_secs();
+            seen.push(at);
+        }
+        assert_eq!(seen, [10, 20, 40, 80, 160]);
+    }
+
+    #[tokio::test]
+    async fn the_post_match_check_reschedules_until_the_schedule_is_used_up() {
+        // The ended match never lands in this DB: each check re-syncs and
+        // schedules the next, five in all, then stops.
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        synced_lobby(&h);
+        poller.post_match = Some(PostMatch {
+            match_id: "m-ended".into(),
+            competitive: true,
+            due: Instant::now(),
+            attempt: 0,
+        });
+        let mut gaps = Vec::new();
+        for _ in 0..POST_MATCH_DELAYS.len() {
+            poller.post_match_check(&h.session).await;
+            poller.stop_worker();
+            if let Some(p) = &poller.post_match {
+                gaps.push(p.due.saturating_duration_since(Instant::now()).as_secs());
+            }
+        }
+        // The delay to each later check, rounded down: 10, 20, 40, 80.
+        assert_eq!(gaps.len(), 4);
+        for (gap, want) in gaps.iter().zip([9, 19, 39, 79]) {
+            assert!(*gap == want || *gap == want + 1, "gap {gap} vs {want}");
+        }
+        assert!(poller.post_match.is_none(), "the fifth check is the last");
+    }
+
     #[tokio::test]
     async fn a_deathmatch_pauses_the_backfill_run_until_it_ends() {
         // R137 with R41: a free-for-all keeps the Lobby view for the whole
@@ -1313,7 +1440,7 @@ mod tests {
     #[tokio::test]
     async fn a_quick_requeue_keeps_the_post_match_follow_up() {
         // R48: a competitive match ended and the Lobby sync ran before Riot
-        // published it. The user requeues before the 30 s check: the
+        // published it. The user requeues before the first check: the
         // follow-up must still re-sync the user's card — in Agent Select, and
         // still pending In Game — instead of being dropped.
         let h = harness().await;

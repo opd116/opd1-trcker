@@ -171,7 +171,7 @@ fn peak_across_seasons() {
     seasons.insert(v26a4.id.clone(), season_with_tier_win(22, 5));
     seasons.insert(v26a5.id.clone(), season_with_tier_win(15, 2));
 
-    let peak = peak(&seasons, &acts).expect("has a peak");
+    let peak = peak(&seasons, &acts, None).expect("has a peak");
     assert_eq!(
         peak,
         Peak {
@@ -193,7 +193,7 @@ fn peak_normalizes_pre_e5_tiers() {
     seasons.insert(e4a3.id.clone(), season_with_tier_win(21, 1));
     seasons.insert(e8a3.id.clone(), season_with_tier_win(22, 1));
 
-    let peak = peak(&seasons, &acts).expect("has a peak");
+    let peak = peak(&seasons, &acts, None).expect("has a peak");
     assert_eq!(peak.tier, 24);
     assert_eq!(peak.season_id, e4a3.id);
 }
@@ -206,7 +206,81 @@ fn peak_none_when_no_ranked_wins() {
     // Tier 2 is unranked/unused per ruling R6 — ignored even with wins.
     seasons.insert(e8a3.id.clone(), season_with_tier_win(2, 4));
 
-    assert_eq!(peak(&seasons, &acts), None);
+    assert_eq!(peak(&seasons, &acts, None), None);
+}
+
+// R164: Peak is never below the current rank. `current` is the MMR
+// snapshot's current tier and the current act's id.
+
+#[test]
+fn peak_is_raised_to_the_current_rank_after_a_promotion() {
+    let acts = load_acts();
+    let v26a4 = act_by_label(&acts, "V26 A4");
+    let v26a5 = act_by_label(&acts, "V26 A5");
+
+    let mut seasons: SeasonalMap = HashMap::new();
+    // Wins were only recorded at the tier below: the promotion game's win
+    // counts at the old tier.
+    seasons.insert(v26a4.id.clone(), season_with_tier_win(14, 5));
+    seasons.insert(v26a5.id.clone(), season_with_tier_win(14, 1));
+
+    let peak = peak(&seasons, &acts, Some((15, v26a5.id.as_str()))).expect("has a peak");
+    assert_eq!(
+        peak,
+        Peak {
+            tier: 15,
+            season_id: v26a5.id,
+        }
+    );
+}
+
+#[test]
+fn peak_is_the_current_rank_when_no_ranked_win_is_recorded() {
+    let acts = load_acts();
+    let v26a5 = act_by_label(&acts, "V26 A5");
+    let seasons: SeasonalMap = HashMap::new();
+
+    let peak = peak(&seasons, &acts, Some((9, v26a5.id.as_str()))).expect("has a peak");
+    assert_eq!(peak.tier, 9);
+    assert_eq!(peak.season_id, v26a5.id);
+}
+
+#[test]
+fn peak_tie_with_the_current_rank_goes_to_the_current_act() {
+    let acts = load_acts();
+    let v26a4 = act_by_label(&acts, "V26 A4");
+    let v26a5 = act_by_label(&acts, "V26 A5");
+
+    let mut seasons: SeasonalMap = HashMap::new();
+    seasons.insert(v26a4.id.clone(), season_with_tier_win(15, 2));
+
+    let peak = peak(&seasons, &acts, Some((15, v26a5.id.as_str()))).expect("has a peak");
+    assert_eq!(peak.tier, 15);
+    assert_eq!(peak.season_id, v26a5.id, "R7: the most recent act wins");
+}
+
+#[test]
+fn peak_keeps_a_higher_past_peak_over_the_current_rank() {
+    let acts = load_acts();
+    let v26a4 = act_by_label(&acts, "V26 A4");
+    let v26a5 = act_by_label(&acts, "V26 A5");
+
+    let mut seasons: SeasonalMap = HashMap::new();
+    seasons.insert(v26a4.id.clone(), season_with_tier_win(22, 2));
+
+    let peak = peak(&seasons, &acts, Some((15, v26a5.id.as_str()))).expect("has a peak");
+    assert_eq!(peak.tier, 22);
+    assert_eq!(peak.season_id, v26a4.id);
+}
+
+#[test]
+fn peak_floor_ignores_an_unranked_current_tier_and_an_unknown_act() {
+    let acts = load_acts();
+    let v26a5 = act_by_label(&acts, "V26 A5");
+    let seasons: SeasonalMap = HashMap::new();
+
+    assert_eq!(peak(&seasons, &acts, Some((2, v26a5.id.as_str()))), None);
+    assert_eq!(peak(&seasons, &acts, Some((15, "no-such-act"))), None);
 }
 
 // ---------------------------------------------------------------------

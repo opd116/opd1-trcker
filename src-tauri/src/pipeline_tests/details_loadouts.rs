@@ -1683,3 +1683,97 @@ async fn a_late_own_loadout_answer_never_lands_on_another_account() {
             .unwrap();
     assert!(kept.is_some());
 }
+
+// ---------------------------------------------------------------------
+// R164: the In Game roster is on screen before the loadouts answer
+// ---------------------------------------------------------------------
+
+/// `core-game` player + match `cg-1` with ME (Blue) and OTHER (Red).
+async fn mock_coregame_roster(server: &MockServer) {
+    let player = |puuid: &str, team: &str| {
+        json!({"Subject": puuid, "TeamID": team, "CharacterID": "agent",
+               "PlayerIdentity": {"Incognito": false, "HideAccountLevel": false,
+                                  "AccountLevel": 10, "PlayerCardID": "card"}})
+    };
+    get(
+        server,
+        &format!("/core-game/v1/players/{ME}"),
+        json!({"Subject": ME, "MatchID": "cg-1"}),
+    )
+    .await;
+    get(
+        server,
+        "/core-game/v1/matches/cg-1",
+        json!({"MapID": SPLIT_PATH, "Players": [player(ME, "Blue"), player(OTHER, "Red")]}),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn in_game_roster_is_published_before_the_loadouts_answer() {
+    let h = harness().await;
+    mock_coregame_roster(&h.server).await;
+    // A slow loadouts answer: it must not hold the roster back.
+    let capture: Value = serde_json::from_str(&riot_fixture("pregame_loadouts.json")).unwrap();
+    let vandal = crate::roster::VANDAL;
+    let items = json!({ vandal: capture["Loadouts"][0]["Items"][vandal].clone() });
+    Mock::given(method("GET"))
+        .and(path("/core-game/v1/matches/cg-1/loadouts"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"Loadouts": [{
+                    "CharacterID": "agent",
+                    "Loadout": {"Subject": OTHER, "Items": items}
+                }]}))
+                .set_delay(std::time::Duration::from_millis(1_500)),
+        )
+        .mount(&h.server)
+        .await;
+
+    let mut poller = Poller::new(h.st.clone());
+    let started = std::time::Instant::now();
+    let watcher = async {
+        loop {
+            if lock(&h.st.live).slots.len() == 2 {
+                return started.elapsed();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    let (res, on_screen) = tokio::join!(poller.fetch_ingame(&h.session, ME), watcher);
+    res.unwrap();
+
+    assert!(
+        on_screen < std::time::Duration::from_millis(1_000),
+        "the ten cards waited for the loadouts: {on_screen:?}"
+    );
+    // The loadouts still arrive, afterwards, and are merged.
+    let live = lock(&h.st.live);
+    assert_eq!(live.stage, Stage::Ingame);
+    assert_eq!(live.coregame_match_id.as_deref(), Some("cg-1"));
+    assert!(live.loadouts.contains_key(OTHER), "merged after the roster");
+    drop(live);
+    poller.stop_worker();
+}
+
+#[tokio::test]
+async fn a_failed_in_game_loadouts_request_leaves_the_roster_alone() {
+    let h = harness().await;
+    mock_coregame_roster(&h.server).await;
+    Mock::given(method("GET"))
+        .and(path("/core-game/v1/matches/cg-1/loadouts"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&h.server)
+        .await;
+
+    let mut poller = Poller::new(h.st.clone());
+    poller
+        .fetch_ingame(&h.session, ME)
+        .await
+        .expect("a loadouts failure is not a roster failure");
+    let live = lock(&h.st.live);
+    assert_eq!(live.slots.len(), 2);
+    assert!(live.loadouts.is_empty());
+    drop(live);
+    poller.stop_worker();
+}

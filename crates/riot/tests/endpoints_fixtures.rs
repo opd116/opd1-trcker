@@ -156,7 +156,7 @@ fn mmr_deserializes() {
         .get("3e47230a-463c-a301-eb7d-67bb60357d4f")
         .unwrap();
     assert_eq!(season.competitive_tier, 15);
-    assert_eq!(season.ranked_rating, 42);
+    assert_eq!(season.ranked_rating, Some(42));
     assert_eq!(season.number_of_wins, 34);
     let wins_by_tier = season.wins_by_tier.as_ref().unwrap();
     assert_eq!(wins_by_tier.get("15"), Some(&20));

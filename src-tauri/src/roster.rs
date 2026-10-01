@@ -364,11 +364,11 @@ pub fn from_coregame(
     resp.players
         .iter()
         .map(|p| {
-            let team = if Some(p.team_id.as_str()) == self_team {
-                Team::Ally
-            } else {
-                Team::Enemy
-            };
+            // A missing `TeamID` decodes as "" (R166): that is no team, so
+            // only the user themselves is placed by it.
+            let same_team = p.subject == self_puuid
+                || (!p.team_id.is_empty() && Some(p.team_id.as_str()) == self_team);
+            let team = if same_team { Team::Ally } else { Team::Enemy };
             // Core-game answers carry no current tier (R161): `live_tier`
             // stays `None` until `fill_tiers`.
             RosterPlayer::from_identity(
@@ -735,6 +735,33 @@ mod tests {
             ]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn core_game_players_without_a_team_id_are_never_allies_of_each_other() {
+        // R166: a missing `TeamID` decodes as "". Two players with no team id
+        // are not teammates, and the user is always on their own side.
+        let resp: CoreGameMatchResponse = serde_json::from_value(json!({
+            "MapID": "/Game/Maps/Ascent/Ascent",
+            "Players": [
+                {"Subject": "me", "PlayerIdentity": identity(false)},
+                {"Subject": "x", "TeamID": null, "PlayerIdentity": identity(false)},
+                {"Subject": "y", "TeamID": "Red", "PlayerIdentity": identity(false)}
+            ]
+        }))
+        .unwrap();
+        let teams: Vec<(String, Team)> = from_coregame(&resp, "me", &HashSet::new())
+            .into_iter()
+            .map(|p| (p.puuid, p.team))
+            .collect();
+        assert_eq!(
+            teams,
+            [
+                ("me".to_string(), Team::Ally),
+                ("x".to_string(), Team::Enemy),
+                ("y".to_string(), Team::Enemy)
+            ]
+        );
     }
 
     fn roster_player(puuid: &str, hide_account_level: bool, account_level: u32) -> RosterPlayer {

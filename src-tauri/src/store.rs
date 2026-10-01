@@ -584,7 +584,7 @@ mod tests {
         assert!(!text.contains("CapstoneWins"));
         let back = parse_mmr_snapshot(&text).unwrap();
         let s = &back.queue_skills["competitive"].seasonal_info_by_season_id["act-1"];
-        assert_eq!((s.competitive_tier, s.ranked_rating), (15, 42));
+        assert_eq!((s.competitive_tier, s.ranked_rating), (15, Some(42)));
         assert_eq!((s.number_of_wins, s.number_of_games), (6, 10));
         assert_eq!(s.wins_by_tier.as_ref().unwrap()["15"], 4);
     }

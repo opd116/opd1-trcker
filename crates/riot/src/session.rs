@@ -1,6 +1,7 @@
 //! The Riot local-client session: lockfile -> local auth -> entitlements
-//! -> remote (pd/glz) headers, with auto re-auth on 401/403 and a
-//! `ClientGone` signal the moment the lockfile disappears or changes.
+//! -> remote (pd/glz) headers, with a token refresh (R166: before a call when
+//! the cached one is ~50 minutes old, and once per call on 401/403 or a 400
+//! `BAD_CLAIMS`) and a `ClientGone` signal the moment the lockfile disappears or changes.
 //!
 //! All HTTP goes through two private choke points — [`RiotSession::call_local`]
 //! and [`RiotSession::call_remote`] — which is also where Task 5's
@@ -10,7 +11,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -47,6 +48,17 @@ const MAX_RATE_LIMIT_RETRIES: u32 = 2;
 /// growing by this much on each successive retry — matches Scout's
 /// `pd_get` backoff (`backoff = 3.0; backoff += 3.0`).
 const FALLBACK_BACKOFF_SECS: f64 = 3.0;
+
+/// R166: Riot's access token lasts about an hour; a call that finds the cached
+/// one older than this fetches a fresh one from the local client first (cheap,
+/// local), so the first call after a long session is not the one that learns
+/// the token expired.
+const TOKEN_MAX_AGE: Duration = Duration::from_secs(50 * 60);
+
+/// After a proactive refresh fails, the next proactive try waits this long
+/// (the call itself goes on with the cached token), so a broken local endpoint
+/// is not asked by every call in turn.
+const PROACTIVE_RETRY_PAUSE: Duration = Duration::from_secs(60);
 
 /// R160: the longest an `other`-family call waits in the call for a hold, or
 /// for a 429's `Retry-After` before retrying. A hold with more left makes the
@@ -115,8 +127,8 @@ pub enum RiotError {
     /// A network-level failure (couldn't send the request / read the
     /// response body).
     Http(String),
-    /// A non-2xx HTTP response (other than 401/403, which trigger a
-    /// re-auth, and 429, which triggers a throttled retry): the status and a
+    /// A non-2xx HTTP response (other than a rejected token, which triggers
+    /// one re-auth, and 429, which triggers a throttled retry): the status and a
     /// short log-safe excerpt of Riot's answer (R158: its `errorCode`) —
     /// redacted, on one line, every full puuid shortened, at most
     /// [`LOG_EXCERPT_CHARS`] characters; empty when the body was.
@@ -174,6 +186,14 @@ struct AuthState {
     client_version: String,
     /// Where `client_version` came from (logged once per session, R158).
     client_version_source: VersionSource,
+    /// Bumped on every token refresh (R166): a call that was rejected says
+    /// which generation it used, so only the first of several rejected callers
+    /// refreshes and the others just retry with the new token.
+    generation: u64,
+    /// When the cached token was fetched.
+    fetched_at: Instant,
+    /// The earliest the next *proactive* refresh may be tried after one failed.
+    proactive_retry_at: Instant,
 }
 
 /// Where the `X-Riot-ClientVersion` a session sends came from (R158): logged
@@ -244,6 +264,11 @@ pub struct RiotSession {
     /// The longest an `other` call waits in the call for a hold or a
     /// `Retry-After` ([`OTHER_MAX_WAIT`]; a test can shorten it).
     other_max_wait: Duration,
+    /// Held while the token is refreshed, so there is one refresh at a time
+    /// (R166).
+    refresh_gate: tokio::sync::Mutex<()>,
+    /// How old the cached token may get before a call refreshes it first.
+    token_max_age: Duration,
     /// The last response body seen at each of `call_local`/`call_remote`,
     /// for Task 5b's `dump_raw()` (via [`RiotSession::raw_captures`]). See
     /// `raw_capture.rs`'s module docs for what is/isn't captured.
@@ -308,6 +333,9 @@ pub struct ConnectOverrides {
     pub valorant_api_base: Option<String>,
     pub local_timeout: Option<Duration>,
     pub remote_timeout: Option<Duration>,
+    /// How old the cached token may get before the next call refreshes it
+    /// first ([`TOKEN_MAX_AGE`]).
+    pub token_max_age: Option<Duration>,
 }
 
 impl RiotSession {
@@ -344,6 +372,7 @@ impl RiotSession {
             valorant_api_base: valorant_api_base_override,
             local_timeout,
             remote_timeout,
+            token_max_age,
         } = overrides;
         let local_timeout = local_timeout.unwrap_or(LOCAL_TIMEOUT);
         let remote_timeout = remote_timeout.unwrap_or(REMOTE_TIMEOUT);
@@ -440,11 +469,16 @@ impl RiotSession {
                 entitlements_jwt: entitlements.token,
                 client_version,
                 client_version_source,
+                generation: 0,
+                fetched_at: Instant::now(),
+                proactive_retry_at: Instant::now(),
             }),
             global_throttle: Throttle::new(GLOBAL_BURST, GLOBAL_RPS),
             mmr_throttle: Throttle::new(MMR_BURST, MMR_RPS),
             other_hold: Hold::new(),
             other_max_wait: OTHER_MAX_WAIT,
+            refresh_gate: tokio::sync::Mutex::new(()),
+            token_max_age: token_max_age.unwrap_or(TOKEN_MAX_AGE),
             raw_captures: RawCaptures::new(),
         })
     }
@@ -554,7 +588,8 @@ impl RiotSession {
     /// `/mmr/` paths, additionally throttled by the mmr bucket). Retries
     /// once on 401/403 (re-authenticating first) and up to
     /// [`MAX_RATE_LIMIT_RETRIES`] times on 429 (`/mmr/` paths: never in-call,
-    /// see [`remote`](Self::remote)).
+    /// see [`remote`](Self::remote)). A 400 `BAD_CLAIMS` (expired token) is
+    /// retried the same way as a 401/403 (R166).
     pub async fn pd<T: DeserializeOwned>(&self, path: &str) -> Result<T, RiotError> {
         self.remote(RemoteKind::Pd, Method::GET, path, None).await
     }
@@ -645,19 +680,20 @@ impl RiotSession {
         method: Method,
         path: &str,
         body: Option<&Value>,
-    ) -> Result<CapturedResponse, RiotError> {
+    ) -> Result<(CapturedResponse, u64), RiotError> {
         let base = match kind {
             RemoteKind::Pd => &self.pd_base,
             RemoteKind::Glz => &self.glz_base,
             RemoteKind::Shared => &self.shared_base,
         };
         let url = format!("{base}{path}");
-        let (access_token, entitlements_jwt, client_version) = {
+        let (access_token, entitlements_jwt, client_version, generation) = {
             let auth = self.auth.lock().unwrap();
             (
                 auth.access_token.clone(),
                 auth.entitlements_jwt.clone(),
                 auth.client_version.clone(),
+                auth.generation,
             )
         };
         let mut req = self
@@ -682,10 +718,12 @@ impl RiotSession {
             self.raw_captures
                 .record_error(path, captured.status.as_u16(), &captured.body);
         }
-        Ok(captured)
+        Ok((captured, generation))
     }
 
-    /// Throttled pd/glz call with 401/403 re-auth (once) and 429 handling.
+    /// Throttled pd/glz call with a token refresh (R166: proactive when the
+    /// cached token is old, reactive once on 401/403/400 `BAD_CLAIMS`) and 429
+    /// handling.
     ///
     /// R160, two request families like Scout's: `mmr` (a pd path starting
     /// `/mmr/`) and `other`. The token bucket (rate) is shared — an `/mmr/`
@@ -710,6 +748,7 @@ impl RiotSession {
         body: Option<&Value>,
     ) -> Result<T, RiotError> {
         self.check_alive()?;
+        self.refresh_if_stale().await?;
         let is_mmr = matches!(kind, RemoteKind::Pd) && path.starts_with("/mmr/");
         let mut backoff = FALLBACK_BACKOFF_SECS;
         let mut reauthed = false;
@@ -729,12 +768,22 @@ impl RiotSession {
             }
             self.global_throttle.take().await;
 
-            let resp = self.call_remote(&kind, method.clone(), path, body).await?;
+            let (resp, generation) = self.call_remote(&kind, method.clone(), path, body).await?;
+            // R166: an expired or rejected token is re-fetched once per call:
+            // 401/403 as before, and Riot's 400 `BAD_CLAIMS` (what it answers
+            // an expired RSO access token with). Never a loop: a second
+            // rejection of the new token is the answer.
+            if !reauthed && token_rejected(&resp) {
+                reauthed = true;
+                log::info!(
+                    "{} on {}: fetching a fresh token",
+                    resp.status.as_u16(),
+                    shorten_uuids(path.split('?').next().unwrap_or(path))
+                );
+                self.refresh_entitlements_after(generation).await?;
+                continue;
+            }
             match resp.status {
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN if !reauthed => {
-                    reauthed = true;
-                    self.refresh_entitlements().await?;
-                }
                 StatusCode::TOO_MANY_REQUESTS => {
                     let retry_after = retry_after_seconds(&resp.headers).unwrap_or(backoff);
                     let (family, left) = if is_mmr {
@@ -761,16 +810,70 @@ impl RiotSession {
         }
     }
 
-    /// Re-fetches the entitlements token (used on a 401/403) and updates
-    /// the cached headers. `self_puuid()` never changes — same account.
-    async fn refresh_entitlements(&self) -> Result<(), RiotError> {
+    /// Fetches a fresh token before a call when the cached one is older than
+    /// the limit (R166). The refresh is best effort: if the local client does
+    /// not answer, the call goes on with the cached token (which may well still
+    /// work) and the next proactive try waits a minute. Only a client that is
+    /// gone is an error.
+    async fn refresh_if_stale(&self) -> Result<(), RiotError> {
+        let (generation, due) = {
+            let auth = self.auth.lock().unwrap();
+            let now = Instant::now();
+            (
+                auth.generation,
+                now.duration_since(auth.fetched_at) >= self.token_max_age
+                    && now >= auth.proactive_retry_at,
+            )
+        };
+        if !due {
+            return Ok(());
+        }
+        match self.refresh_entitlements_after(generation).await {
+            Ok(()) => Ok(()),
+            Err(RiotError::ClientGone) => Err(RiotError::ClientGone),
+            Err(e) => {
+                log::warn!("fresh token not fetched ({e}); going on with the cached one");
+                self.auth.lock().unwrap().proactive_retry_at =
+                    Instant::now() + PROACTIVE_RETRY_PAUSE;
+                Ok(())
+            }
+        }
+    }
+
+    /// Re-fetches the entitlements token from the local client and updates the
+    /// cached headers (`self_puuid()` never changes: same account) — unless
+    /// another caller already did since `seen_generation` was read: one refresh
+    /// at a time, and a burst of rejected calls costs one fetch (R166).
+    async fn refresh_entitlements_after(&self, seen_generation: u64) -> Result<(), RiotError> {
+        let _one_at_a_time = self.refresh_gate.lock().await;
+        if self.auth.lock().unwrap().generation != seen_generation {
+            return Ok(());
+        }
         self.check_alive()?;
         let entitlements =
             fetch_entitlements(&self.local_client, &self.local_base, &self.basic_auth).await?;
         let mut auth = self.auth.lock().unwrap();
         auth.access_token = entitlements.access_token;
         auth.entitlements_jwt = entitlements.token;
+        auth.generation += 1;
+        auth.fetched_at = Instant::now();
         Ok(())
+    }
+}
+
+/// Whether Riot refused the call because of the token, so that a fresh one is
+/// worth a retry: 401, 403, or 400 with `errorCode: "BAD_CLAIMS"` (how Riot
+/// answers an expired RSO access token). Any other 400 is the caller's bug.
+fn token_rejected(resp: &CapturedResponse) -> bool {
+    match resp.status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => true,
+        StatusCode::BAD_REQUEST => {
+            serde_json::from_slice::<Value>(&resp.body)
+                .ok()
+                .and_then(|v| v.get("errorCode")?.as_str().map(|c| c == "BAD_CLAIMS"))
+                == Some(true)
+        }
+        _ => false,
     }
 }
 

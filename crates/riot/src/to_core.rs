@@ -117,9 +117,12 @@ pub fn current_rank_from_mmr(resp: &PlayerMmrResponse, season_id: &str) -> Optio
     if tier < UNRANKED_BELOW {
         return None;
     }
+    // A `RankedRating` Riot left out is no rank from here, never "0 RR" (R166):
+    // the stored competitive updates answer instead (R154).
+    let rr = info.ranked_rating?;
     Some(CurrentRank {
         tier,
-        rr: clamp_u16(info.ranked_rating),
+        rr: clamp_u16(rr),
     })
 }
 
@@ -129,8 +132,10 @@ pub fn current_rank_from_mmr(resp: &PlayerMmrResponse, season_id: &str) -> Optio
 
 /// `mmr/v1/players/{puuid}/competitiveupdates` -> one
 /// `opd1_core::db::repo::CompUpdateRow` per match, same order as Riot
-/// returned them. `tier_before` is always `Some` here (ruling R29) — Riot
-/// always sends `TierBeforeUpdate` on this endpoint.
+/// returned them. `tier_before` is `Some` whenever Riot sent
+/// `TierBeforeUpdate` (ruling R29: it always does); a row without it is kept
+/// with `None` (R166). A row Riot sent without its id, start time, tier or RR
+/// never gets here: the response drops it while decoding.
 pub fn comp_update_rows_from_response(resp: &CompetitiveUpdatesResponse) -> Vec<CompUpdateRow> {
     resp.matches
         .iter()
@@ -138,7 +143,7 @@ pub fn comp_update_rows_from_response(resp: &CompetitiveUpdatesResponse) -> Vec<
             match_id: m.match_id.clone(),
             season_id: m.season_id.clone(),
             tier_after: m.tier_after_update,
-            tier_before: Some(m.tier_before_update),
+            tier_before: m.tier_before_update,
             rr_after: m.ranked_rating_after_update,
             rr_earned: m.ranked_rating_earned,
             map_id: non_empty(&m.map_id),

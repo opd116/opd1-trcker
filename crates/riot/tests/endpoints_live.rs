@@ -321,3 +321,156 @@ async fn content_error_status_is_an_error() {
         .await;
     assert!(session.content().await.is_err());
 }
+
+// ---------------------------------------------------------------------
+// name-service resilience and tolerance (R166)
+// ---------------------------------------------------------------------
+
+fn one_visible() -> Vec<VisiblePuuid> {
+    vec![VisiblePuuid::new(OTHER_PUUID.to_string(), false).unwrap()]
+}
+
+async fn names_puts(server: &MockServer) -> Vec<serde_json::Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method.as_str() == "PUT" && r.url.path() == "/name-service/v2/players")
+        .map(|r| serde_json::from_slice(&r.body).unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn names_retries_once_after_a_5xx_with_the_same_body() {
+    let (_tmp, server, session) = setup().await;
+    Mock::given(method("PUT"))
+        .and(path("/name-service/v2/players"))
+        .respond_with(ResponseTemplate::new(503))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/name-service/v2/players"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "Subject": OTHER_PUUID, "GameName": "Rival", "TagLine": "ENEMY" },
+        ])))
+        .mount(&server)
+        .await;
+
+    let result = session
+        .names(&one_visible())
+        .await
+        .expect("second try answers");
+    assert_eq!(result[0].game_name, "Rival");
+    let sent = names_puts(&server).await;
+    assert_eq!(sent.len(), 2);
+    assert_eq!(sent[0], sent[1], "the same ids both times");
+    assert_eq!(sent[0], json!([OTHER_PUUID]));
+}
+
+#[tokio::test]
+async fn names_gives_up_after_the_second_5xx() {
+    let (_tmp, server, session) = setup().await;
+    Mock::given(method("PUT"))
+        .and(path("/name-service/v2/players"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+
+    let err = session.names(&one_visible()).await.unwrap_err();
+    assert!(
+        matches!(err, opd1_riot::session::RiotError::Status(500, _)),
+        "{err:?}"
+    );
+    assert_eq!(names_puts(&server).await.len(), 2, "one retry, no more");
+}
+
+#[tokio::test]
+async fn names_does_not_retry_a_client_error() {
+    let (_tmp, server, session) = setup().await;
+    Mock::given(method("PUT"))
+        .and(path("/name-service/v2/players"))
+        .respond_with(ResponseTemplate::new(404))
+        .mount(&server)
+        .await;
+
+    assert!(session.names(&one_visible()).await.is_err());
+    assert_eq!(names_puts(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn names_retries_once_after_a_transport_failure() {
+    // The first answer comes after the (shortened) remote timeout: a
+    // transport-level error, retried; the second is fast.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    let base = server.uri();
+    let session = opd1_riot::session::RiotSession::connect_with_overrides(
+        tmp.path(),
+        opd1_riot::session::ConnectOverrides {
+            pd_base: Some(base.clone()),
+            glz_base: Some(base.clone()),
+            valorant_api_base: Some(base),
+            remote_timeout: Some(std::time::Duration::from_millis(300)),
+            ..Default::default()
+        },
+    )
+    .await
+    .unwrap();
+    Mock::given(method("PUT"))
+        .and(path("/name-service/v2/players"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!([]))
+                .set_delay(std::time::Duration::from_secs(2)),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path("/name-service/v2/players"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            { "Subject": OTHER_PUUID, "GameName": "Rival", "TagLine": "ENEMY" },
+        ])))
+        .mount(&server)
+        .await;
+
+    let result = session.names(&one_visible()).await.expect("retried");
+    assert_eq!(result.len(), 1);
+    assert_eq!(names_puts(&server).await.len(), 2);
+}
+
+#[tokio::test]
+async fn names_decoding_is_tolerant() {
+    let (_tmp, server, session) = setup().await;
+    let answer = |body: serde_json::Value| async {
+        server.reset().await;
+        mount_entitlements(&server, SELF_PUUID).await;
+        Mock::given(method("PUT"))
+            .and(path("/name-service/v2/players"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(&server)
+            .await;
+        session.names(&one_visible()).await.unwrap()
+    };
+    // Not a list (null, an object): no names.
+    assert!(answer(serde_json::Value::Null).await.is_empty());
+    assert!(answer(json!({"errorCode": "X"})).await.is_empty());
+    // An entry without a Subject is skipped; a missing or null name is "".
+    let result = answer(json!([
+        { "GameName": "NoId", "TagLine": "X" },
+        { "Subject": OTHER_PUUID, "GameName": null },
+        { "Subject": SELF_PUUID },
+    ]))
+    .await;
+    assert_eq!(result.len(), 2);
+    assert_eq!(
+        (result[0].game_name.as_str(), result[0].tag_line.as_str()),
+        ("", "")
+    );
+    assert_eq!(result[1].subject, SELF_PUUID);
+}

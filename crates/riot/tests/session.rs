@@ -451,6 +451,7 @@ async fn session_local_call_times_out_when_server_never_responds() {
             valorant_api_base: Some(base),
             local_timeout: Some(Duration::from_millis(100)),
             remote_timeout: None,
+            ..Default::default()
         },
     )
     .await
@@ -499,6 +500,7 @@ async fn session_remote_call_times_out_when_server_never_responds() {
             valorant_api_base: Some(base),
             local_timeout: None,
             remote_timeout: Some(Duration::from_millis(100)),
+            ..Default::default()
         },
     )
     .await
@@ -549,6 +551,7 @@ async fn a_network_error_never_carries_the_url() {
             valorant_api_base: Some(base),
             local_timeout: Some(Duration::from_millis(100)),
             remote_timeout: Some(Duration::from_millis(100)),
+            ..Default::default()
         },
     )
     .await
@@ -1339,4 +1342,272 @@ async fn a_gzip_error_body_is_decoded_for_the_excerpt() {
         .unwrap_err()
         .to_string();
     assert!(msg.contains("GZIPPED_ERROR"), "{msg}");
+}
+
+// ---------------------------------------------------------------------
+// token refresh (R166)
+// ---------------------------------------------------------------------
+
+/// A mock "Riot" whose entitlements answer `access-token-1` once (the connect)
+/// and `access-token-2` from then on, and whose `/mmr` path answers 200 only to
+/// `Bearer access-token-2` and `bad` to anything else.
+async fn token_server(bad: ResponseTemplate) -> (TempDir, MockServer) {
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    for (token, once) in [("access-token-1", true), ("access-token-2", false)] {
+        let m = Mock::given(method("GET"))
+            .and(path("/entitlements/v1/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "accessToken": token, "entitlements": [], "issuer": "i",
+                "subject": SELF_PUUID, "token": format!("jwt-for-{token}"),
+            })));
+        if once {
+            m.up_to_n_times(1).mount(&server).await;
+        } else {
+            m.mount(&server).await;
+        }
+    }
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .and(header("Authorization", "Bearer access-token-2"))
+        .and(header("X-Riot-Entitlements-JWT", "jwt-for-access-token-2"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"Subject": SELF_PUUID})))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(bad)
+        .mount(&server)
+        .await;
+    (tmp, server)
+}
+
+async fn connect_with_age(
+    tmp: &TempDir,
+    server: &MockServer,
+    token_max_age: Option<Duration>,
+) -> RiotSession {
+    let base = server.uri();
+    RiotSession::connect_with_overrides(
+        tmp.path(),
+        ConnectOverrides {
+            pd_base: Some(base.clone()),
+            glz_base: Some(base.clone()),
+            valorant_api_base: Some(base),
+            token_max_age,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("connect")
+}
+
+async fn count(server: &MockServer, p: &str) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == p)
+        .count()
+}
+
+fn bad_claims() -> ResponseTemplate {
+    ResponseTemplate::new(400).set_body_json(json!({
+        "httpStatus": 400, "errorCode": "BAD_CLAIMS",
+        "message": "Failure validating/decoding RSO Access Token"
+    }))
+}
+
+#[tokio::test]
+async fn a_400_bad_claims_refreshes_the_token_and_retries_once() {
+    let (tmp, server) = token_server(bad_claims()).await;
+    let session = connect_with_age(&tmp, &server, None).await;
+
+    let result: Value = session
+        .pd(&mmr_path())
+        .await
+        .expect("retried with the new token");
+    assert_eq!(result["Subject"], SELF_PUUID);
+    assert_eq!(
+        count(&server, "/entitlements/v1/token").await,
+        2,
+        "connect + one refresh"
+    );
+    assert_eq!(
+        count(&server, &mmr_path()).await,
+        2,
+        "the call and its one retry"
+    );
+}
+
+#[tokio::test]
+async fn a_401_and_a_403_refresh_the_token_too() {
+    for status in [401u16, 403] {
+        let (tmp, server) = token_server(ResponseTemplate::new(status)).await;
+        let session = connect_with_age(&tmp, &server, None).await;
+        let result: Value = session.pd(&mmr_path()).await.expect("retried");
+        assert_eq!(result["Subject"], SELF_PUUID, "{status}");
+        assert_eq!(
+            count(&server, "/entitlements/v1/token").await,
+            2,
+            "{status}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_400_with_another_error_code_or_none_is_not_a_token_problem() {
+    for bad in [
+        ResponseTemplate::new(400).set_body_json(json!({"errorCode": "BAD_REQUEST"})),
+        ResponseTemplate::new(400),
+        ResponseTemplate::new(400).set_body_string("not json BAD_CLAIMS"),
+    ] {
+        let (tmp, server) = token_server(bad).await;
+        let session = connect_with_age(&tmp, &server, None).await;
+        let err = session.pd::<Value>(&mmr_path()).await.unwrap_err();
+        assert!(matches!(err, RiotError::Status(400, _)), "{err:?}");
+        assert_eq!(
+            count(&server, "/entitlements/v1/token").await,
+            1,
+            "no refresh"
+        );
+        assert_eq!(count(&server, &mmr_path()).await, 1, "no retry");
+    }
+}
+
+#[tokio::test]
+async fn a_token_that_stays_rejected_is_refreshed_once_per_call_not_in_a_loop() {
+    // The server rejects even the new token (a different problem): one refresh,
+    // one retry, then the error.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(bad_claims())
+        .mount(&server)
+        .await;
+    let session = connect_with_age(&tmp, &server, None).await;
+
+    let err = session.pd::<Value>(&mmr_path()).await.unwrap_err();
+    assert!(matches!(err, RiotError::Status(400, _)), "{err:?}");
+    assert_eq!(count(&server, "/entitlements/v1/token").await, 2);
+    assert_eq!(count(&server, &mmr_path()).await, 2);
+}
+
+#[tokio::test]
+async fn a_token_older_than_the_limit_is_refreshed_before_the_call() {
+    let (tmp, server) = token_server(bad_claims()).await;
+    let session = connect_with_age(&tmp, &server, Some(Duration::from_millis(200))).await;
+
+    // The mock rejects token 1, so an answer proves the new one was in place
+    // before the first request left.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let result: Value = session.pd(&mmr_path()).await.expect("answered");
+    assert_eq!(result["Subject"], SELF_PUUID);
+    assert_eq!(
+        count(&server, "/entitlements/v1/token").await,
+        2,
+        "one refresh"
+    );
+    assert_eq!(
+        count(&server, &mmr_path()).await,
+        1,
+        "refreshed before the call: the call itself never failed"
+    );
+
+    // And a call right after does not refresh again.
+    let _: Value = session.pd(&mmr_path()).await.unwrap();
+    assert_eq!(count(&server, "/entitlements/v1/token").await, 2);
+}
+
+#[tokio::test]
+async fn a_failing_proactive_refresh_goes_on_with_the_cached_token() {
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "access-token-1", "entitlements": [], "issuer": "i",
+            "subject": SELF_PUUID, "token": "jwt-1",
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"Subject": SELF_PUUID})))
+        .mount(&server)
+        .await;
+    let session = connect_with_age(&tmp, &server, Some(Duration::from_millis(100))).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    for _ in 0..3 {
+        let result: Value = session
+            .pd(&mmr_path())
+            .await
+            .expect("the old token still works");
+        assert_eq!(result["Subject"], SELF_PUUID);
+    }
+    assert_eq!(
+        count(&server, "/entitlements/v1/token").await,
+        2,
+        "connect + one failed attempt; the next try waits"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_calls_share_one_refresh() {
+    // Reactive: eight calls all hit the expired token at once.
+    let (tmp, server) = token_server(bad_claims()).await;
+    let session = connect_with_age(&tmp, &server, None).await;
+    for result in fan_out(session, 8).await {
+        assert_eq!(result.expect("answered")["Subject"], SELF_PUUID);
+    }
+    assert_eq!(
+        count(&server, "/entitlements/v1/token").await,
+        2,
+        "connect + exactly one shared refresh"
+    );
+
+    // Proactive: eight calls find the token too old at once.
+    let (tmp, server) = token_server(bad_claims()).await;
+    let session = connect_with_age(&tmp, &server, Some(Duration::from_millis(100))).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    for result in fan_out(session, 8).await {
+        assert_eq!(result.expect("answered")["Subject"], SELF_PUUID);
+    }
+    assert_eq!(count(&server, "/entitlements/v1/token").await, 2);
+    assert_eq!(
+        count(&server, &mmr_path()).await,
+        8,
+        "no call needed a retry"
+    );
+}
+
+/// `n` overlapping calls of the `/mmr` path on one session.
+async fn fan_out(session: RiotSession, n: usize) -> Vec<Result<Value, RiotError>> {
+    let session = std::sync::Arc::new(session);
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..n {
+        let session = session.clone();
+        set.spawn(async move { session.pd::<Value>(&mmr_path()).await });
+    }
+    let mut out = Vec::new();
+    while let Some(done) = set.join_next().await {
+        out.push(done.unwrap());
+    }
+    out
 }

@@ -41,9 +41,10 @@ use opd1_riot::{RiotError, RiotSession};
 
 use crate::logbuf::short;
 use crate::roster::{
-    connect_retry_delay, extract_loadouts, extract_pregame_loadouts, from_coregame, from_party,
-    from_pregame, is_ffa_roster, order_players, party_key, plan_transition, view_stage,
-    want_pregame_loadouts, GameVerdict, GameWatch, PartyKey, RosterFetch, RosterPlayer,
+    connect_retry_delay, extract_loadouts, extract_pregame_loadouts, fill_tiers, from_coregame,
+    from_party, from_pregame, is_ffa_roster, order_players, party_key, plan_transition,
+    pregame_tiers, view_stage, want_pregame_loadouts, GameVerdict, GameWatch, PartyKey,
+    RosterFetch, RosterPlayer,
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
 use crate::store::{
@@ -60,13 +61,41 @@ const PREGAME_REPOLL: Duration = Duration::from_secs(3);
 /// Consecutive presence failures (other than ClientGone) before the
 /// session is dropped and rebuilt.
 const PRESENCE_ERRORS_TO_RECONNECT: u32 = 5;
-/// Roster retry backoff: 3s, 6s, 12s, … capped.
+/// R164: presence can say PREGAME / INGAME a moment before the player
+/// endpoint answers, so the first [`ROSTER_RETRY_FLAT_TRIES`] retries come
+/// every [`ROSTER_RETRY_FLAT`]; after that the backoff is 3s, 6s, 12s, … capped.
+const ROSTER_RETRY_FLAT: Duration = Duration::from_secs(2);
+const ROSTER_RETRY_FLAT_TRIES: u32 = 5;
 const ROSTER_RETRY_BASE: Duration = Duration::from_secs(3);
 const ROSTER_RETRY_MAX: Duration = Duration::from_secs(30);
 /// After a match ends, Riot needs a moment to publish it: re-sync the party
-/// at these delays until the ended match has landed (R48: for competitive,
-/// its `comp_updates` row — RR/rank — not just its details).
-const POST_MATCH_DELAYS: [Duration; 2] = [Duration::from_secs(30), Duration::from_secs(90)];
+/// at about +10, +20, +40, +80 and +160 s (each gap is the delay since the
+/// previous check) until the ended match has landed (R48: for competitive,
+/// its `comp_updates` row — RR/rank — not just its details; R164). Each check
+/// is one DB lookup plus the existing re-sync, and the first success stops it.
+const POST_MATCH_DELAYS: [Duration; 5] = [
+    Duration::from_secs(10),
+    Duration::from_secs(10),
+    Duration::from_secs(20),
+    Duration::from_secs(40),
+    Duration::from_secs(80),
+];
+
+/// R164: the In Game loadouts only feed Player Details, and the poll loop
+/// awaits them inline after the roster is on screen, so a call stuck in a
+/// throttle hold or a slow answer is cut off after this long (log and skip).
+const INGAME_LOADOUTS_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The wait before the next roster retry after `failures` failed fetches
+/// (the first one counts; `failures >= 1`).
+fn roster_retry_delay(failures: u32) -> Duration {
+    if failures <= ROSTER_RETRY_FLAT_TRIES {
+        return ROSTER_RETRY_FLAT;
+    }
+    ROSTER_RETRY_BASE
+        .saturating_mul(1 << (failures - ROSTER_RETRY_FLAT_TRIES - 1).min(4))
+        .min(ROSTER_RETRY_MAX)
+}
 
 /// Why the connected tick stopped.
 #[derive(Debug)]
@@ -102,6 +131,8 @@ pub(crate) struct Poller {
     /// The user's own loadout was asked for under this session (R90: once
     /// per connect, at the first presence that shows VALORANT running).
     self_loadout_asked: bool,
+    /// R162: the content-service was asked for this session.
+    content_asked: bool,
     /// The client version came from the user's VALORANT presence under this
     /// session (R159: re-resolved at the first presence that has one, once per
     /// connect — no extra request).
@@ -116,8 +147,12 @@ pub(crate) struct Poller {
     /// Riot answered `LoadoutsValid` for the current Agent Select: the
     /// pre-game loadouts are not asked for again (R83).
     pregame_loadouts_valid: bool,
+    /// How long the In Game loadouts call may take (a field so a test can
+    /// shorten it).
+    pub(crate) ingame_loadouts_timeout: Duration,
     next_presence: Instant,
     next_pregame: Option<Instant>,
+    /// When the next roster retry is due and how many fetches failed so far.
     roster_retry: Option<(Instant, u32)>,
     post_match: Option<PostMatch>,
     /// The sync worker's task and the id its claim in `LiveModel` has.
@@ -145,6 +180,7 @@ impl Poller {
             presence_stage: Stage::Closed,
             game: GameWatch::default(),
             self_loadout_asked: false,
+            content_asked: false,
             version_from_presence_done: false,
             match_queue: None,
             presence_errors: 0,
@@ -152,6 +188,7 @@ impl Poller {
             self_party: HashSet::new(),
             pregame_match_id: None,
             pregame_loadouts_valid: false,
+            ingame_loadouts_timeout: INGAME_LOADOUTS_TIMEOUT,
             next_presence: Instant::now(),
             next_pregame: None,
             roster_retry: None,
@@ -256,6 +293,8 @@ impl Poller {
                 live.match_end_ms = None;
                 // R155: nor are its pending rank retries.
                 live.rank_retries.clear();
+                // R161: nor are the tiers of its last Agent Select.
+                live.match_tiers.clear();
             }
             // R160: a new session has its own, empty request holds.
             live.reset_names_hold();
@@ -281,6 +320,8 @@ impl Poller {
         self.game = GameWatch::default();
         // R90: asked at this session's first presence showing VALORANT.
         self.self_loadout_asked = false;
+        // R162: and the current act.
+        self.content_asked = false;
         // R159: so is the client version, from that same presence.
         self.version_from_presence_done = false;
         self.presence_errors = 0;
@@ -344,6 +385,12 @@ impl Poller {
     // -- connected -------------------------------------------------------
 
     async fn connected_tick(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
+        // R162: when the act Riot named has ended (or it never answered),
+        // ask again; a no-op otherwise. Never while VALORANT is closed: the
+        // session is stale then (R46/R137), like every other remote call.
+        if self.stage != Stage::Closed {
+            self.st.spawn_content_refresh(false);
+        }
         let now = Instant::now();
         if now >= self.next_presence {
             self.presence_tick(session).await?;
@@ -362,10 +409,9 @@ impl Poller {
             if Instant::now() >= due {
                 self.roster_retry = None;
                 if !self.fetch_roster(session).await? {
-                    let delay = ROSTER_RETRY_BASE
-                        .saturating_mul(1 << attempt.min(4))
-                        .min(ROSTER_RETRY_MAX);
-                    self.roster_retry = Some((Instant::now() + delay, attempt + 1));
+                    let failures = attempt + 1;
+                    self.roster_retry =
+                        Some((Instant::now() + roster_retry_delay(failures), failures));
                 }
             }
         }
@@ -440,6 +486,7 @@ impl Poller {
         match self.game.on_presence(decoded.is_some()) {
             GameVerdict::Present => {
                 self.read_self_loadout_once(session);
+                self.content_once();
                 self.client_version_from_presence_once(session, private.as_deref());
             }
             // The session was built (or has lived) while VALORANT wasn't
@@ -532,6 +579,18 @@ impl Poller {
         });
     }
 
+    /// R162: Riot's own current act, asked once per session at the first
+    /// presence showing VALORANT (valorant-api's dates stand in until it
+    /// answers, or if it never does). Not at connect: the session is stale
+    /// while the game is closed (R46, R137).
+    fn content_once(&mut self) {
+        if self.content_asked {
+            return;
+        }
+        self.content_asked = true;
+        self.st.spawn_content_refresh(true);
+    }
+
     /// R159: the first time this session sees the user's VALORANT presence
     /// *with a usable version*, its `partyClientVersion` (already in hand: the
     /// tick read the presences) replaces a client version the session took
@@ -616,6 +675,8 @@ impl Poller {
                 live.synced.clear();
                 live.party_ready.clear();
                 live.names_attempted.clear();
+                // R161: a match is over or VALORANT closed.
+                live.match_tiers.clear();
             }
             ended
         };
@@ -664,7 +725,7 @@ impl Poller {
     async fn fetch_or_retry(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
         if !self.fetch_roster(session).await? {
             self.show_self_only(session).await;
-            self.roster_retry = Some((Instant::now() + ROSTER_RETRY_BASE, 1));
+            self.roster_retry = Some((Instant::now() + roster_retry_delay(1), 1));
         }
         Ok(())
     }
@@ -700,10 +761,16 @@ impl Poller {
         session.party(&party_id).await
     }
 
-    async fn fetch_party(&mut self, session: &Arc<RiotSession>, me: &str) -> Result<(), RiotError> {
+    pub(crate) async fn fetch_party(
+        &mut self,
+        session: &Arc<RiotSession>,
+        me: &str,
+    ) -> Result<(), RiotError> {
         let party = self.party_response(session, me).await?;
         let roster = from_party(&party);
         self.self_party = roster.iter().map(|p| p.puuid.clone()).collect();
+        // R161: a Lobby answer says nothing about a match to come.
+        lock(&self.st.live).match_tiers.clear();
         log::info!("lobby: party of {}", roster.len());
         self.apply_roster(session, Stage::Menus, None, roster).await;
         Ok(())
@@ -761,6 +828,9 @@ impl Poller {
         let match_id = session.pregame_player(me).await?.match_id;
         let m = session.pregame_match(&match_id).await?;
         let roster = from_pregame(&m, me, &self.self_party);
+        lock(&self.st.live)
+            .match_tiers
+            .set_pregame(&match_id, pregame_tiers(&m));
         log::info!("agent select: {} allies", roster.len());
         if self.pregame_match_id.as_deref() != Some(match_id.as_str()) {
             // A new Agent Select: its loadouts start unknown.
@@ -784,6 +854,9 @@ impl Poller {
             Ok(m) => {
                 let me = session.self_puuid().to_string();
                 let roster = from_pregame(&m, &me, &self.self_party);
+                lock(&self.st.live)
+                    .match_tiers
+                    .set_pregame(&match_id, pregame_tiers(&m));
                 let allies: Vec<String> = roster.iter().map(|p| p.puuid.clone()).collect();
                 self.apply_roster(session, Stage::Pregame, Some(m.map_id), roster)
                     .await;
@@ -840,7 +913,7 @@ impl Poller {
         }
     }
 
-    async fn fetch_ingame(
+    pub(crate) async fn fetch_ingame(
         &mut self,
         session: &Arc<RiotSession>,
         me: &str,
@@ -861,27 +934,40 @@ impl Poller {
             lock(&self.st.live).in_match = true;
             return self.fetch_party(session, me).await;
         }
-        let roster = from_coregame(&m, me, &self.self_party);
-        let loadouts = match session.coregame_loadouts(&match_id).await {
-            Ok(resp) => Some(extract_loadouts(&resp)),
-            Err(RiotError::ClientGone) => return Err(RiotError::ClientGone),
-            Err(e) => {
-                log::warn!("loadouts failed: {e}");
-                None
-            }
-        };
+        let mut roster = from_coregame(&m, me, &self.self_party);
+        // R161: core-game answers carry no tier; the Agent Select one of
+        // this very match did.
+        let known = lock(&self.st.live).match_tiers.for_match(&match_id);
+        fill_tiers(&mut roster, &known);
         log::info!(
             "in game: {} players, match {}",
             roster.len(),
             short(&match_id)
         );
-        {
-            let mut live = lock(&self.st.live);
-            live.coregame_match_id = Some(match_id);
-            live.loadouts = loadouts.unwrap_or_default();
-        }
+        lock(&self.st.live).coregame_match_id = Some(match_id.clone());
+        // R164: the roster goes on screen (and the worker starts) first; the
+        // loadouts only feed Player Details, so a slow or failed answer never
+        // holds the ten cards back (as in Agent Select, R83).
         self.apply_roster(session, Stage::Ingame, Some(m.map_id), roster)
             .await;
+        let asked = tokio::time::timeout(
+            self.ingame_loadouts_timeout,
+            session.coregame_loadouts(&match_id),
+        )
+        .await;
+        match asked {
+            Err(_) => log::warn!("loadouts skipped: no answer in time"),
+            Ok(Ok(resp)) => {
+                let found = extract_loadouts(&resp);
+                if !found.is_empty() {
+                    lock(&self.st.live).loadouts.extend(found);
+                    // No card shows skins: an open Details is rebuilt.
+                    crate::details::refresh_open_after_live_change(&self.st).await;
+                }
+            }
+            Ok(Err(RiotError::ClientGone)) => return Err(RiotError::ClientGone),
+            Ok(Err(e)) => log::warn!("loadouts failed: {e}"),
+        }
         Ok(())
     }
 
@@ -1012,7 +1098,7 @@ impl Poller {
     }
 
     /// Closed: the user's own card from the DB (nothing if unknown).
-    async fn enter_closed(&mut self) {
+    pub(crate) async fn enter_closed(&mut self) {
         self.stop_worker();
         self.stage = Stage::Closed;
         let me = lock(&self.st.live).self_puuid.clone();
@@ -1036,6 +1122,7 @@ impl Poller {
             live.map_id = None;
             live.coregame_match_id = None;
             live.loadouts.clear();
+            live.match_tiers.clear();
             live.slots = slot.into_iter().collect();
             // R155: nothing is retried while VALORANT is closed.
             live.prune_rank_retries();
@@ -1208,6 +1295,107 @@ mod tests {
         live.synced.insert(ME.into());
     }
 
+    // R164 (review finding 7): the roster retry is a flat ~2 s for the first
+    // five retries, then the old 3, 6, 12, 24, 30 s backoff.
+    #[test]
+    fn the_roster_retry_is_flat_at_first_then_backs_off() {
+        let secs: Vec<u64> = (1..=11)
+            .map(|failures| roster_retry_delay(failures).as_secs())
+            .collect();
+        assert_eq!(secs, [2, 2, 2, 2, 2, 3, 6, 12, 24, 30, 30]);
+        assert_eq!(roster_retry_delay(u32::MAX).as_secs(), 30, "never panics");
+    }
+
+    #[tokio::test]
+    async fn a_failed_first_roster_fetch_retries_in_about_two_seconds() {
+        // Presence says PREGAME, but the pregame player endpoint is not ready
+        // (this harness mounts none: 404).
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Pregame;
+        poller.fetch_or_retry(&h.session).await.unwrap();
+        let (due, failures) = poller.roster_retry.expect("a retry is scheduled");
+        assert_eq!(failures, 1);
+        let wait = due.saturating_duration_since(Instant::now());
+        assert!(
+            wait > Duration::from_millis(1_000) && wait <= Duration::from_secs(2),
+            "first retry in ~2 s, not {wait:?}"
+        );
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_failing_retry_reschedules_two_seconds_out_five_times() {
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Pregame;
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        poller.fetch_or_retry(&h.session).await.unwrap();
+        for expected in 2..=5 {
+            // Make the retry due and let the tick run it (still 404).
+            let (_, failures) = poller.roster_retry.unwrap();
+            poller.roster_retry = Some((Instant::now(), failures));
+            poller.connected_tick(&h.session).await.unwrap();
+            let (due, failures) = poller.roster_retry.expect("still retrying");
+            assert_eq!(failures, expected);
+            let wait = due.saturating_duration_since(Instant::now());
+            assert!(
+                wait > Duration::from_millis(1_000) && wait <= Duration::from_secs(2),
+                "retry {expected}: ~2 s, not {wait:?}"
+            );
+        }
+        // The sixth failure backs off to 3 s.
+        poller.roster_retry = Some((Instant::now(), 5));
+        poller.connected_tick(&h.session).await.unwrap();
+        let (due, failures) = poller.roster_retry.unwrap();
+        assert_eq!(failures, 6);
+        assert!(due.saturating_duration_since(Instant::now()) > Duration::from_millis(2_500));
+        poller.stop_worker();
+    }
+
+    // R164 (finding 6): the post-match rank check at about +10, +20, +40,
+    // +80 and +160 s after the match.
+    #[test]
+    fn the_post_match_checks_land_at_10_20_40_80_160_seconds() {
+        let mut at = 0;
+        let mut seen = Vec::new();
+        for gap in POST_MATCH_DELAYS {
+            at += gap.as_secs();
+            seen.push(at);
+        }
+        assert_eq!(seen, [10, 20, 40, 80, 160]);
+    }
+
+    #[tokio::test]
+    async fn the_post_match_check_reschedules_until_the_schedule_is_used_up() {
+        // The ended match never lands in this DB: each check re-syncs and
+        // schedules the next, five in all, then stops.
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        synced_lobby(&h);
+        poller.post_match = Some(PostMatch {
+            match_id: "m-ended".into(),
+            competitive: true,
+            due: Instant::now(),
+            attempt: 0,
+        });
+        let mut gaps = Vec::new();
+        for _ in 0..POST_MATCH_DELAYS.len() {
+            poller.post_match_check(&h.session).await;
+            poller.stop_worker();
+            if let Some(p) = &poller.post_match {
+                gaps.push(p.due.saturating_duration_since(Instant::now()).as_secs());
+            }
+        }
+        // The delay to each later check, rounded down: 10, 20, 40, 80.
+        assert_eq!(gaps.len(), 4);
+        for (gap, want) in gaps.iter().zip([9, 19, 39, 79]) {
+            assert!(*gap == want || *gap == want + 1, "gap {gap} vs {want}");
+        }
+        assert!(poller.post_match.is_none(), "the fifth check is the last");
+    }
+
     #[tokio::test]
     async fn a_deathmatch_pauses_the_backfill_run_until_it_ends() {
         // R137 with R41: a free-for-all keeps the Lobby view for the whole
@@ -1320,7 +1508,7 @@ mod tests {
     #[tokio::test]
     async fn a_quick_requeue_keeps_the_post_match_follow_up() {
         // R48: a competitive match ended and the Lobby sync ran before Riot
-        // published it. The user requeues before the 30 s check: the
+        // published it. The user requeues before the first check: the
         // follow-up must still re-sync the user's card — in Agent Select, and
         // still pending In Game — instead of being dropped.
         let h = harness().await;
@@ -1460,6 +1648,68 @@ mod tests {
             .count()
     }
 
+    async fn content_requests(h: &Harness) -> usize {
+        requests(&h.server)
+            .await
+            .iter()
+            .filter(|r| r.url.path().starts_with("/content-service/"))
+            .count()
+    }
+
+    #[tokio::test]
+    async fn the_current_act_is_asked_once_when_the_game_shows_up_never_while_closed() {
+        // R162, like R137: the session is stale while VALORANT is closed.
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(content_requests(&h).await, 0, "no ask on a Closed connect");
+        // Closed ticks (the due re-ask included) ask nothing either.
+        poller.connected_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(100)).await;
+        assert_eq!(content_requests(&h).await, 0);
+
+        // VALORANT is up: one ask, however many presences follow.
+        mock_presence(&h, "MENUS", "unrated").await;
+        poller.presence_tick(&h.session).await.unwrap();
+        poller.presence_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(content_requests(&h).await, 1);
+    }
+
+    #[tokio::test]
+    async fn every_new_session_asks_for_the_current_act_once_more() {
+        // The flag resets at each connect (the game starting, an account
+        // switch), so the new session asks again, with its fresh headers.
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        mock_presence(&h, "MENUS", "unrated").await;
+        poller.on_connected(h.session.clone()).await;
+        poller.presence_tick(&h.session).await.unwrap();
+        poller.presence_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(content_requests(&h).await, 1);
+
+        poller.on_connected(h.session.clone()).await;
+        poller.presence_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(content_requests(&h).await, 2, "the new session asked once");
+    }
+
+    #[tokio::test]
+    async fn the_tick_asks_again_when_due_and_the_game_is_not_closed() {
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        // Only the re-ask is under test: no presence tick, a stage showing
+        // the game is up.
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        poller.stage = Stage::Menus;
+        poller.connected_tick(&h.session).await.unwrap();
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(content_requests(&h).await, 1, "never answered, so due");
+    }
+
     #[tokio::test]
     async fn on_connected_queues_the_run_and_the_first_presence_starts_the_worker() {
         // R137: connecting while VALORANT is closed makes no Sync/backfill
@@ -1493,6 +1743,31 @@ mod tests {
         let anchor = wait_for_anchor(&h.st).await.expect("the run finished");
         assert_eq!(anchor.0, crate::pipeline_tests::backfill::entry_id(0));
         assert_eq!(backfill_pages(&h).await, 1);
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn the_transition_to_menus_forgets_the_match_tiers_even_if_the_lobby_fetch_fails() {
+        // R161: the Agent Select tiers belong to the match that just ended; a
+        // failed party fetch (no mock answers it here) must not leave them
+        // for the next In Game roster.
+        let h = harness().await;
+        mock_presence(&h, "MENUS", "unrated").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Ingame;
+        poller.presence_stage = Stage::Ingame;
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Ingame;
+            live.match_tiers
+                .set_pregame("pg-1", [(ME.to_string(), 22)].into());
+            assert!(!live.match_tiers.is_empty());
+        }
+
+        poller.presence_tick(&h.session).await.unwrap();
+
+        assert_eq!(lock(&h.st.live).stage, Stage::Menus);
+        assert!(lock(&h.st.live).match_tiers.is_empty());
         poller.stop_worker();
     }
 

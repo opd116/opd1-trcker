@@ -1,6 +1,7 @@
 <!-- The map in the top bar (spec §2.3, v8:26-31): name + list image, or the skeleton while the id is unknown. -->
 <script lang="ts">
   import { assetUrl } from "../lib/assets";
+  import { retryImg } from "../lib/imgRetry";
   import { mapName } from "../lib/meta";
   import { meta } from "../lib/stores";
   import Skel from "./Skel.svelte";
@@ -16,7 +17,7 @@
     <Skel w={116} h={32} r={4} block />
   {:else}
     {#if name === undefined}<Skel w={52} h={12} block />{:else}<span class="mname">{name ?? "—"}</span>{/if}
-    <img src={assetUrl("mapList", mapId)} alt="" />
+    <img {@attach retryImg} src={assetUrl("mapList", mapId)} alt="" />
   {/if}
 </div>
 

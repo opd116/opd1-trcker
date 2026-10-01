@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { retryImg } from "../../lib/imgRetry";
   import { liveTeammate } from "../../lib/details";
   import { plural } from "../../lib/format";
   import { meta } from "../../lib/stores";
@@ -33,8 +34,8 @@
         <Name name={m.name} size="row" tipMode="none" wrap />
         {#if lv}
           <div class="mlive" use:tip={liveTip($meta, lv.agentId)}>
-            {#if lv.agentId}<img class="lagent" src={assetUrl("agent", lv.agentId)} alt="" />{:else}<div class="lagent"></div>{/if}
-            {#if lv.tier !== null}<img class="ltier" src={assetUrl("tier", lv.tier)} alt="" />{:else}<div class="ltier"></div>{/if}
+            {#if lv.agentId}<img {@attach retryImg} class="lagent" src={assetUrl("agent", lv.agentId)} alt="" />{:else}<div class="lagent"></div>{/if}
+            {#if lv.tier !== null}<img {@attach retryImg} class="ltier" src={assetUrl("tier", lv.tier)} alt="" />{:else}<div class="ltier"></div>{/if}
           </div>
         {/if}
         <!-- `14 games`, `1 game` (spec §4.3 `count`), the number in its own span. -->

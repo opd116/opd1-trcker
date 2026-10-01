@@ -10,6 +10,7 @@
 //! its own endpoint's real casing.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -30,6 +31,27 @@ where
 {
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
+
+/// R161: a tier Riot's roster answers carry (`CompetitiveTier`) — a number,
+/// or nothing. An absent key, a `null` or any other kind of value is "no
+/// tier" instead of a decode error, so a surprise in this one field can never
+/// blank the whole roster. A value that is present but neither `null` nor an
+/// integer is logged once per run (debug), so ranks that turn late again
+/// because Riot changed the type leave a trace.
+fn lenient_tier<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let tier = value.as_i64();
+    if tier.is_none() && !value.is_null() && !TIER_TYPE_LOGGED.swap(true, Ordering::Relaxed) {
+        log::debug!("CompetitiveTier is not an integer ({value}); read as no tier");
+    }
+    Ok(tier)
+}
+
+/// Whether the odd-`CompetitiveTier` line was logged this run.
+static TIER_TYPE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------
 // VisiblePuuid — ruling R16
@@ -106,6 +128,12 @@ pub struct PregamePlayer {
     pub character_selection_state: String,
     #[serde(rename = "PlayerIdentity")]
     pub player_identity: PlayerIdentity,
+    /// R161: the player's current competitive tier (`0` = unranked) — real
+    /// pregame answers carry it for every player, enemies included. `None`
+    /// when absent. The neighbouring `SeasonalBadgeInfo.Rank` is not the
+    /// current tier (it is the badge the player picked) and is not read.
+    #[serde(rename = "CompetitiveTier", default, deserialize_with = "lenient_tier")]
+    pub competitive_tier: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -184,6 +212,9 @@ pub struct PlayerLoadoutResponse {
 // Core game (In Game)
 // ---------------------------------------------------------------------
 
+/// R161: core-game players carry no current tier. Their `SeasonalBadgeInfo.Rank`
+/// is the badge the player picked (an earlier act's: 21 where pregame and
+/// party said 22 for the same player), so it is not read.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CoreGamePlayer {
     #[serde(rename = "Subject")]
@@ -490,6 +521,10 @@ pub struct PartyMember {
     /// `PartyResponse` decode.
     #[serde(rename = "IsReady", default)]
     pub is_ready: Option<bool>,
+    /// R161: the member's current competitive tier (`0` = unranked); `None`
+    /// when absent.
+    #[serde(rename = "CompetitiveTier", default, deserialize_with = "lenient_tier")]
+    pub competitive_tier: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -672,5 +707,175 @@ impl RiotSession {
         let body: Vec<&str> = puuids.iter().map(VisiblePuuid::as_str).collect();
         let body = serde_json::to_value(&body).map_err(|e| RiotError::Decode(e.to_string()))?;
         self.pd_put("/name-service/v2/players", &body).await
+    }
+}
+
+// ---------------------------------------------------------------------
+// content-service (R162)
+// ---------------------------------------------------------------------
+
+/// One act as Riot's content-service names it. Times are `None` when Riot's
+/// answer lacks them or they do not parse: the id alone still identifies the
+/// act (valorant-api, which shares the id space, may know its dates).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentAct {
+    pub id: String,
+    /// Riot's own `Name`, normalized to valorant-api's style (`ACT 3` ->
+    /// `ACT III`). Empty when Riot gave none.
+    pub name: String,
+    /// The parent episode's `Name` (`EPISODE 9`, `V26`), empty when unknown.
+    pub episode_name: String,
+    pub start_ms: Option<i64>,
+    pub end_ms: Option<i64>,
+}
+
+/// The act Riot says is running and the one before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentActs {
+    pub current: ContentAct,
+    pub previous: Option<ContentAct>,
+}
+
+#[derive(Debug, Clone)]
+struct ContentSeason {
+    id: String,
+    kind: String,
+    name: String,
+    start_ms: Option<i64>,
+    end_ms: Option<i64>,
+    is_active: bool,
+}
+
+/// Riot's `/content-service/v3/content` `Seasons` list, decoded tolerantly:
+/// whatever the shape, building one never fails. An entry that is not an
+/// object, or has no id, is dropped; a field of the wrong type is unknown.
+/// Only `ID`/`Type`/`Name`/`StartTime`/`EndTime`/`IsActive` are read: the
+/// real answer's entries have exactly those six fields (no parent id).
+#[derive(Debug, Clone, Default)]
+pub struct ContentSeasons {
+    seasons: Vec<ContentSeason>,
+}
+
+impl ContentSeasons {
+    pub fn from_value(value: &Value) -> Self {
+        let text = |o: &serde_json::Map<String, Value>, k: &str| {
+            o.get(k).and_then(Value::as_str).unwrap_or("").to_string()
+        };
+        let time = |o: &serde_json::Map<String, Value>, k: &str| {
+            o.get(k)
+                .and_then(Value::as_str)
+                .and_then(crate::to_core::parse_iso8601_utc_ms)
+        };
+        let seasons = value
+            .get("Seasons")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(Value::as_object)
+                    .map(|o| ContentSeason {
+                        id: text(o, "ID"),
+                        kind: text(o, "Type").to_ascii_lowercase(),
+                        name: text(o, "Name"),
+                        start_ms: time(o, "StartTime"),
+                        end_ms: time(o, "EndTime"),
+                        is_active: o.get("IsActive").and_then(Value::as_bool) == Some(true),
+                    })
+                    .filter(|s| !s.id.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        Self { seasons }
+    }
+
+    /// The active act (`Type == "act"`, case-insensitive, `IsActive`) and
+    /// the act whose `EndTime` equals its `StartTime` (Scout's rule). With
+    /// several active acts the latest-starting one wins. `None` when no act
+    /// is active.
+    pub fn active_acts(&self) -> Option<ContentActs> {
+        let acts = || self.seasons.iter().filter(|s| s.kind == "act");
+        let current = acts()
+            .filter(|s| s.is_active)
+            .max_by_key(|s| s.start_ms.unwrap_or(i64::MIN))?;
+        let previous = current
+            .start_ms
+            .and_then(|start| acts().find(|s| s.id != current.id && s.end_ms == Some(start)));
+        Some(ContentActs {
+            current: self.to_act(current),
+            previous: previous.map(|s| self.to_act(s)),
+        })
+    }
+
+    /// The act's episode is the episode entry that contains its start
+    /// (`episode.start <= act.start < episode.end`; the shortest if several),
+    /// since the real entries carry no parent id.
+    fn to_act(&self, s: &ContentSeason) -> ContentAct {
+        let episode_name = s
+            .start_ms
+            .and_then(|start| {
+                self.seasons
+                    .iter()
+                    .filter(|e| e.kind == "episode")
+                    .filter_map(|e| Some((e, e.start_ms?, e.end_ms?)))
+                    .filter(|&(_, from, to)| from <= start && start < to)
+                    .min_by_key(|&(_, from, to)| to - from)
+                    .map(|(e, _, _)| normalize_episode_name(&e.name))
+            })
+            .unwrap_or_default();
+        ContentAct {
+            id: s.id.clone(),
+            name: normalize_act_name(&s.name),
+            episode_name,
+            start_ms: s.start_ms,
+            end_ms: s.end_ms,
+        }
+    }
+}
+
+/// Riot's `EPISODE 6` (any case) is kept as `EPISODE 6`, the form
+/// `opd1_core::stats::act_label` shortens to `E6`; any other episode name
+/// (`V26`) is used as given, trimmed.
+fn normalize_episode_name(raw: &str) -> String {
+    let name = raw.trim();
+    match name.get(..8) {
+        Some(p) if p.eq_ignore_ascii_case("episode ") => {
+            format!("EPISODE {}", name[8..].trim())
+        }
+        _ => name.to_string(),
+    }
+}
+
+/// `ACT 3` / `act 3` -> `ACT III` (valorant-api's naming, which
+/// `opd1_core::stats::act_label` understands); anything else is trimmed and
+/// kept as Riot wrote it.
+fn normalize_act_name(raw: &str) -> String {
+    let name = raw.trim();
+    if let Some(rest) = name
+        .get(..3)
+        .filter(|p| p.eq_ignore_ascii_case("act"))
+        .map(|_| name[3..].trim())
+    {
+        let roman = match rest {
+            "1" => Some("I"),
+            "2" => Some("II"),
+            "3" => Some("III"),
+            "4" => Some("IV"),
+            "5" => Some("V"),
+            "6" => Some("VI"),
+            _ => None,
+        };
+        if let Some(r) = roman {
+            return format!("ACT {r}");
+        }
+    }
+    name.to_string()
+}
+
+impl RiotSession {
+    /// `GET shared.{shard}.a.pvp.net/content-service/v3/content`: the
+    /// season list, from which Riot's own active act is read (R162). Any
+    /// 2xx body decodes; only a transport or status failure is an error.
+    pub async fn content(&self) -> Result<ContentSeasons, RiotError> {
+        let body: Value = self.shared("/content-service/v3/content").await?;
+        Ok(ContentSeasons::from_value(&body))
     }
 }

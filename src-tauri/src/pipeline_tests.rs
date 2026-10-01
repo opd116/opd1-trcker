@@ -56,6 +56,7 @@ struct Recorder {
     live: Mutex<Vec<LiveState>>,
     details: Mutex<Vec<PlayerDetails>>,
     matches: Mutex<Vec<MatchDetailsView>>,
+    metas: Mutex<Vec<opd1_riot::assets::Meta>>,
 }
 
 struct Sink(Arc<Recorder>);
@@ -69,6 +70,9 @@ impl EventSink for Sink {
     }
     fn match_view(&self, view: &MatchDetailsView) {
         self.0.matches.lock().unwrap().push(view.clone());
+    }
+    fn meta(&self, meta: &opd1_riot::assets::Meta) {
+        self.0.metas.lock().unwrap().push(meta.clone());
     }
 }
 
@@ -504,6 +508,7 @@ pub(crate) fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
         card_id: "card".into(),
         character_id: "agent".into(),
         selection_state: "locked".into(),
+        live_tier: None,
     }
 }
 
@@ -1223,10 +1228,24 @@ mod names_fill;
 #[cfg(test)]
 mod rank;
 
+/// R161's live-tier tests: the rank from the roster answers (their own file;
+/// same harness).
+#[cfg(test)]
+mod live_tier;
+
 /// R158's diagnostics tests: the failed-call warn line and `dump_raw` (their
 /// own file; same harness).
 #[cfg(test)]
 mod diagnostics;
+
+/// R162's current-act tests (Riot's content-service; their own file; same
+/// harness).
+#[cfg(test)]
+mod act;
+
+/// R163's keyed close and late-open tests (their own file; same harness).
+#[cfg(test)]
+mod ui_open;
 
 /// R165's sync-order tests: rank first for the whole roster, the retries of
 /// names and partial syncs (their own file; same harness).

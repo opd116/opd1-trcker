@@ -16,7 +16,7 @@
   import MatchSkeleton from "../components/match/MatchSkeleton.svelte";
   import Scoreboard from "../components/match/Scoreboard.svelte";
   import { closeMatch, getMatchDetails } from "../lib/api";
-  import { DETAILS_RETRY_MS } from "../lib/boot";
+  import { DETAILS_RETRY_MS, DETAILS_TIMEOUT_MS } from "../lib/boot";
   import { emptyMatch, type MatchFrom } from "../lib/details";
   import { openMatch } from "../lib/stores";
 
@@ -30,7 +30,7 @@
   // Fetch on open and whenever the match or the perspective changes; a failure ends as the settled empty view.
   $effect(() => {
     openMatch
-      .open(matchId, (id) => getMatchDetails(id, focusPuuid), { retryMs: DETAILS_RETRY_MS, settle: emptyMatch })
+      .open(matchId, (id) => getMatchDetails(id, focusPuuid), { retryMs: DETAILS_RETRY_MS, timeoutMs: DETAILS_TIMEOUT_MS, settle: emptyMatch })
       .catch((err: unknown) => console.error("match_details failed", err));
   });
 
@@ -40,7 +40,7 @@
   // so its `close_match` goes out before the new `match_details` (which opens the new match on the Rust side).
   $effect(() => () => {
     openMatch.close();
-    closeMatch().catch((err: unknown) => console.error("close_match failed", err));
+    closeMatch(matchId).catch((err: unknown) => console.error("close_match failed", err));
   });
 </script>
 

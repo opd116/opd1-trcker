@@ -68,7 +68,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Riot ID with the Tag visually distinct
 - Long names: only the name part truncates with `…`; the tag is never cut; the ⟲ badge has a fixed reserved slot; hovering a truncated name shows the full `Name#TAG` (tooltip only when truncated).
 - Account Level
-- Current Rank: icon + tier name + exact RR. When Riot's MMR request gives no answer, the rank comes from the player's stored competitive updates (exact RR) or, failing that, from the tier of a stored current-act match (RR shows `—`) (R154, user 2026-09-30).
+- Current Rank: icon + tier name + exact RR. When Riot's MMR request gives no answer, the rank comes from the player's stored competitive updates (exact RR) then from the tier the pregame / party answer carries for the player (RR shows `—`, shown at once, R161), or, failing that, from the tier of a stored current-act match (RR shows `—`) (R154, user 2026-09-30).
 - Previous Act Rank: icon + tier name (`—` if none)
 - Peak Rank: icon + tier name + the act it was reached in (`V26 A4 · 1mo`, `E9 A3 · 1y`); time is since that act ended, not the day the peak was hit. Current act → `This Act`. Hover shows the full act name and dates (the design's tooltip shows dates only — add the act name). If the peak tier was reached in several acts, show the most recent (R7).
 - K/D and HS% from the last 5 Competitive matches
@@ -177,6 +177,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
   - `match-history`, `match-details`
   - `name-service/v2/players` (never for a hidden player during a live stage; after the match every participant without a stored name is asked once)
   - `parties`
+  - `content-service/v3/content` on `shared.{shard}.a.pvp.net` (the current act: `IsActive` act, previous = `EndTime == StartTime`; valorant-api dates only as the fallback, R162)
 - **Throttle** every remote call with a token bucket and honor `429 Retry-After` in full (sanity ceiling 120 s, R160). Holds are per family, `mmr` (`/mmr/` paths) and `other`; a call during a hold (an `other` one when more than 10 s is left) returns at once and never blocks the worker. Reference implementation: Scout's `backend/riot_client.py`.
 
 ## Hard limits

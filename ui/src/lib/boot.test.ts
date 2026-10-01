@@ -2,6 +2,7 @@ import { get } from "svelte/store";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   DETAILS_RETRY_MS,
+  DETAILS_TIMEOUT_MS,
   META_RETRY_FIRST_MS,
   META_RETRY_MAX_MS,
   browserKeyBlocked,
@@ -667,5 +668,190 @@ describe("loadMeta (spec §5.8: a rejected meta() must not stay pending)", () =>
     expect(invoke).toHaveBeenCalledTimes(6);
     await vi.advanceTimersByTimeAsync(META_RETRY_MAX_MS);
     expect(invoke).toHaveBeenCalledTimes(7);
+  });
+});
+
+describe("R163: a page that never answers, a deterministic rejection, a settled page (M1, M5)", () => {
+  afterEach(() => vi.useRealTimers());
+  const details = (puuid: string, marker: string) => ({ card: { puuid }, marker }) as unknown as PlayerDetails;
+  const marker = (slot: ReturnType<typeof detailsSlot>) => (get(slot) as { marker: string } | null)?.marker;
+  const settle = (puuid: string) => details(puuid, "settled");
+
+  it("the timeout is 15s", () => {
+    expect(DETAILS_TIMEOUT_MS).toBe(15_000);
+  });
+
+  it("a call that never answers times out after 15s and feeds the retry, whose answer shows", async () => {
+    vi.useFakeTimers();
+    const slot = detailsSlot();
+    let n = 0;
+    const fetch = vi.fn((p: string) => (n++ === 0 ? new Promise<PlayerDetails>(() => {}) : Promise.resolve(details(p, "retried"))));
+    const done = slot.open("p1", fetch, { retryMs: DETAILS_RETRY_MS, timeoutMs: DETAILS_TIMEOUT_MS, settle });
+    await vi.advanceTimersByTimeAsync(DETAILS_TIMEOUT_MS - 1);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(marker(slot)).toBeUndefined(); // still the skeleton
+    await vi.advanceTimersByTimeAsync(1 + DETAILS_RETRY_MS);
+    await done;
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(marker(slot)).toBe("retried");
+  });
+
+  it("two calls that never answer settle the page after 2 x 15s + 1s, and reject for the log", async () => {
+    vi.useFakeTimers();
+    const slot = detailsSlot();
+    const fetch = vi.fn(() => new Promise<PlayerDetails>(() => {}));
+    const done = slot.open("p1", fetch, { retryMs: DETAILS_RETRY_MS, timeoutMs: DETAILS_TIMEOUT_MS, settle });
+    const seen = expect(done).rejects.toThrow(/timed out/);
+    await vi.advanceTimersByTimeAsync(DETAILS_TIMEOUT_MS * 2 + DETAILS_RETRY_MS);
+    await seen;
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(marker(slot)).toBe("settled");
+  });
+
+  it("an answer inside the timeout leaves no timer behind", async () => {
+    vi.useFakeTimers();
+    const slot = detailsSlot();
+    await slot.open("p1", async (p) => details(p, "a"), { retryMs: DETAILS_RETRY_MS, timeoutMs: DETAILS_TIMEOUT_MS, settle });
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("a rejection that says `invalid …` is deterministic: no retry, the slot settles at once", async () => {
+    vi.useFakeTimers();
+    const slot = detailsSlot();
+    const fetch = vi.fn(async () => {
+      throw "invalid player id"; // Tauri rejects with the bare string
+    });
+    const done = slot.open("p1", fetch, { retryMs: DETAILS_RETRY_MS, settle });
+    await expect(done).rejects.toBe("invalid player id");
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(marker(slot)).toBe("settled");
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("retryOnce: an Error whose message starts with `invalid ` is not retried either; other errors still are", async () => {
+    vi.useFakeTimers();
+    const bad = vi.fn(async () => {
+      throw new Error("invalid match id");
+    });
+    await expect(retryOnce(bad, 1_000)).rejects.toThrow("invalid match id");
+    expect(bad).toHaveBeenCalledTimes(1);
+    const other = vi.fn(async () => {
+      throw new Error("unknown match");
+    });
+    const p = expect(retryOnce(other, 1_000)).rejects.toThrow("unknown match");
+    await vi.advanceTimersByTimeAsync(1_000);
+    await p;
+    expect(other).toHaveBeenCalledTimes(2);
+  });
+
+  describe("retrySettled (the next `live` event retries a settled page once)", () => {
+    async function settled(fetch: (p: string) => Promise<PlayerDetails>) {
+      const slot = detailsSlot();
+      await slot.open("p1", fetch, { settle }).catch(() => {});
+      expect(marker(slot)).toBe("settled");
+      return slot;
+    }
+
+    it("a settled page asks again once; the answer replaces the empty state", async () => {
+      let n = 0;
+      const fetch = vi.fn(async (p: string) => {
+        if (n++ === 0) throw new Error("db busy");
+        return details(p, "late answer");
+      });
+      const slot = await settled(fetch);
+      slot.retrySettled();
+      await vi.waitFor(() => expect(marker(slot)).toBe("late answer"));
+      expect(fetch).toHaveBeenCalledTimes(2);
+      slot.retrySettled(); // nothing is settled any more
+      expect(fetch).toHaveBeenCalledTimes(2);
+    });
+
+    it("when that fails too, the page stays settled and no later live event asks again", async () => {
+      const fetch = vi.fn(async () => {
+        throw new Error("still down");
+      });
+      const slot = await settled(fetch);
+      slot.retrySettled();
+      slot.retrySettled(); // one retry, even while it is in flight
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      await Promise.resolve();
+      slot.retrySettled();
+      slot.retrySettled();
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(marker(slot)).toBe("settled");
+    });
+
+    it("a page that was left, replaced or never settled does not retry", async () => {
+      const fetch = vi.fn(async (p: string) => {
+        if (fetch.mock.calls.length === 1) throw new Error("db busy");
+        return details(p, "ok");
+      });
+      const slot = await settled(fetch);
+      slot.close();
+      slot.retrySettled();
+      expect(fetch).toHaveBeenCalledTimes(1);
+
+      const fresh = detailsSlot();
+      const ok = vi.fn(async (p: string) => details(p, "ok"));
+      await fresh.open("p2", ok);
+      fresh.retrySettled();
+      expect(ok).toHaveBeenCalledTimes(1);
+    });
+
+    it("a new open of a failing page gets its own one retry", async () => {
+      const fetch = vi.fn(async () => {
+        throw new Error("down");
+      });
+      const slot = await settled(fetch);
+      slot.retrySettled();
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+      slot.close();
+      await slot.open("p1", fetch, { settle }).catch(() => {});
+      expect(fetch).toHaveBeenCalledTimes(3);
+      slot.retrySettled();
+      await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+    });
+  });
+
+  it("a timeout nobody waits for any more (the page was left) resolves quietly: nothing for the console", async () => {
+    vi.useFakeTimers();
+    const slot = detailsSlot();
+    const fetch = vi.fn(() => new Promise<PlayerDetails>(() => {}));
+    const done = slot.open("p1", fetch, { retryMs: DETAILS_RETRY_MS, timeoutMs: DETAILS_TIMEOUT_MS, settle });
+    await vi.advanceTimersByTimeAsync(100);
+    slot.close(); // Back, during the 15s
+    await vi.advanceTimersByTimeAsync(DETAILS_TIMEOUT_MS + DETAILS_RETRY_MS);
+    await expect(done).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(marker(slot)).toBeUndefined();
+  });
+
+  describe("loadMeta stops when told to (the `meta` event delivered the tables)", () => {
+    it("no further invoke after `stopped()` turns true", async () => {
+      vi.useFakeTimers();
+      const invoke = vi.fn(async () => {
+        throw new Error("asset tables unavailable");
+      });
+      let stop = false;
+      const done = loadMeta({ invoke } as unknown as Bridge, vi.fn(), () => {}, () => stop);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(invoke).toHaveBeenCalledTimes(1);
+      stop = true;
+      await vi.advanceTimersByTimeAsync(META_RETRY_FIRST_MS);
+      await done;
+      expect(invoke).toHaveBeenCalledTimes(1);
+    });
+
+    it("an answer that was in flight when the event arrived does not overwrite it", async () => {
+      let answer!: (m: Meta) => void;
+      const invoke = vi.fn(() => new Promise<Meta>((res) => (answer = res)));
+      let stop = false;
+      const set = vi.fn();
+      const done = loadMeta({ invoke } as unknown as Bridge, set, () => {}, () => stop);
+      stop = true; // the `meta` event came first
+      answer({ agents: {}, maps: {}, tiers: {} });
+      await done;
+      expect(set).not.toHaveBeenCalled();
+    });
   });
 });

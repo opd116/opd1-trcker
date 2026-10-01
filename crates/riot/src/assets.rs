@@ -69,7 +69,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -501,6 +501,9 @@ pub struct AssetCache {
     /// Per-skin async locks, so concurrent [`AssetCache::weapon_skin`]
     /// calls for one skin make one request.
     skin_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Set when a newer table set failed to download and the old disk copy
+    /// stands in ([`AssetCache::tables_stale`]).
+    stale: AtomicBool,
 }
 
 impl AssetCache {
@@ -547,6 +550,7 @@ impl AssetCache {
             image_locks: Mutex::new(HashMap::new()),
             skins: RwLock::new(HashMap::new()),
             skin_locks: Mutex::new(HashMap::new()),
+            stale: AtomicBool::new(false),
         }
     }
 
@@ -587,6 +591,7 @@ impl AssetCache {
 
     async fn refresh_with_known_version(&self, version: String) -> Result<bool, AssetError> {
         if self.disk_cache_matches(&version) {
+            self.stale.store(false, Ordering::Relaxed);
             let tables = blocking({
                 let dir = self.dir.clone();
                 move || load_tables_from_disk_sync(&dir)
@@ -627,11 +632,38 @@ impl AssetCache {
             return Ok(true);
         }
 
-        let agents = self.fetch_agents().await?;
-        let maps = self.fetch_maps().await?;
-        let tiers = self.fetch_latest_tiers().await?;
-        let seasons = self.fetch_seasons().await?;
-        let content_tiers = self.fetch_content_tiers().await?;
+        let fetched = async {
+            Ok::<_, AssetError>((
+                self.fetch_agents().await?,
+                self.fetch_maps().await?,
+                self.fetch_latest_tiers().await?,
+                self.fetch_seasons().await?,
+                self.fetch_content_tiers().await?,
+            ))
+        }
+        .await;
+        let (agents, maps, tiers, seasons, content_tiers) = match fetched {
+            Ok(all) => all,
+            // The version answered but a table did not (a patch is also when
+            // a new act starts): the old tables on disk are better than
+            // none. The manifest keeps the old version, so the next
+            // `refresh_tables` fetches again.
+            Err(e) if self.tables_files_exist() => {
+                // Said once per stale period, not at every retry.
+                if !self.stale.swap(true, Ordering::Relaxed) {
+                    log::warn!("asset table fetch failed, keeping the cached tables: {e}");
+                }
+                let tables = blocking({
+                    let dir = self.dir.clone();
+                    move || load_tables_from_disk_sync(&dir)
+                })
+                .await?;
+                *self.tables.write().unwrap() = tables;
+                return Ok(false);
+            }
+            Err(e) => return Err(e),
+        };
+        self.stale.store(false, Ordering::Relaxed);
 
         blocking({
             let dir = self.dir.clone();
@@ -687,6 +719,13 @@ impl AssetCache {
             return false;
         };
         manifest.version == version && self.tables_files_exist()
+    }
+
+    /// Whether the loaded tables are an older disk copy because the current
+    /// version's download failed: the caller should call
+    /// [`refresh_tables`](Self::refresh_tables) again soon.
+    pub fn tables_stale(&self) -> bool {
+        self.stale.load(Ordering::Relaxed)
     }
 
     /// The tables every feature needs (names, maps, tiers, acts): enough to

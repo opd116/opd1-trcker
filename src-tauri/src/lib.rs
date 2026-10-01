@@ -88,7 +88,7 @@ pub fn run() {
             };
             let st = st.inner().clone();
             let method = request.method().as_str().to_string();
-            let path = request.uri().path().to_string();
+            let path = imgproto::request_path(request.uri());
             tauri::async_runtime::spawn(async move {
                 responder.respond(imgproto::serve(st, method, path).await);
             });

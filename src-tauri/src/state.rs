@@ -23,19 +23,28 @@ use opd1_core::model::{
 use opd1_core::party::detect_parties;
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
-use opd1_riot::assets::AssetCache;
+use opd1_riot::assets::{AssetCache, Meta};
+use opd1_riot::endpoints::ContentActs;
 use opd1_riot::to_core::{current_rank_from_mmr, seasonal_map_from_mmr};
 use opd1_riot::RiotSession;
 
 use crate::logbuf::short;
 use crate::rank_retry::{RankRetries, RANK_RETRY_DELAYS};
-use crate::roster::{current_act, RawLoadout, RosterPlayer};
+use crate::roster::{current_act, resolve_acts, RawLoadout, RosterPlayer};
 use crate::store::{PlayerDb, StoredPlayer, SELF_LOADOUT_KEY};
 
 /// A failed asset-table load isn't retried more often than this (offline
 /// first run: `meta()` and every `img` request would otherwise each hit
 /// valorant-api again).
 const TABLES_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Riot's content-service is asked again at most this often: after a failure
+/// (every connect also asks, regardless).
+const CONTENT_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
+/// … and after the act it named has ended (Riot late at a rollover).
+const CONTENT_RECHECK_AFTER: Duration = Duration::from_secs(60);
+/// An act Riot still calls active past its end is believed for this long.
+const CONTENT_LATE_TRUST_MS: i64 = 10 * 60_000;
 
 /// Player Details re-syncs the same player at most this often.
 const DETAILS_RESYNC_AFTER: Duration = Duration::from_secs(120);
@@ -235,6 +244,48 @@ impl NamesAttempted {
     }
 }
 
+/// R161: the ranked tiers (by puuid) an Agent Select answer carried, bound to
+/// the match they came from. Pregame's `ID` is the core-game `MatchID` of the
+/// same match, so the In Game roster can tell a tier of its own match from a
+/// leftover of an earlier one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MatchTiers {
+    match_id: Option<String>,
+    tiers: HashMap<String, u8>,
+}
+
+impl MatchTiers {
+    /// An Agent Select answer for `match_id`. A different match replaces
+    /// what is stored; the same one (a re-poll) merges by presence, so a
+    /// player an answer leaves the tier out for keeps the earlier tier.
+    pub fn set_pregame(&mut self, match_id: &str, tiers: HashMap<String, u8>) {
+        if self.match_id.as_deref() == Some(match_id) {
+            self.tiers.extend(tiers);
+        } else {
+            self.match_id = Some(match_id.to_string());
+            self.tiers = tiers;
+        }
+    }
+
+    /// The tiers stored for `match_id`; none for any other match.
+    pub fn for_match(&self, match_id: &str) -> HashMap<String, u8> {
+        if self.match_id.as_deref() == Some(match_id) {
+            self.tiers.clone()
+        } else {
+            HashMap::new()
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.match_id.is_none() && self.tiers.is_empty()
+    }
+}
+
 /// One unit of work for the roster worker (see [`LiveModel::next_job`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Job {
@@ -366,6 +417,13 @@ pub struct LiveModel {
     /// The user's own last-seen roster entry (placeholder while a roster
     /// fetch is retried).
     pub self_roster: Option<RosterPlayer>,
+    /// R161: the ranked tiers an Agent Select answer carried (both teams),
+    /// bound to that match. Core-game answers carry no tier, so an In Game
+    /// roster takes its players' tiers from here, only when its own match id
+    /// is the stored one (`MatchTiers::for_match`). Replaced by a new Agent
+    /// Select, emptied on every Lobby fetch, on the transition to Menus or
+    /// Closed, and when VALORANT closes or the account changes.
+    pub match_tiers: MatchTiers,
     /// Names from `names()` this run (visible, non-self players only).
     pub known_names: HashMap<String, (String, String)>,
     /// Players whose card showed them hidden the last time they were on
@@ -450,6 +508,7 @@ impl LiveModel {
             self_name: None,
             self_name_attempted: false,
             self_roster: None,
+            match_tiers: MatchTiers::default(),
             known_names: HashMap::new(),
             seen_hidden: HashMap::new(),
             names_attempted: NamesAttempted::default(),
@@ -646,6 +705,7 @@ impl LiveModel {
             // R154: read only for a player with no snapshot, used only when
             // MMR is not a value.
             stored_tier: slot.db.stored_tier,
+            live_tier: r.live_tier,
         });
         settle_card(&mut card, names_done, data_done);
         card
@@ -1228,6 +1288,7 @@ pub fn closed_self_slot(self_puuid: &str, db: PlayerDb) -> Option<Slot> {
             card_id: row.card_id,
             character_id: String::new(),
             selection_state: String::new(),
+            live_tier: None,
         },
         db,
     })
@@ -1244,6 +1305,9 @@ pub trait EventSink: Send + Sync {
     fn details(&self, details: &PlayerDetails);
     /// R150: the open Match Details, rebuilt because names arrived.
     fn match_view(&self, view: &MatchDetailsView);
+    /// R163: the asset tables (names, colours) loaded or were refreshed.
+    /// Default: nothing (test sinks that do not record it).
+    fn meta(&self, _meta: &Meta) {}
 }
 
 impl EventSink for AppHandle {
@@ -1264,6 +1328,82 @@ impl EventSink for AppHandle {
             log::warn!("emit match failed: {e}");
         }
     }
+
+    fn meta(&self, meta: &Meta) {
+        if let Err(e) = self.emit("meta", meta) {
+            log::warn!("emit meta failed: {e}");
+        }
+    }
+}
+
+/// The act table every "current act" / "previous act" reads (R162): valorant-
+/// api's list, with Riot's own answer folded in while it is fresh. The one
+/// place that decides; nothing outside this struct applies the date rule to
+/// the raw table.
+struct ActsState {
+    /// valorant-api's acts, ascending by start.
+    base: Arc<Vec<Act>>,
+    /// Riot's content-service answer, with the wall-clock time after which
+    /// it is stale (the act's end; a late Riot gets a short trust window).
+    riot: Option<(ContentActs, i64)>,
+    /// `base` with `riot` folded in, valid until `valid_until_ms`.
+    resolved: Arc<Vec<Act>>,
+    valid_until_ms: i64,
+    /// Whether `resolved` has Riot's act folded in (else it is `base`).
+    from_riot: bool,
+    /// With `from_riot`: the current act's id and true start, which the
+    /// resolved entry may have clamped to the card clock.
+    true_start: Option<(String, i64)>,
+}
+
+impl ActsState {
+    fn new() -> Self {
+        let empty = Arc::new(Vec::new());
+        Self {
+            base: empty.clone(),
+            riot: None,
+            resolved: empty,
+            valid_until_ms: i64::MAX,
+            from_riot: false,
+            true_start: None,
+        }
+    }
+
+    fn rebuild(&mut self, now_ms: i64) {
+        let folded = self
+            .riot
+            .as_ref()
+            .filter(|(_, usable_until)| now_ms < *usable_until)
+            .and_then(|(riot, usable_until)| {
+                resolve_acts(&self.base, riot, now_ms).map(|r| (r, *usable_until))
+            });
+        match folded {
+            Some((r, usable_until)) => {
+                self.valid_until_ms = r.valid_until_ms.min(usable_until);
+                self.resolved = Arc::new(r.acts);
+                self.from_riot = true;
+                self.true_start = self
+                    .resolved
+                    .last()
+                    .map(|a| (a.id.clone(), r.current_start_ms));
+            }
+            None => {
+                self.valid_until_ms = i64::MAX;
+                self.resolved = self.base.clone();
+                self.from_riot = false;
+                self.true_start = None;
+            }
+        }
+    }
+}
+
+/// Bookkeeping for the content-service fetches.
+#[derive(Default)]
+struct ContentFetch {
+    in_flight: bool,
+    last_attempt: Option<Instant>,
+    /// The act and source last logged, so each is logged once.
+    logged: Option<(String, &'static str)>,
 }
 
 #[derive(Default)]
@@ -1278,7 +1418,8 @@ pub struct AppState {
     pub assets: Arc<AssetCache>,
     session: RwLock<Option<Arc<RiotSession>>>,
     pub live: Mutex<LiveModel>,
-    acts: RwLock<Arc<Vec<Act>>>,
+    acts: RwLock<ActsState>,
+    content: Mutex<ContentFetch>,
     tables: tokio::sync::Mutex<TablesStatus>,
     details_synced: Mutex<HashMap<String, Instant>>,
     /// R160: players whose Details sync is waiting out a hold to run again
@@ -1311,6 +1452,10 @@ pub struct AppState {
     /// page for Live, so it can outlive the page: a rebuild is one DB read,
     /// and it emits only on a change.
     open_match: Mutex<Option<OpenMatch>>,
+    /// R163: which `player_details` / `match_details` call may open its page
+    /// ([`OpenGate`]). Lock order: a gate, then its open slot.
+    details_gate: Mutex<OpenGate>,
+    match_gate: Mutex<OpenGate>,
     /// R150: set when names-fill asks are queued (`queue_name_fill`), taken
     /// by the poll loop (`take_worker_kick`), which owns the worker's handle:
     /// a command can't start a worker itself.
@@ -1357,7 +1502,8 @@ impl AppState {
             assets: Arc::new(assets),
             session: RwLock::new(None),
             live: Mutex::new(live),
-            acts: RwLock::new(Arc::new(Vec::new())),
+            acts: RwLock::new(ActsState::new()),
+            content: Mutex::new(ContentFetch::default()),
             tables: tokio::sync::Mutex::new(TablesStatus::default()),
             details_synced: Mutex::new(HashMap::new()),
             details_rerun: Mutex::new(HashSet::new()),
@@ -1366,6 +1512,8 @@ impl AppState {
             details_inflight: Mutex::new(HashMap::new()),
             details_404: Mutex::new(HashSet::new()),
             open_match: Mutex::new(None),
+            details_gate: Mutex::new(OpenGate::default()),
+            match_gate: Mutex::new(OpenGate::default()),
             worker_kick: AtomicBool::new(false),
             debug_dir,
         }
@@ -1382,22 +1530,201 @@ impl AppState {
         *self.session.write().unwrap_or_else(PoisonError::into_inner) = session;
     }
 
+    /// The acts to read "current" and "previous" from: valorant-api's table
+    /// with Riot's own current act folded in (R162). The last started act is
+    /// the current one, the one before it the previous one — and with
+    /// nothing from Riot that is valorant-api's date rule, as before.
     pub fn acts(&self) -> Arc<Vec<Act>> {
-        self.acts
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.acts_at(now_ms())
+    }
+
+    pub fn acts_at(&self, now_ms: i64) -> Arc<Vec<Act>> {
+        {
+            let g = self.acts.read().unwrap_or_else(PoisonError::into_inner);
+            if now_ms < g.valid_until_ms {
+                return g.resolved.clone();
+            }
+        }
+        let mut g = self.acts.write().unwrap_or_else(PoisonError::into_inner);
+        g.rebuild(now_ms);
+        g.resolved.clone()
     }
 
     #[cfg(test)]
     pub fn set_acts_for_test(&self, acts: Vec<Act>) {
-        *self.acts.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(acts);
+        self.set_base_acts(acts);
     }
 
-    /// The current act (by wall clock), if the tables are loaded.
+    /// valorant-api's act table (after the tables load).
+    fn set_base_acts(&self, acts: Vec<Act>) {
+        let mut g = self.acts.write().unwrap_or_else(PoisonError::into_inner);
+        g.base = Arc::new(acts);
+        g.rebuild(now_ms());
+    }
+
+    /// Riot's answer, fetched at `fetched_ms`.
+    fn set_riot_acts(&self, riot: Option<ContentActs>, fetched_ms: i64) {
+        let mut g = self.acts.write().unwrap_or_else(PoisonError::into_inner);
+        g.riot = riot.map(|r| {
+            let usable_until = match r.current.end_ms {
+                Some(end) if end > fetched_ms => end,
+                // No end known, or already past while Riot still calls the
+                // act active: trust it for a short while, then ask again.
+                _ => fetched_ms + CONTENT_LATE_TRUST_MS,
+            };
+            (r, usable_until)
+        });
+        g.rebuild(now_ms());
+    }
+
+    #[cfg(test)]
+    pub fn set_riot_acts_for_test(&self, riot: Option<ContentActs>, fetched_ms: i64) {
+        self.set_riot_acts(riot, fetched_ms);
+    }
+
+    /// The current act, if the tables are loaded.
     pub fn current_act(&self) -> Option<Act> {
-        let acts = self.acts();
-        current_act(&acts, now_ms()).cloned()
+        let now = now_ms();
+        let acts = self.acts_at(now);
+        let mut act = current_act(&acts, now).cloned()?;
+        // The list may carry the hour-floored card clock as the start for the
+        // first hour of an act (so cards switch at once); everything that
+        // reads dates (backfill bound, My Stats, hero stats) wants the true
+        // start.
+        let g = self.acts.read().unwrap_or_else(PoisonError::into_inner);
+        if let Some((id, start)) = &g.true_start {
+            if *id == act.id && g.from_riot {
+                // Never after now: Riot's clock a few seconds ahead of ours
+                // must not leave the act empty for those seconds.
+                act.start_ms = (*start).min(now);
+            }
+        }
+        Some(act)
+    }
+
+    /// A failed or empty ask: an earlier answer whose act has not ended
+    /// stays (a blip must not swap the act for valorant-api's dates);
+    /// otherwise the date rule answers.
+    fn drop_riot_answer_unless_valid(&self, now_ms: i64) {
+        if !self.riot_answer_still_valid(now_ms) {
+            self.set_riot_acts(None, now_ms);
+        }
+    }
+
+    /// Riot's earlier answer is still good: its act has not ended.
+    fn riot_answer_still_valid(&self, now_ms: i64) -> bool {
+        let g = self.acts.read().unwrap_or_else(PoisonError::into_inner);
+        g.riot.as_ref().is_some_and(|(r, usable_until)| {
+            now_ms < *usable_until && r.current.end_ms.is_some_and(|end| end > now_ms)
+        })
+    }
+
+    /// Whether Riot's content-service should be asked now: never while
+    /// another ask runs; after a failure (or before any answer) every
+    /// [`CONTENT_RETRY_AFTER`]; once the act it named has ended, every
+    /// [`CONTENT_RECHECK_AFTER`] until it names the next one.
+    pub(crate) fn content_due(&self, now_ms: i64) -> bool {
+        let c = lock(&self.content);
+        if c.in_flight {
+            return false;
+        }
+        let since = c.last_attempt.map(|t| t.elapsed());
+        let g = self.acts.read().unwrap_or_else(PoisonError::into_inner);
+        match &g.riot {
+            Some((_, usable_until)) if now_ms < *usable_until => false,
+            Some(_) => since.is_none_or(|s| s >= CONTENT_RECHECK_AFTER),
+            None => since.is_none_or(|s| s >= CONTENT_RETRY_AFTER),
+        }
+    }
+
+    /// Asks Riot for the current act in the background (R162): `force` on a
+    /// connect, otherwise only when [`content_due`](Self::content_due).
+    pub fn spawn_content_refresh(self: &Arc<Self>, force: bool) {
+        if self.session().is_none() {
+            return;
+        }
+        if !force && !self.content_due(now_ms()) {
+            return;
+        }
+        let st = self.clone();
+        tauri::async_runtime::spawn(async move { st.refresh_content().await });
+    }
+
+    /// One content-service ask and what follows: on an answer, Riot's act
+    /// becomes the current one; on any failure valorant-api's date rule
+    /// stays (one log line says why). Republishes when the current act
+    /// changed.
+    pub async fn refresh_content(self: &Arc<Self>) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        {
+            let mut c = lock(&self.content);
+            if c.in_flight {
+                return;
+            }
+            c.in_flight = true;
+            c.last_attempt = Some(Instant::now());
+        }
+        let result = session.content().await;
+        let now = now_ms();
+        let before = self.current_act().map(|a| a.id);
+        let why = match result {
+            Ok(seasons) => match seasons.active_acts() {
+                Some(acts) => {
+                    self.set_riot_acts(Some(acts), now);
+                    None
+                }
+                None => {
+                    self.drop_riot_answer_unless_valid(now);
+                    Some("no active act in the answer".to_string())
+                }
+            },
+            Err(e) => {
+                self.drop_riot_answer_unless_valid(now);
+                Some(e.to_string())
+            }
+        };
+        let current = self.current_act();
+        // Riot's act may have no usable times; then valorant-api's rule
+        // stands in even after an answer, and the log says so.
+        let source = if self
+            .acts
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .from_riot
+        {
+            "riot content-service"
+        } else {
+            "valorant-api"
+        };
+        let label = current.as_ref().map_or_else(
+            || "none".to_string(),
+            |a| format!("{} ({})", opd1_core::stats::act_full_name(a), a.id),
+        );
+        {
+            let mut c = lock(&self.content);
+            c.in_flight = false;
+            let key = (
+                current.as_ref().map(|a| a.id.clone()).unwrap_or_default(),
+                source,
+            );
+            match (&why, c.logged.as_ref() != Some(&key)) {
+                (Some(why), _) => {
+                    log::warn!("content-service: {why}; current act {label} from {source}");
+                }
+                (None, true) => log::info!("current act {label} from {source}"),
+                (None, false) => {}
+            }
+            c.logged = Some(key);
+        }
+        if current.map(|a| a.id) != before {
+            // The live cards and an open Player Details read the act. (My
+            // Stats has no push path: it takes the new act at its next
+            // `my_stats` call.)
+            self.publish();
+            crate::details::refresh_open(self).await;
+        }
     }
 
     /// Riot map path -> valorant-api uuid (`None` if unknown or the tables
@@ -1439,31 +1766,57 @@ impl AppState {
     /// Offline, `AssetCache` falls back to the disk copy.
     pub async fn ensure_tables(&self, recheck: bool) -> Result<(), String> {
         let mut status = self.tables.lock().await;
-        if status.loaded && !recheck {
+        // A copy of the previous version's tables stands in (the new
+        // download failed): ask again, at most every `TABLES_RETRY_AFTER`.
+        let stale = self.assets.tables_stale();
+        if status.loaded && !recheck && !stale {
             return Ok(());
         }
-        if !status.loaded {
+        if !status.loaded || (stale && !recheck) {
             if let Some(t) = status.last_failure {
                 if t.elapsed() < TABLES_RETRY_AFTER {
-                    return Err("asset tables unavailable".into());
+                    return if status.loaded {
+                        Ok(())
+                    } else {
+                        Err("asset tables unavailable".into())
+                    };
                 }
             }
         }
+        let first = !status.loaded;
         match self.assets.refresh_tables().await {
             Ok(refetched) => {
                 status.loaded = true;
-                status.last_failure = None;
+                status.last_failure = self.assets.tables_stale().then(Instant::now);
                 let acts = self.assets.acts().unwrap_or_default();
-                log::info!(
-                    "asset tables {} ({} acts)",
-                    if refetched {
-                        "downloaded"
-                    } else {
-                        "loaded from cache"
-                    },
-                    acts.len()
-                );
-                *self.acts.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(acts);
+                let still_stale = self.assets.tables_stale();
+                // Once per stale period: a retry that fails the same way
+                // every 30 s says nothing new.
+                if !(stale && still_stale) {
+                    log::info!(
+                        "asset tables {} ({} acts)",
+                        if refetched {
+                            "downloaded"
+                        } else {
+                            "loaded from cache"
+                        },
+                        acts.len()
+                    );
+                }
+                self.set_base_acts(acts);
+                // R163: the UI's names and colours follow the tables: sent
+                // when they first load and whenever they were downloaded
+                // again (a new patch), not on a plain version re-check.
+                if first || refetched {
+                    match self.assets.meta() {
+                        Ok(meta) => self.sink.meta(&meta),
+                        Err(e) => log::warn!("meta event: {e}"),
+                    }
+                }
+                if stale && !still_stale {
+                    // Healed: the cards were built from the old tables.
+                    self.publish();
+                }
                 Ok(())
             }
             Err(e) => {
@@ -1512,29 +1865,69 @@ impl AppState {
         live.current = state;
     }
 
+    /// A `player_details` call starts opening `puuid`'s page: the ticket it
+    /// must hand to [`Self::set_open_details`] once its build is done. Any
+    /// earlier ticket is void from now on (R163).
+    pub fn begin_open_details(&self, puuid: &str) -> u64 {
+        lock(&self.details_gate).begin(puuid)
+    }
+
     /// Records `details` as the open Player Details, as the UI was just
-    /// given them (the `player_details` answer). Opening a Player Details
-    /// also closes any Match Details: the UI only gets here from the match
-    /// page by going Back.
-    pub fn set_open_details(&self, details: &PlayerDetails) {
+    /// given them (the `player_details` answer), when `ticket` is still the
+    /// latest open and its page was not left meanwhile (R163: a build that
+    /// finishes after Back, or after a newer open, must not set the open
+    /// page); `false` when it lost. Opening a Player Details also closes any
+    /// Match Details: the UI only gets here from the match page by going
+    /// Back.
+    pub fn set_open_details(&self, ticket: u64, details: &PlayerDetails) -> bool {
+        let gate = lock(&self.details_gate);
+        if gate.seq != ticket {
+            return false;
+        }
         *lock(&self.open_details) = Some(details.clone());
         *lock(&self.open_match) = None;
+        true
+    }
+
+    /// A `match_details` call starts opening `match_id`'s page (like
+    /// [`Self::begin_open_details`]).
+    pub fn begin_open_match(&self, match_id: &str) -> u64 {
+        lock(&self.match_gate).begin(match_id)
     }
 
     /// Records `view` as the open Match Details, as the UI was just given it
-    /// (the `match_details` answer).
-    pub fn set_open_match(&self, match_id: &str, focus_puuid: &str, view: &MatchDetailsView) {
+    /// (the `match_details` answer), when `ticket` is still the latest open
+    /// of its page; `false` when it lost (R163).
+    pub fn set_open_match(
+        &self,
+        ticket: u64,
+        match_id: &str,
+        focus_puuid: &str,
+        view: &MatchDetailsView,
+    ) -> bool {
+        let gate = lock(&self.match_gate);
+        if gate.seq != ticket {
+            return false;
+        }
         *lock(&self.open_match) = Some(OpenMatch {
             match_id: match_id.to_string(),
             focus_puuid: focus_puuid.to_string(),
             view: view.clone(),
         });
+        true
     }
 
     /// The UI left the Match Details page (`close_match`): nothing is open,
     /// so no `match` event is built or emitted until the next
-    /// `match_details` call. A no-op with nothing open.
-    pub fn close_match(&self) {
+    /// `match_details` call, and an open still being built is void. With a
+    /// `match_id`, a close for any other match than the one open or being
+    /// opened is ignored (R163: a late close of a page already replaced).
+    /// A no-op with nothing open.
+    pub fn close_match(&self, match_id: Option<&str>) {
+        let mut gate = lock(&self.match_gate);
+        if !gate.close(match_id) {
+            return;
+        }
         *lock(&self.open_match) = None;
     }
 
@@ -1652,8 +2045,14 @@ impl AppState {
     }
 
     /// The UI left the Details page (`close_details`): nothing is open, so
-    /// no rebuild is done or emitted for it until the next open.
-    pub fn close_details(&self) {
+    /// no rebuild is done or emitted for it until the next open, and an open
+    /// still being built is void. With a `puuid`, a close for any other
+    /// player than the one open or being opened is ignored (R163).
+    pub fn close_details(&self, puuid: Option<&str>) {
+        let mut gate = lock(&self.details_gate);
+        if !gate.close(puuid) {
+            return;
+        }
         *lock(&self.open_details) = None;
     }
 
@@ -1784,6 +2183,40 @@ impl AppState {
     }
 }
 
+/// Which open of one page (Player Details, or Match Details) is the latest
+/// (R163). Every `player_details` / `match_details` call takes a ticket when
+/// it starts ([`OpenGate::begin`]) and may set the open page only while its
+/// ticket is still `seq`; a close for the page voids every ticket taken so
+/// far. Held across the check and the write, so a close can never fall in
+/// between.
+#[derive(Default)]
+struct OpenGate {
+    /// The latest ticket; bumped by every `begin` and every effective close.
+    seq: u64,
+    /// What the latest `begin` is opening (a puuid, a match id); `None` once
+    /// closed.
+    key: Option<String>,
+}
+
+impl OpenGate {
+    fn begin(&mut self, key: &str) -> u64 {
+        self.seq += 1;
+        self.key = Some(key.to_string());
+        self.seq
+    }
+
+    /// `false` when `key` is given and is not what is open or being opened
+    /// (nothing changes); otherwise voids every ticket and returns `true`.
+    fn close(&mut self, key: Option<&str>) -> bool {
+        if key.is_some_and(|k| self.key.as_deref() != Some(k)) {
+            return false;
+        }
+        self.seq += 1;
+        self.key = None;
+        true
+    }
+}
+
 /// The Match Details the UI asked for last (`match_details`), as it was last
 /// given to the UI (R150): rebuilt and re-emitted when names arrive.
 struct OpenMatch {
@@ -1869,6 +2302,7 @@ mod tests {
             card_id: "card".into(),
             character_id: "agent".into(),
             selection_state: "locked".into(),
+            live_tier: None,
         }
     }
 

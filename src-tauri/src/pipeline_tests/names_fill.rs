@@ -1639,3 +1639,40 @@ async fn with_no_match_end_ever_seen_no_fill_is_queued() {
     store_match(&h, "m-x").await;
     assert!(lock(&h.st.live).name_fill.is_empty());
 }
+
+#[tokio::test]
+async fn a_match_open_that_lost_queues_no_names() {
+    // R163: the page was left while the open was being built (the real
+    // `match_details::load` path); the answer is still returned, but its
+    // unnamed rows are not queued for a page nobody sees. The first open is
+    // the control: the same match, opened normally, does queue them.
+    let h = harness().await;
+    lobby(&h);
+    let others: Vec<String> = (1..=3).map(pid).collect();
+    mount_match(
+        &h.server,
+        "n-lost",
+        "competitive",
+        now_ms() - 30 * 60_000,
+        &others,
+    )
+    .await;
+    store_match(&h, "n-lost").await;
+    assert!(!h.st.take_worker_kick());
+
+    let control = crate::match_details::load(&h.st, "n-lost", &pid(1))
+        .await
+        .unwrap();
+    assert!(h.st.take_worker_kick(), "control: unnamed rows are queued");
+    crate::commands::close_match_for(&h.st);
+
+    // `join!` polls the open first (ticket, then the DB read), then the
+    // close, which voids it before the read ends.
+    let focus = pid(1);
+    let (view, ()) = tokio::join!(crate::match_details::load(&h.st, "n-lost", &focus), async {
+        crate::commands::close_match_key_for(&h.st, Some("n-lost"))
+    });
+    assert_eq!(view.unwrap(), control, "still answered");
+    assert_eq!(h.st.open_match_args(), None, "not open");
+    assert!(!h.st.take_worker_kick(), "no name ask for a closed page");
+}

@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../lib/assets";
+  import { retryImg } from "../lib/imgRetry";
   import { isRankedTier, tierLabel } from "../lib/meta";
   import { meta } from "../lib/stores";
   import Skel from "./Skel.svelte";
@@ -21,7 +22,7 @@
     <Skel w={124} h={10} block />
   {:else}
     <div class="icol">
-      {#if isRankedTier(tier)}<img class="pi" src={assetUrl("tier", tier)} alt="" />{/if}
+      {#if isRankedTier(tier)}<img {@attach retryImg} class="pi" src={assetUrl("tier", tier)} alt="" />{/if}
     </div>
     <span class="lbl">Prev</span>
     {#if isRankedTier(tier)}

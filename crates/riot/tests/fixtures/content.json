@@ -1,0 +1,68 @@
+{
+  "DisabledIDs": [],
+  "Seasons": [
+    {
+      "ID": "11111111-0000-0000-0000-00000000e801",
+      "Name": "EPISODE 8",
+      "Type": "episode",
+      "StartTime": "2024-01-10T00:00:00Z",
+      "EndTime": "2024-06-25T00:00:00Z",
+      "IsActive": false
+    },
+    {
+      "ID": "11111111-0000-0000-0000-00000000a801",
+      "Name": "ACT 1",
+      "Type": "act",
+      "StartTime": "2024-01-10T00:00:00Z",
+      "EndTime": "2024-03-06T00:00:00Z",
+      "IsActive": false
+    },
+    {
+      "ID": "11111111-0000-0000-0000-00000000a802",
+      "Name": "ACT 2",
+      "Type": "act",
+      "StartTime": "2024-03-06T00:00:00Z",
+      "EndTime": "2024-04-30T00:00:00Z",
+      "IsActive": false
+    },
+    {
+      "ID": "22222222-0000-0000-0000-00000000e901",
+      "Name": "V26",
+      "Type": "episode",
+      "StartTime": "2026-01-06T00:00:00Z",
+      "EndTime": "2026-10-14T00:00:00Z",
+      "IsActive": true
+    },
+    {
+      "ID": "22222222-0000-0000-0000-00000000a904",
+      "Name": "ACT IV",
+      "Type": "act",
+      "StartTime": "2026-06-24T00:00:00Z",
+      "EndTime": "2026-08-19T00:00:00Z",
+      "IsActive": false
+    },
+    {
+      "ID": "22222222-0000-0000-0000-00000000a905",
+      "Name": "ACT V",
+      "Type": "Act",
+      "StartTime": "2026-08-19T00:00:00Z",
+      "EndTime": "2026-10-14T00:00:00Z",
+      "IsActive": true
+    },
+    {
+      "ID": "22222222-0000-0000-0000-00000000a906",
+      "Name": "ACT VI",
+      "Type": "act",
+      "StartTime": "2026-10-14T00:00:00Z",
+      "EndTime": "2026-12-09T00:00:00Z",
+      "IsActive": false
+    }
+  ],
+  "Events": [],
+  "Equips": [
+    {
+      "ID": "x",
+      "Name": "Vandal"
+    }
+  ]
+}

@@ -1,6 +1,7 @@
 <!-- Current rank (spec §3.6): icon + tier name + exact RR. No tooltip. -->
 <script lang="ts">
   import { assetUrl } from "../lib/assets";
+  import { retryImg } from "../lib/imgRetry";
   import { rr } from "../lib/format";
   import { isRankedTier, tierLabel } from "../lib/meta";
   import { meta } from "../lib/stores";
@@ -23,7 +24,7 @@
     <div class="icon"></div>
     <span class="rtext dash">—</span>
   {:else}
-    <img class="icon" src={assetUrl("tier", ranked.tier)} alt="" />
+    <img {@attach retryImg} class="icon" src={assetUrl("tier", ranked.tier)} alt="" />
     <div class="rtext">
       <span class="tier">{#if name === undefined}<Skel w={84} h={13} />{:else}{name ?? "—"}{/if}</span>
       <span class="rr"><span class="v">{rr(ranked.rr)}</span> RR</span>

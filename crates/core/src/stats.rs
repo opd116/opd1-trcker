@@ -146,7 +146,19 @@ fn normalize_tier(tier: u8, pre_e5a1: bool) -> u8 {
 /// signature minimally to receive the acts" ruling: the brief's original
 /// signature took only `seasons`, but normalization needs to know when
 /// each season's act started.
-pub fn peak(seasons: &SeasonalMap, ordered_acts: &[Act]) -> Option<Peak> {
+///
+/// R164: the peak is never below the current rank. `current` is the MMR
+/// snapshot's current tier with the id of the current act; when that tier is
+/// ranked (>= 3), its act is in `ordered_acts` and it is at least the
+/// wins-based peak, it becomes the peak (a tie goes to the current act, the
+/// most recent one, as in R7). Wins are only recorded at the tier a game was
+/// won at, so right after a promotion, or after placements, the wins-based
+/// peak lags the rank the card shows.
+pub fn peak(
+    seasons: &SeasonalMap,
+    ordered_acts: &[Act],
+    current: Option<(u8, &str)>,
+) -> Option<Peak> {
     let mut best: Option<(u8, &str, i64)> = None; // (tier, season_id, act_start_ms)
 
     for act in ordered_acts {
@@ -170,6 +182,20 @@ pub fn peak(seasons: &SeasonalMap, ordered_acts: &[Act]) -> Option<Peak> {
             };
             if replace {
                 best = Some((normalized, act.id.as_str(), act.start_ms));
+            }
+        }
+    }
+
+    if let Some((tier, act_id)) = current {
+        if tier >= 3 && ordered_acts.iter().any(|a| a.id == act_id) {
+            let floor_applies = best
+                .as_ref()
+                .is_none_or(|(best_tier, _, _)| tier >= *best_tier);
+            if floor_applies {
+                return Some(Peak {
+                    tier,
+                    season_id: act_id.to_string(),
+                });
             }
         }
     }
@@ -229,15 +255,25 @@ pub fn act_label(act: &Act) -> String {
         None => act.episode_name.clone(),
     };
     match act_number(&act.name) {
+        Some(n) if episode_part.is_empty() => format!("A{n}"),
         Some(n) => format!("{episode_part} A{n}"),
-        None => episode_part,
+        None if !episode_part.trim().is_empty() => episode_part,
+        // An act valorant-api does not know, named only by Riot (R162).
+        None if !act.name.trim().is_empty() => act.name.trim().to_string(),
+        None => "—".to_string(),
     }
 }
 
 /// The full act name used for hover text (e.g. `"V26 ACT V"` /
 /// `"EPISODE 8 ACT III"`) — Task 5's `actName` field.
 pub fn act_full_name(act: &Act) -> String {
-    format!("{} {}", act.episode_name, act.name)
+    // An act valorant-api does not know yet may lack either part (R162).
+    [act.episode_name.trim(), act.name.trim()]
+        .iter()
+        .filter(|p| !p.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ---------------------------------------------------------------------

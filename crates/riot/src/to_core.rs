@@ -87,18 +87,23 @@ pub fn seasonal_map_from_mmr(resp: &PlayerMmrResponse) -> SeasonalMap {
                 })
                 .collect();
 
+            // Placement wins count toward the act win rate; fall back to
+            // `NumberOfWins` when Riot doesn't send them. A record missing its
+            // wins or its games is unknown as a whole: 0 games, which the card
+            // shows as `—` (never "0 wins of N games", R166). The tier and
+            // `WinsByTier` of the entry stay.
+            let wins = info.number_of_wins_with_placements.or(info.number_of_wins);
+            let (number_of_wins, number_of_games) = match (wins, info.number_of_games) {
+                (Some(wins), Some(games)) => (clamp_u32(wins), clamp_u32(games)),
+                _ => (0, 0),
+            };
             (
                 season_id.clone(),
                 SeasonInfo {
                     competitive_tier: clamp_u8(info.competitive_tier),
                     wins_by_tier,
-                    // Placement wins count toward the act win rate; fall
-                    // back to `NumberOfWins` when Riot doesn't send them.
-                    number_of_wins: clamp_u32(
-                        info.number_of_wins_with_placements
-                            .unwrap_or(info.number_of_wins),
-                    ),
-                    number_of_games: clamp_u32(info.number_of_games),
+                    number_of_wins,
+                    number_of_games,
                 },
             )
         })

@@ -107,9 +107,11 @@ fn comp_update_rows_keep_their_place_when_a_soft_field_is_missing() {
 }
 
 #[test]
-fn a_comp_update_row_without_what_makes_it_a_row_is_dropped_not_zeroed() {
+fn a_comp_update_row_without_what_makes_it_a_row_fails_the_whole_answer() {
     // No id, start time, tier or RR: a default 0 would be a 1970 match, an
-    // unranked tier or "+0 RR" in the charts. The other rows still decode.
+    // unranked tier or "+0 RR", and dropping the row would shift "newest" (the
+    // stored-rank fallback would show the row before it as the current rank).
+    // So the answer fails and the existing retry paths ask again.
     for field in [
         "MatchID",
         "MatchStartTime",
@@ -119,9 +121,10 @@ fn a_comp_update_row_without_what_makes_it_a_row_is_dropped_not_zeroed() {
     ] {
         let pointer = format!("/Matches/0/{field}");
         for (how, body) in absent_and_null(&comp_body(), &pointer) {
-            let r: CompetitiveUpdatesResponse = decode(&format!("{field} {how}"), &body);
-            assert_eq!(r.matches.len(), 1, "{field} {how}");
-            assert_eq!(r.matches[0].match_id, "m2", "{field} {how}");
+            assert!(
+                serde_json::from_value::<CompetitiveUpdatesResponse>(body).is_err(),
+                "{field} {how}"
+            );
         }
     }
 }
@@ -155,15 +158,22 @@ fn match_history_tolerates_a_missing_list_subject_and_queue() {
 }
 
 #[test]
-fn a_history_entry_without_an_id_or_a_start_is_dropped() {
+fn a_history_entry_without_an_id_or_a_start_fails_the_whole_answer() {
+    // Dropping the newest entry would make the real second one "most recent"
+    // for party detection; the answer fails instead.
     for field in ["MatchID", "GameStartTime"] {
         let pointer = format!("/History/0/{field}");
         for (how, body) in absent_and_null(&history_body(), &pointer) {
-            let r: MatchHistoryResponse = decode(&format!("{field} {how}"), &body);
-            assert_eq!(r.history.len(), 1, "{field} {how}");
-            assert_eq!(r.history[0].match_id, "m2", "{field} {how}");
+            assert!(
+                serde_json::from_value::<MatchHistoryResponse>(body).is_err(),
+                "{field} {how}"
+            );
         }
     }
+    // A list that is not a list is no answer either (a null one is empty).
+    let mut body = history_body();
+    body["History"] = json!("garbage");
+    assert!(serde_json::from_value::<MatchHistoryResponse>(body).is_err());
 }
 
 // ---------------------------------------------------------------------
@@ -225,21 +235,43 @@ fn a_season_entry_without_a_rank_or_rr_gives_no_current_rank_never_zero_rr() {
 }
 
 #[test]
-fn a_missing_games_count_is_zero_games_and_missing_wins_are_zero_wins() {
-    for field in [
-        "NumberOfWins",
-        "NumberOfWinsWithPlacements",
-        "NumberOfGames",
-    ] {
-        for (how, body) in absent_and_null(&mmr_body(), &act_ptr(field)) {
-            let r: PlayerMmrResponse = decode(&format!("{field} {how}"), &body);
-            let info = &seasonal_map_from_mmr(&r)[ACT];
-            match field {
-                "NumberOfGames" => assert_eq!(info.number_of_games, 0, "{how}"),
-                "NumberOfWins" => assert_eq!(info.number_of_wins, 7, "{how}: placements win"),
-                _ => assert_eq!(info.number_of_wins, 6, "{how}: falls back to NumberOfWins"),
-            }
-        }
+fn a_missing_games_or_wins_count_is_an_unknown_record_never_a_zero_percent() {
+    // The model reads 0 games as "no record" (win rate, wins and games show
+    // `—`); a missing count must never become "0 wins of 10 games".
+    let record = |body: &Value| {
+        let r: PlayerMmrResponse = decode("record", body);
+        let info = seasonal_map_from_mmr(&r)[ACT].clone();
+        (info.number_of_wins, info.number_of_games)
+    };
+    assert_eq!(record(&mmr_body()), (7, 10), "placements wins count");
+    for (how, body) in absent_and_null(&mmr_body(), &act_ptr("NumberOfGames")) {
+        assert_eq!(record(&body), (0, 0), "games {how}");
+    }
+    for (how, body) in absent_and_null(&mmr_body(), &act_ptr("NumberOfWinsWithPlacements")) {
+        assert_eq!(
+            record(&body),
+            (6, 10),
+            "placements {how}: NumberOfWins stands in"
+        );
+    }
+    for (how, body) in absent_and_null(&mmr_body(), &act_ptr("NumberOfWins")) {
+        assert_eq!(
+            record(&body),
+            (7, 10),
+            "wins {how}: placements wins stand in"
+        );
+        // Neither wins figure: unknown, not zero.
+        let mut none = body.clone();
+        none["QueueSkills"]["competitive"]["SeasonalInfoBySeasonID"][ACT]
+            .as_object_mut()
+            .unwrap()
+            .remove("NumberOfWinsWithPlacements");
+        assert_eq!(record(&none), (0, 0), "no wins at all, {how}");
+    }
+    // The rank of that entry is untouched.
+    for (how, body) in absent_and_null(&mmr_body(), &act_ptr("NumberOfGames")) {
+        let r: PlayerMmrResponse = decode("rank", &body);
+        assert_eq!(current_rank_from_mmr(&r, ACT).unwrap().tier, 15, "{how}");
     }
 }
 
@@ -605,7 +637,6 @@ fn match_details_tolerates_soft_fields_missing_or_null() {
         "/matchInfo/gameLengthMillis",
         "/players/0/gameName",
         "/players/0/tagLine",
-        "/players/0/teamId",
         "/players/0/partyId",
         "/players/0/characterId",
         "/players/0/competitiveTier",
@@ -631,11 +662,7 @@ fn match_details_tolerates_soft_fields_missing_or_null() {
 }
 
 #[test]
-fn a_player_without_a_subject_or_a_malformed_stats_block_never_fails_the_match() {
-    for (how, body) in absent_and_null(&details_body(), "/players/0/subject") {
-        let r: MatchDetailsResponse = decode(&format!("subject {how}"), &body);
-        assert_eq!(r.players.len(), 1, "{how}");
-    }
+fn a_malformed_stats_block_never_fails_the_match() {
     // A stats block with a hole is "no stats", never zero kills stored forever.
     for field in ["score", "roundsPlayed", "kills", "deaths", "assists"] {
         for (how, body) in absent_and_null(&details_body(), &format!("/players/0/stats/{field}")) {
@@ -643,12 +670,34 @@ fn a_player_without_a_subject_or_a_malformed_stats_block_never_fails_the_match()
             assert!(r.players[0].stats.is_none(), "{field} {how}");
         }
     }
-    // A team without an id or a result is dropped (no invented winner).
+}
+
+#[test]
+fn a_match_whose_player_has_no_team_or_whose_team_has_no_result_is_not_decoded() {
+    // Stored for good, and read by party detection (same team id), encounters
+    // and the result: a "" team id would make strangers teammates, and a
+    // dropped winner would be stored as a draw. So the answer fails and the
+    // fetch is retried like any failure.
+    for field in ["subject", "teamId"] {
+        for (how, body) in absent_and_null(&details_body(), &format!("/players/0/{field}")) {
+            assert!(
+                serde_json::from_value::<MatchDetailsResponse>(body).is_err(),
+                "player {field} {how}"
+            );
+        }
+    }
+    for (how, body) in absent_and_null(&details_body(), "/players/0/teamId") {
+        assert!(
+            serde_json::from_value::<MatchDetailsResponse>(body).is_err(),
+            "player teamId {how}"
+        );
+    }
     for field in ["teamId", "won"] {
         for (how, body) in absent_and_null(&details_body(), &format!("/teams/0/{field}")) {
-            let r: MatchDetailsResponse = decode(&format!("{field} {how}"), &body);
-            assert_eq!(r.teams.len(), 1, "{field} {how}");
-            assert_eq!(r.teams[0].team_id, "Red", "{field} {how}");
+            assert!(
+                serde_json::from_value::<MatchDetailsResponse>(body).is_err(),
+                "team {field} {how}"
+            );
         }
     }
 }

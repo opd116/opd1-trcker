@@ -1502,12 +1502,12 @@ async fn a_token_that_stays_rejected_is_refreshed_once_per_call_not_in_a_loop() 
 
 #[tokio::test]
 async fn a_token_older_than_the_limit_is_refreshed_before_the_call() {
+    // A zero limit: every token is already too old, no waiting needed.
     let (tmp, server) = token_server(bad_claims()).await;
-    let session = connect_with_age(&tmp, &server, Some(Duration::from_millis(200))).await;
+    let session = connect_with_age(&tmp, &server, Some(Duration::ZERO)).await;
 
     // The mock rejects token 1, so an answer proves the new one was in place
     // before the first request left.
-    tokio::time::sleep(Duration::from_millis(300)).await;
     let result: Value = session.pd(&mmr_path()).await.expect("answered");
     assert_eq!(result["Subject"], SELF_PUUID);
     assert_eq!(
@@ -1520,10 +1520,30 @@ async fn a_token_older_than_the_limit_is_refreshed_before_the_call() {
         1,
         "refreshed before the call: the call itself never failed"
     );
+}
 
-    // And a call right after does not refresh again.
-    let _: Value = session.pd(&mmr_path()).await.unwrap();
-    assert_eq!(count(&server, "/entitlements/v1/token").await, 2);
+#[tokio::test]
+async fn a_fresh_token_is_not_refreshed_again_and_again() {
+    // The default limit (50 minutes): a token just fetched is used as it is.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"Subject": SELF_PUUID})))
+        .mount(&server)
+        .await;
+    let session = connect_with_age(&tmp, &server, None).await;
+    for _ in 0..3 {
+        let _: Value = session.pd(&mmr_path()).await.unwrap();
+    }
+    assert_eq!(
+        count(&server, "/entitlements/v1/token").await,
+        1,
+        "connect only"
+    );
 }
 
 #[tokio::test]
@@ -1551,8 +1571,7 @@ async fn a_failing_proactive_refresh_goes_on_with_the_cached_token() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"Subject": SELF_PUUID})))
         .mount(&server)
         .await;
-    let session = connect_with_age(&tmp, &server, Some(Duration::from_millis(100))).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let session = connect_with_age(&tmp, &server, Some(Duration::ZERO)).await;
 
     for _ in 0..3 {
         let result: Value = session
@@ -1584,8 +1603,7 @@ async fn concurrent_calls_share_one_refresh() {
 
     // Proactive: eight calls find the token too old at once.
     let (tmp, server) = token_server(bad_claims()).await;
-    let session = connect_with_age(&tmp, &server, Some(Duration::from_millis(100))).await;
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    let session = connect_with_age(&tmp, &server, Some(Duration::ZERO)).await;
     for result in fan_out(session, 8).await {
         assert_eq!(result.expect("answered")["Subject"], SELF_PUUID);
     }

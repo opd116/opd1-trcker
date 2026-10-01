@@ -780,7 +780,7 @@ impl RiotSession {
                     resp.status.as_u16(),
                     shorten_uuids(path.split('?').next().unwrap_or(path))
                 );
-                self.refresh_entitlements_after(generation).await?;
+                self.refresh_entitlements_after(generation, false).await?;
                 continue;
             }
             match resp.status {
@@ -828,7 +828,7 @@ impl RiotSession {
         if !due {
             return Ok(());
         }
-        match self.refresh_entitlements_after(generation).await {
+        match self.refresh_entitlements_after(generation, true).await {
             Ok(()) => Ok(()),
             Err(RiotError::ClientGone) => Err(RiotError::ClientGone),
             Err(e) => {
@@ -844,10 +844,23 @@ impl RiotSession {
     /// cached headers (`self_puuid()` never changes: same account) — unless
     /// another caller already did since `seen_generation` was read: one refresh
     /// at a time, and a burst of rejected calls costs one fetch (R166).
-    async fn refresh_entitlements_after(&self, seen_generation: u64) -> Result<(), RiotError> {
+    ///
+    /// `proactive` callers also re-check, once they hold the gate, that no
+    /// failed attempt put the next one off meanwhile: with a hung local client
+    /// the first failure spares the callers queued behind it their own timeout.
+    async fn refresh_entitlements_after(
+        &self,
+        seen_generation: u64,
+        proactive: bool,
+    ) -> Result<(), RiotError> {
         let _one_at_a_time = self.refresh_gate.lock().await;
-        if self.auth.lock().unwrap().generation != seen_generation {
-            return Ok(());
+        {
+            let auth = self.auth.lock().unwrap();
+            if auth.generation != seen_generation
+                || (proactive && Instant::now() < auth.proactive_retry_at)
+            {
+                return Ok(());
+            }
         }
         self.check_alive()?;
         let entitlements =

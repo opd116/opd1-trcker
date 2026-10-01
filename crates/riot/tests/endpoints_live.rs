@@ -155,13 +155,71 @@ async fn match_details_hits_pd() {
                 "queueId": "competitive",
                 "isRanked": true
             },
-            "players": [], "teams": [], "roundResults": []
+            "players": [], "teams": [{"teamId": "Blue", "won": true}], "roundResults": []
         })))
         .mount(&server)
         .await;
 
     let result = session.match_details(MATCH_ID).await.unwrap();
     assert!(result.players.is_empty());
+}
+
+fn details_with(queue: &str, completion: &str, teams: serde_json::Value) -> serde_json::Value {
+    json!({
+        "matchInfo": {"matchId": MATCH_ID, "mapId": "/Game/Maps/Ascent/Ascent",
+            "gameStartMillis": 1_758_970_000_000i64, "queueID": queue, "isRanked": true,
+            "completionState": completion},
+        "players": [], "teams": teams, "roundResults": []
+    })
+}
+
+#[tokio::test]
+async fn a_match_that_cannot_say_who_won_is_a_failed_fetch_not_a_stored_draw() {
+    // R166 fix round 1: stored for good, so no winner means no row.
+    let (_tmp, server, session) = setup().await;
+    let blue_red = |blue: bool, red: bool| json!([{"teamId": "Blue", "won": blue}, {"teamId": "Red", "won": red}]);
+    let cases = [
+        // (queue, completion, teams, accepted)
+        ("competitive", "Completed", blue_red(true, false), true),
+        ("competitive", "Completed", blue_red(false, false), false),
+        ("competitive", "Completed", blue_red(true, true), false),
+        ("competitive", "Completed", json!([]), false),
+        ("competitive", "Completed", serde_json::Value::Null, false),
+        ("unrated", "Surrendered", blue_red(false, true), true),
+        ("unrated", "Completed", json!([]), false),
+        ("premier", "Completed", json!([]), false),
+        // A vote-draw has no winner by definition.
+        ("competitive", "VoteDraw", blue_red(false, false), true),
+        ("competitive", "VoteDraw", json!([]), true),
+        // Deathmatch has no teams.
+        ("deathmatch", "Completed", serde_json::Value::Null, true),
+        ("deathmatch", "Completed", json!([]), true),
+    ];
+    for (queue, completion, teams, accepted) in cases {
+        server.reset().await;
+        mount_entitlements(&server, SELF_PUUID).await;
+        Mock::given(method("GET"))
+            .and(path(format!("/match-details/v1/matches/{MATCH_ID}")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(details_with(
+                queue,
+                completion,
+                teams.clone(),
+            )))
+            .mount(&server)
+            .await;
+        let got = session.match_details(MATCH_ID).await;
+        assert_eq!(
+            got.is_ok(),
+            accepted,
+            "{queue} {completion} {teams}: {got:?}"
+        );
+        if !accepted {
+            assert!(
+                matches!(got, Err(opd1_riot::session::RiotError::Decode(_))),
+                "{got:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

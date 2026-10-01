@@ -69,19 +69,19 @@ pub(crate) fn list_from_value<T: DeserializeOwned>(value: Value) -> Vec<T> {
 /// Whether the dropped-element line was logged this run.
 static ELEMENT_DROP_LOGGED: AtomicBool = AtomicBool::new(false);
 
-/// Like [`lenient_list`], but the list itself is required: anything that is
-/// not an array (a `null` included) fails the answer. Used where an empty list
-/// would be stored for good (a match's players).
-fn required_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+/// A list that is empty when missing or `null`, but whose elements must all
+/// decode: one that does not fails the whole answer (R166, fix round 1). Used
+/// where dropping an element would shift what the rest means: the newest
+/// history entry decides party detection, the newest competitive-update row
+/// decides the stored rank and whether MMR is asked again, so a row Riot sent
+/// half-empty is a failed answer (the existing retry paths ask again), never a
+/// shorter list.
+fn whole_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: Deserializer<'de>,
     T: DeserializeOwned,
 {
-    let value = Value::deserialize(deserializer)?;
-    if !value.is_array() {
-        return Err(serde::de::Error::custom("expected a list"));
-    }
-    Ok(list_from_value(value))
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// R166: an optional object that decodes as `T` or is `None` — a missing,
@@ -174,7 +174,9 @@ impl VisiblePuuid {
 /// closed** (R166): a flag that did not arrive is the safe reading, so a player
 /// whose `Incognito` is missing, `null` or not a bool is hidden (no name is
 /// ever asked for them), and a level that did not arrive is not shown
-/// (`hide_account_level`, level 0) rather than shown as 0.
+/// (`hide_account_level`, level 0) rather than shown as 0. A missing
+/// `HideAccountLevel` next to a level that did arrive is read as "not hidden"
+/// (a deliberate choice: the level is shown only when Riot withholds it).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(from = "RawPlayerIdentity")]
 pub struct PlayerIdentity {
@@ -409,19 +411,19 @@ pub struct SeasonalInfo {
     /// and the stored competitive updates answer instead (R154, R166).
     #[serde(rename = "RankedRating", default)]
     pub ranked_rating: Option<i64>,
-    #[serde(rename = "NumberOfWins", default, deserialize_with = "null_to_default")]
-    pub number_of_wins: i64,
+    /// `None` when absent. A record with an unknown wins or games count is
+    /// unknown as a whole ([`crate::to_core::seasonal_map_from_mmr`] gives it
+    /// 0 games, which the card shows as `—`), never "0 wins of N games" (R166,
+    /// fix round 1).
+    #[serde(rename = "NumberOfWins", default)]
+    pub number_of_wins: Option<i64>,
     /// Wins including the placement games, which `NumberOfWins` leaves out
     /// (the act win rate counts them). Absent on older responses and old
     /// stored snapshots, so it is optional: `NumberOfWins` stands in.
     #[serde(rename = "NumberOfWinsWithPlacements", default)]
     pub number_of_wins_with_placements: Option<i64>,
-    #[serde(
-        rename = "NumberOfGames",
-        default,
-        deserialize_with = "null_to_default"
-    )]
-    pub number_of_games: i64,
+    #[serde(rename = "NumberOfGames", default)]
+    pub number_of_games: Option<i64>,
     #[serde(rename = "WinsByTier", default)]
     pub wins_by_tier: Option<HashMap<String, i64>>,
     /// Not in the brief's field list and not consumed by this crate yet;
@@ -457,9 +459,10 @@ pub struct PlayerMmrResponse {
 
 /// One row of `competitiveupdates`. What makes it a row (`MatchID`,
 /// `MatchStartTime`, the tier and RR after, the RR earned) is required: a row
-/// lacking one is dropped by the list ([`lenient_list`]), because a default 0
-/// would be a 1970 match, an unranked tier or "+0 RR" in the charts. The
-/// before-values, map and season are optional.
+/// lacking one fails the whole answer ([`whole_list`]), because a default 0
+/// would be a 1970 match, an unranked tier or "+0 RR" in the charts, and a
+/// dropped row would shift "newest". The before-values, map and season are
+/// optional.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CompetitiveUpdateMatch {
     #[serde(rename = "MatchID")]
@@ -488,7 +491,7 @@ pub struct CompetitiveUpdateMatch {
 pub struct CompetitiveUpdatesResponse {
     #[serde(rename = "Subject", default, deserialize_with = "null_to_default")]
     pub subject: String,
-    #[serde(rename = "Matches", default, deserialize_with = "lenient_list")]
+    #[serde(rename = "Matches", default, deserialize_with = "whole_list")]
     pub matches: Vec<CompetitiveUpdateMatch>,
 }
 
@@ -500,8 +503,9 @@ pub struct CompetitiveUpdatesResponse {
 pub struct MatchHistoryEntry {
     #[serde(rename = "MatchID")]
     pub match_id: String,
-    /// Required: an entry without a start time would be dated 1970 and fall
-    /// outside every act; it is dropped by the list instead (R166).
+    /// Required, like the id: an entry without a start time would be dated
+    /// 1970 and fall outside every act, and a dropped entry would shift "most
+    /// recent", so the whole answer fails ([`whole_list`], R166).
     #[serde(rename = "GameStartTime")]
     pub game_start_time: i64,
     /// `""` when absent: not a competitive match and not Deathmatch, so it
@@ -514,7 +518,7 @@ pub struct MatchHistoryEntry {
 pub struct MatchHistoryResponse {
     #[serde(rename = "Subject", default, deserialize_with = "null_to_default")]
     pub subject: String,
-    #[serde(rename = "History", default, deserialize_with = "lenient_list")]
+    #[serde(rename = "History", default, deserialize_with = "whole_list")]
     pub history: Vec<MatchHistoryEntry>,
     /// How many matches the history holds in all (for the requested queue
     /// filter), not just on this page: the fixture shows `"EndIndex": 2,
@@ -582,13 +586,16 @@ pub struct MatchPlayerStats {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchPlayer {
-    /// Required: a player without one is dropped by the list (R166).
+    /// Required (R166, fix round 1: a player without one fails the answer).
     pub subject: String,
     #[serde(default, deserialize_with = "null_to_default")]
     pub game_name: String,
     #[serde(default, deserialize_with = "null_to_default")]
     pub tag_line: String,
-    #[serde(default, deserialize_with = "null_to_default")]
+    /// Required: it is stored, and party detection, the encounter counts and the
+    /// match result all compare it, so a `""` would make strangers teammates. A
+    /// player without one fails the answer and the match is fetched again later
+    /// (R166, fix round 1).
     pub team_id: String,
     #[serde(default, deserialize_with = "null_to_default")]
     pub party_id: String,
@@ -610,8 +617,8 @@ pub struct MatchPlayer {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchTeam {
-    /// Required, like `won`: a team lacking either is dropped by the list, so
-    /// no winner is invented from a default `false` (R166).
+    /// Required, like `won`: a team lacking either fails the answer, so no
+    /// winner is lost or invented (R166, fix round 1).
     pub team_id: String,
     pub won: bool,
     /// Not in Task 3's original field list (which covered only
@@ -670,13 +677,13 @@ pub struct MatchDetailsResponse {
     // `rename_all = "camelCase"` on this container already turns
     // `match_info` into `matchInfo`.
     pub match_info: MatchInfo,
-    /// Required (a stored match with no players is garbage); a player
-    /// without a `subject` is dropped (R166).
-    #[serde(deserialize_with = "required_list")]
+    /// Required, and every player must decode (`subject`, `teamId`): a match
+    /// is stored for good, so a missing list or a half-empty player fails the
+    /// answer and the fetch is retried later (R166, fix round 1).
     pub players: Vec<MatchPlayer>,
     /// `.nullable()` in `MatchDetails.ts` — defaults to empty rather than
     /// failing the decode when Riot sends `null`.
-    #[serde(default, deserialize_with = "lenient_list")]
+    #[serde(default, deserialize_with = "whole_list")]
     pub teams: Vec<MatchTeam>,
     /// `.nullable()` in `MatchDetails.ts` — same treatment as `teams`.
     #[serde(default, deserialize_with = "null_to_default")]
@@ -776,6 +783,27 @@ pub struct NameServiceEntry {
     /// `Option` so an absent value can't fail the whole `names()` decode.
     #[serde(rename = "DisplayName", default)]
     pub display_name: Option<String>,
+}
+
+/// Queues whose matches always have a decided result (a winning team, or a
+/// `VoteDraw` completion): the ones with 12-round halves.
+const WINNER_QUEUES: [&str; 3] = ["competitive", "unrated", "premier"];
+
+/// A competitive, unrated or premier match with no single winning team (and
+/// not a `VoteDraw`) is an answer with its `teams` missing, empty or without a
+/// usable result: stored, it would be a draw for good. Other queues (Deathmatch
+/// has no teams) are not checked.
+fn check_winner(details: &MatchDetailsResponse) -> Result<(), RiotError> {
+    let info = &details.match_info;
+    if WINNER_QUEUES.contains(&info.queue_id.as_str())
+        && info.completion_state != "VoteDraw"
+        && details.teams.iter().filter(|t| t.won).count() != 1
+    {
+        return Err(RiotError::Decode(
+            "the match has no single winning team".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// How long [`RiotSession::names`] waits before its one retry (R166).
@@ -887,9 +915,15 @@ impl RiotSession {
             .await
     }
 
+    /// A match is stored for good, so an answer that cannot say who won is a
+    /// failed fetch (retried later like any failure), not a stored draw: see
+    /// [`check_winner`] (R166, fix round 1).
     pub async fn match_details(&self, match_id: &str) -> Result<MatchDetailsResponse, RiotError> {
-        self.pd(&format!("/match-details/v1/matches/{match_id}"))
-            .await
+        let details: MatchDetailsResponse = self
+            .pd(&format!("/match-details/v1/matches/{match_id}"))
+            .await?;
+        check_winner(&details)?;
+        Ok(details)
     }
 
     pub async fn party_of(&self, puuid: &str) -> Result<PartyOfResponse, RiotError> {

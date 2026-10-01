@@ -271,6 +271,11 @@ pub struct LiveModel {
     /// live roster; dropped with a roster change, an account switch, and when
     /// VALORANT closes.
     pub rank_retries: RankRetries,
+    /// R160: name-service answered "on hold" (`RiotError::Held`, nothing
+    /// sent): until this instant no names job is handed out
+    /// ([`Self::names_needed`], [`Self::fill_ready`]), so the worker neither
+    /// spins on a refused call nor marks anyone as asked.
+    names_hold_until: Option<Instant>,
     /// Test clock: added to "now" wherever the retries are timed, so a test
     /// moves time forward instead of sleeping (`Self::advance_clock`).
     #[cfg(test)]
@@ -306,6 +311,7 @@ impl LiveModel {
             name_fill: VecDeque::new(),
             match_end_ms: None,
             rank_retries: RankRetries::default(),
+            names_hold_until: None,
             #[cfg(test)]
             clock_offset: Duration::ZERO,
             current: LiveState {
@@ -533,6 +539,9 @@ impl LiveModel {
     /// comes from the chat session), never anyone whose `Incognito` is
     /// true, only names not known and not yet asked for.
     pub fn names_needed(&self) -> Vec<(String, bool)> {
+        if self.names_deferred() {
+            return Vec::new();
+        }
         let self_id = self.self_id();
         self.slots
             .iter()
@@ -583,7 +592,19 @@ impl LiveModel {
     /// R150: a names fill is queued and it is between matches. The asks wait
     /// in the queue through a match and run after it.
     pub fn fill_ready(&self) -> bool {
-        !self.name_fill.is_empty() && self.between_matches()
+        !self.name_fill.is_empty() && self.between_matches() && !self.names_deferred()
+    }
+
+    /// R160: no names job is handed out for `wait` (a name-service call was
+    /// refused because the `other` request family is on hold). Only ever
+    /// extended.
+    pub fn defer_names(&mut self, wait: Duration) {
+        let until = self.now() + wait;
+        self.names_hold_until = Some(self.names_hold_until.map_or(until, |u| u.max(until)));
+    }
+
+    fn names_deferred(&self) -> bool {
+        self.names_hold_until.is_some_and(|u| self.now() < u)
     }
 
     /// The clock the rank retries are timed by.
@@ -1389,6 +1410,14 @@ impl AppState {
             st: self.clone(),
             match_id: match_id.to_string(),
         })
+    }
+
+    /// Gives back a [`Self::claim_details_sync`]: the sync did not get its data
+    /// (R160: refused by a hold, or the competitive-updates call failed), so
+    /// the next open or refresh may run it again instead of waiting out the
+    /// 120 s.
+    pub fn release_details_sync(&self, puuid: &str) {
+        lock(&self.details_synced).remove(puuid);
     }
 
     /// `true` (and records now) when `puuid`'s Player Details data hasn't

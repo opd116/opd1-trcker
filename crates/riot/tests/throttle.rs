@@ -170,18 +170,29 @@ async fn take_unless_held_returns_the_remaining_hold_at_once_and_keeps_the_token
         "returns at once"
     );
     assert!(left > Duration::from_secs(59) && left <= Duration::from_secs(60));
-    assert!(throttle.held_for().is_some());
+}
 
-    // The refused call took no token: a throttle that is only ever refused
-    // still has its full burst once the hold is gone.
-    let fresh = Throttle::new(1.0, 1.0);
-    assert!(fresh.take_unless_held().await.is_ok());
+#[tokio::test]
+async fn a_refused_take_unless_held_leaves_the_bucket_untouched() {
+    // Burst 1, 1 rps: if the refused call had taken the one token, the next
+    // take would have to wait about 0.85 s for it to refill.
+    let throttle = Throttle::new(1.0, 1.0);
+    throttle.hold_for(0.1);
+    assert!(throttle.take_unless_held().await.is_err());
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let start = Instant::now();
+    assert!(throttle.take_unless_held().await.is_ok());
+    assert!(
+        start.elapsed() < Duration::from_millis(300),
+        "the token was still there: {:?}",
+        start.elapsed()
+    );
 }
 
 #[tokio::test]
 async fn take_unless_held_takes_a_token_when_nothing_is_held() {
     let throttle = Throttle::new(2.0, 2.0);
-    assert!(throttle.held_for().is_none());
     assert!(throttle.take_unless_held().await.is_ok());
     assert!(throttle.take_unless_held().await.is_ok());
 }
@@ -203,4 +214,23 @@ async fn a_hold_waits_out_and_is_independent_of_other_holds() {
     other.wait().await;
     assert!(start.elapsed() >= Duration::from_millis(80));
     assert!(other.remaining().is_none());
+}
+
+#[tokio::test]
+async fn wait_up_to_waits_for_a_short_hold_and_refuses_a_long_one_at_once() {
+    // R160: the `other` family waits only for a hold of at most the bound.
+    let hold = Hold::new();
+    hold.hold_for(0.1);
+    let start = Instant::now();
+    assert!(hold.wait_up_to(Duration::from_secs(1)).await.is_ok());
+    assert!(start.elapsed() >= Duration::from_millis(80));
+
+    hold.hold_for(60.0);
+    let start = Instant::now();
+    let left = hold
+        .wait_up_to(Duration::from_secs(10))
+        .await
+        .expect_err("60 s is over the bound");
+    assert!(start.elapsed() < Duration::from_millis(50), "at once");
+    assert!(left > Duration::from_secs(59));
 }

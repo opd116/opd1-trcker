@@ -281,7 +281,7 @@ async fn an_mmr_429_holds_the_full_retry_after_and_returns_at_once() {
         "neither call waited: {:?}",
         start.elapsed()
     );
-    assert!(RiotError::Held(left).to_string().contains("mmr"));
+    assert!(RiotError::Held(left).to_string().contains("on hold"));
     // `.expect(1)` is checked when the server drops: nothing was sent the
     // second time.
 }
@@ -329,17 +329,20 @@ async fn every_mmr_path_shares_the_mmr_hold_and_other_calls_do_not() {
 #[tokio::test]
 async fn an_other_429_holds_only_the_other_family_and_mmr_still_answers() {
     // R160: a match-history 429 used to hold the global bucket and so delayed
-    // mmr too.
+    // mmr too. A hold over the 10 s in-call bound returns at once: the 429'd
+    // call is not retried in-call, the next `other` call is refused locally
+    // (nothing sent), and mmr is not touched.
     let tmp = TempDir::new();
     write_shooter_log(tmp.path());
     let server = MockServer::start().await;
     write_lockfile(tmp.path(), "http", server.address().port(), "pw");
     mount_entitlements(&server, SELF_PUUID).await;
-    let session = std::sync::Arc::new(connect_against(tmp.path(), &server).await);
+    let session = connect_against(tmp.path(), &server).await;
 
     Mock::given(method("GET"))
         .and(path(HISTORY_PATH))
         .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
+        .expect(1)
         .mount(&server)
         .await;
     Mock::given(method("GET"))
@@ -350,26 +353,18 @@ async fn an_other_429_holds_only_the_other_family_and_mmr_still_answers() {
         .mount(&server)
         .await;
 
-    // The history call 429s and sleeps out its hold in-call: run it aside.
-    let s = session.clone();
-    let history = tokio::spawn(async move { s.pd::<Value>(HISTORY_PATH).await });
-    // Wait until the 429 has been received (the hold is set right after).
-    for _ in 0..100 {
-        let seen = server
-            .received_requests()
-            .await
-            .unwrap_or_default()
-            .iter()
-            .filter(|r| r.url.path() == HISTORY_PATH)
-            .count();
-        if seen >= 1 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
     let start = Instant::now();
+    let first = session.pd::<Value>(HISTORY_PATH).await.unwrap_err();
+    assert!(
+        matches!(first, RiotError::RateLimited),
+        "a 60 s hold is not slept out: {first:?}"
+    );
+    let second = session.pd::<Value>(HISTORY_PATH).await.unwrap_err();
+    let RiotError::Held(left) = second else {
+        panic!("expected Held, got {second:?}");
+    };
+    assert!(left > Duration::from_secs(55) && left <= Duration::from_secs(60));
+
     let mmr: Value = session
         .pd(OTHER_MMR_PATH)
         .await
@@ -377,10 +372,37 @@ async fn an_other_429_holds_only_the_other_family_and_mmr_still_answers() {
     assert_eq!(mmr["Subject"], "x");
     assert!(
         start.elapsed() < Duration::from_secs(2),
-        "took {:?}",
+        "nothing waited: {:?}",
         start.elapsed()
     );
-    history.abort();
+    // `.expect(1)`: the second history call sent nothing.
+}
+
+#[tokio::test]
+async fn an_other_call_waits_for_a_short_hold_but_not_a_long_one() {
+    // R160's bound: a hold of at most 10 s is waited out in the call (here
+    // 0.4 s, set by a first 429); one with more left is refused at once.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    let session = connect_against(tmp.path(), &server).await;
+
+    Mock::given(method("GET"))
+        .and(path(HISTORY_PATH))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.4"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(HISTORY_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "History": [] })))
+        .mount(&server)
+        .await;
+    let start = Instant::now();
+    let _: Value = session.pd(HISTORY_PATH).await.expect("retried after 0.4 s");
+    assert!(start.elapsed() >= Duration::from_millis(350));
 }
 
 #[tokio::test]

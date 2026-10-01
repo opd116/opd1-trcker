@@ -35,8 +35,11 @@ use std::time::{Duration, Instant};
 pub const RANK_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(20), Duration::from_secs(60)];
 
 /// How long after a hold ends the held-back sync is due (R160): a moment, so
-/// the first request is not the one that lands on the last instant of Riot's
-/// block, and the players held at once do not all fire in the same tick.
+/// the first request does not land on the last instant of Riot's block. The
+/// due time is counted from when the held sync ended (`LiveModel::now()`), not
+/// from when the hold was seen, so it is never earlier than the hold's end. The
+/// players held at once are all due together and the single worker hands them
+/// out one by one; the slack does not spread them.
 pub const HOLD_SLACK: Duration = Duration::from_millis(1500);
 
 /// One player waiting for a retry.

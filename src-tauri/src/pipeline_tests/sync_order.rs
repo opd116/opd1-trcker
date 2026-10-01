@@ -556,3 +556,121 @@ async fn every_failed_names_try_leaves_a_wake_up_for_the_next_one() {
     assert_eq!(count(&h.server, "PUT", put_names()).await, 3);
     assert_eq!(card_json(&h.st, OTHER)["name"]["name"], "Other");
 }
+
+/// The PUT bodies sent to name-service, in order, as the puuids they carried.
+async fn name_asks(h: &Harness) -> Vec<Vec<String>> {
+    h.server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|r| r.method.as_str() == "PUT" && r.url.path() == put_names())
+        .map(|r| serde_json::from_slice::<Vec<String>>(&r.body).expect("a list of puuids"))
+        .collect()
+}
+
+fn join(h: &Harness, puuid: &str) {
+    let mut live = lock(&h.st.live);
+    live.slots.push(Slot {
+        roster: roster(puuid, false),
+        db: PlayerDb::default(),
+    });
+    live.synced.insert(puuid.into());
+}
+
+#[tokio::test]
+async fn a_new_player_is_asked_at_once_while_an_older_retry_waits_and_the_retry_still_wakes() {
+    let h = harness().await;
+    fails(&h, "PUT", put_names(), 500, Some(1)).await;
+    names_only(&h);
+    assert!(drain(&h).await, "OTHER's first try fails");
+
+    join(&h, MATE);
+    assert!(
+        drain(&h).await,
+        "MATE is asked now, not after OTHER's delay"
+    );
+    let asks = name_asks(&h).await;
+    assert_eq!(asks.len(), 2);
+    assert_eq!(asks[1], vec![MATE.to_string()], "alone: OTHER waits");
+
+    // OTHER's retry still wakes on time.
+    assert!(!lock(&h.st.live).names_wakeup_due());
+    advance(&h, 3 * S);
+    assert!(lock(&h.st.live).names_wakeup_due());
+    assert!(drain(&h).await);
+    assert_eq!(name_asks(&h).await[2], vec![OTHER.to_string()]);
+    assert_eq!(card_json(&h.st, OTHER)["name"]["name"], "Other");
+}
+
+#[tokio::test]
+async fn a_staggered_retry_is_woken_after_a_names_step_that_succeeded() {
+    // OTHER fails twice (try 2 due +6 s) while MATE, who joined between,
+    // fails once (due +2 s). MATE answers alone at +2 s: the step that
+    // answered must leave the wake-up for OTHER's retry.
+    let h = harness().await;
+    fails(&h, "PUT", put_names(), 500, Some(2)).await;
+    names_only(&h);
+    assert!(drain(&h).await, "request 1: [OTHER] fails");
+    advance(&h, 3 * S);
+    join(&h, MATE);
+    assert!(drain(&h).await, "request 2: [OTHER, MATE] fails");
+    assert_eq!(name_asks(&h).await[1].len(), 2);
+
+    assert!(!lock(&h.st.live).names_wakeup_due());
+    advance(&h, 3 * S);
+    assert!(lock(&h.st.live).names_wakeup_due(), "MATE is due");
+    assert!(drain(&h).await, "request 3: [MATE] is answered");
+    assert_eq!(name_asks(&h).await[2], vec![MATE.to_string()]);
+
+    // Only the success arm can have armed this one.
+    assert!(!lock(&h.st.live).names_wakeup_due());
+    advance(&h, 4 * S);
+    assert!(lock(&h.st.live).names_wakeup_due(), "OTHER is due");
+    assert!(drain(&h).await, "request 4");
+    assert_eq!(name_asks(&h).await[3], vec![OTHER.to_string()]);
+}
+
+#[tokio::test]
+async fn a_task_that_waited_on_anothers_404_does_not_count_the_match_as_missing() {
+    let h = harness().await;
+    let id = "m-dead";
+    let guard = match h.st.claim_details_fetch(id) {
+        crate::state::DetailsClaim::Mine(g) => g,
+        _ => panic!("free"),
+    };
+    let waiter = crate::sync::fetch_missing_details_full(&h.st, &h.session, vec![id.to_string()]);
+    let owner = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        // The owner's download answered 404.
+        h.st.note_details_404(id);
+        drop(guard);
+    };
+    let (fetched, ()) = tokio::join!(waiter, owner);
+    let fetched = fetched.unwrap();
+    assert!(
+        !fetched.incomplete,
+        "a dead id is terminal for the waiter too"
+    );
+    assert_eq!(
+        count(&h.server, "GET", &format!("/match-details/v1/matches/{id}")).await,
+        0
+    );
+}
+
+#[tokio::test]
+async fn a_task_that_waited_on_a_download_that_failed_still_counts_it_as_missing() {
+    let h = harness().await;
+    let id = "m-flaky";
+    let guard = match h.st.claim_details_fetch(id) {
+        crate::state::DetailsClaim::Mine(g) => g,
+        _ => panic!("free"),
+    };
+    let waiter = crate::sync::fetch_missing_details_full(&h.st, &h.session, vec![id.to_string()]);
+    let owner = async {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        drop(guard); // failed in its own task: nothing stored, no 404
+    };
+    let (fetched, ()) = tokio::join!(waiter, owner);
+    assert!(fetched.unwrap().incomplete);
+}

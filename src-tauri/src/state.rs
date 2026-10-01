@@ -202,14 +202,9 @@ impl NamesAttempted {
         self.failed.clear();
     }
 
-    /// The earliest instant a failed player's next try is due, when one is
-    /// still waiting after `now`.
-    fn next_due(&self, now: Instant) -> Option<Instant> {
-        self.failed
-            .values()
-            .map(|f| f.due)
-            .filter(|d| *d > now)
-            .min()
+    /// When `puuid`'s next try is due, while it is still waiting after `now`.
+    fn due_after(&self, puuid: &str, now: Instant) -> Option<Instant> {
+        self.failed.get(puuid).map(|f| f.due).filter(|d| *d > now)
     }
 
     /// The player's next try is not due yet.
@@ -428,6 +423,9 @@ pub struct LiveModel {
     /// ([`Self::names_needed`], [`Self::fill_ready`]), so the worker neither
     /// spins on a refused call nor marks anyone as asked.
     names_hold_until: Option<Instant>,
+    /// R165: when the earliest waiting names retry is due ([`Self::arm_names_retry_wake`]);
+    /// only [`Self::names_wakeup_due`] reads it, nothing is blocked by it.
+    names_retry_wake: Option<Instant>,
     /// Test clock: added to "now" wherever the retries are timed, so a test
     /// moves time forward instead of sleeping (`Self::advance_clock`).
     #[cfg(test)]
@@ -465,6 +463,7 @@ impl LiveModel {
             last_match_end: None,
             rank_retries: RankRetries::default(),
             names_hold_until: None,
+            names_retry_wake: None,
             #[cfg(test)]
             clock_offset: Duration::ZERO,
             current: LiveState {
@@ -727,13 +726,23 @@ impl LiveModel {
             .min()
     }
 
-    /// R165: how long until the earliest still-waiting names retry is due.
-    /// After every names step the worker defers names jobs to this time
-    /// ([`Self::defer_names`]), so the tick's `names_wakeup_due` wakes a worker
-    /// for every staggered retry, not just the first.
-    pub fn names_next_wait(&self) -> Option<Duration> {
+    /// R165: arms the wake-up of the earliest still-waiting names retry: the
+    /// earliest due time among players who are on the roster and still need a
+    /// name (not the user, not hidden, not known, not attempted). Read only by
+    /// [`Self::names_wakeup_due`]: unlike [`Self::defer_names`] (R160's hold)
+    /// it blocks nothing, so a new player's first ask is never delayed. Called
+    /// after every names step, so each staggered retry is woken in turn.
+    pub fn arm_names_retry_wake(&mut self) {
         let now = self.now();
-        self.names_attempted.next_due(now).map(|d| d - now)
+        let self_id = self.self_id();
+        self.names_retry_wake = self
+            .slots
+            .iter()
+            .filter(|s| s.roster.puuid != self_id && !s.roster.incognito)
+            .filter(|s| !self.known_names.contains_key(&s.roster.puuid))
+            .filter(|s| !self.names_attempted.contains(&s.roster.puuid))
+            .filter_map(|s| self.names_attempted.due_after(&s.roster.puuid, now))
+            .min();
     }
 
     /// The next player whose matches phase is due, in display order (self ->
@@ -830,14 +839,19 @@ impl LiveModel {
     /// cleared here, so a job that cannot run cannot make the tick start a
     /// worker again and again.
     pub fn names_wakeup_due(&mut self) -> bool {
-        let Some(until) = self.names_hold_until else {
-            return false;
-        };
-        if self.now() < until {
-            return false;
+        let now = self.now();
+        let mut wake = false;
+        if self.names_hold_until.is_some_and(|until| now >= until) {
+            self.names_hold_until = None;
+            wake |= !self.names_needed().is_empty() || self.fill_ready();
         }
-        self.names_hold_until = None;
-        !self.names_needed().is_empty() || self.fill_ready()
+        // R165: a waiting names retry came due (one-shot like the hold; the
+        // names step that follows arms the next one).
+        if self.names_retry_wake.is_some_and(|at| now >= at) {
+            self.names_retry_wake = None;
+            wake |= !self.names_needed().is_empty();
+        }
+        wake
     }
 
     /// R160: forgets a names deferral. A new session (a reconnect, another
@@ -845,6 +859,7 @@ impl LiveModel {
     /// refused now.
     pub fn reset_names_hold(&mut self) {
         self.names_hold_until = None;
+        self.names_retry_wake = None;
     }
 
     /// The clock the rank retries are timed by.
@@ -1286,6 +1301,10 @@ pub struct AppState {
     /// the live sync, a Details sync, Match Details and the backfill can all
     /// want the same match at once, and it is downloaded once.
     details_inflight: Mutex<HashMap<String, tokio::sync::watch::Sender<()>>>,
+    /// R165: match ids Riot answered 404 for (terminal: `sync::fetch_missing_details_full`
+    /// skips them without a retry); a task that waited on another's download
+    /// of such an id does not count it as missing. Bounded.
+    details_404: Mutex<HashSet<String>>,
     /// The Match Details the UI has open, if any (R150): replaced by the next
     /// `match_details` call, dropped when the Player Details is opened again
     /// (Back from the match). The UI has no signal for leaving the match
@@ -1345,6 +1364,7 @@ impl AppState {
             skins_inflight: Mutex::new(HashMap::new()),
             open_details: Mutex::new(None),
             details_inflight: Mutex::new(HashMap::new()),
+            details_404: Mutex::new(HashSet::new()),
             open_match: Mutex::new(None),
             worker_kick: AtomicBool::new(false),
             debug_dir,
@@ -1557,6 +1577,20 @@ impl AppState {
         }
         lock(&self.live).queue_name_fill(asks);
         self.worker_kick.store(true, Ordering::Release);
+    }
+
+    /// R165: Riot no longer has this match (404): remembered for the session.
+    pub fn note_details_404(&self, match_id: &str) {
+        let mut set = lock(&self.details_404);
+        if set.len() >= 512 {
+            set.clear();
+        }
+        set.insert(match_id.to_string());
+    }
+
+    /// R165: this match answered 404 earlier ([`Self::note_details_404`]).
+    pub fn details_404(&self, match_id: &str) -> bool {
+        lock(&self.details_404).contains(match_id)
     }
 
     /// `true` once after each [`Self::queue_name_fill`]: the poll loop calls
@@ -3603,44 +3637,73 @@ mod tests {
     }
 
     #[test]
-    fn staggered_names_retries_are_each_woken() {
-        // R165 fix round: `a` is on its second failure (due +6 s) while `c`,
+    fn staggered_names_retries_are_each_woken_and_nothing_else_is_blocked() {
+        // R165 fix rounds: `a` is on its second failure (due +6 s) while `c`,
         // who joined later, is on its first (due +2 s). After every names
-        // step the deferral goes to the earliest still-waiting retry, so the
-        // tick wakes a worker for `c` and then again for `a`.
+        // step the wake-up goes to the earliest still-waiting retry of a
+        // player who still needs a name, so the tick wakes a worker for `c`
+        // and then again for `a`. The wake-up blocks nothing.
         let mut m = model(vec![slot("me", false), slot("a", false)]);
         m.synced.extend(["me".to_string(), "a".to_string()]);
         m.names_attempted.insert("me".into());
         assert_eq!(m.note_names_failed(&["a".to_string()]), Some(2 * S));
+        m.arm_names_retry_wake();
+        assert!(!m.names_wakeup_due());
         m.advance_clock(2 * S);
+        assert!(m.names_wakeup_due(), "a is due");
         m.slots.push(slot("c", false));
         m.synced.insert("c".into());
-        assert_eq!(
-            m.note_names_failed(&["a".to_string(), "c".to_string()]),
-            Some(2 * S),
-            "c's first failure is the shortest wait"
-        );
-        let wait = m.names_next_wait().expect("both are waiting");
-        // (the real clock runs a few microseconds between the calls)
-        let near = |w: Duration, want: Duration| w <= want && w > want - Duration::from_millis(100);
-        assert!(near(wait, 2 * S), "{wait:?}");
-        m.defer_names(wait);
-        assert!(!m.names_wakeup_due());
+        m.note_names_failed(&["a".to_string(), "c".to_string()]);
+        m.arm_names_retry_wake();
+        assert!(!m.names_wakeup_due(), "c's first failure: +2 s");
         m.advance_clock(2 * S);
         assert!(m.names_wakeup_due(), "c is due");
         assert_eq!(m.names_needed(), vec![("c".to_string(), false)]);
         // c answers; a is still waiting and gets its own wake-up.
         m.names_attempted.insert("c".into());
-        let wait = m.names_next_wait().expect("a is waiting");
-        assert!(near(wait, 4 * S), "{wait:?}");
-        m.defer_names(wait);
+        m.arm_names_retry_wake();
         m.advance_clock(3 * S);
         assert!(!m.names_wakeup_due());
         m.advance_clock(S);
         assert!(m.names_wakeup_due(), "a is due");
         assert_eq!(m.names_needed(), vec![("a".to_string(), false)]);
-        // Nothing is waiting any more: no deferral to make.
+        // Nothing is waiting any more: nothing to arm.
         m.names_attempted.insert("a".into());
-        assert_eq!(m.names_next_wait(), None);
+        m.arm_names_retry_wake();
+        m.advance_clock(1_000 * S);
+        assert!(!m.names_wakeup_due());
+    }
+
+    #[test]
+    fn a_player_who_joins_while_a_retry_waits_is_needed_at_once() {
+        let mut m = model(vec![slot("me", false), slot("a", false)]);
+        m.synced.extend(["me".to_string(), "a".to_string()]);
+        m.names_attempted.insert("me".into());
+        m.note_names_failed(&["a".to_string()]);
+        m.arm_names_retry_wake();
+        m.slots.push(slot("d", false));
+        assert_eq!(
+            m.names_needed(),
+            vec![("d".to_string(), false)],
+            "d is asked now, a waits for its retry"
+        );
+        // The older retry still wakes on time.
+        m.names_attempted.insert("d".into());
+        m.arm_names_retry_wake();
+        m.advance_clock(2 * S);
+        assert!(m.names_wakeup_due());
+        assert_eq!(m.names_needed(), vec![("a".to_string(), false)]);
+    }
+
+    #[test]
+    fn the_retry_wake_ignores_players_who_left_or_no_longer_need_a_name() {
+        let mut m = model(vec![slot("me", false), slot("a", false), slot("b", false)]);
+        m.names_attempted.insert("me".into());
+        m.note_names_failed(&["a".to_string(), "b".to_string()]);
+        m.slots.retain(|s| s.roster.puuid != "a");
+        m.known_names.insert("b".into(), ("B".into(), "T".into()));
+        m.arm_names_retry_wake();
+        m.advance_clock(100 * S);
+        assert!(!m.names_wakeup_due(), "nobody left who needs one");
     }
 }

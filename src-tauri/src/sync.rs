@@ -512,6 +512,7 @@ pub async fn fetch_missing_details_full(
             // partial because of it.
             Ok((id, Err(e @ RiotError::Status(404, _)))) => {
                 log::warn!("match details {} skipped: {e}", short(&id));
+                st.note_details_404(&id);
                 claimed.remove(&id);
             }
             Ok((id, Err(e))) => {
@@ -539,10 +540,12 @@ pub async fn fetch_missing_details_full(
     // The downloads this call waited for may have failed in their own task:
     // look again, so a retry is scheduled for them too.
     if !incomplete && !waited.is_empty() {
+        let owner = st.clone();
         incomplete = st
             .db(move |repo| repo.new_match_ids(&waited))
             .await
-            .is_some_and(|still| !still.is_empty());
+            // A waited-for id that answered 404 in its own task is terminal.
+            .is_some_and(|still| still.iter().any(|id| !owner.details_404(id)));
     }
     Ok(DetailsFetch { held, incomplete })
 }
@@ -1464,13 +1467,11 @@ async fn names_step(
             let retry = {
                 let mut live = lock(&st.live);
                 let retry = live.note_names_failed(&asked);
-                // The worker never waits: no names job is handed out until the
-                // earliest still-waiting retry (this batch's or an older
-                // one's) is due, and the poll loop's tick starts a worker then
-                // (`LiveModel::names_wakeup_due`, R160).
-                if let Some(wait) = live.names_next_wait() {
-                    live.defer_names(wait);
-                }
+                // The worker never waits: the poll loop's tick starts one when
+                // the earliest waiting retry is due
+                // (`LiveModel::names_wakeup_due`). Nothing else is blocked:
+                // a player who joins meanwhile is asked at once.
+                live.arm_names_retry_wake();
                 retry
             };
             log::warn!(
@@ -1502,9 +1503,7 @@ async fn names_step(
         }
         // Players of an earlier failed lookup may still be waiting for their
         // retry (their counts differ): keep a wake-up for the next one.
-        if let Some(wait) = live.names_next_wait() {
-            live.defer_names(wait);
-        }
+        live.arm_names_retry_wake();
     }
     log::debug!("names: {} of {} resolved", learned.len(), asked.len());
     save_names(st, learned).await;

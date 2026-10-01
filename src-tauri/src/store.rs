@@ -584,8 +584,8 @@ mod tests {
         assert!(!text.contains("CapstoneWins"));
         let back = parse_mmr_snapshot(&text).unwrap();
         let s = &back.queue_skills["competitive"].seasonal_info_by_season_id["act-1"];
-        assert_eq!((s.competitive_tier, s.ranked_rating), (15, 42));
-        assert_eq!((s.number_of_wins, s.number_of_games), (6, 10));
+        assert_eq!((s.competitive_tier, s.ranked_rating), (15, Some(42)));
+        assert_eq!((s.number_of_wins, s.number_of_games), (Some(6), Some(10)));
         assert_eq!(s.wins_by_tier.as_ref().unwrap()["15"], 4);
     }
 
@@ -612,7 +612,7 @@ mod tests {
 
         let back = parse_mmr_snapshot(&trimmed.to_string()).unwrap();
         let seasons = &back.queue_skills["competitive"].seasonal_info_by_season_id;
-        assert_eq!(seasons["act-1"].number_of_wins, 34);
+        assert_eq!(seasons["act-1"].number_of_wins, Some(34));
         assert_eq!(seasons["act-1"].number_of_wins_with_placements, Some(39));
         // A season Riot sent without the field keeps `None` (the card then
         // falls back to `NumberOfWins`).

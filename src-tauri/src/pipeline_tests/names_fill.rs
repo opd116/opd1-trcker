@@ -820,7 +820,9 @@ async fn a_failed_request_stores_no_marker_and_is_not_retried_in_a_loop() {
 
     run_fill(&h).await;
 
-    assert_eq!(puts(&h.server).await.len(), 1, "one attempt");
+    // R166: the call itself tries a 5xx twice (one pause, then one more), and
+    // that is all: the ask is not kept for the worker to loop on.
+    assert_eq!(puts(&h.server).await.len(), 2, "the call and its one retry");
     assert!(lock(&h.st.live).name_fill.is_empty(), "not kept for a loop");
     assert_eq!(
         marker(&h.st, pid(1)).await,

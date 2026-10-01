@@ -129,7 +129,8 @@ async fn with_no_rr_row_either_the_rank_is_the_tier_of_a_stored_match_and_the_rr
                 "partyId": "q", "characterId": "agent-o", "competitiveTier": 14,
                 "stats": {"score": 1, "roundsPlayed": 20, "kills": 5, "deaths": 15, "assists": 1}
             }],
-            "teams": [{"teamId": "Red", "won": false, "roundsWon": 7}],
+            "teams": [{"teamId": "Red", "won": false, "roundsWon": 7},
+                      {"teamId": "Blue", "won": true, "roundsWon": 13}],
             "roundResults": []
         }),
     )

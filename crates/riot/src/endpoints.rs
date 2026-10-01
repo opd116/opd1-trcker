@@ -12,6 +12,7 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
 
@@ -30,6 +31,83 @@ where
     T: Default + Deserialize<'de>,
 {
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// R166: a list whose elements are decoded one by one; an element that does not
+/// decode (no id, a wrong type) is dropped instead of failing the answer, and a
+/// missing, `null` or non-array list is empty. Identity fields (a subject, a
+/// match id) stay required on the element type, so "no id" means "no element",
+/// never an invented one. Costs one `Value` pass, so it is used for the short
+/// lists (rosters, histories, comp updates), not for `roundResults`.
+fn lenient_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    Ok(list_from_value(Value::deserialize(deserializer)?))
+}
+
+/// The elements of a JSON array that decode as `T`; anything else is empty.
+pub(crate) fn list_from_value<T: DeserializeOwned>(value: Value) -> Vec<T> {
+    let Value::Array(items) = value else {
+        return Vec::new();
+    };
+    let total = items.len();
+    let kept: Vec<T> = items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value(item).ok())
+        .collect();
+    if kept.len() < total && !ELEMENT_DROP_LOGGED.swap(true, Ordering::Relaxed) {
+        log::debug!(
+            "dropped {} of {total} list elements that did not decode",
+            total - kept.len()
+        );
+    }
+    kept
+}
+
+/// Whether the dropped-element line was logged this run.
+static ELEMENT_DROP_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// A list that is empty when missing or `null`, but whose elements must all
+/// decode: one that does not fails the whole answer (R166, fix round 1). Used
+/// where dropping an element would shift what the rest means: the newest
+/// history entry decides party detection, the newest competitive-update row
+/// decides the stored rank and whether MMR is asked again, so a row Riot sent
+/// half-empty is a failed answer (the existing retry paths ask again), never a
+/// shorter list.
+fn whole_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// R166: an optional object that decodes as `T` or is `None` — a missing,
+/// `null` or malformed one is "not there", never a failed answer.
+fn lenient_opt<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    Ok(serde_json::from_value(Value::deserialize(deserializer)?).ok())
+}
+
+/// R166: a map whose values are decoded one by one; an entry whose value is
+/// `null` or malformed is dropped, a missing or `null` map is empty.
+fn lenient_map<'de, D, T>(deserializer: D) -> Result<HashMap<String, T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let Value::Object(entries) = Value::deserialize(deserializer)? else {
+        return Ok(HashMap::new());
+    };
+    Ok(entries
+        .into_iter()
+        .filter_map(|(k, v)| Some((k, serde_json::from_value(v).ok()?)))
+        .collect())
 }
 
 /// R161: a tier Riot's roster answers carry (`CompetitiveTier`) — a number,
@@ -92,23 +170,60 @@ impl VisiblePuuid {
 // Shared PascalCase shapes (pregame / core-game / party)
 // ---------------------------------------------------------------------
 
+/// A roster entry's `PlayerIdentity`. Decoding never fails and **fails
+/// closed** (R166): a flag that did not arrive is the safe reading, so a player
+/// whose `Incognito` is missing, `null` or not a bool is hidden (no name is
+/// ever asked for them), and a level that did not arrive is not shown
+/// (`hide_account_level`, level 0) rather than shown as 0. A missing
+/// `HideAccountLevel` next to a level that did arrive is read as "not hidden"
+/// (a deliberate choice: the level is shown only when Riot withholds it).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(from = "RawPlayerIdentity")]
 pub struct PlayerIdentity {
-    #[serde(rename = "Incognito")]
     pub incognito: bool,
-    #[serde(rename = "HideAccountLevel")]
     pub hide_account_level: bool,
-    #[serde(rename = "AccountLevel")]
     pub account_level: u32,
-    #[serde(rename = "PlayerCardID")]
     pub player_card_id: String,
+}
+
+#[derive(Default, Deserialize)]
+struct RawPlayerIdentity {
+    #[serde(rename = "Incognito", default)]
+    incognito: Value,
+    #[serde(rename = "HideAccountLevel", default)]
+    hide_account_level: Value,
+    #[serde(rename = "AccountLevel", default)]
+    account_level: Value,
+    #[serde(rename = "PlayerCardID", default)]
+    player_card_id: Value,
+}
+
+impl From<RawPlayerIdentity> for PlayerIdentity {
+    fn from(raw: RawPlayerIdentity) -> Self {
+        let level = raw.account_level.as_u64();
+        Self {
+            incognito: raw.incognito.as_bool().unwrap_or(true),
+            // No level that arrived, none shown, whatever the flag says.
+            hide_account_level: level.is_none()
+                || raw.hide_account_level.as_bool().unwrap_or(false),
+            account_level: level.map_or(0, |n| n.min(u64::from(u32::MAX)) as u32),
+            player_card_id: raw.player_card_id.as_str().unwrap_or("").to_string(),
+        }
+    }
+}
+
+impl Default for PlayerIdentity {
+    /// An identity that did not arrive at all: hidden, no level, no card.
+    fn default() -> Self {
+        RawPlayerIdentity::default().into()
+    }
 }
 
 /// The shape shared by `Pregame_GetPlayer` and `CoreGame_FetchPlayer`:
 /// both just resolve a PUUID to "the match they're currently in".
 #[derive(Debug, Clone, Deserialize)]
 pub struct MatchRef {
-    #[serde(rename = "Subject")]
+    #[serde(rename = "Subject", default, deserialize_with = "null_to_default")]
     pub subject: String,
     #[serde(rename = "MatchID")]
     pub match_id: String,
@@ -122,11 +237,19 @@ pub struct MatchRef {
 pub struct PregamePlayer {
     #[serde(rename = "Subject")]
     pub subject: String,
-    #[serde(rename = "CharacterID")]
+    #[serde(rename = "CharacterID", default, deserialize_with = "null_to_default")]
     pub character_id: String,
-    #[serde(rename = "CharacterSelectionState")]
+    #[serde(
+        rename = "CharacterSelectionState",
+        default,
+        deserialize_with = "null_to_default"
+    )]
     pub character_selection_state: String,
-    #[serde(rename = "PlayerIdentity")]
+    #[serde(
+        rename = "PlayerIdentity",
+        default,
+        deserialize_with = "null_to_default"
+    )]
     pub player_identity: PlayerIdentity,
     /// R161: the player's current competitive tier (`0` = unranked) — real
     /// pregame answers carry it for every player, enemies included. `None`
@@ -138,23 +261,25 @@ pub struct PregamePlayer {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PregameTeam {
-    #[serde(rename = "TeamID")]
+    #[serde(rename = "TeamID", default, deserialize_with = "null_to_default")]
     pub team_id: String,
-    #[serde(rename = "Players")]
+    /// A player without a `Subject` is dropped (R166).
+    #[serde(rename = "Players", default, deserialize_with = "lenient_list")]
     pub players: Vec<PregamePlayer>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PregameMatchResponse {
-    #[serde(rename = "MapID")]
+    #[serde(rename = "MapID", default, deserialize_with = "null_to_default")]
     pub map_id: String,
-    #[serde(rename = "Teams")]
+    #[serde(rename = "Teams", default, deserialize_with = "lenient_list")]
     pub teams: Vec<PregameTeam>,
     /// The user's own team (the "5 teammates only" the Agent Select
-    /// screen shows) — `null` in some payload snapshots.
-    #[serde(rename = "AllyTeam")]
+    /// screen shows) — `null` in some payload snapshots; a malformed one
+    /// is `None` too (R166).
+    #[serde(rename = "AllyTeam", default, deserialize_with = "lenient_opt")]
     pub ally_team: Option<PregameTeam>,
-    #[serde(rename = "EnemyTeam")]
+    #[serde(rename = "EnemyTeam", default, deserialize_with = "lenient_opt")]
     pub enemy_team: Option<PregameTeam>,
 }
 
@@ -165,9 +290,13 @@ pub struct PregameMatchResponse {
 /// the four weapons out.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PregameLoadoutsResponse {
-    #[serde(rename = "Loadouts")]
+    #[serde(rename = "Loadouts", default, deserialize_with = "null_to_default")]
     pub loadouts: Vec<Value>,
-    #[serde(rename = "LoadoutsValid")]
+    #[serde(
+        rename = "LoadoutsValid",
+        default,
+        deserialize_with = "null_to_default"
+    )]
     pub loadouts_valid: bool,
 }
 
@@ -185,10 +314,10 @@ pub struct LoadoutGun {
     #[serde(rename = "ID")]
     pub id: String,
     /// The equipped skin's uuid (`/v1/weapons/skins/{uuid}`).
-    #[serde(rename = "SkinID", default)]
+    #[serde(rename = "SkinID", default, deserialize_with = "null_to_default")]
     pub skin_id: String,
     /// The equipped chroma's uuid.
-    #[serde(rename = "ChromaID", default)]
+    #[serde(rename = "ChromaID", default, deserialize_with = "null_to_default")]
     pub chroma_id: String,
 }
 
@@ -202,9 +331,10 @@ pub struct LoadoutGun {
 /// ignored, so a v2-shaped body still decodes.
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlayerLoadoutResponse {
-    #[serde(rename = "Subject")]
+    #[serde(rename = "Subject", default, deserialize_with = "null_to_default")]
     pub subject: String,
-    #[serde(rename = "Guns", default, deserialize_with = "null_to_default")]
+    /// A gun without an `ID` is dropped (R166).
+    #[serde(rename = "Guns", default, deserialize_with = "lenient_list")]
     pub guns: Vec<LoadoutGun>,
 }
 
@@ -219,35 +349,42 @@ pub struct PlayerLoadoutResponse {
 pub struct CoreGamePlayer {
     #[serde(rename = "Subject")]
     pub subject: String,
-    #[serde(rename = "TeamID")]
+    /// `""` when Riot sent none: `roster::from_coregame` never lets that
+    /// pass for a team (R166).
+    #[serde(rename = "TeamID", default, deserialize_with = "null_to_default")]
     pub team_id: String,
-    #[serde(rename = "CharacterID")]
+    #[serde(rename = "CharacterID", default, deserialize_with = "null_to_default")]
     pub character_id: String,
-    #[serde(rename = "PlayerIdentity")]
+    #[serde(
+        rename = "PlayerIdentity",
+        default,
+        deserialize_with = "null_to_default"
+    )]
     pub player_identity: PlayerIdentity,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CoreGameMatchResponse {
-    #[serde(rename = "MapID")]
+    #[serde(rename = "MapID", default, deserialize_with = "null_to_default")]
     pub map_id: String,
-    #[serde(rename = "Players")]
+    /// A player without a `Subject` is dropped (R166).
+    #[serde(rename = "Players", default, deserialize_with = "lenient_list")]
     pub players: Vec<CoreGamePlayer>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CoreGameLoadoutEntry {
-    #[serde(rename = "CharacterID")]
+    #[serde(rename = "CharacterID", default, deserialize_with = "null_to_default")]
     pub character_id: String,
     /// Sprays/skins keyed by dynamic UUIDs — kept opaque for the same
     /// reason as [`PregameLoadoutsResponse`].
-    #[serde(rename = "Loadout")]
+    #[serde(rename = "Loadout", default)]
     pub loadout: Value,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CoreGameLoadoutsResponse {
-    #[serde(rename = "Loadouts")]
+    #[serde(rename = "Loadouts", default, deserialize_with = "lenient_list")]
     pub loadouts: Vec<CoreGameLoadoutEntry>,
 }
 
@@ -257,22 +394,37 @@ pub struct CoreGameLoadoutsResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct SeasonalInfo {
-    #[serde(rename = "SeasonID")]
+    /// Not read: the map key of `SeasonalInfoBySeasonID` is the act id
+    /// ([`crate::to_core::seasonal_map_from_mmr`]), so an entry whose own
+    /// `SeasonID` is missing is still filed under the right act (R166).
+    #[serde(rename = "SeasonID", default, deserialize_with = "null_to_default")]
     pub season_id: String,
-    #[serde(rename = "CompetitiveTier")]
+    /// `0` (unranked) when absent: no rank is shown from such an entry.
+    #[serde(
+        rename = "CompetitiveTier",
+        default,
+        deserialize_with = "null_to_default"
+    )]
     pub competitive_tier: i64,
-    #[serde(rename = "RankedRating")]
-    pub ranked_rating: i64,
-    #[serde(rename = "NumberOfWins")]
-    pub number_of_wins: i64,
+    /// `None` when absent: a rank with an invented "0 RR" is wrong data, so
+    /// [`crate::to_core::current_rank_from_mmr`] gives no rank from this entry
+    /// and the stored competitive updates answer instead (R154, R166).
+    #[serde(rename = "RankedRating", default)]
+    pub ranked_rating: Option<i64>,
+    /// `None` when absent. A record with an unknown wins or games count is
+    /// unknown as a whole ([`crate::to_core::seasonal_map_from_mmr`] gives it
+    /// 0 games, which the card shows as `—`), never "0 wins of N games" (R166,
+    /// fix round 1).
+    #[serde(rename = "NumberOfWins", default)]
+    pub number_of_wins: Option<i64>,
     /// Wins including the placement games, which `NumberOfWins` leaves out
     /// (the act win rate counts them). Absent on older responses and old
     /// stored snapshots, so it is optional: `NumberOfWins` stands in.
     #[serde(rename = "NumberOfWinsWithPlacements", default)]
     pub number_of_wins_with_placements: Option<i64>,
-    #[serde(rename = "NumberOfGames")]
-    pub number_of_games: i64,
-    #[serde(rename = "WinsByTier")]
+    #[serde(rename = "NumberOfGames", default)]
+    pub number_of_games: Option<i64>,
+    #[serde(rename = "WinsByTier", default)]
     pub wins_by_tier: Option<HashMap<String, i64>>,
     /// Not in the brief's field list and not consumed by this crate yet;
     /// kept `Option` (rather than a plain `i64`) so an absent value can't
@@ -289,49 +441,57 @@ pub struct QueueSkill {
     #[serde(
         rename = "SeasonalInfoBySeasonID",
         default,
-        deserialize_with = "null_to_default"
+        deserialize_with = "lenient_map"
     )]
     pub seasonal_info_by_season_id: HashMap<String, SeasonalInfo>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PlayerMmrResponse {
-    #[serde(rename = "Subject")]
+    #[serde(rename = "Subject", default, deserialize_with = "null_to_default")]
     pub subject: String,
     /// Scout null-guards this exact field (`r.get("QueueSkills") or {}` in
     /// `live_match.py`) — same treatment as
     /// [`QueueSkill::seasonal_info_by_season_id`].
-    #[serde(rename = "QueueSkills", default, deserialize_with = "null_to_default")]
+    #[serde(rename = "QueueSkills", default, deserialize_with = "lenient_map")]
     pub queue_skills: HashMap<String, QueueSkill>,
 }
 
+/// One row of `competitiveupdates`. What makes it a row (`MatchID`,
+/// `MatchStartTime`, the tier and RR after, the RR earned) is required: a row
+/// lacking one fails the whole answer ([`whole_list`]), because a default 0
+/// would be a 1970 match, an unranked tier or "+0 RR" in the charts, and a
+/// dropped row would shift "newest". The before-values, map and season are
+/// optional.
 #[derive(Debug, Clone, Deserialize)]
 pub struct CompetitiveUpdateMatch {
     #[serde(rename = "MatchID")]
     pub match_id: String,
-    #[serde(rename = "MapID")]
+    #[serde(rename = "MapID", default, deserialize_with = "null_to_default")]
     pub map_id: String,
-    #[serde(rename = "SeasonID")]
+    /// `""` when absent: never equal to an act id, so such a row counts for no
+    /// act (as the real `SeasonID: ""` rows already do).
+    #[serde(rename = "SeasonID", default, deserialize_with = "null_to_default")]
     pub season_id: String,
     #[serde(rename = "MatchStartTime")]
     pub match_start_time: i64,
     #[serde(rename = "TierAfterUpdate")]
     pub tier_after_update: i64,
-    #[serde(rename = "TierBeforeUpdate")]
-    pub tier_before_update: i64,
+    #[serde(rename = "TierBeforeUpdate", default)]
+    pub tier_before_update: Option<i64>,
     #[serde(rename = "RankedRatingAfterUpdate")]
     pub ranked_rating_after_update: i64,
-    #[serde(rename = "RankedRatingBeforeUpdate")]
-    pub ranked_rating_before_update: i64,
+    #[serde(rename = "RankedRatingBeforeUpdate", default)]
+    pub ranked_rating_before_update: Option<i64>,
     #[serde(rename = "RankedRatingEarned")]
     pub ranked_rating_earned: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CompetitiveUpdatesResponse {
-    #[serde(rename = "Subject")]
+    #[serde(rename = "Subject", default, deserialize_with = "null_to_default")]
     pub subject: String,
-    #[serde(rename = "Matches")]
+    #[serde(rename = "Matches", default, deserialize_with = "whole_list")]
     pub matches: Vec<CompetitiveUpdateMatch>,
 }
 
@@ -343,17 +503,22 @@ pub struct CompetitiveUpdatesResponse {
 pub struct MatchHistoryEntry {
     #[serde(rename = "MatchID")]
     pub match_id: String,
+    /// Required, like the id: an entry without a start time would be dated
+    /// 1970 and fall outside every act, and a dropped entry would shift "most
+    /// recent", so the whole answer fails ([`whole_list`], R166).
     #[serde(rename = "GameStartTime")]
     pub game_start_time: i64,
-    #[serde(rename = "QueueID")]
+    /// `""` when absent: not a competitive match and not Deathmatch, so it
+    /// counts for neither.
+    #[serde(rename = "QueueID", default, deserialize_with = "null_to_default")]
     pub queue_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MatchHistoryResponse {
-    #[serde(rename = "Subject")]
+    #[serde(rename = "Subject", default, deserialize_with = "null_to_default")]
     pub subject: String,
-    #[serde(rename = "History")]
+    #[serde(rename = "History", default, deserialize_with = "whole_list")]
     pub history: Vec<MatchHistoryEntry>,
     /// How many matches the history holds in all (for the requested queue
     /// filter), not just on this page: the fixture shows `"EndIndex": 2,
@@ -369,17 +534,27 @@ pub struct MatchHistoryResponse {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DamageEntry {
+    #[serde(default, deserialize_with = "null_to_default")]
     pub receiver: String,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub damage: i64,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub legshots: i64,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub bodyshots: i64,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub headshots: i64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlayerRoundStats {
+    /// `""` when absent: matches no player, so the entry counts for nobody
+    /// (R166). Not a [`lenient_list`] element on purpose: `roundResults` is the
+    /// heavy part of a match-details answer and is decoded straight.
+    #[serde(default, deserialize_with = "null_to_default")]
     pub subject: String,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub damage: Vec<DamageEntry>,
 }
 
@@ -394,6 +569,7 @@ pub struct RoundResult {
     /// The team id that won the round (`""` on a round nobody won).
     #[serde(default)]
     pub winning_team: Option<String>,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub player_stats: Vec<PlayerRoundStats>,
 }
 
@@ -410,17 +586,27 @@ pub struct MatchPlayerStats {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchPlayer {
+    /// Required (R166, fix round 1: a player without one fails the answer).
     pub subject: String,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub game_name: String,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub tag_line: String,
+    /// Required: it is stored, and party detection, the encounter counts and the
+    /// match result all compare it, so a `""` would make strangers teammates. A
+    /// player without one fails the answer and the match is fetched again later
+    /// (R166, fix round 1).
     pub team_id: String,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub party_id: String,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub character_id: String,
     /// `.nullable()` in techchrism's `valorant-api-types` (`MatchDetails.ts`
     /// — a player can apparently have no `stats` at all, e.g. an observer
     /// or a very early surrender), so this must not fail the whole
-    /// `MatchDetailsResponse` decode when it's `null`.
-    #[serde(default)]
+    /// `MatchDetailsResponse` decode when it's `null`. A block with a field
+    /// missing is `None` too (R166): a stored "0 kills" would stay for good.
+    #[serde(default, deserialize_with = "lenient_opt")]
     pub stats: Option<MatchPlayerStats>,
     /// Riot's rank for the player during this match (`MatchDetails.ts`;
     /// `0` when unranked). Optional: absent in older captures.
@@ -431,6 +617,8 @@ pub struct MatchPlayer {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MatchTeam {
+    /// Required, like `won`: a team lacking either fails the answer, so no
+    /// winner is lost or invented (R166, fix round 1).
     pub team_id: String,
     pub won: bool,
     /// Not in Task 3's original field list (which covered only
@@ -463,7 +651,10 @@ pub struct MatchTeam {
 pub struct MatchInfo {
     #[serde(alias = "matchID")]
     pub match_id: String,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub map_id: String,
+    /// Required (with the match id and the queue): a match is stored for good,
+    /// so one without a start or a queue is not stored at all (R166).
     pub game_start_millis: i64,
     #[serde(alias = "queueID")]
     pub queue_id: String,
@@ -472,7 +663,7 @@ pub struct MatchInfo {
     /// techchrism's types — not in the Task 3 fixture at all, so this
     /// defaults to `""` (itself one of the documented values) rather than
     /// failing the decode.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_to_default")]
     pub completion_state: String,
     /// How long the game ran (`MatchDetails.ts`). Optional: absent in older
     /// captures.
@@ -486,10 +677,13 @@ pub struct MatchDetailsResponse {
     // `rename_all = "camelCase"` on this container already turns
     // `match_info` into `matchInfo`.
     pub match_info: MatchInfo,
+    /// Required, and every player must decode (`subject`, `teamId`): a match
+    /// is stored for good, so a missing list or a half-empty player fails the
+    /// answer and the fetch is retried later (R166, fix round 1).
     pub players: Vec<MatchPlayer>,
     /// `.nullable()` in `MatchDetails.ts` — defaults to empty rather than
     /// failing the decode when Riot sends `null`.
-    #[serde(default, deserialize_with = "null_to_default")]
+    #[serde(default, deserialize_with = "whole_list")]
     pub teams: Vec<MatchTeam>,
     /// `.nullable()` in `MatchDetails.ts` — same treatment as `teams`.
     #[serde(default, deserialize_with = "null_to_default")]
@@ -502,7 +696,7 @@ pub struct MatchDetailsResponse {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PartyOfResponse {
-    #[serde(rename = "Subject")]
+    #[serde(rename = "Subject", default, deserialize_with = "null_to_default")]
     pub subject: String,
     #[serde(rename = "CurrentPartyID")]
     pub current_party_id: String,
@@ -512,9 +706,13 @@ pub struct PartyOfResponse {
 pub struct PartyMember {
     #[serde(rename = "Subject")]
     pub subject: String,
-    #[serde(rename = "PlayerIdentity")]
+    #[serde(
+        rename = "PlayerIdentity",
+        default,
+        deserialize_with = "null_to_default"
+    )]
     pub player_identity: PlayerIdentity,
-    #[serde(rename = "IsOwner")]
+    #[serde(rename = "IsOwner", default)]
     pub is_owner: Option<bool>,
     /// Not in the brief's field list and not consumed by this crate yet;
     /// kept `Option` so an absent value can't fail the whole
@@ -529,9 +727,10 @@ pub struct PartyMember {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PartyResponse {
-    #[serde(rename = "ID")]
+    #[serde(rename = "ID", default, deserialize_with = "null_to_default")]
     pub id: String,
-    #[serde(rename = "Members")]
+    /// A member without a `Subject` is dropped (R166).
+    #[serde(rename = "Members", default, deserialize_with = "lenient_list")]
     pub members: Vec<PartyMember>,
     /// Not in the brief's field list and not consumed by this crate yet;
     /// kept `Option` so an absent value can't fail the whole
@@ -542,7 +741,11 @@ pub struct PartyResponse {
     /// `#[serde(default)]` (an empty `Vec`, not `Option`) is the
     /// equivalent "an absent field can't blank the whole response"
     /// guard for a collection.
-    #[serde(rename = "EligibleQueues", default)]
+    #[serde(
+        rename = "EligibleQueues",
+        default,
+        deserialize_with = "null_to_default"
+    )]
     pub eligible_queues: Vec<String>,
 }
 
@@ -551,13 +754,17 @@ pub struct PartyResponse {
 /// so no `rename`s are needed for the ones we use.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Presence {
+    /// Required: a presence without one is dropped by the list (R166).
     pub puuid: String,
+    #[serde(default, deserialize_with = "null_to_default")]
     pub product: String,
+    #[serde(default)]
     pub private: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PresencesResponse {
+    #[serde(default, deserialize_with = "lenient_list")]
     pub presences: Vec<Presence>,
 }
 
@@ -565,9 +772,11 @@ pub struct PresencesResponse {
 pub struct NameServiceEntry {
     #[serde(rename = "Subject")]
     pub subject: String,
-    #[serde(rename = "GameName")]
+    /// `""` when absent: Riot already answers `""` for a player who hides
+    /// their name, and every consumer treats it as "no name" (R166).
+    #[serde(rename = "GameName", default, deserialize_with = "null_to_default")]
     pub game_name: String,
-    #[serde(rename = "TagLine")]
+    #[serde(rename = "TagLine", default, deserialize_with = "null_to_default")]
     pub tag_line: String,
     /// Not in the brief's field list (`game_name`/`tag_line` already give
     /// the Riot ID display) and not consumed by this crate yet; kept
@@ -575,6 +784,30 @@ pub struct NameServiceEntry {
     #[serde(rename = "DisplayName", default)]
     pub display_name: Option<String>,
 }
+
+/// Queues with 12-round halves, whose answers always list their teams.
+const WINNER_QUEUES: [&str; 3] = ["competitive", "unrated", "premier"];
+
+/// A competitive, unrated or premier answer whose `teams` is missing or empty,
+/// or names more than one winner, is not trustworthy and is not stored. Both
+/// teams `won: false` is a draw (R29) and is accepted, and so is a `VoteDraw`
+/// whatever its teams say. Other queues (Deathmatch has no teams) are not
+/// checked.
+fn check_winner(details: &MatchDetailsResponse) -> Result<(), RiotError> {
+    let info = &details.match_info;
+    if WINNER_QUEUES.contains(&info.queue_id.as_str())
+        && info.completion_state != "VoteDraw"
+        && (details.teams.is_empty() || details.teams.iter().filter(|t| t.won).count() > 1)
+    {
+        return Err(RiotError::Decode(
+            "the match lists no teams or more than one winning team".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// How long [`RiotSession::names`] waits before its one retry (R166).
+const NAMES_RETRY_PAUSE: std::time::Duration = std::time::Duration::from_millis(250);
 
 // ---------------------------------------------------------------------
 // Query-string helper (comp_updates / match_history)
@@ -682,9 +915,15 @@ impl RiotSession {
             .await
     }
 
+    /// A match is stored for good, so an answer with no teams or two winners
+    /// is a failed fetch (retried later like any failure): see
+    /// [`check_winner`] (R166).
     pub async fn match_details(&self, match_id: &str) -> Result<MatchDetailsResponse, RiotError> {
-        self.pd(&format!("/match-details/v1/matches/{match_id}"))
-            .await
+        let details: MatchDetailsResponse = self
+            .pd(&format!("/match-details/v1/matches/{match_id}"))
+            .await?;
+        check_winner(&details)?;
+        Ok(details)
     }
 
     pub async fn party_of(&self, puuid: &str) -> Result<PartyOfResponse, RiotError> {
@@ -706,7 +945,23 @@ impl RiotSession {
     pub async fn names(&self, puuids: &[VisiblePuuid]) -> Result<Vec<NameServiceEntry>, RiotError> {
         let body: Vec<&str> = puuids.iter().map(VisiblePuuid::as_str).collect();
         let body = serde_json::to_value(&body).map_err(|e| RiotError::Decode(e.to_string()))?;
-        self.pd_put("/name-service/v2/players", &body).await
+        // R166 (Scout: retries across builds): one more try, after a short
+        // pause, for a 5xx or a transport failure. Same body, same
+        // `VisiblePuuid`s: the privacy gate is the argument type, not this loop.
+        let mut retried = false;
+        let raw: Value = loop {
+            match self.pd_put("/name-service/v2/players", &body).await {
+                Err(RiotError::Status(code, _)) if code >= 500 && !retried => {}
+                Err(RiotError::Http(_)) if !retried => {}
+                other => break other?,
+            }
+            retried = true;
+            log::debug!("name-service answered badly; asking once more");
+            tokio::time::sleep(NAMES_RETRY_PAUSE).await;
+        };
+        // Tolerant like every list (R166): a non-array answer is no names, an
+        // entry without a `Subject` is skipped.
+        Ok(list_from_value(raw))
     }
 }
 

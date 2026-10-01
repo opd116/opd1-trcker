@@ -1243,6 +1243,20 @@ mod diagnostics;
 #[cfg(test)]
 mod act;
 
+/// Waits until `cond()` holds, looking again every millisecond. The wait ends
+/// at the event, not at a count of scheduler turns or a guessed duration, so
+/// a slow or loaded machine only makes it longer; 30 s turns a condition that
+/// never comes into a failure instead of a hang.
+pub(crate) async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    let waited = tokio::time::timeout(Duration::from_secs(30), async {
+        while !cond() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(waited.is_ok(), "never happened: {what}");
+}
+
 /// R163's keyed close and late-open tests (their own file; same harness).
 #[cfg(test)]
 mod ui_open;

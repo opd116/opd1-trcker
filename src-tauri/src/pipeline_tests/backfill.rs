@@ -535,16 +535,13 @@ async fn backfill_never_delays_live_card_sync() {
     let worker = tokio::spawn(run_worker(h.st.clone(), h.session.clone(), id));
 
     // Wait for the backfill to be well under way…
-    for _ in 0..200 {
-        if details_asked(&requests(&h.server).await).len() >= 3 {
-            break;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while details_asked(&requests(&h.server).await).len() < 3 {
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    assert!(
-        details_asked(&requests(&h.server).await).len() >= 3,
-        "run started"
-    );
+    })
+    .await
+    .expect("run started");
     assert!(!worker.is_finished(), "still backfilling");
 
     // …then a roster with a new, unsynced player arrives.

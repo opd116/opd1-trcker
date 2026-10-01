@@ -441,17 +441,12 @@ async fn a_rank_failure_is_recorded_with_the_ranked_mark_even_if_the_worker_is_a
     open_details_of_me(&h).await;
     let (st, session) = (h.st.clone(), h.session.clone());
     let task = tokio::spawn(async move { crate::sync::rank_step(&st, &session, ME, true).await });
-    let mut seen = false;
-    for _ in 0..10_000 {
-        if lock(&h.st.live).synced.rank_done(ME) {
-            seen = true;
-            assert_eq!(retries_done(&h, ME), Some(0), "noted with the mark");
-            task.abort();
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(seen, "the rank phase was marked");
+    wait_until("the rank phase was marked", || {
+        lock(&h.st.live).synced.rank_done(ME)
+    })
+    .await;
+    assert_eq!(retries_done(&h, ME), Some(0), "noted with the mark");
+    task.abort();
 }
 
 #[tokio::test]
@@ -464,17 +459,12 @@ async fn a_partial_matches_phase_is_recorded_with_the_synced_mark_even_if_aborte
         crate::sync::rank_step(&st, &session, ME, true).await?;
         crate::sync::matches_step(&st, &session, ME, true).await
     });
-    let mut seen = false;
-    for _ in 0..10_000 {
-        if lock(&h.st.live).synced.contains(ME) {
-            seen = true;
-            assert_eq!(retries_done(&h, ME), Some(0), "noted with the mark");
-            task.abort();
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(seen);
+    wait_until("the matches phase was marked", || {
+        lock(&h.st.live).synced.contains(ME)
+    })
+    .await;
+    assert_eq!(retries_done(&h, ME), Some(0), "noted with the mark");
+    task.abort();
 }
 
 #[tokio::test]

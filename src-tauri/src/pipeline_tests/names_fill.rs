@@ -1600,6 +1600,47 @@ async fn the_match_end_fill_runs_before_the_backfill_goes_on() {
 }
 
 #[tokio::test]
+async fn a_match_published_after_the_next_one_started_still_queues_the_match_end_fill() {
+    // R165: the poll loop clears the match-end marker the moment the next
+    // match starts (a quick queue: the end, then Agent Select within a minute
+    // or two). Riot publishes the match later, at +40 s or more: its players
+    // are still asked about, from the copy the model kept at the end.
+    let h = harness().await;
+    lobby(&h);
+    let others: Vec<String> = (1..=3).map(pid).collect();
+    let now = now_ms();
+    mount_match(
+        &h.server,
+        "m-late",
+        "competitive",
+        now - 20 * 60_000,
+        &others,
+    )
+    .await;
+
+    match_ends_now(&h);
+    // Any publish or worker job between the end and the next match sees it.
+    h.st.publish();
+    // The next match starts: `match_end_ms` is cleared.
+    lock(&h.st.live).match_end_ms = None;
+
+    store_match(&h, "m-late").await;
+    let queued: Vec<String> = queue_of(&h).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(queued, others, "the match that ended is still asked about");
+}
+
+#[tokio::test]
+async fn with_no_match_end_ever_seen_no_fill_is_queued() {
+    let h = harness().await;
+    lobby(&h);
+    let others: Vec<String> = (1..=2).map(pid).collect();
+    mount_match(&h.server, "m-x", "competitive", now_ms() - 60_000, &others).await;
+    h.st.publish();
+    store_match(&h, "m-x").await;
+    assert!(lock(&h.st.live).name_fill.is_empty());
+}
+
+#[tokio::test]
 async fn a_match_open_that_lost_queues_no_names() {
     // R163: the page was left while the open was being built (the real
     // `match_details::load` path); the answer is still returned, but its

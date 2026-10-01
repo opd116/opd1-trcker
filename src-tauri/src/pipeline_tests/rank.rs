@@ -21,7 +21,7 @@ fn comp_path(puuid: &str) -> String {
 }
 
 /// The user alone in the Lobby, nothing synced yet.
-fn lobby(h: &Harness) {
+pub(super) fn lobby(h: &Harness) {
     let mut live = lock(&h.st.live);
     live.stage = Stage::Menus;
     live.in_match = false;
@@ -33,7 +33,7 @@ fn lobby(h: &Harness) {
 }
 
 /// Starts a worker if there is work, lets it drain; `false`: no work.
-async fn drain(h: &Harness) -> bool {
+pub(super) async fn drain(h: &Harness) -> bool {
     let Some(id) = lock(&h.st.live).try_start_worker() else {
         return false;
     };
@@ -42,7 +42,7 @@ async fn drain(h: &Harness) -> bool {
     true
 }
 
-fn advance(h: &Harness, by: Duration) {
+pub(super) fn advance(h: &Harness, by: Duration) {
     lock(&h.st.live).advance_clock(by);
 }
 
@@ -302,7 +302,7 @@ async fn with_comp_updates_failing_a_stored_snapshot_keeps_the_mmr_call_skipped(
 }
 
 /// ME's mmr request answers 429 with this `Retry-After`, once.
-async fn mmr_429_once(h: &Harness, puuid: &str, retry_after: &str) {
+pub(super) async fn mmr_429_once(h: &Harness, puuid: &str, retry_after: &str) {
     Mock::given(method("GET"))
         .and(path(mmr_path(puuid).as_str()))
         .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", retry_after))
@@ -312,7 +312,7 @@ async fn mmr_429_once(h: &Harness, puuid: &str, retry_after: &str) {
         .await;
 }
 
-fn retries_done(h: &Harness, puuid: &str) -> Option<usize> {
+pub(super) fn retries_done(h: &Harness, puuid: &str) -> Option<usize> {
     lock(&h.st.live).rank_retries.retries_done(puuid)
 }
 
@@ -356,25 +356,23 @@ async fn a_retry_that_only_met_the_mmr_hold_uses_no_turn() {
 
 #[tokio::test]
 async fn a_player_met_by_the_hold_in_the_first_pass_is_not_asked_and_never_blocks_the_worker() {
-    // ME's mmr 429s with a long Retry-After (60 s). OTHER is synced after:
-    // both its mmr-family calls are refused locally (nothing sent), the
-    // worker moves on at once, and OTHER waits for the hold with both of its
-    // retries still unused.
+    // ME's mmr 429s with a long Retry-After (60 s). R165 runs the rank phases
+    // three at a time: ME, HIDDEN and MATE go out together (the 429 lands
+    // while the others are in flight), OTHER is in the next batch: both its
+    // mmr-family calls are refused locally (nothing sent), the worker moves on
+    // at once, and OTHER waits for the hold with both of its retries unused.
     let h = harness().await;
     mmr_429_once(&h, ME, "60").await;
     {
         let mut live = lock(&h.st.live);
         live.stage = Stage::Ingame;
-        live.slots = vec![
-            Slot {
-                roster: roster(ME, false),
+        live.slots = [ME, HIDDEN, MATE, OTHER]
+            .iter()
+            .map(|p| Slot {
+                roster: roster(p, false),
                 db: PlayerDb::default(),
-            },
-            Slot {
-                roster: roster(OTHER, false),
-                db: PlayerDb::default(),
-            },
-        ];
+            })
+            .collect();
     }
     tokio::time::timeout(Duration::from_secs(10), drain(&h))
         .await
@@ -397,8 +395,10 @@ async fn a_player_met_by_the_hold_in_the_first_pass_is_not_asked_and_never_block
     assert_eq!(retries_done(&h, OTHER), Some(0), "held: nothing used");
 
     // OTHER is due after the hold (about 60 s + slack), not at 20 s.
-    // (ME's own 20 s retry is set aside so it does not come first.)
-    lock(&h.st.live).rank_retries.forget(ME);
+    // (The others' own 20 s retries are set aside so they do not come first.)
+    for p in [ME, HIDDEN, MATE] {
+        lock(&h.st.live).rank_retries.forget(p);
+    }
     advance(&h, 20 * S);
     assert_eq!(lock(&h.st.live).due_rank_retry(), None, "not at 20 s");
     advance(&h, 45 * S);
@@ -456,7 +456,7 @@ async fn no_retry_runs_while_valorant_is_closed() {
 // ---------------------------------------------------------------------
 
 /// ME's Details page, open on screen (the Lobby with the user's own card).
-async fn open_details_of_me(h: &Harness) {
+pub(super) async fn open_details_of_me(h: &Harness) {
     lobby(h);
     h.st.set_session(Some(h.session.clone()));
     h.st.publish();
@@ -627,9 +627,64 @@ async fn a_names_call_refused_by_the_other_hold_asks_nobody_and_does_not_spin_th
 
 #[tokio::test]
 async fn a_match_that_could_not_be_downloaded_for_a_hold_is_synced_again_after_it() {
-    // R160: the other family's hold refuses the match-details download. The
-    // player is not "done": the held-back sync is scheduled for after the hold
-    // (nothing used of R155's retries), like a held rank part.
+    // R160: the other family is on hold before the sync starts (an earlier
+    // call's 429), so the history call and the match-details download are
+    // both refused locally, nothing sent. The player is not "done" and no
+    // R155 retry is used: the held-back sync is due after the hold, like a
+    // held rank part.
+    let h = harness().await;
+    let session = session_with_other_wait(&h, Duration::from_millis(100)).await;
+    // An earlier call's 429 holds `other` for 1.5 s (over the 100 ms bound).
+    Mock::given(method("GET"))
+        .and(path("/match-details/v1/matches/earlier"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1.5"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    assert!(session.match_details("earlier").await.is_err());
+    let hold_set = Instant::now();
+    lobby(&h);
+    let id = lock(&h.st.live).try_start_worker().unwrap();
+    run_worker(h.st.clone(), session.clone(), id).await;
+
+    // Nothing of the matches phase was sent, and nothing was used.
+    let history = format!("/match-history/v1/history/{ME}");
+    assert_eq!(count(&h.server, "GET", &history).await, 0, "held");
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m1").await,
+        0,
+        "held"
+    );
+    assert_eq!(
+        retries_done(&h, ME),
+        Some(0),
+        "waiting, both retries unused"
+    );
+    // Due after the hold (+ slack), not at 20 s.
+    advance(&h, Duration::from_millis(1_400));
+    assert!(
+        lock(&h.st.live).due_rank_retry().is_none(),
+        "slack not over"
+    );
+    tokio::time::sleep(Duration::from_millis(1_600).saturating_sub(hold_set.elapsed())).await;
+    advance(&h, 3 * S);
+    let id = lock(&h.st.live).try_start_worker().expect("due");
+    run_worker(h.st.clone(), session, id).await;
+    assert_eq!(count(&h.server, "GET", &history).await, 1);
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m1").await,
+        1
+    );
+    assert_eq!(retries_done(&h, ME), None, "the round ended, none used");
+}
+
+#[tokio::test]
+async fn a_history_429_that_was_sent_counts_as_a_real_failure_and_is_retried_at_20s() {
+    // R165: the history call really went out and Riot answered 429: a real
+    // failure, so it counts toward R155's bound (the retry is due at 20 s, not
+    // at the hold's end). The match-details refused locally afterwards do not
+    // add to it. (The held-only case is the test above.)
     let h = harness().await;
     let session = session_with_other_wait(&h, Duration::from_millis(100)).await;
     // The history call 429s (holds `other` for 1.5 s, over the 100 ms bound).
@@ -646,16 +701,18 @@ async fn a_match_that_could_not_be_downloaded_for_a_hold_is_synced_again_after_i
     run_worker(h.st.clone(), session.clone(), id).await;
 
     // The history call was a real 429 (sent); the details download that
-    // followed was refused locally, and the sync is due after the hold.
+    // followed was refused locally. Retries are counted from here (R165).
     let history = format!("/match-history/v1/history/{ME}");
     assert_eq!(count(&h.server, "GET", &history).await, 1);
     assert_eq!(
         count(&h.server, "GET", "/match-details/v1/matches/m1").await,
         0
     );
-    assert_eq!(retries_done(&h, ME), Some(0), "waiting, nothing used");
+    assert_eq!(retries_done(&h, ME), Some(0), "waiting for the first retry");
     tokio::time::sleep(Duration::from_millis(1_600).saturating_sub(hold_set.elapsed())).await;
-    advance(&h, 3 * S);
+    // R165: the history 429 was a real (sent) failure, so the sync is a
+    // partial one on the R155 schedule (20 s) and not the held-back kind.
+    advance(&h, 20 * S);
     let id = lock(&h.st.live).try_start_worker().expect("due");
     run_worker(h.st.clone(), session, id).await;
     assert_eq!(

@@ -91,6 +91,12 @@ pub struct Slot {
 /// a burst nobody needs, and it is dropped rather than grown.
 pub const NAME_FILL_QUEUE_MAX: usize = 300;
 
+/// R167: the soft cap on low-priority asks (a roster player's matches phase,
+/// `LiveModel::queue_name_fill_low`): they never take more than this many of
+/// the [`NAME_FILL_QUEUE_MAX`] places, so a mid-match burst of strangers'
+/// histories leaves room for the match-end and Details asks.
+pub const NAME_FILL_LOW_MAX: usize = 100;
+
 /// R150: how long before a match end a match can have started and still be
 /// the one that just ended. A game runs well under an hour; the slack covers
 /// overtime and an app that was started mid-match.
@@ -460,7 +466,16 @@ pub struct LiveModel {
     /// R150: the asks waiting for the names fill (`Job::FillNames`), oldest
     /// first, one per puuid. In memory only: a restart loses them, and the
     /// next match end, Details open or backfill asks again.
+    ///
+    /// R167: two priorities in one deque. High asks (match end, Player and
+    /// Match Details, a backfill, asks put back by a dropped step) sit in
+    /// front; low asks ([`Self::name_fill_low`]: a roster player's matches
+    /// phase) sit behind them, so `take_fill` serves the high ones first.
     pub name_fill: VecDeque<NameAsk>,
+    /// R167: the puuids of `name_fill` that are low priority. Always at the
+    /// back of the deque; a stale entry (the deque was cleared) is harmless:
+    /// only puuids found in the deque count.
+    name_fill_low: HashSet<String>,
     /// R150: when the last match ended (epoch ms) — In Game to Menus, a
     /// free-for-all one included — until the next one starts. A match stored
     /// meanwhile that the user played in, that started shortly before, is the
@@ -519,6 +534,7 @@ impl LiveModel {
             next_worker_id: 0,
             backfill: None,
             name_fill: VecDeque::new(),
+            name_fill_low: HashSet::new(),
             match_end_ms: None,
             last_match_end: None,
             rank_retries: RankRetries::default(),
@@ -1106,13 +1122,69 @@ impl LiveModel {
             if !self.fill_allowed(&ask.puuid) {
                 continue;
             }
-            if let Some(queued) = self.name_fill.iter_mut().find(|q| q.puuid == ask.puuid) {
+            // R167: a high ask for a puuid queued low promotes it: it leaves
+            // the low part (it is re-inserted below, in front of it).
+            let promoted = self.name_fill_low.remove(&ask.puuid);
+            if let Some(i) = self.name_fill.iter().position(|q| q.puuid == ask.puuid) {
+                let mut queued = self.name_fill.remove(i).expect("position is in range");
                 // `None` (on demand) is older than any match.
                 queued.match_start_ms = queued.match_start_ms.max(ask.match_start_ms);
-            } else if self.name_fill.len() < NAME_FILL_QUEUE_MAX {
+                if promoted {
+                    let at = self.name_fill.len() - self.low_count();
+                    self.name_fill.insert(at, queued);
+                } else {
+                    self.name_fill.insert(i, queued);
+                }
+                continue;
+            }
+            // R167: a full queue makes room for a high ask by dropping its
+            // oldest low ones; with none left it takes no new puuid.
+            while self.name_fill.len() >= NAME_FILL_QUEUE_MAX {
+                let Some(i) = self
+                    .name_fill
+                    .iter()
+                    .position(|q| self.name_fill_low.contains(&q.puuid))
+                else {
+                    break;
+                };
+                if let Some(evicted) = self.name_fill.remove(i) {
+                    self.name_fill_low.remove(&evicted.puuid);
+                }
+            }
+            if self.name_fill.len() < NAME_FILL_QUEUE_MAX {
+                let at = self.name_fill.len() - self.low_count();
+                self.name_fill.insert(at, ask);
+            }
+        }
+    }
+
+    /// R167: queues low-priority asks (a roster player's matches phase stored
+    /// matches whose players have no name). Like [`Self::queue_name_fill`],
+    /// but they go behind every high ask, never evict anything, and take at
+    /// most [`NAME_FILL_LOW_MAX`] places. A puuid already queued (either
+    /// priority) keeps its place and takes the newer match.
+    pub fn queue_name_fill_low(&mut self, asks: impl IntoIterator<Item = NameAsk>) {
+        for ask in asks {
+            if !self.fill_allowed(&ask.puuid) {
+                continue;
+            }
+            if let Some(queued) = self.name_fill.iter_mut().find(|q| q.puuid == ask.puuid) {
+                queued.match_start_ms = queued.match_start_ms.max(ask.match_start_ms);
+            } else if self.name_fill.len() < NAME_FILL_QUEUE_MAX
+                && self.low_count() < NAME_FILL_LOW_MAX
+            {
+                self.name_fill_low.insert(ask.puuid.clone());
                 self.name_fill.push_back(ask);
             }
         }
+    }
+
+    /// How many of the queued asks are low priority.
+    fn low_count(&self) -> usize {
+        self.name_fill
+            .iter()
+            .filter(|q| self.name_fill_low.contains(&q.puuid))
+            .count()
     }
 
     /// R150, R153 (user, 2026-09-30) with R16: whether the names fill may ask
@@ -1168,6 +1240,7 @@ impl LiveModel {
             let Some(ask) = self.name_fill.pop_front() else {
                 break;
             };
+            self.name_fill_low.remove(&ask.puuid);
             if self.fill_allowed(&ask.puuid) {
                 taken.push(ask);
             }
@@ -1995,6 +2068,16 @@ impl AppState {
             return;
         }
         lock(&self.live).queue_name_fill(asks);
+        self.worker_kick.store(true, Ordering::Release);
+    }
+
+    /// R167: [`Self::queue_name_fill`] at low priority
+    /// (`LiveModel::queue_name_fill_low`).
+    pub fn queue_name_fill_low(&self, asks: Vec<NameAsk>) {
+        if asks.is_empty() {
+            return;
+        }
+        lock(&self.live).queue_name_fill_low(asks);
         self.worker_kick.store(true, Ordering::Release);
     }
 
@@ -3356,6 +3439,70 @@ mod tests {
         // Room is not made by dropping: a full queue takes nothing more.
         m.queue_name_fill(vec![ask("late", None)]);
         assert!(!m.name_fill.iter().any(|a| a.puuid == "late"));
+    }
+
+    #[test]
+    fn low_priority_asks_have_a_soft_cap_and_never_evict_anything() {
+        // R167: the roster matches phase's asks are low priority.
+        let mut m = model(vec![]);
+        m.queue_name_fill_low((0..NAME_FILL_LOW_MAX + 40).map(|i| ask(&format!("l{i}"), Some(1))));
+        assert_eq!(m.name_fill.len(), NAME_FILL_LOW_MAX, "soft cap");
+        // Room in the hard cap does not lift the soft one…
+        m.queue_name_fill_low([ask("late", Some(1))]);
+        assert_eq!(m.name_fill.len(), NAME_FILL_LOW_MAX);
+        // …and a queue full of high asks takes no low one.
+        let mut m = model(vec![]);
+        m.queue_name_fill((0..NAME_FILL_QUEUE_MAX).map(|i| ask(&format!("h{i}"), None)));
+        m.queue_name_fill_low([ask("l", Some(1))]);
+        assert_eq!(m.name_fill.len(), NAME_FILL_QUEUE_MAX);
+        assert!(!m.name_fill.iter().any(|a| a.puuid == "l"));
+    }
+
+    #[test]
+    fn high_priority_asks_go_first_and_evict_the_oldest_low_ones_when_full() {
+        let mut m = model(vec![]);
+        m.queue_name_fill_low((0..NAME_FILL_LOW_MAX).map(|i| ask(&format!("l{i}"), Some(1))));
+        m.queue_name_fill((0..NAME_FILL_QUEUE_MAX - 50).map(|i| ask(&format!("h{i}"), Some(9))));
+        // 100 low + 250 high would be 350: the 50 oldest low ones made room.
+        assert_eq!(m.name_fill.len(), NAME_FILL_QUEUE_MAX);
+        assert!(m
+            .name_fill
+            .iter()
+            .take(NAME_FILL_QUEUE_MAX - 50)
+            .all(|a| a.puuid.starts_with('h')));
+        assert!(!m
+            .name_fill
+            .iter()
+            .any(|a| a.puuid == "l0" || a.puuid == "l49"));
+        assert!(m.name_fill.iter().any(|a| a.puuid == "l50"));
+        // A full queue of high asks takes no more (as before).
+        m.queue_name_fill((0..100).map(|i| ask(&format!("x{i}"), Some(9))));
+        m.queue_name_fill((0..100).map(|i| ask(&format!("y{i}"), Some(9))));
+        assert!(m.name_fill.len() <= NAME_FILL_QUEUE_MAX);
+        // Taken in that order: high before low.
+        m.stage = Stage::Menus;
+        let first = m.take_fill(1).pop().unwrap();
+        assert_eq!(first.puuid, "h0");
+    }
+
+    #[test]
+    fn a_high_ask_promotes_a_queued_low_one_and_a_low_ask_never_demotes() {
+        let mut m = model(vec![]);
+        m.queue_name_fill_low([ask("a", Some(1)), ask("b", Some(1))]);
+        m.queue_name_fill([ask("c", Some(5))]);
+        m.queue_name_fill([ask("b", Some(7))]);
+        // c, then the promoted b, then the low a.
+        assert_eq!(queued(&m), [("c", Some(5)), ("b", Some(7)), ("a", Some(1))]);
+        m.queue_name_fill_low([ask("c", Some(9)), ask("a", Some(3))]);
+        // c keeps its place and takes the newer match; a is still low.
+        assert_eq!(queued(&m), [("c", Some(9)), ("b", Some(7)), ("a", Some(3))]);
+        m.queue_name_fill([ask("d", None)]);
+        assert_eq!(
+            queued(&m)[2],
+            ("d", None),
+            "a high ask still lands before the low a"
+        );
+        assert_eq!(queued(&m)[3].0, "a");
     }
 
     #[test]

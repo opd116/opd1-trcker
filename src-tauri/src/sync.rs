@@ -410,29 +410,21 @@ pub async fn fetch_missing_details(
         .map(|_| ())
 }
 
-/// R167: adds the players of a stored match that started at `start_ms` to
-/// `asks`, one ask per puuid: a puuid already there keeps the newer match.
-/// (Matches complete in any order, unlike the backfill's newest-first walk.)
-fn add_participants(asks: &mut Vec<NameAsk>, start_ms: i64, puuids: Vec<String>) {
-    for puuid in puuids {
-        match asks.iter_mut().find(|a| a.puuid == puuid) {
-            Some(ask) => ask.match_start_ms = ask.match_start_ms.max(Some(start_ms)),
-            None => asks.push(NameAsk {
-                puuid,
-                match_start_ms: Some(start_ms),
-            }),
-        }
-    }
+/// R167: the low-priority asks one stored match raises: its players whose
+/// names match-details left blank, each tagged with the match's start.
+fn match_asks(start_ms: i64, others: Vec<String>) -> Vec<NameAsk> {
+    others
+        .into_iter()
+        .map(|puuid| NameAsk {
+            puuid,
+            match_start_ms: Some(start_ms),
+        })
+        .collect()
 }
 
 /// How a [`fetch_missing_details_full`] went.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct DetailsFetch {
-    /// R167: the players, other than the user, of the matches this call
-    /// stored whose names match-details left blank — one ask each, with its
-    /// newest such match. The caller that wants them named queues them
-    /// ([`sync_matches`]); the fill sends them between matches only.
-    pub participants: Vec<NameAsk>,
     /// R160: a download was refused only because the `other` request family
     /// was on hold (`Held`: nothing sent): the longest of what was left of the
     /// hold. Those ids are not stored; a caller that can run again when the
@@ -462,6 +454,19 @@ pub async fn fetch_missing_details_full(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
     ids: Vec<String>,
+) -> Result<DetailsFetch, Gone> {
+    fetch_missing_details_asking(st, session, ids, false).await
+}
+
+/// [`fetch_missing_details_full`]; with `ask_names` (R167: a roster player's
+/// matches phase) the players of each match it stores whose names were blank
+/// are queued for the names fill at low priority **as the match is stored**,
+/// so a client that goes away mid-call loses none of the stored matches' asks.
+async fn fetch_missing_details_asking(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    ids: Vec<String>,
+    ask_names: bool,
 ) -> Result<DetailsFetch, Gone> {
     let ids = dedupe(ids);
     if ids.is_empty() {
@@ -508,15 +513,15 @@ pub async fn fetch_missing_details_full(
     let mut gone = false;
     let mut incomplete = false;
     let mut held: Option<Duration> = None;
-    let mut participants: Vec<NameAsk> = Vec::new();
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((id, Ok(details))) => {
                 // A failed write is logged; the live sync goes on (partial).
                 match store_details(st, details).await {
-                    Some((start_ms, others)) => {
-                        add_participants(&mut participants, start_ms, others)
+                    Some((start_ms, others)) if ask_names => {
+                        st.queue_name_fill_low(match_asks(start_ms, others));
                     }
+                    Some(_) => {}
                     None => incomplete = true,
                 }
                 // Stored: whoever waits on this id can read it now.
@@ -571,11 +576,7 @@ pub async fn fetch_missing_details_full(
             // A waited-for id that answered 404 in its own task is terminal.
             .is_some_and(|still| still.iter().any(|id| !owner.details_404(id)));
     }
-    Ok(DetailsFetch {
-        participants,
-        held,
-        incomplete,
-    })
+    Ok(DetailsFetch { held, incomplete })
 }
 
 /// The rank phase (R165): `comp_updates(0..5)`, then `mmr` when it is needed.
@@ -696,12 +697,12 @@ pub async fn sync_matches(
     };
     // A history that did not answer, held or failed, leaves no fresh history
     // (`history_ok`): party marks wait. Only a real failure is `partial`.
-    let fetched = fetch_missing_details_full(st, session, ids).await?;
+    // R167: the players of the matches this phase stores are queued as each
+    // is stored (low priority), named between matches like the Details
+    // sync's (`LiveModel::take_fill` holds them in a match;
+    // `Repo::names_to_ask` drops the known and the already-asked).
+    let fetched = fetch_missing_details_asking(st, session, ids, true).await?;
     partial |= fetched.incomplete;
-    // R167: the players of the matches this phase stored, named between
-    // matches like the Details sync's (`LiveModel::take_fill` holds them in a
-    // match; `Repo::names_to_ask` drops the known and the already-asked).
-    st.queue_name_fill(fetched.participants);
     if let Some(left) = fetched.held {
         hold(left);
     }
@@ -1610,6 +1611,9 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
         if !live.between_matches() {
             return Ok(());
         }
+        // Kept next to the door although `take_fill` already dropped these:
+        // an account switch while the DB was read can make a taken ask the
+        // user's, and `held.asks` must not mark it spent.
         held.asks.retain(|a| live.fill_allowed(&a.puuid));
         // Between matches a player who hid their name *during* the match is
         // asked about on purpose (R153); `fill_visible` builds them only

@@ -634,6 +634,55 @@ async fn a_roster_players_sync_that_stores_matches_queues_their_participants_for
 }
 
 #[tokio::test]
+async fn a_roster_syncs_burst_of_asks_does_not_starve_the_match_that_just_ended() {
+    // R167 fix round 1: during a match the roster's matches phase fills the
+    // queue (low priority, soft cap) with strangers' histories. The match that
+    // ends afterwards keeps all its asks, and they are sent first.
+    let h = harness().await;
+    let p = pid(7);
+    let crowd: Vec<String> = (100..220).map(pid).collect();
+    let (hist_start, end_start) = (now_ms() - 3 * 86_400_000, now_ms() - 30 * 60_000);
+    mount_player_history(&h, &p, &[("mx-crowd", hist_start)], &crowd).await;
+    mount_name_service(&h.server, &[]).await;
+    {
+        let slot = slot_for(&h.st, &p, false).await;
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.in_match = true;
+        live.slots.push(slot);
+        live.synced.insert(p.clone());
+        live.names_attempted.insert(p.clone());
+    }
+    sync_player(&h.st, &h.session, &p).await.unwrap();
+    assert_eq!(
+        lock(&h.st.live).name_fill.len(),
+        crate::state::NAME_FILL_LOW_MAX,
+        "the roster's asks stop at the soft cap"
+    );
+
+    // The match ends; its details arrive and are stored.
+    let others: Vec<String> = (1..=9).map(pid).collect();
+    mount_match(&h.server, "m-end", "competitive", end_start, &others).await;
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Menus;
+        live.in_match = false;
+    }
+    match_ends_now(&h);
+    store_match(&h, "m-end").await;
+    assert_eq!(
+        lock(&h.st.live).name_fill.len(),
+        crate::state::NAME_FILL_LOW_MAX + 9,
+        "all nine kept, behind nothing"
+    );
+
+    run_fill(&h).await;
+    let sent = puts(&h.server).await;
+    assert_eq!(sent[0].len(), NAME_BATCH_MAX);
+    assert_eq!(sent[0][..9], others[..], "the match end goes first");
+}
+
+#[tokio::test]
 async fn the_user_and_an_empty_id_are_never_asked() {
     let h = harness().await;
     lobby(&h);

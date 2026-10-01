@@ -723,6 +723,19 @@ async fn player_details_resolves_skins_without_riot_sync() {
     assert_eq!(skin_requests(&h).await, 0);
     // The Riot sync claimed OTHER for the next 120 s.
     assert!(!h.st.claim_details_sync(OTHER));
+    // Its background request may still be in flight (a slow runner): wait for
+    // it to land before anything counts requests.
+    for _ in 0..250 {
+        if count(&h.server, "GET", &comp).await >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        count(&h.server, "GET", &comp).await,
+        1,
+        "the first open's sync"
+    );
     let seen = details_events(&h.rec);
 
     // 2. The loadouts arrive. Reopening inside the 120 s (the sync claim

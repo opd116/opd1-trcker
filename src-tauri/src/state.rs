@@ -804,6 +804,30 @@ impl LiveModel {
         self.names_hold_until.is_some_and(|u| self.now() < u)
     }
 
+    /// R160: `true` once, when a names deferral has just run out and names or
+    /// names-fill work is waiting: the poll tick then starts a worker (the
+    /// worker exited when the deferral emptied its job list, and a pure
+    /// passing of time is no other wake-up). One-shot: the deferral is
+    /// cleared here, so a job that cannot run cannot make the tick start a
+    /// worker again and again.
+    pub fn names_wakeup_due(&mut self) -> bool {
+        let Some(until) = self.names_hold_until else {
+            return false;
+        };
+        if self.now() < until {
+            return false;
+        }
+        self.names_hold_until = None;
+        !self.names_needed().is_empty() || self.fill_ready()
+    }
+
+    /// R160: forgets a names deferral. A new session (a reconnect, another
+    /// account) has its own, empty hold: what the old one refused is not
+    /// refused now.
+    pub fn reset_names_hold(&mut self) {
+        self.names_hold_until = None;
+    }
+
     /// The clock the rank retries are timed by.
     fn now(&self) -> Instant {
         let now = Instant::now();
@@ -1223,6 +1247,9 @@ pub struct AppState {
     acts: RwLock<Arc<Vec<Act>>>,
     tables: tokio::sync::Mutex<TablesStatus>,
     details_synced: Mutex<HashMap<String, Instant>>,
+    /// R160: players whose Details sync is waiting out a hold to run again
+    /// (`commands::details_sync_job`): one waiting job per player.
+    details_rerun: Mutex<HashSet<String>>,
     /// Players whose skin names are being fetched right now, with how many
     /// fetches run (R97): while a puuid is in here its Details loadout
     /// weapons are still "resolving" (absent keys); once it leaves, an
@@ -1295,6 +1322,7 @@ impl AppState {
             acts: RwLock::new(Arc::new(Vec::new())),
             tables: tokio::sync::Mutex::new(TablesStatus::default()),
             details_synced: Mutex::new(HashMap::new()),
+            details_rerun: Mutex::new(HashSet::new()),
             skins_inflight: Mutex::new(HashMap::new()),
             open_details: Mutex::new(None),
             details_inflight: Mutex::new(HashMap::new()),
@@ -1679,6 +1707,19 @@ impl AppState {
         })
     }
 
+    /// R160: marks `puuid`'s Details sync as waiting out a hold to run again,
+    /// unless another job of that player already waits (`None`): a page
+    /// reopened during the wait does not leave two reruns. The mark ends when
+    /// the guard is dropped, on every path.
+    pub fn begin_details_rerun(self: &Arc<Self>, puuid: &str) -> Option<DetailsRerunGuard> {
+        lock(&self.details_rerun)
+            .insert(puuid.to_string())
+            .then(|| DetailsRerunGuard {
+                st: self.clone(),
+                puuid: puuid.to_string(),
+            })
+    }
+
     /// Gives back a [`Self::claim_details_sync`]: the sync did not get its data
     /// (R160: refused by a hold, or the competitive-updates call failed), so
     /// the next open or refresh may run it again instead of waiting out the
@@ -1708,6 +1749,19 @@ struct OpenMatch {
     match_id: String,
     focus_puuid: String,
     view: MatchDetailsView,
+}
+
+/// A player's waiting Details rerun ([`AppState::begin_details_rerun`]);
+/// dropping it ends the mark.
+pub struct DetailsRerunGuard {
+    st: Arc<AppState>,
+    puuid: String,
+}
+
+impl Drop for DetailsRerunGuard {
+    fn drop(&mut self) {
+        lock(&self.st.details_rerun).remove(&self.puuid);
+    }
 }
 
 /// See [`AppState::claim_details_fetch`].
@@ -2406,6 +2460,54 @@ mod tests {
         m.note_rank_sync("me", true, true);
         m.advance_clock(100_000 * S);
         assert!(m.try_start_worker().is_none(), "no third retry");
+    }
+
+    #[test]
+    fn a_names_deferral_wakes_the_worker_once_when_it_ends_and_work_is_waiting() {
+        // R160: the tick asks `names_wakeup_due`; it is true once.
+        let mut m = settled_lobby(&["me"]);
+        m.slots.push(slot("p2", false));
+        m.synced.insert("p2".into());
+        assert!(!m.names_needed().is_empty(), "p2 needs a name");
+        m.defer_names(10 * S);
+        assert!(m.names_needed().is_empty(), "deferred");
+        assert!(!m.names_wakeup_due(), "not before the end");
+        m.advance_clock(11 * S);
+        assert!(m.names_wakeup_due(), "ended, names waiting");
+        assert!(!m.names_wakeup_due(), "once");
+        assert!(!m.names_needed().is_empty());
+
+        // Nothing waiting: the deferral is cleared without a wake-up.
+        let mut m = settled_lobby(&["me"]);
+        m.defer_names(S);
+        m.advance_clock(2 * S);
+        assert!(!m.names_wakeup_due());
+
+        // A new session forgets it.
+        let mut m = settled_lobby(&["me"]);
+        m.slots.push(slot("p2", false));
+        m.defer_names(100 * S);
+        m.reset_names_hold();
+        assert!(!m.names_needed().is_empty());
+        assert!(!m.names_wakeup_due());
+    }
+
+    #[tokio::test]
+    async fn a_waiting_details_rerun_is_one_per_player_and_ends_with_its_guard() {
+        // R160: a reopen during the wait finds the mark taken; the mark ends
+        // when the guard drops, whichever way the job leaves.
+        let h = crate::pipeline_tests::harness().await;
+        let first = h.st.begin_details_rerun("p1").expect("free");
+        assert!(h.st.begin_details_rerun("p1").is_none(), "one per player");
+        let other =
+            h.st.begin_details_rerun("p2")
+                .expect("another player is free");
+        drop(first);
+        assert!(
+            h.st.begin_details_rerun("p1").is_some(),
+            "ended with the guard"
+        );
+        drop(other);
     }
 
     #[test]

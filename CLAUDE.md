@@ -177,6 +177,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
   - `match-history`, `match-details`
   - `name-service/v2/players` (never for a hidden player during a live stage; after the match every participant without a stored name is asked once)
   - `parties`
+  - `content-service/v3/content` on `shared.{shard}.a.pvp.net` (the current act: `IsActive` act, previous = `EndTime == StartTime`; valorant-api dates only as the fallback, R162)
 - **Throttle** every remote call with a token bucket and honor `429 Retry-After`. Reference implementation: Scout's `backend/riot_client.py`.
 
 ## Hard limits

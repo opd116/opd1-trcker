@@ -398,14 +398,6 @@ pub fn pregame_tiers(resp: &PregameMatchResponse) -> HashMap<String, u8> {
         .collect()
 }
 
-/// R161: the ranked tiers of a roster, by puuid.
-pub fn tiers_of(players: &[RosterPlayer]) -> HashMap<String, u8> {
-    players
-        .iter()
-        .filter_map(|p| Some((p.puuid.clone(), p.live_tier?)))
-        .collect()
-}
-
 /// R161: gives every player of `players` with no tier of their own the one
 /// in `known`, if any (the tiers an earlier roster of the same match
 /// carried). A tier the roster answer itself carried is never replaced.
@@ -917,9 +909,6 @@ mod tests {
         assert_eq!(players[0].live_tier, Some(22));
         assert_eq!(players[1].live_tier, None);
         assert_eq!(players[2].live_tier, None);
-        let tiers = tiers_of(&players);
-        assert_eq!(tiers.len(), 1);
-        assert_eq!(tiers["me"], 22);
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //! its own endpoint's real casing.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Deserializer};
 use serde_json::Value;
@@ -34,13 +35,23 @@ where
 /// R161: a tier Riot's roster answers carry (`CompetitiveTier`) — a number,
 /// or nothing. An absent key, a `null` or any other kind of value is "no
 /// tier" instead of a decode error, so a surprise in this one field can never
-/// blank the whole roster.
+/// blank the whole roster. A value that is present but neither `null` nor an
+/// integer is logged once per run (debug), so ranks that turn late again
+/// because Riot changed the type leave a trace.
 fn lenient_tier<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
 where
     D: Deserializer<'de>,
 {
-    Ok(Value::deserialize(deserializer)?.as_i64())
+    let value = Value::deserialize(deserializer)?;
+    let tier = value.as_i64();
+    if tier.is_none() && !value.is_null() && !TIER_TYPE_LOGGED.swap(true, Ordering::Relaxed) {
+        log::debug!("CompetitiveTier is not an integer ({value}); read as no tier");
+    }
+    Ok(tier)
 }
+
+/// Whether the odd-`CompetitiveTier` line was logged this run.
+static TIER_TYPE_LOGGED: AtomicBool = AtomicBool::new(false);
 
 // ---------------------------------------------------------------------
 // VisiblePuuid — ruling R16

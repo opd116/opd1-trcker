@@ -201,6 +201,12 @@ fn put_names() -> &'static str {
     "/name-service/v2/players"
 }
 
+/// `asks` failed name-service asks (None: always). R166: `RiotSession::names`
+/// repeats a 5xx once, so one failed ask is two failed requests on the wire.
+async fn fails_names(h: &Harness, asks: Option<u64>) {
+    fails(h, "PUT", put_names(), 500, asks.map(|n| 2 * n)).await;
+}
+
 /// OTHER visible and synced: only the names job is left.
 fn names_only(h: &Harness) {
     let mut live = lock(&h.st.live);
@@ -224,11 +230,15 @@ fn names_only(h: &Harness) {
 #[tokio::test]
 async fn a_failed_names_request_is_asked_again_after_the_delay_and_the_name_arrives() {
     let h = harness().await;
-    fails(&h, "PUT", put_names(), 500, Some(1)).await;
+    fails_names(&h, Some(1)).await;
     names_only(&h);
 
     assert!(drain(&h).await);
-    assert_eq!(count(&h.server, "PUT", put_names()).await, 1);
+    assert_eq!(
+        count(&h.server, "PUT", put_names()).await,
+        2,
+        "one ask, repeated once inside the call (R166)"
+    );
     assert!(
         !lock(&h.st.live).names_attempted.contains(OTHER),
         "an error is not an answer"
@@ -242,7 +252,7 @@ async fn a_failed_names_request_is_asked_again_after_the_delay_and_the_name_arri
     assert!(!drain(&h).await, "not before the delay");
     advance(&h, 2 * S);
     assert!(drain(&h).await, "the retry");
-    assert_eq!(count(&h.server, "PUT", put_names()).await, 2);
+    assert_eq!(count(&h.server, "PUT", put_names()).await, 3);
     assert!(lock(&h.st.live).names_attempted.contains(OTHER));
     let card = card_json(&h.st, OTHER);
     assert_eq!(card["name"]["name"], "Other", "the name filled in");
@@ -250,13 +260,13 @@ async fn a_failed_names_request_is_asked_again_after_the_delay_and_the_name_arri
     // Answered: never asked again.
     advance(&h, 1_000 * S);
     assert!(!drain(&h).await);
-    assert_eq!(count(&h.server, "PUT", put_names()).await, 2);
+    assert_eq!(count(&h.server, "PUT", put_names()).await, 3);
 }
 
 #[tokio::test]
 async fn a_names_request_that_always_fails_is_asked_three_times_and_then_given_up() {
     let h = harness().await;
-    fails(&h, "PUT", put_names(), 500, None).await;
+    fails_names(&h, None).await;
     names_only(&h);
 
     assert!(drain(&h).await);
@@ -264,17 +274,17 @@ async fn a_names_request_that_always_fails_is_asked_three_times_and_then_given_u
     assert!(drain(&h).await);
     advance(&h, 7 * S);
     assert!(drain(&h).await, "the third and last try");
-    assert_eq!(count(&h.server, "PUT", put_names()).await, 3);
+    assert_eq!(count(&h.server, "PUT", put_names()).await, 6, "3 asks x 2");
     assert!(lock(&h.st.live).names_attempted.contains(OTHER));
     advance(&h, 100_000 * S);
     assert!(!drain(&h).await, "no fourth try");
-    assert_eq!(count(&h.server, "PUT", put_names()).await, 3);
+    assert_eq!(count(&h.server, "PUT", put_names()).await, 6);
 }
 
 #[tokio::test]
 async fn a_hidden_player_is_never_sent_to_name_service_by_the_retry_either() {
     let h = harness().await;
-    fails(&h, "PUT", put_names(), 500, Some(1)).await;
+    fails_names(&h, Some(1)).await;
     {
         let mut live = lock(&h.st.live);
         live.stage = Stage::Ingame;
@@ -306,7 +316,8 @@ async fn a_hidden_player_is_never_sent_to_name_service_by_the_retry_either() {
             assert!(!body.contains(HIDDEN), "{body}");
         }
     }
-    assert_eq!(count(&h.server, "PUT", put_names()).await, 2);
+    // The failed ask (2 requests) and its retry (1).
+    assert_eq!(count(&h.server, "PUT", put_names()).await, 3);
 }
 
 // ---------------------------------------------------------------------
@@ -531,7 +542,7 @@ async fn every_failed_names_try_leaves_a_wake_up_for_the_next_one() {
     // tick's `names_wakeup_due` is what starts the next one, so each failure
     // must leave a deferral that ends at the next retry.
     let h = harness().await;
-    fails(&h, "PUT", put_names(), 500, Some(2)).await;
+    fails_names(&h, Some(2)).await;
     names_only(&h);
 
     assert!(drain(&h).await, "try 1 fails");
@@ -543,20 +554,30 @@ async fn every_failed_names_try_leaves_a_wake_up_for_the_next_one() {
     advance(&h, 7 * S);
     assert!(lock(&h.st.live).names_wakeup_due(), "woken for try 3");
     assert!(drain(&h).await, "try 3 answers");
-    assert_eq!(count(&h.server, "PUT", put_names()).await, 3);
+    assert_eq!(count(&h.server, "PUT", put_names()).await, 5);
     assert_eq!(card_json(&h.st, OTHER)["name"]["name"], "Other");
 }
 
-/// The PUT bodies sent to name-service, in order, as the puuids they carried.
-async fn name_asks(h: &Harness) -> Vec<Vec<String>> {
-    h.server
+/// The PUT bodies sent to name-service, in order, as the puuids they carried,
+/// one per ask: the first `failed` asks each went out twice (R166), the
+/// repeat is dropped here.
+async fn name_asks(h: &Harness, failed: usize) -> Vec<Vec<String>> {
+    let all: Vec<Vec<String>> = h
+        .server
         .received_requests()
         .await
         .unwrap()
         .into_iter()
         .filter(|r| r.method.as_str() == "PUT" && r.url.path() == put_names())
         .map(|r| serde_json::from_slice::<Vec<String>>(&r.body).expect("a list of puuids"))
-        .collect()
+        .collect();
+    let mut asks = Vec::new();
+    let mut i = 0;
+    while i < all.len() {
+        asks.push(all[i].clone());
+        i += if asks.len() <= failed { 2 } else { 1 };
+    }
+    asks
 }
 
 fn join(h: &Harness, puuid: &str) {
@@ -571,7 +592,7 @@ fn join(h: &Harness, puuid: &str) {
 #[tokio::test]
 async fn a_new_player_is_asked_at_once_while_an_older_retry_waits_and_the_retry_still_wakes() {
     let h = harness().await;
-    fails(&h, "PUT", put_names(), 500, Some(1)).await;
+    fails_names(&h, Some(1)).await;
     names_only(&h);
     assert!(drain(&h).await, "OTHER's first try fails");
 
@@ -580,7 +601,7 @@ async fn a_new_player_is_asked_at_once_while_an_older_retry_waits_and_the_retry_
         drain(&h).await,
         "MATE is asked now, not after OTHER's delay"
     );
-    let asks = name_asks(&h).await;
+    let asks = name_asks(&h, 1).await;
     assert_eq!(asks.len(), 2);
     assert_eq!(asks[1], vec![MATE.to_string()], "alone: OTHER waits");
 
@@ -589,7 +610,7 @@ async fn a_new_player_is_asked_at_once_while_an_older_retry_waits_and_the_retry_
     advance(&h, 3 * S);
     assert!(lock(&h.st.live).names_wakeup_due());
     assert!(drain(&h).await);
-    assert_eq!(name_asks(&h).await[2], vec![OTHER.to_string()]);
+    assert_eq!(name_asks(&h, 1).await[2], vec![OTHER.to_string()]);
     assert_eq!(card_json(&h.st, OTHER)["name"]["name"], "Other");
 }
 
@@ -599,26 +620,26 @@ async fn a_staggered_retry_is_woken_after_a_names_step_that_succeeded() {
     // fails once (due +2 s). MATE answers alone at +2 s: the step that
     // answered must leave the wake-up for OTHER's retry.
     let h = harness().await;
-    fails(&h, "PUT", put_names(), 500, Some(2)).await;
+    fails_names(&h, Some(2)).await;
     names_only(&h);
     assert!(drain(&h).await, "request 1: [OTHER] fails");
     advance(&h, 3 * S);
     join(&h, MATE);
     assert!(drain(&h).await, "request 2: [OTHER, MATE] fails");
-    assert_eq!(name_asks(&h).await[1].len(), 2);
+    assert_eq!(name_asks(&h, 2).await[1].len(), 2);
 
     assert!(!lock(&h.st.live).names_wakeup_due());
     advance(&h, 3 * S);
     assert!(lock(&h.st.live).names_wakeup_due(), "MATE is due");
     assert!(drain(&h).await, "request 3: [MATE] is answered");
-    assert_eq!(name_asks(&h).await[2], vec![MATE.to_string()]);
+    assert_eq!(name_asks(&h, 2).await[2], vec![MATE.to_string()]);
 
     // Only the success arm can have armed this one.
     assert!(!lock(&h.st.live).names_wakeup_due());
     advance(&h, 4 * S);
     assert!(lock(&h.st.live).names_wakeup_due(), "OTHER is due");
     assert!(drain(&h).await, "request 4");
-    assert_eq!(name_asks(&h).await[3], vec![OTHER.to_string()]);
+    assert_eq!(name_asks(&h, 2).await[3], vec![OTHER.to_string()]);
 }
 
 #[tokio::test]

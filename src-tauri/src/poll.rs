@@ -41,9 +41,10 @@ use opd1_riot::{RiotError, RiotSession};
 
 use crate::logbuf::short;
 use crate::roster::{
-    connect_retry_delay, extract_loadouts, extract_pregame_loadouts, from_coregame, from_party,
-    from_pregame, is_ffa_roster, order_players, party_key, plan_transition, view_stage,
-    want_pregame_loadouts, GameVerdict, GameWatch, PartyKey, RosterFetch, RosterPlayer,
+    connect_retry_delay, extract_loadouts, extract_pregame_loadouts, fill_tiers, from_coregame,
+    from_party, from_pregame, is_ffa_roster, order_players, party_key, plan_transition,
+    pregame_tiers, view_stage, want_pregame_loadouts, GameVerdict, GameWatch, PartyKey,
+    RosterFetch, RosterPlayer,
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
 use crate::store::{
@@ -256,6 +257,8 @@ impl Poller {
                 live.match_end_ms = None;
                 // R155: nor are its pending rank retries.
                 live.rank_retries.clear();
+                // R161: nor are the tiers of its last Agent Select.
+                live.match_tiers.clear();
             }
             live.self_puuid = Some(me.clone());
             live.self_name_attempted = false;
@@ -609,6 +612,8 @@ impl Poller {
                 live.synced.clear();
                 live.party_ready.clear();
                 live.names_attempted.clear();
+                // R161: a match is over or VALORANT closed.
+                live.match_tiers.clear();
             }
             ended
         };
@@ -693,10 +698,16 @@ impl Poller {
         session.party(&party_id).await
     }
 
-    async fn fetch_party(&mut self, session: &Arc<RiotSession>, me: &str) -> Result<(), RiotError> {
+    pub(crate) async fn fetch_party(
+        &mut self,
+        session: &Arc<RiotSession>,
+        me: &str,
+    ) -> Result<(), RiotError> {
         let party = self.party_response(session, me).await?;
         let roster = from_party(&party);
         self.self_party = roster.iter().map(|p| p.puuid.clone()).collect();
+        // R161: a Lobby answer says nothing about a match to come.
+        lock(&self.st.live).match_tiers.clear();
         log::info!("lobby: party of {}", roster.len());
         self.apply_roster(session, Stage::Menus, None, roster).await;
         Ok(())
@@ -754,6 +765,9 @@ impl Poller {
         let match_id = session.pregame_player(me).await?.match_id;
         let m = session.pregame_match(&match_id).await?;
         let roster = from_pregame(&m, me, &self.self_party);
+        lock(&self.st.live)
+            .match_tiers
+            .set_pregame(&match_id, pregame_tiers(&m));
         log::info!("agent select: {} allies", roster.len());
         if self.pregame_match_id.as_deref() != Some(match_id.as_str()) {
             // A new Agent Select: its loadouts start unknown.
@@ -777,6 +791,9 @@ impl Poller {
             Ok(m) => {
                 let me = session.self_puuid().to_string();
                 let roster = from_pregame(&m, &me, &self.self_party);
+                lock(&self.st.live)
+                    .match_tiers
+                    .set_pregame(&match_id, pregame_tiers(&m));
                 let allies: Vec<String> = roster.iter().map(|p| p.puuid.clone()).collect();
                 self.apply_roster(session, Stage::Pregame, Some(m.map_id), roster)
                     .await;
@@ -833,7 +850,7 @@ impl Poller {
         }
     }
 
-    async fn fetch_ingame(
+    pub(crate) async fn fetch_ingame(
         &mut self,
         session: &Arc<RiotSession>,
         me: &str,
@@ -854,7 +871,11 @@ impl Poller {
             lock(&self.st.live).in_match = true;
             return self.fetch_party(session, me).await;
         }
-        let roster = from_coregame(&m, me, &self.self_party);
+        let mut roster = from_coregame(&m, me, &self.self_party);
+        // R161: core-game answers carry no tier; the Agent Select one of
+        // this very match did.
+        let known = lock(&self.st.live).match_tiers.for_match(&match_id);
+        fill_tiers(&mut roster, &known);
         let loadouts = match session.coregame_loadouts(&match_id).await {
             Ok(resp) => Some(extract_loadouts(&resp)),
             Err(RiotError::ClientGone) => return Err(RiotError::ClientGone),
@@ -1005,7 +1026,7 @@ impl Poller {
     }
 
     /// Closed: the user's own card from the DB (nothing if unknown).
-    async fn enter_closed(&mut self) {
+    pub(crate) async fn enter_closed(&mut self) {
         self.stop_worker();
         self.stage = Stage::Closed;
         let me = lock(&self.st.live).self_puuid.clone();
@@ -1029,6 +1050,7 @@ impl Poller {
             live.map_id = None;
             live.coregame_match_id = None;
             live.loadouts.clear();
+            live.match_tiers.clear();
             live.slots = slot.into_iter().collect();
             // R155: nothing is retried while VALORANT is closed.
             live.prune_rank_retries();
@@ -1486,6 +1508,31 @@ mod tests {
         let anchor = wait_for_anchor(&h.st).await.expect("the run finished");
         assert_eq!(anchor.0, crate::pipeline_tests::backfill::entry_id(0));
         assert_eq!(backfill_pages(&h).await, 1);
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn the_transition_to_menus_forgets_the_match_tiers_even_if_the_lobby_fetch_fails() {
+        // R161: the Agent Select tiers belong to the match that just ended; a
+        // failed party fetch (no mock answers it here) must not leave them
+        // for the next In Game roster.
+        let h = harness().await;
+        mock_presence(&h, "MENUS", "unrated").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Ingame;
+        poller.presence_stage = Stage::Ingame;
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Ingame;
+            live.match_tiers
+                .set_pregame("pg-1", [(ME.to_string(), 22)].into());
+            assert!(!live.match_tiers.is_empty());
+        }
+
+        poller.presence_tick(&h.session).await.unwrap();
+
+        assert_eq!(lock(&h.st.live).stage, Stage::Menus);
+        assert!(lock(&h.st.live).match_tiers.is_empty());
         poller.stop_worker();
     }
 

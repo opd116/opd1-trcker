@@ -100,6 +100,48 @@ pub fn unnamed_others<'a>(
         .map(|p| p.puuid.clone())
 }
 
+/// R161: the ranked tiers (by puuid) an Agent Select answer carried, bound to
+/// the match they came from. Pregame's `ID` is the core-game `MatchID` of the
+/// same match, so the In Game roster can tell a tier of its own match from a
+/// leftover of an earlier one.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct MatchTiers {
+    match_id: Option<String>,
+    tiers: HashMap<String, u8>,
+}
+
+impl MatchTiers {
+    /// An Agent Select answer for `match_id`. A different match replaces
+    /// what is stored; the same one (a re-poll) merges by presence, so a
+    /// player an answer leaves the tier out for keeps the earlier tier.
+    pub fn set_pregame(&mut self, match_id: &str, tiers: HashMap<String, u8>) {
+        if self.match_id.as_deref() == Some(match_id) {
+            self.tiers.extend(tiers);
+        } else {
+            self.match_id = Some(match_id.to_string());
+            self.tiers = tiers;
+        }
+    }
+
+    /// The tiers stored for `match_id`; none for any other match.
+    pub fn for_match(&self, match_id: &str) -> HashMap<String, u8> {
+        if self.match_id.as_deref() == Some(match_id) {
+            self.tiers.clone()
+        } else {
+            HashMap::new()
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.match_id.is_none() && self.tiers.is_empty()
+    }
+}
+
 /// One unit of work for the roster worker (see [`LiveModel::next_job`]).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Job {
@@ -225,6 +267,13 @@ pub struct LiveModel {
     /// The user's own last-seen roster entry (placeholder while a roster
     /// fetch is retried).
     pub self_roster: Option<RosterPlayer>,
+    /// R161: the ranked tiers an Agent Select answer carried (both teams),
+    /// bound to that match. Core-game answers carry no tier, so an In Game
+    /// roster takes its players' tiers from here, only when its own match id
+    /// is the stored one (`MatchTiers::for_match`). Replaced by a new Agent
+    /// Select, emptied on every Lobby fetch, on the transition to Menus or
+    /// Closed, and when VALORANT closes or the account changes.
+    pub match_tiers: MatchTiers,
     /// Names from `names()` this run (visible, non-self players only).
     pub known_names: HashMap<String, (String, String)>,
     /// Players whose card showed them hidden the last time they were on
@@ -295,6 +344,7 @@ impl LiveModel {
             self_name: None,
             self_name_attempted: false,
             self_roster: None,
+            match_tiers: MatchTiers::default(),
             known_names: HashMap::new(),
             seen_hidden: HashMap::new(),
             names_attempted: HashSet::new(),
@@ -486,6 +536,7 @@ impl LiveModel {
             // R154: read only for a player with no snapshot, used only when
             // MMR is not a value.
             stored_tier: slot.db.stored_tier,
+            live_tier: r.live_tier,
         });
         settle_card(&mut card, names_done, data_done);
         card
@@ -872,6 +923,7 @@ pub fn closed_self_slot(self_puuid: &str, db: PlayerDb) -> Option<Slot> {
             card_id: row.card_id,
             character_id: String::new(),
             selection_state: String::new(),
+            live_tier: None,
         },
         db,
     })
@@ -1453,6 +1505,7 @@ mod tests {
             card_id: "card".into(),
             character_id: "agent".into(),
             selection_state: "locked".into(),
+            live_tier: None,
         }
     }
 

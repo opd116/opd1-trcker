@@ -330,7 +330,7 @@ The party stripe and tab (§3.9) come **before** the grid in the markup, as in t
 - Text column: `flex-direction:column; gap:2px; min-width:0`.
   - Tier name 15px/600 `nowrap`.
   - Line 2: 12px/500 `--text2` `nowrap`: `<span 13px/600 --text tab>{rr}</span> RR`.
-  - **R154:** when the MMR request gives no answer the backend still fills the rank from stored data: from the player's stored competitive updates (tier and exact RR, `rr` is a number, drawn as usual), else from the tier of a stored current-act match. Only that last case has no RR: `rank.rr` is `null`. The tier icon and name draw as usual and the number is `—` (`<span>—</span> RR`): same markup, same positions, no extra text or badge, no tooltip. The Details hero does the same (§6.2). `rr: 0` is a real RR.
+  - **R154:** when the MMR request gives no answer the backend still fills the rank from stored data: from the player's stored competitive updates (tier and exact RR, `rr` is a number, drawn as usual), else (R161) from the tier the pregame / party answer carries for the player, else from the tier of a stored current-act match. Only those last two cases have no RR: `rank.rr` is `null`. The tier icon and name draw as usual and the number is `—` (`<span>—</span> RR`): same markup, same positions, no extra text or badge, no tooltip. The Details hero does the same (§6.2). `rr: 0` is a real RR.
 - `rank === null` **[C]**, or `rank.tier < 3` (Unrated and the unused tiers 1–2; **R129**): an empty 40×40 box (layout kept), then `—` 15px/600 `--text2`, with no line 2. A tier below 3 renders exactly like `null`, the same rule as the Prev row.
 - The tier name's right edge must stay ≤ x 463 in card coordinates, because the party tab occupies x 464–485, y 22–42.
 
@@ -816,7 +816,7 @@ interface PlayerCard {
   level?: number | null;                // tri-state — FIX. null when the player hides it (HideAccountLevel), except on the user's own card (isSelf), which always carries the level (R100)
   cardId: string;
   agentId: string | null;               // set only after the lock (R99; a hover leaves it null)
-  rank?: { tier: number; rr: number | null } | null;   // R154: rr is null only when the MMR request gave no answer and the tier comes from a stored match (from stored competitive updates it is a number); the key is always present
+  rank?: { tier: number; rr: number | null } | null;   // R154, R161: rr is null only when the MMR request gave no answer and the tier comes from the roster answer or a stored match (from stored competitive updates it is a number); the key is always present
   prevActTier?: number | null;
   peak?: { tier: number; actLabel: string; actName: string; sinceActEndMs: number | null;
            actStartMs: number; actEndMs: number } | null;
@@ -897,7 +897,7 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
 | Hidden agent name | `card.name.agentId` → `meta.agents` | existing |
 | ⟲ count + tip | `card.encounters.{with,against}` | existing |
 | Lv | `card.level` | existing |
-| Current rank | `card.rank.{tier,rr}` (`rr` may be null, R154; the backend falls back to stored competitive updates, then to a stored match's tier, when MMR has no answer), `meta.tiers` | existing |
+| Current rank | `card.rank.{tier,rr}` (`rr` may be null, R154; the backend falls back to stored competitive updates, then to the roster's live tier (R161), then to a stored match's tier, when MMR has no answer), `meta.tiers` | existing |
 | Peak row + tip | `card.peak.{tier,actLabel,actName,sinceActEndMs,actStartMs,actEndMs}` | existing |
 | Prev row | `card.prevActTier` | existing |
 | K/D, HS% (Live card) | `card.kd`, `card.hsPct` (last 5 competitive) | existing |

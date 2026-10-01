@@ -820,6 +820,12 @@ pub struct BuildCardInput<'a> {
     /// is not a value and no current-act RR row in `comp_updates` names a
     /// rank; see [`rank_without_mmr`].
     pub stored_tier: Option<StoredTier>,
+    /// R161: the player's current competitive tier as the roster answer
+    /// carried it — pregame `CompetitiveTier`, a party member's
+    /// `CompetitiveTier` — the raw number (`0` = unranked). Costs no request;
+    /// used only when `mmr` is not a value and no current-act `comp_updates`
+    /// row names a rank; see [`rank_without_mmr`].
+    pub live_tier: Option<u8>,
 }
 
 /// The agent a card shows: `character_id`, but only once it's locked (R99).
@@ -863,6 +869,7 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
         party,
         encounters,
         stored_tier,
+        live_tier,
     } = input;
 
     // CLAUDE.md: agent head icon "only after the agent is selected" — R99:
@@ -932,9 +939,13 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
     // With no snapshot (still loading, or the call failed) the rank alone
     // is read off the player's stored matches; nothing else is.
     if !matches!(mmr, Field::Value(_)) {
-        if let Some(stored) =
-            rank_without_mmr(&comp_updates, stored_tier, ordered_acts, current_act_id)
-        {
+        if let Some(stored) = rank_without_mmr(
+            &comp_updates,
+            live_tier,
+            stored_tier,
+            ordered_acts,
+            current_act_id,
+        ) {
             rank = Field::Value(stored);
         }
     }
@@ -1050,38 +1061,47 @@ fn build_mmr_fields(
     }
 }
 
-/// R154: the current rank of a player MMR has no answer for, from what is
-/// stored, in order:
+/// R154 + R161: the current rank of a player MMR has no answer for, from what
+/// is at hand, in order:
 /// 1. the newest `comp_updates` row (by match start) of the current act whose
 ///    `tier_after` is a ranked tier ([`display_tier`]): that tier and the RR
 ///    after the match — exact;
-/// 2. else `stored_tier` when its match started in the current act: that
+/// 2. else `live_tier`, the tier the roster answer (pregame, party) carried
+///    for the player right now, when it is a ranked tier: that tier, RR
+///    unknown (`None`). It is a statement about now, so it needs no act;
+/// 3. else `stored_tier` when its match started in the current act: that
 ///    tier, RR unknown (`None`).
 ///
-/// `None` when neither applies — a previous act's row or match says nothing
-/// about the player's rank now — or when the current act is unknown
-/// (`current_act_id` empty, or not in `ordered_acts`).
+/// `None` when none applies — a previous act's row or match says nothing
+/// about the player's rank now — or when step 1 or 3 needs the current act
+/// and it is unknown (`current_act_id` empty, or not in `ordered_acts`).
 fn rank_without_mmr(
     comp_updates: &Field<Vec<CompUpdateRow>>,
+    live_tier: Option<u8>,
     stored_tier: Option<StoredTier>,
     ordered_acts: &[Act],
     current_act_id: &str,
 ) -> Option<RankInfo> {
+    if !current_act_id.is_empty() {
+        if let Field::Value(updates) = comp_updates {
+            let newest = updates
+                .iter()
+                .filter(|u| u.season_id == current_act_id)
+                .filter_map(|u| Some((u, display_tier(Some(u.tier_after))?)))
+                .max_by_key(|(u, _)| u.start_ms);
+            if let Some((update, tier)) = newest {
+                return Some(RankInfo {
+                    tier,
+                    rr: Some(update.rr_after.clamp(0, i64::from(u16::MAX)) as u16),
+                });
+            }
+        }
+    }
+    if let Some(tier) = display_tier(live_tier.map(i64::from)) {
+        return Some(RankInfo { tier, rr: None });
+    }
     if current_act_id.is_empty() {
         return None;
-    }
-    if let Field::Value(updates) = comp_updates {
-        let newest = updates
-            .iter()
-            .filter(|u| u.season_id == current_act_id)
-            .filter_map(|u| Some((u, display_tier(Some(u.tier_after))?)))
-            .max_by_key(|(u, _)| u.start_ms);
-        if let Some((update, tier)) = newest {
-            return Some(RankInfo {
-                tier,
-                rr: Some(update.rr_after.clamp(0, i64::from(u16::MAX)) as u16),
-            });
-        }
     }
     let act = ordered_acts.iter().find(|a| a.id == current_act_id)?;
     stored_tier

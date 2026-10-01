@@ -482,6 +482,7 @@ pub(crate) fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
         card_id: "card".into(),
         character_id: "agent".into(),
         selection_state: "locked".into(),
+        live_tier: None,
     }
 }
 
@@ -1200,6 +1201,11 @@ mod names_fill;
 /// bounded retry of a failed rank sync (their own file; same harness).
 #[cfg(test)]
 mod rank;
+
+/// R161's live-tier tests: the rank from the roster answers (their own file;
+/// same harness).
+#[cfg(test)]
+mod live_tier;
 
 /// R158's diagnostics tests: the failed-call warn line and `dump_raw` (their
 /// own file; same harness).

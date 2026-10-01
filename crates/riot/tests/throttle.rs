@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use opd1_riot::throttle::Throttle;
+use opd1_riot::throttle::{Hold, Throttle};
 
 #[tokio::test]
 async fn throttle_limits_rate() {
@@ -152,4 +152,55 @@ fn new_with_negative_or_nan_burst_does_not_panic() {
     // regardless of how nonsensical the arguments are.
     let _ = Throttle::new(-5.0, 10.0);
     let _ = Throttle::new(f64::NAN, 10.0);
+}
+
+#[tokio::test]
+async fn take_unless_held_returns_the_remaining_hold_at_once_and_keeps_the_token() {
+    // R160: an mmr-family call must not sleep out a 60 s Riot block.
+    let throttle = Throttle::new(1.0, 1.0);
+    throttle.hold_for(60.0);
+
+    let start = Instant::now();
+    let left = throttle
+        .take_unless_held()
+        .await
+        .expect_err("a hold is active");
+    assert!(
+        start.elapsed() < Duration::from_millis(50),
+        "returns at once"
+    );
+    assert!(left > Duration::from_secs(59) && left <= Duration::from_secs(60));
+    assert!(throttle.held_for().is_some());
+
+    // The refused call took no token: a throttle that is only ever refused
+    // still has its full burst once the hold is gone.
+    let fresh = Throttle::new(1.0, 1.0);
+    assert!(fresh.take_unless_held().await.is_ok());
+}
+
+#[tokio::test]
+async fn take_unless_held_takes_a_token_when_nothing_is_held() {
+    let throttle = Throttle::new(2.0, 2.0);
+    assert!(throttle.held_for().is_none());
+    assert!(throttle.take_unless_held().await.is_ok());
+    assert!(throttle.take_unless_held().await.is_ok());
+}
+
+#[tokio::test]
+async fn a_hold_waits_out_and_is_independent_of_other_holds() {
+    let mmr = Hold::new();
+    let other = Hold::new();
+    mmr.hold_for(60.0);
+    assert!(mmr.remaining().is_some());
+    assert!(other.remaining().is_none(), "families do not share a hold");
+
+    let start = Instant::now();
+    other.wait().await;
+    assert!(start.elapsed() < Duration::from_millis(50));
+
+    other.hold_for(0.1);
+    let start = Instant::now();
+    other.wait().await;
+    assert!(start.elapsed() >= Duration::from_millis(80));
+    assert!(other.remaining().is_none());
 }

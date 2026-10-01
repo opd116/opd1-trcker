@@ -12,7 +12,10 @@
 //!    paces the actual requests).
 //! 4. `mmr` only when `mmr_refresh_needed(latest comp match)` — no new
 //!    competitive match means the rank can't have changed, unless the stored
-//!    snapshot predates the current snapshot version (refetched once).
+//!    snapshot predates the current snapshot version (refetched once). When
+//!    `comp_updates` failed there is no "latest" to compare (R160): `mmr` is
+//!    then asked for a player with no stored snapshot, and skipped when one
+//!    exists (it keeps showing).
 //!
 //! Behind all of that, at the lowest priority, the worker also runs the
 //! user's own-history backfill ([`backfill_step`], R101) and, ahead of it,
@@ -30,10 +33,15 @@
 //! A failed rank part (`comp_updates` or `mmr`) is retried, bounded (R155,
 //! `crate::rank_retry`): the worker syncs the player again 20 s after the
 //! failure and 60 s after that, while they are on the live roster, behind the
-//! first-pass syncs and ahead of the names fill and the backfill.
+//! first-pass syncs and ahead of the names fill and the backfill. A rank part
+//! that did not run only because the mmr request family was on hold after a
+//! Riot 429 (R160, `RiotError::Held`: nothing was sent) is not a failure: the
+//! player is synced again when the hold ends and no retry is used up. The
+//! worker never waits for a hold.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -132,6 +140,7 @@ pub fn counts_toward_skip(e: &RiotError) -> bool {
         | RiotError::ShardsUnavailable
         | RiotError::AuthFailed(_)
         | RiotError::RateLimited
+        | RiotError::Held(_)
         | RiotError::Http(_) => false,
     }
 }
@@ -148,11 +157,17 @@ pub struct SyncOutcome {
     /// history failed this cycle (the call or the write) must not take part:
     /// the stored one may be from an earlier session (a false stripe).
     pub history_ok: bool,
-    /// The rank part failed: the `comp_updates` call (which also skips the
-    /// `mmr` call), or the `mmr` call. Any error but `ClientGone`, which
-    /// aborts the sync instead. R155: such a player is synced again later
-    /// (`LiveModel::note_rank_sync`).
+    /// The rank part really failed: the `comp_updates` call or the `mmr` call
+    /// answered with an error (any but `ClientGone`, which aborts the sync
+    /// instead, and `Held`, which is `rank_held`). R155: such a player is
+    /// synced again later (`LiveModel::note_rank_sync`).
     pub rank_failed: bool,
+    /// R160: the rank part did not run, only because the mmr request family
+    /// was on hold — nothing was sent — and this is the longest of what was
+    /// left of the hold. `None` when a call really failed (`rank_failed`) or
+    /// nothing was held. Not a failure: `LiveModel::note_rank_held` syncs the
+    /// player again when the hold ends and uses up no retry.
+    pub rank_held: Option<Duration>,
 }
 
 /// The warn line a failed call leaves in the log (R158): what failed, for
@@ -173,6 +188,48 @@ fn check(err: RiotError, what: &str, puuid: &str) -> Result<(), Gone> {
             log::warn!("{}", failure_line(what, puuid, &other));
             Ok(())
         }
+    }
+}
+
+/// How a rank-part call (`comp_updates`, `mmr`) ended, for [`sync_player`].
+enum RankCall<T> {
+    Ok(T),
+    /// Not sent: the mmr family is on hold for this much longer (R160).
+    Held(Duration),
+    /// Failed for real (logged).
+    Failed,
+}
+
+/// Maps a rank call's result: `ClientGone` aborts, `Held` is noted (debug
+/// only: the hold itself was logged when it started), anything else is logged
+/// like [`check`] and counts as a real failure.
+fn rank_call<T>(res: Result<T, RiotError>, what: &str, puuid: &str) -> Result<RankCall<T>, Gone> {
+    match res {
+        Ok(v) => Ok(RankCall::Ok(v)),
+        Err(RiotError::Held(left)) => {
+            log::debug!("{}", failure_line(what, puuid, &RiotError::Held(left)));
+            Ok(RankCall::Held(left))
+        }
+        Err(e) => check(e, what, puuid).map(|()| RankCall::Failed),
+    }
+}
+
+/// What the rank part of one sync learned: a real failure and/or a hold.
+#[derive(Default)]
+struct RankPart {
+    failed: bool,
+    held: Option<Duration>,
+}
+
+impl RankPart {
+    fn held(&mut self, left: Duration) {
+        self.held = Some(self.held.map_or(left, |h| h.max(left)));
+    }
+
+    /// `(rank_failed, rank_held)`: a hold only counts when nothing failed for
+    /// real (a real failure schedules the R155 retry, which covers the hold).
+    fn outcome(&self) -> (bool, Option<Duration>) {
+        (self.failed, self.held.filter(|_| !self.failed))
     }
 }
 
@@ -233,15 +290,20 @@ fn comp_history_entries(rows: &[CompUpdateRow]) -> Vec<HistoryEntry> {
         .collect()
 }
 
-/// `comp_updates(start..end)` -> DB. Returns the rows (`None` on failure).
-async fn sync_comp_updates(
+/// `comp_updates(start..end)` -> DB, telling a hold apart from a failure
+/// (R160).
+async fn comp_updates_call(
     st: &Arc<AppState>,
     session: &RiotSession,
     puuid: &str,
     end: u32,
-) -> Result<Option<Vec<CompUpdateRow>>, Gone> {
-    match session.comp_updates(puuid, Some(0), Some(end)).await {
-        Ok(resp) => {
+) -> Result<RankCall<Vec<CompUpdateRow>>, Gone> {
+    match rank_call(
+        session.comp_updates(puuid, Some(0), Some(end)).await,
+        "comp updates",
+        puuid,
+    )? {
+        RankCall::Ok(resp) => {
             let rows = comp_update_rows_from_response(&resp);
             let (p, r) = (puuid.to_string(), rows.clone());
             st.db(move |repo| {
@@ -249,10 +311,25 @@ async fn sync_comp_updates(
                 repo.index_history(&p, &comp_history_entries(&r))
             })
             .await;
-            Ok(Some(rows))
+            Ok(RankCall::Ok(rows))
         }
-        Err(e) => check(e, "comp updates", puuid).map(|()| None),
+        RankCall::Held(left) => Ok(RankCall::Held(left)),
+        RankCall::Failed => Ok(RankCall::Failed),
     }
+}
+
+/// `comp_updates(start..end)` -> DB. Returns the rows (`None` on failure or
+/// while the mmr family is held).
+async fn sync_comp_updates(
+    st: &Arc<AppState>,
+    session: &RiotSession,
+    puuid: &str,
+    end: u32,
+) -> Result<Option<Vec<CompUpdateRow>>, Gone> {
+    Ok(match comp_updates_call(st, session, puuid, end).await? {
+        RankCall::Ok(rows) => Some(rows),
+        RankCall::Held(_) | RankCall::Failed => None,
+    })
 }
 
 /// A match-details response -> the compact rows stored in SQLite (~1-2 KB;
@@ -375,14 +452,23 @@ pub async fn sync_player(
     puuid: &str,
 ) -> Result<SyncOutcome, Gone> {
     let mut ids = Vec::new();
-    // R155: set when the rank part fails, for the retry.
-    let mut rank_failed = false;
+    // R155/R160: how the rank part ended, for the retry.
+    let mut rank = RankPart::default();
 
-    let comp = sync_comp_updates(st, session, puuid, 5).await?;
-    match &comp {
-        Some(rows) => ids.extend(rows.iter().map(|r| r.match_id.clone())),
-        None => rank_failed = true,
-    }
+    let comp = match comp_updates_call(st, session, puuid, 5).await? {
+        RankCall::Ok(rows) => {
+            ids.extend(rows.iter().map(|r| r.match_id.clone()));
+            Some(rows)
+        }
+        RankCall::Held(left) => {
+            rank.held(left);
+            None
+        }
+        RankCall::Failed => {
+            rank.failed = true;
+            None
+        }
+    };
 
     let history_ok = match session.match_history(puuid, Some(0), Some(2), None).await {
         Ok(resp) => {
@@ -402,38 +488,52 @@ pub async fn sync_player(
 
     fetch_missing_details(st, session, ids).await?;
 
-    // MMR only when a new competitive match appeared since the snapshot (or
-    // the snapshot is from an older shape).
-    // Skipped entirely when comp_updates failed (it shares the mmr rate
-    // bucket; the stored snapshot, if any, keeps showing).
-    if let Some(rows) = comp {
-        let latest = latest_comp_match(&rows);
-        let (p, l) = (puuid.to_string(), latest.clone());
-        let needs = st
-            .db(move |repo| mmr_refresh_needed(repo, &p, &l))
-            .await
-            .unwrap_or(true);
-        if needs {
-            match session.mmr(puuid).await {
-                Ok(resp) => {
-                    let snap = MmrSnapshot {
-                        puuid: puuid.to_string(),
-                        json: trim_mmr(&resp).to_string(),
-                        last_comp_match_id: Some(latest),
-                        fetched_ms: now_ms(),
-                    };
-                    st.db(move |repo| repo.save_mmr_snapshot(&snap)).await;
-                }
-                Err(e) => {
-                    check(e, "mmr", puuid)?;
-                    rank_failed = true;
-                }
+    // MMR when a new competitive match appeared since the snapshot (or the
+    // snapshot is from an older shape). R160: no longer tied to comp_updates
+    // having answered. Without its rows there is no "latest match" to compare,
+    // so the mmr call is made for a player with no stored snapshot (or when
+    // that check cannot run) and skipped when one exists: it keeps showing.
+    let (needs, latest) = match &comp {
+        Some(rows) => {
+            let latest = latest_comp_match(rows);
+            let (p, l) = (puuid.to_string(), latest.clone());
+            let needs = st
+                .db(move |repo| mmr_refresh_needed(repo, &p, &l))
+                .await
+                .unwrap_or(true);
+            (needs, Some(latest))
+        }
+        None => {
+            let p = puuid.to_string();
+            let missing = st
+                .db(move |repo| repo.load_mmr_snapshot(&p).map(|s| s.is_none()))
+                .await
+                .unwrap_or(true);
+            (missing, None)
+        }
+    };
+    if needs {
+        match rank_call(session.mmr(puuid).await, "mmr", puuid)? {
+            RankCall::Ok(resp) => {
+                let snap = MmrSnapshot {
+                    puuid: puuid.to_string(),
+                    json: trim_mmr(&resp).to_string(),
+                    // `None`: the newest match was never seen, so the next
+                    // sync that does see it refreshes the snapshot.
+                    last_comp_match_id: latest,
+                    fetched_ms: now_ms(),
+                };
+                st.db(move |repo| repo.save_mmr_snapshot(&snap)).await;
             }
+            RankCall::Held(left) => rank.held(left),
+            RankCall::Failed => rank.failed = true,
         }
     }
+    let (rank_failed, rank_held) = rank.outcome();
     Ok(SyncOutcome {
         history_ok,
         rank_failed,
+        rank_held,
     })
 }
 
@@ -994,8 +1094,12 @@ async fn sync_step(
         if outcome.history_ok && db.is_some() {
             live.party_ready.insert(puuid.clone());
         }
-        // R155: a failed rank part is synced again later, bounded.
-        live.note_rank_sync(&puuid, outcome.rank_failed, retry);
+        // R155: a failed rank part is synced again later, bounded. R160: one
+        // that only met the mmr hold waits for it instead, uncounted.
+        match outcome.rank_held {
+            Some(left) => live.note_rank_held(&puuid, left, retry),
+            None => live.note_rank_sync(&puuid, outcome.rank_failed, retry),
+        }
         if let (Some(db), Some(slot)) =
             (db, live.slots.iter_mut().find(|s| s.roster.puuid == puuid))
         {
@@ -1372,6 +1476,7 @@ mod tests {
             RiotError::Status(404, String::new()),
             RiotError::Status(429, String::new()),
             RiotError::RateLimited,
+            RiotError::Held(Duration::from_secs(30)),
             RiotError::Http("operation timed out".into()),
             RiotError::AuthFailed("no token".into()),
             RiotError::Status(401, String::new()),
@@ -1410,6 +1515,7 @@ mod tests {
         // The other kinds: rate limit, decode, and the transport failure kind.
         for (err, needle) in [
             (RiotError::RateLimited, "rate-limited"),
+            (RiotError::Held(Duration::from_secs(30)), "on hold"),
             (RiotError::Decode("missing field `Matches`".into()), "parse"),
             (
                 RiotError::Http("timeout: error sending request".into()),

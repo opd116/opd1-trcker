@@ -5,6 +5,10 @@
 //! `_take_token` (burst + linear refill at `rps` tokens/sec, blocking the
 //! caller until a token is free) and `_set_hold`/`held_secs` (a hard floor
 //! on the next `take()`, extended — never shrunk — by repeated holds).
+//!
+//! R160: the hold is its own type, [`Hold`], so the session can keep one per
+//! request *family* (`mmr` and `other`, like Scout's `_HOLD_UNTIL[fam]`) while
+//! the token bucket stays shared. [`Throttle`] embeds one for its own users.
 
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -23,11 +27,13 @@ use tokio::time::sleep;
 const MIN_RPS: f64 = 0.01;
 
 /// The longest a single `hold_for` call will ever actually hold,
-/// regardless of what it's asked for. Guards against a malformed or
-/// absurd caller value (`f64::INFINITY`, `f64::NAN`, a huge number — e.g.
-/// from a bogus `Retry-After` header) turning into a `Duration`/`Instant`
-/// that panics, or an effectively-infinite hold.
-const MAX_HOLD_SECS: f64 = 30.0;
+/// regardless of what it's asked for (R160: Riot's `/mmr/` block is about
+/// 60 s, so the old 30 s cap just earned another 429). A sanity ceiling, not a
+/// policy: it guards against a malformed or absurd caller value
+/// (`f64::INFINITY`, `f64::NAN`, a huge number — e.g. from a bogus
+/// `Retry-After` header) turning into a `Duration`/`Instant` that panics, or
+/// an effectively-infinite hold.
+pub const MAX_HOLD_SECS: f64 = 120.0;
 
 /// Clamps a `hold_for` duration to `[0, MAX_HOLD_SECS]`. `NaN` (which
 /// `f64::clamp` passes through unchanged rather than clamping) maps to
@@ -49,9 +55,59 @@ struct Inner {
     /// (mirrors Scout's `bucket["at"] == 0` sentinel), so an idle throttle
     /// doesn't "earn" refill credit for the time before it was ever used.
     last_refill: Option<Instant>,
-    /// The instant before which every `take()` must wait, regardless of
-    /// tokens on hand. Set by `hold_for()` on a `429`.
-    hold_until: Option<Instant>,
+}
+
+/// A hard floor on "when may the next call go out", set by a `429
+/// Retry-After` and only ever extended, never shrunk. Independent of any token
+/// bucket: the session keeps one per request family (R160).
+#[derive(Debug, Default)]
+pub struct Hold {
+    until: Mutex<Option<Instant>>,
+}
+
+impl Hold {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Holds for at least `secs` from now (clamped to `[0, MAX_HOLD_SECS]`).
+    /// A shorter hold never shrinks an already-active longer one — Scout's
+    /// `_HOLD_UNTIL[fam] = max(_HOLD_UNTIL[fam], now + seconds)`. Returns what
+    /// is left of the hold afterwards (zero when `secs` came to nothing and
+    /// no hold was active).
+    pub fn hold_for(&self, secs: f64) -> Duration {
+        self.hold_until(Instant::now(), secs)
+    }
+
+    /// [`hold_for`](Self::hold_for) with the current time given, so a test
+    /// moves time by passing later instants.
+    fn hold_until(&self, now: Instant, secs: f64) -> Duration {
+        let until = now + Duration::from_secs_f64(clamp_hold_secs(secs));
+        let mut slot = self.until.lock().unwrap();
+        let held = match *slot {
+            Some(existing) if existing > until => existing,
+            _ => until,
+        };
+        *slot = Some(held);
+        held.saturating_duration_since(now)
+    }
+
+    /// What is left of the hold, or `None` when none is active.
+    pub fn remaining(&self) -> Option<Duration> {
+        self.remaining_at(Instant::now())
+    }
+
+    fn remaining_at(&self, now: Instant) -> Option<Duration> {
+        let until = (*self.until.lock().unwrap())?;
+        (until > now).then(|| until - now)
+    }
+
+    /// Waits (async) until no hold is active.
+    pub async fn wait(&self) {
+        while let Some(wait) = self.remaining() {
+            sleep(wait).await;
+        }
+    }
 }
 
 /// A token bucket: `burst` tokens are available immediately, refilling at
@@ -61,6 +117,7 @@ pub struct Throttle {
     burst: f64,
     rps: f64,
     inner: Mutex<Inner>,
+    hold: Hold,
 }
 
 impl Throttle {
@@ -77,8 +134,8 @@ impl Throttle {
             inner: Mutex::new(Inner {
                 tokens: burst,
                 last_refill: None,
-                hold_until: None,
             }),
+            hold: Hold::new(),
         }
     }
 
@@ -87,7 +144,7 @@ impl Throttle {
     /// then consumes one token.
     pub async fn take(&self) {
         loop {
-            if let Some(wait) = self.hold_wait() {
+            if let Some(wait) = self.hold.remaining() {
                 sleep(wait).await;
                 continue;
             }
@@ -98,26 +155,34 @@ impl Throttle {
         }
     }
 
-    /// Forces every `take()` to wait at least `secs` seconds from now,
-    /// regardless of tokens on hand. Used after a `429` response, with
-    /// `secs` taken from `Retry-After` (or a fallback backoff).
-    ///
-    /// A shorter hold never shrinks an already-active longer one — matches
-    /// Scout's `_HOLD_UNTIL[fam] = max(_HOLD_UNTIL[fam], now + seconds)`.
-    pub fn hold_for(&self, secs: f64) {
-        let until = Instant::now() + Duration::from_secs_f64(clamp_hold_secs(secs));
-        let mut inner = self.inner.lock().unwrap();
-        inner.hold_until = Some(match inner.hold_until {
-            Some(existing) if existing > until => existing,
-            _ => until,
-        });
+    /// Like [`take`](Self::take), but never waits out a hold: when one is
+    /// active (or starts while this waits for a token) it returns
+    /// `Err(what is left of it)` without consuming a token. The bucket's own
+    /// refill wait (a few seconds at most) still happens in here. R160: an
+    /// `/mmr/` call must not park the sync worker for a 60 s Riot block.
+    pub async fn take_unless_held(&self) -> Result<(), Duration> {
+        loop {
+            if let Some(left) = self.hold.remaining() {
+                return Err(left);
+            }
+            match self.try_take_token() {
+                Ok(()) => return Ok(()),
+                Err(wait) => sleep(wait).await,
+            }
+        }
     }
 
-    fn hold_wait(&self) -> Option<Duration> {
-        let inner = self.inner.lock().unwrap();
-        let until = inner.hold_until?;
-        let now = Instant::now();
-        (until > now).then(|| until - now)
+    /// Forces every `take()` to wait at least `secs` seconds from now,
+    /// regardless of tokens on hand. Used after a `429` response, with
+    /// `secs` taken from `Retry-After` (or a fallback backoff). Returns what
+    /// is left of the hold (see [`Hold::hold_for`]).
+    pub fn hold_for(&self, secs: f64) -> Duration {
+        self.hold.hold_for(secs)
+    }
+
+    /// What is left of the active hold, `None` when there is none.
+    pub fn held_for(&self) -> Option<Duration> {
+        self.hold.remaining()
     }
 
     /// Refills the bucket for elapsed time, then either takes a token
@@ -160,6 +225,37 @@ mod tests {
     fn clamp_hold_secs_maps_negative_infinity_and_negatives_to_zero() {
         assert_eq!(clamp_hold_secs(f64::NEG_INFINITY), 0.0);
         assert_eq!(clamp_hold_secs(-5.0), 0.0);
+    }
+
+    #[test]
+    fn the_ceiling_is_120s_so_a_60s_riot_block_is_held_in_full() {
+        assert_eq!(MAX_HOLD_SECS, 120.0);
+        assert_eq!(clamp_hold_secs(60.0), 60.0);
+        assert_eq!(clamp_hold_secs(121.0), 120.0);
+    }
+
+    #[test]
+    fn a_hold_is_extended_never_shrunk_and_reports_what_is_left() {
+        let t0 = Instant::now();
+        let h = Hold::new();
+        assert_eq!(h.remaining_at(t0), None);
+        assert_eq!(h.hold_until(t0, 60.0), Duration::from_secs(60));
+        // A shorter one is a no-op; a longer one extends.
+        assert_eq!(h.hold_until(t0, 5.0), Duration::from_secs(60));
+        assert_eq!(
+            h.remaining_at(t0 + Duration::from_secs(10)),
+            Some(Duration::from_secs(50))
+        );
+        assert_eq!(h.hold_until(t0, 90.0), Duration::from_secs(90));
+        assert_eq!(h.remaining_at(t0 + Duration::from_secs(90)), None);
+    }
+
+    #[test]
+    fn a_nonsense_hold_is_no_hold() {
+        let t0 = Instant::now();
+        let h = Hold::new();
+        assert_eq!(h.hold_until(t0, f64::NAN), Duration::ZERO);
+        assert_eq!(h.remaining_at(t0), None);
     }
 
     #[test]

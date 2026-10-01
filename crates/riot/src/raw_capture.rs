@@ -265,7 +265,7 @@ fn is_uuid_bytes(b: &[u8]) -> bool {
 /// Every full uuid in `s` (a puuid, a match id) shortened to its first 8
 /// characters — the way the log writes ids (`logbuf::short`). A uuid glued to
 /// more hex digits is left alone: it is not one.
-fn shorten_uuids(s: &str) -> String {
+pub(crate) fn shorten_uuids(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;

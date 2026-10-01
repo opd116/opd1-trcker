@@ -635,6 +635,31 @@ impl LiveModel {
         }
     }
 
+    /// R160: a per-player sync of `puuid` ended (`retry`: it was a retry) and
+    /// its rank part did not run only because the mmr request family was on
+    /// hold, `left` of it still to go: nothing was sent, so no R155 retry is
+    /// used up. The player is synced again once the hold is over (+ a moment).
+    /// Same guards as [`Self::note_rank_sync`]: nothing for a player who is not
+    /// on the live roster, nor while VALORANT is closed.
+    pub fn note_rank_held(&mut self, puuid: &str, left: Duration, retry: bool) {
+        let shown = self.stage != Stage::Closed && self.shows(puuid);
+        if !shown {
+            self.rank_retries.forget(puuid);
+            return;
+        }
+        let now = self.now();
+        if retry {
+            self.rank_retries.retry_held(puuid, left, now);
+        } else {
+            self.rank_retries.first_pass_held(puuid, left, now);
+        }
+        log::info!(
+            "rank sync for {} waits for the mmr hold ({}s more); no retry used",
+            short(puuid),
+            left.as_secs_f64().ceil() as u64
+        );
+    }
+
     /// R155: the first player on the live roster (display order) whose rank
     /// retry is due — `None` while VALORANT is closed, and for a player who
     /// is no longer shown. Like the first-pass syncs it is work for the
@@ -2035,6 +2060,52 @@ mod tests {
         m.advance_clock(100_000 * S);
         assert!(m.try_start_worker().is_none());
         assert_eq!(m.due_rank_retry(), None);
+    }
+
+    #[test]
+    fn a_rank_sync_held_by_the_mmr_hold_waits_for_it_and_uses_no_retry() {
+        // R160: nothing was sent, so nothing is spent: the sync is due 1.5 s
+        // after the hold ends, and both R155 retries are still there.
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_held("me", 40 * S, false);
+        assert!(!m.has_pending_work(), "waiting is not work");
+        m.advance_clock(41 * S);
+        assert_eq!(m.due_rank_retry(), None, "1.5 s of slack after the hold");
+        m.advance_clock(S);
+        let id = m.try_start_worker().expect("due");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+        assert_eq!(m.rank_retries.retries_done("me"), Some(1));
+
+        // It met the hold again (somebody's 429 extended it): given back.
+        m.note_rank_held("me", 10 * S, true);
+        assert_eq!(m.rank_retries.retries_done("me"), Some(0));
+        assert_eq!(m.next_job(id), None, "the worker does not wait");
+        m.advance_clock(12 * S);
+        let id = m.try_start_worker().expect("due again");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+
+        // A real failure now moves the usual schedule on: 60 s, then the last.
+        m.note_rank_sync("me", true, true);
+        assert_eq!(m.rank_retries.retries_done("me"), Some(1));
+        assert_eq!(m.next_job(id), None);
+        m.advance_clock(60 * S);
+        let id = m.try_start_worker().expect("the second retry");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+        m.note_rank_sync("me", true, true);
+        m.advance_clock(100_000 * S);
+        assert!(m.try_start_worker().is_none(), "no third retry");
+    }
+
+    #[test]
+    fn a_held_rank_sync_for_a_player_off_the_roster_or_while_closed_schedules_nothing() {
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_held("ghost", 5 * S, false);
+        m.stage = Stage::Closed;
+        m.note_rank_held("me", 5 * S, false);
+        m.stage = Stage::Menus;
+        m.advance_clock(100 * S);
+        assert_eq!(m.due_rank_retry(), None);
+        assert!(m.rank_retries.is_empty());
     }
 
     #[test]

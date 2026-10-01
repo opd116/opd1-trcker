@@ -24,18 +24,27 @@ use opd1_core::party::detect_parties;
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
 use opd1_riot::assets::AssetCache;
+use opd1_riot::endpoints::ContentActs;
 use opd1_riot::to_core::{current_rank_from_mmr, seasonal_map_from_mmr};
 use opd1_riot::RiotSession;
 
 use crate::logbuf::short;
 use crate::rank_retry::{RankRetries, RANK_RETRY_DELAYS};
-use crate::roster::{current_act, RawLoadout, RosterPlayer};
+use crate::roster::{current_act, resolve_acts, RawLoadout, RosterPlayer};
 use crate::store::{PlayerDb, StoredPlayer, SELF_LOADOUT_KEY};
 
 /// A failed asset-table load isn't retried more often than this (offline
 /// first run: `meta()` and every `img` request would otherwise each hit
 /// valorant-api again).
 const TABLES_RETRY_AFTER: Duration = Duration::from_secs(30);
+
+/// Riot's content-service is asked again at most this often: after a failure
+/// (every connect also asks, regardless).
+const CONTENT_RETRY_AFTER: Duration = Duration::from_secs(5 * 60);
+/// … and after the act it named has ended (Riot late at a rollover).
+const CONTENT_RECHECK_AFTER: Duration = Duration::from_secs(60);
+/// An act Riot still calls active past its end is believed for this long.
+const CONTENT_LATE_TRUST_MS: i64 = 10 * 60_000;
 
 /// Player Details re-syncs the same player at most this often.
 const DETAILS_RESYNC_AFTER: Duration = Duration::from_secs(120);
@@ -910,6 +919,67 @@ impl EventSink for AppHandle {
     }
 }
 
+/// The act table every "current act" / "previous act" reads (R162): valorant-
+/// api's list, with Riot's own answer folded in while it is fresh. The one
+/// place that decides; nothing outside this struct applies the date rule to
+/// the raw table.
+struct ActsState {
+    /// valorant-api's acts, ascending by start.
+    base: Arc<Vec<Act>>,
+    /// Riot's content-service answer, with the wall-clock time after which
+    /// it is stale (the act's end; a late Riot gets a short trust window).
+    riot: Option<(ContentActs, i64)>,
+    /// `base` with `riot` folded in, valid until `valid_until_ms`.
+    resolved: Arc<Vec<Act>>,
+    valid_until_ms: i64,
+    /// Whether `resolved` has Riot's act folded in (else it is `base`).
+    from_riot: bool,
+}
+
+impl ActsState {
+    fn new() -> Self {
+        let empty = Arc::new(Vec::new());
+        Self {
+            base: empty.clone(),
+            riot: None,
+            resolved: empty,
+            valid_until_ms: i64::MAX,
+            from_riot: false,
+        }
+    }
+
+    fn rebuild(&mut self, now_ms: i64) {
+        let folded = self
+            .riot
+            .as_ref()
+            .filter(|(_, usable_until)| now_ms < *usable_until)
+            .and_then(|(riot, usable_until)| {
+                resolve_acts(&self.base, riot, now_ms).map(|r| (r, *usable_until))
+            });
+        match folded {
+            Some((r, usable_until)) => {
+                self.valid_until_ms = r.valid_until_ms.min(usable_until);
+                self.resolved = Arc::new(r.acts);
+                self.from_riot = true;
+            }
+            None => {
+                self.valid_until_ms = i64::MAX;
+                self.resolved = self.base.clone();
+                self.from_riot = false;
+            }
+        }
+    }
+}
+
+/// Bookkeeping for the content-service fetches.
+#[derive(Default)]
+struct ContentFetch {
+    in_flight: bool,
+    last_attempt: Option<Instant>,
+    /// The act and source last logged, so each is logged once.
+    logged: Option<(String, &'static str)>,
+}
+
 #[derive(Default)]
 struct TablesStatus {
     loaded: bool,
@@ -922,7 +992,8 @@ pub struct AppState {
     pub assets: Arc<AssetCache>,
     session: RwLock<Option<Arc<RiotSession>>>,
     pub live: Mutex<LiveModel>,
-    acts: RwLock<Arc<Vec<Act>>>,
+    acts: RwLock<ActsState>,
+    content: Mutex<ContentFetch>,
     tables: tokio::sync::Mutex<TablesStatus>,
     details_synced: Mutex<HashMap<String, Instant>>,
     /// Players whose skin names are being fetched right now, with how many
@@ -994,7 +1065,8 @@ impl AppState {
             assets: Arc::new(assets),
             session: RwLock::new(None),
             live: Mutex::new(live),
-            acts: RwLock::new(Arc::new(Vec::new())),
+            acts: RwLock::new(ActsState::new()),
+            content: Mutex::new(ContentFetch::default()),
             tables: tokio::sync::Mutex::new(TablesStatus::default()),
             details_synced: Mutex::new(HashMap::new()),
             skins_inflight: Mutex::new(HashMap::new()),
@@ -1017,22 +1089,167 @@ impl AppState {
         *self.session.write().unwrap_or_else(PoisonError::into_inner) = session;
     }
 
+    /// The acts to read "current" and "previous" from: valorant-api's table
+    /// with Riot's own current act folded in (R162). The last started act is
+    /// the current one, the one before it the previous one — and with
+    /// nothing from Riot that is valorant-api's date rule, as before.
     pub fn acts(&self) -> Arc<Vec<Act>> {
-        self.acts
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+        self.acts_at(now_ms())
+    }
+
+    pub fn acts_at(&self, now_ms: i64) -> Arc<Vec<Act>> {
+        {
+            let g = self.acts.read().unwrap_or_else(PoisonError::into_inner);
+            if now_ms < g.valid_until_ms {
+                return g.resolved.clone();
+            }
+        }
+        let mut g = self.acts.write().unwrap_or_else(PoisonError::into_inner);
+        g.rebuild(now_ms);
+        g.resolved.clone()
     }
 
     #[cfg(test)]
     pub fn set_acts_for_test(&self, acts: Vec<Act>) {
-        *self.acts.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(acts);
+        self.set_base_acts(acts);
     }
 
-    /// The current act (by wall clock), if the tables are loaded.
+    /// valorant-api's act table (after the tables load).
+    fn set_base_acts(&self, acts: Vec<Act>) {
+        let mut g = self.acts.write().unwrap_or_else(PoisonError::into_inner);
+        g.base = Arc::new(acts);
+        g.rebuild(now_ms());
+    }
+
+    /// Riot's answer, fetched at `fetched_ms`.
+    fn set_riot_acts(&self, riot: Option<ContentActs>, fetched_ms: i64) {
+        let mut g = self.acts.write().unwrap_or_else(PoisonError::into_inner);
+        g.riot = riot.map(|r| {
+            let usable_until = match r.current.end_ms {
+                Some(end) if end > fetched_ms => end,
+                // No end known, or already past while Riot still calls the
+                // act active: trust it for a short while, then ask again.
+                _ => fetched_ms + CONTENT_LATE_TRUST_MS,
+            };
+            (r, usable_until)
+        });
+        g.rebuild(now_ms());
+    }
+
+    #[cfg(test)]
+    pub fn set_riot_acts_for_test(&self, riot: Option<ContentActs>, fetched_ms: i64) {
+        self.set_riot_acts(riot, fetched_ms);
+    }
+
+    /// The current act, if the tables are loaded.
     pub fn current_act(&self) -> Option<Act> {
-        let acts = self.acts();
-        current_act(&acts, now_ms()).cloned()
+        let now = now_ms();
+        let acts = self.acts_at(now);
+        current_act(&acts, now).cloned()
+    }
+
+    /// Whether Riot's content-service should be asked now: never while
+    /// another ask runs; after a failure (or before any answer) every
+    /// [`CONTENT_RETRY_AFTER`]; once the act it named has ended, every
+    /// [`CONTENT_RECHECK_AFTER`] until it names the next one.
+    pub(crate) fn content_due(&self, now_ms: i64) -> bool {
+        let c = lock(&self.content);
+        if c.in_flight {
+            return false;
+        }
+        let since = c.last_attempt.map(|t| t.elapsed());
+        let g = self.acts.read().unwrap_or_else(PoisonError::into_inner);
+        match &g.riot {
+            Some((_, usable_until)) if now_ms < *usable_until => false,
+            Some(_) => since.is_none_or(|s| s >= CONTENT_RECHECK_AFTER),
+            None => since.is_none_or(|s| s >= CONTENT_RETRY_AFTER),
+        }
+    }
+
+    /// Asks Riot for the current act in the background (R162): `force` on a
+    /// connect, otherwise only when [`content_due`](Self::content_due).
+    pub fn spawn_content_refresh(self: &Arc<Self>, force: bool) {
+        if self.session().is_none() {
+            return;
+        }
+        if !force && !self.content_due(now_ms()) {
+            return;
+        }
+        let st = self.clone();
+        tauri::async_runtime::spawn(async move { st.refresh_content().await });
+    }
+
+    /// One content-service ask and what follows: on an answer, Riot's act
+    /// becomes the current one; on any failure valorant-api's date rule
+    /// stays (one log line says why). Republishes when the current act
+    /// changed.
+    pub async fn refresh_content(&self) {
+        let Some(session) = self.session() else {
+            return;
+        };
+        {
+            let mut c = lock(&self.content);
+            if c.in_flight {
+                return;
+            }
+            c.in_flight = true;
+            c.last_attempt = Some(Instant::now());
+        }
+        let result = session.content().await;
+        let now = now_ms();
+        let before = self.current_act().map(|a| a.id);
+        let why = match result {
+            Ok(seasons) => match seasons.active_acts() {
+                Some(acts) => {
+                    self.set_riot_acts(Some(acts), now);
+                    None
+                }
+                None => {
+                    self.set_riot_acts(None, now);
+                    Some("no active act in the answer".to_string())
+                }
+            },
+            Err(e) => {
+                self.set_riot_acts(None, now);
+                Some(e.to_string())
+            }
+        };
+        let current = self.current_act();
+        // Riot's act may have no usable times; then valorant-api's rule
+        // stands in even after an answer, and the log says so.
+        let source = if self
+            .acts
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .from_riot
+        {
+            "riot content-service"
+        } else {
+            "valorant-api"
+        };
+        let label = current.as_ref().map_or_else(
+            || "none".to_string(),
+            |a| format!("{} ({})", opd1_core::stats::act_full_name(a), a.id),
+        );
+        {
+            let mut c = lock(&self.content);
+            c.in_flight = false;
+            let key = (
+                current.as_ref().map(|a| a.id.clone()).unwrap_or_default(),
+                source,
+            );
+            match (&why, c.logged.as_ref() != Some(&key)) {
+                (Some(why), _) => {
+                    log::warn!("content-service: {why}; current act {label} from {source}");
+                }
+                (None, true) => log::info!("current act {label} from {source}"),
+                (None, false) => {}
+            }
+            c.logged = Some(key);
+        }
+        if current.map(|a| a.id) != before {
+            self.publish();
+        }
     }
 
     /// Riot map path -> valorant-api uuid (`None` if unknown or the tables
@@ -1098,7 +1315,7 @@ impl AppState {
                     },
                     acts.len()
                 );
-                *self.acts.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(acts);
+                self.set_base_acts(acts);
                 Ok(())
             }
             Err(e) => {

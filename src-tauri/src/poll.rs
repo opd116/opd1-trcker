@@ -294,6 +294,9 @@ impl Poller {
                 st.publish();
             }
         });
+        // R162: Riot's own current act, once per connect (valorant-api's
+        // dates stand in until it answers, or if it never does).
+        self.st.spawn_content_refresh(true);
         // The user's own card, from the DB, while the first presence
         // arrives (closed-stage card if the game isn't up).
         self.enter_closed().await;
@@ -342,6 +345,9 @@ impl Poller {
     // -- connected -------------------------------------------------------
 
     async fn connected_tick(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
+        // R162: when the act Riot named has ended (or it never answered),
+        // ask again; a no-op otherwise.
+        self.st.spawn_content_refresh(false);
         let now = Instant::now();
         if now >= self.next_presence {
             self.presence_tick(session).await?;

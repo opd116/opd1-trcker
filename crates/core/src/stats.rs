@@ -229,6 +229,7 @@ pub fn act_label(act: &Act) -> String {
         None => act.episode_name.clone(),
     };
     match act_number(&act.name) {
+        Some(n) if episode_part.is_empty() => format!("A{n}"),
         Some(n) => format!("{episode_part} A{n}"),
         None => episode_part,
     }
@@ -237,7 +238,13 @@ pub fn act_label(act: &Act) -> String {
 /// The full act name used for hover text (e.g. `"V26 ACT V"` /
 /// `"EPISODE 8 ACT III"`) — Task 5's `actName` field.
 pub fn act_full_name(act: &Act) -> String {
-    format!("{} {}", act.episode_name, act.name)
+    // An act valorant-api does not know yet may lack either part (R162).
+    [act.episode_name.trim(), act.name.trim()]
+        .iter()
+        .filter(|p| !p.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 // ---------------------------------------------------------------------

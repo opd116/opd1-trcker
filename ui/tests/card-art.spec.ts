@@ -60,6 +60,36 @@ test("a live event with the same cardIds keeps every card's art: no new probe, n
   for (const el of await arts.all()) await expect(el).toHaveCSS("background-image", /^url\(/);
 });
 
+test("a changed cardId loads the new art once; an empty cardId clears it with no probe", async ({ page }) => {
+  await instrument(page);
+  await openScene(page, "ingame");
+  const arts = page.locator(".live .card .art-img");
+  const urls = () => arts.evaluateAll((els) => els.map((e) => (e as HTMLElement).style.backgroundImage));
+  const before = await urls();
+  expect(before).toHaveLength(10);
+  // Player 0 takes the card art player 1 already shows (cached, so the new probe loads at once).
+  const edit = (body: string) =>
+    fromApp(
+      page,
+      `import("/src/lib/stores.ts").then(({ live, applyLive }) => { let s; live.subscribe((v) => (s = v))(); s = structuredClone(s); ${body}; applyLive(s); })`,
+    );
+  const ids = (await fromApp(
+    page,
+    `import("/src/lib/stores.ts").then(({ live }) => { let s; live.subscribe((v) => (s = v))(); return s.players.slice(0, 2).map((p) => p.cardId); })`,
+  )) as string[];
+  expect(ids[0]).not.toBe(ids[1]);
+  await watchArt(page);
+  await edit(`s.players[0].cardId = ${JSON.stringify(ids[1])}`);
+  await expect.poll(async () => (await urls()).filter((u) => u.includes(ids[1]!)).length).toBe(2);
+  expect((await seen(page)).probes).toBe(1);
+  expect((await urls()).filter((u) => u.includes(ids[0]!)).length).toBe(before.filter((u) => u.includes(ids[0]!)).length - 1);
+
+  await watchArt(page);
+  await edit(`s.players[0].cardId = ""`);
+  await expect.poll(async () => (await urls()).filter((u) => u === "").length).toBe(1);
+  expect((await seen(page)).probes).toBe(0);
+});
+
 test("a details event with the same cardId keeps the hero's art", async ({ page }) => {
   await instrument(page);
   await openScene(page, "details");

@@ -1120,6 +1120,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R159). Each
 - **Cost:** If `mmr` still fails, R154 still shows the rank and the next log says more. gzip adds `async-compression` and friends to `Cargo.lock` (all on the existing tokio/reqwest stack).
 - **Status:** active
 
+### R161 — The live tier from the roster answers fills the rank at once
+
+- **What:** Ruling 2026-10-01 (extends R154's chain). Riot's roster answers already carry each player's current tier and the app dropped it: `pregame/v1/matches/{id}` players carry `CompetitiveTier` for both teams, `parties` members carry `CompetitiveTier`. `core-game/v1/matches/{id}` players carry none (their `SeasonalBadgeInfo.Rank` is the badge the player picked, an earlier act's: 21 where pregame and party said 22 for the same player, so it is not read). The rank of a card with no MMR snapshot is now, in order: the newest current-act `comp_updates` row (tier and exact RR, R154), then the live tier (tier, RR `—`), then the tier of the newest stored current-act match (RR `—`, R154), else missing. A tier of 0 (Unranked), 1 or 2, a missing field or a non-number is no tier. The live tier is a statement about now, so it needs no act tables. It shows as soon as the roster is on screen, before any rank call returns, and a later MMR snapshot replaces it. The tiers of the latest Lobby or Agent Select answer (both teams for Agent Select, enemies included) are kept in `LiveModel::match_tiers` and given to the In Game roster, whose core-game answer has none (`roster::fill_tiers`); the map is replaced by each such answer and cleared when VALORANT closes. `BuildCardInput.live_tier` and `RosterPlayer.live_tier` carry it; `PregamePlayer.competitive_tier` and `PartyMember.competitive_tier` read it leniently (absent, `null` or a stray type is no tier, never a decode error). The wire contract is unchanged: `rank.rr` is already nullable.
+- **Why:** The user reported delays: every card's rank waited for `comp_updates` and `mmr`, the slow, 429-prone family, while Riot had already sent the tier with the roster. Zero extra requests; a hidden player's rank shows like anyone's, since rank is not part of the hidden name; no name is requested.
+- **Cost:** A tier from the roster can be one match stale right after a rank change (until the sync lands an exact row or a snapshot, which take priority). Core-game rosters of a match whose Agent Select the app did not see (started mid-match) still wait for the rank calls.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

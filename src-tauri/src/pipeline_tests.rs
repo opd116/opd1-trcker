@@ -1205,3 +1205,8 @@ mod rank;
 /// own file; same harness).
 #[cfg(test)]
 mod diagnostics;
+
+/// R165's sync-order tests: rank first for the whole roster, the retries of
+/// names and partial syncs (their own file; same harness).
+#[cfg(test)]
+mod sync_order;

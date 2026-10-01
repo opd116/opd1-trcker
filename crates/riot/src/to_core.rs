@@ -344,7 +344,7 @@ const ACT_TYPE: &str = "EAresSeasonType::Act";
 /// milliseconds. `None` on anything that doesn't parse as RFC3339 — a
 /// caller should skip that entry rather than fail the whole act list over
 /// one bad timestamp.
-fn parse_iso8601_utc_ms(s: &str) -> Option<i64> {
+pub(crate) fn parse_iso8601_utc_ms(s: &str) -> Option<i64> {
     chrono::DateTime::parse_from_rfc3339(s)
         .ok()
         .map(|dt| dt.timestamp_millis())

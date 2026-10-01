@@ -277,3 +277,47 @@ async fn names_puts_the_puuid_list_and_hits_pd() {
     assert_eq!(result[0].game_name, "Shanky");
     assert_eq!(result[1].game_name, "Rival");
 }
+
+#[tokio::test]
+async fn content_hits_shared_with_the_remote_headers_and_never_fails_on_shape() {
+    use wiremock::matchers::header_exists;
+    let (_tmp, server, session) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/content-service/v3/content"))
+        .and(header_exists("Authorization"))
+        .and(header_exists("X-Riot-Entitlements-JWT"))
+        .and(header_exists("X-Riot-ClientPlatform"))
+        .and(header_exists("X-Riot-ClientVersion"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "Seasons": [{"ID": "a", "Type": "act", "IsActive": true,
+                         "StartTime": "2026-08-19T00:00:00.000Z",
+                         "EndTime": "2026-10-14T00:00:00.000Z"}],
+            "SomethingNew": {"x": 1}
+        })))
+        .mount(&server)
+        .await;
+
+    let acts = session.content().await.unwrap().active_acts().unwrap();
+    assert_eq!(acts.current.id, "a");
+
+    // A body that is not even an object is an answer with no active act,
+    // not an error.
+    server.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/content-service/v3/content"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([1, 2])))
+        .mount(&server)
+        .await;
+    assert!(session.content().await.unwrap().active_acts().is_none());
+}
+
+#[tokio::test]
+async fn content_error_status_is_an_error() {
+    let (_tmp, server, session) = setup().await;
+    Mock::given(method("GET"))
+        .and(path("/content-service/v3/content"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
+    assert!(session.content().await.is_err());
+}

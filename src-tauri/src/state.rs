@@ -1540,18 +1540,6 @@ impl AppState {
         self.worker_kick.store(true, Ordering::Release);
     }
 
-    /// R165: wakes the poll loop's worker kick ([`Self::take_worker_kick`])
-    /// once `delay` has passed — for work that is not due yet when the worker
-    /// runs out of jobs (a failed names lookup's retry): the worker never
-    /// waits, the poll loop's tick starts one then.
-    pub fn kick_worker_after(self: &Arc<Self>, delay: Duration) {
-        let st = self.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(delay).await;
-            st.worker_kick.store(true, Ordering::Release);
-        });
-    }
-
     /// `true` once after each [`Self::queue_name_fill`]: the poll loop calls
     /// it every tick and, when it is set, makes sure a worker runs.
     pub fn take_worker_kick(&self) -> bool {

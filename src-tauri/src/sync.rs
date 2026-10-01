@@ -1457,9 +1457,10 @@ async fn names_step(
                 }
             );
             if let Some(wait) = retry {
-                // The worker never waits: the poll loop's tick starts one
-                // when the delay is over.
-                st.kick_worker_after(wait);
+                // The worker never waits: no names job is handed out for the
+                // delay, and the poll loop's tick starts a worker when it is
+                // over (`LiveModel::names_wakeup_due`, R160).
+                lock(&st.live).defer_names(wait);
             }
             st.publish();
             return Ok(());

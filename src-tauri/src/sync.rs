@@ -1579,14 +1579,10 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
             return Ok(());
         }
         held.asks.retain(|a| live.fill_allowed(&a.puuid));
-        // `false`: between matches a player who hid their name *during* the
-        // match is asked about on purpose (R153) — the `VisiblePuuid` claim
-        // for this door is "not asked during a live stage", which the stage
-        // checks above guarantee.
-        held.asks
-            .iter()
-            .filter_map(|a| VisiblePuuid::new(a.puuid.clone(), false))
-            .collect()
+        // Between matches a player who hid their name *during* the match is
+        // asked about on purpose (R153); `fill_visible` builds them only
+        // while no match runs (R167).
+        live.fill_visible(&held.asks)
     };
     if visible.is_empty() {
         return Ok(());

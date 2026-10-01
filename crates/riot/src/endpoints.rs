@@ -62,12 +62,13 @@ static TIER_TYPE_LOGGED: AtomicBool = AtomicBool::new(false);
 /// "never request a hidden player's name from any endpoint" a type-level
 /// guarantee instead of a convention a caller could forget to follow.
 ///
-/// The live-stage lookup (Agent Select, In Game) builds one from the roster's
-/// real `Incognito` flag, so a hidden player is never asked about during a
-/// match. The between-matches names fill (R150, R153) passes `false` on
-/// purpose for players who hid their name *during* a finished match — the
-/// game's own Match History shows those names once it is over — and is itself
-/// barred from running while a match is on (`LiveModel::between_matches`).
+/// The live-stage lookup (Agent Select, In Game) builds one with
+/// [`VisiblePuuid::new`] from the roster's real `Incognito` flag, so a hidden
+/// player is never asked about during a match. The between-matches names fill
+/// (R150, R153) uses [`VisiblePuuid::between_matches`] for players who hid
+/// their name *during* a finished match — the game's own Match History shows
+/// those names once it is over — and is itself barred from running while a
+/// match is on (`LiveModel::fill_visible`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisiblePuuid(String);
 
@@ -81,6 +82,18 @@ impl VisiblePuuid {
         } else {
             Some(Self(puuid))
         }
+    }
+
+    /// R167: a PUUID the caller may ask about because **no match is running**
+    /// — the names fill's door (R150, R153). It takes no incognito flag: a
+    /// player who hid their name during a match that is over is asked on
+    /// purpose, and that claim holds only between matches. The type cannot
+    /// check the stage, so its one caller (`LiveModel::fill_visible`, in the
+    /// shell) refuses to build one while Agent Select, In Game or a
+    /// free-for-all match is on; a live-stage lookup must use
+    /// [`VisiblePuuid::new`]. `None` for an empty id.
+    pub fn between_matches(puuid: String) -> Option<Self> {
+        (!puuid.is_empty()).then_some(Self(puuid))
     }
 
     pub fn as_str(&self) -> &str {

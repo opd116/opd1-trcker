@@ -27,6 +27,7 @@ use opd1_riot::assets::{AssetCache, Meta};
 use opd1_riot::endpoints::ContentActs;
 use opd1_riot::to_core::{current_rank_from_mmr, seasonal_map_from_mmr};
 use opd1_riot::RiotSession;
+use opd1_riot::VisiblePuuid;
 
 use crate::logbuf::short;
 use crate::rank_retry::{RankRetries, RANK_RETRY_DELAYS};
@@ -1133,6 +1134,24 @@ impl LiveModel {
     /// player (CLAUDE.md "Never request a hidden player's name").
     pub fn fill_allowed(&self, puuid: &str) -> bool {
         !puuid.is_empty() && puuid != self.self_id()
+    }
+
+    /// R167: the names fill's `VisiblePuuid`s for `asks` — the only place
+    /// that builds them with [`VisiblePuuid::between_matches`]. **Empty while
+    /// a match is running** ([`Self::between_matches`]: Agent Select, In
+    /// Game, a free-for-all match), so the claim "no live stage" is checked at
+    /// the door itself and not only where the asks leave the queue
+    /// ([`Self::take_fill`]). Asks [`Self::fill_allowed`] refuses (the user, an
+    /// empty id) are left out. Whether a player was hidden does not matter
+    /// between matches (R153).
+    pub fn fill_visible(&self, asks: &[NameAsk]) -> Vec<VisiblePuuid> {
+        if !self.between_matches() {
+            return Vec::new();
+        }
+        asks.iter()
+            .filter(|a| self.fill_allowed(&a.puuid))
+            .filter_map(|a| VisiblePuuid::between_matches(a.puuid.clone()))
+            .collect()
     }
 
     /// R150: takes up to `n` asks off the queue, oldest first — **none while a
@@ -3438,6 +3457,49 @@ mod tests {
             m.in_match = false;
             let taken: Vec<String> = m.take_fill(10).into_iter().map(|a| a.puuid).collect();
             assert_eq!(taken, ["live-hidden", "was-hidden", "stranger"]);
+        }
+    }
+
+    #[test]
+    fn fill_visible_builds_nothing_while_a_match_runs() {
+        // R167: the door checks the stage itself. A live-hidden player, a
+        // player hidden earlier and a stranger are all built between matches
+        // (R153); the user and an empty id never; nothing at all during a
+        // match, whoever is asked.
+        let asks = [
+            ask("live-hidden", Some(1)),
+            ask("was-hidden", Some(1)),
+            ask("stranger", None),
+            ask("me", None),
+            ask("", None),
+        ];
+        let ids = |v: Vec<VisiblePuuid>| -> Vec<String> {
+            v.iter().map(|p| p.as_str().to_string()).collect()
+        };
+        for (stage, in_match) in [
+            (Stage::Pregame, true),
+            (Stage::Ingame, true),
+            (Stage::Menus, true),
+        ] {
+            let mut m = model(vec![slot("me", false), slot("live-hidden", true)]);
+            m.stage = stage;
+            m.in_match = in_match;
+            m.seen_hidden.insert("was-hidden".into(), None);
+            assert!(
+                m.fill_visible(&asks).is_empty(),
+                "{stage:?}/{in_match}: nothing is built"
+            );
+        }
+        for stage in [Stage::Menus, Stage::Closed] {
+            let mut m = model(vec![slot("me", false), slot("live-hidden", true)]);
+            m.stage = stage;
+            m.in_match = false;
+            m.seen_hidden.insert("was-hidden".into(), None);
+            assert_eq!(
+                ids(m.fill_visible(&asks)),
+                ["live-hidden", "was-hidden", "stranger"],
+                "{stage:?}"
+            );
         }
     }
 

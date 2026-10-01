@@ -1291,20 +1291,27 @@ impl AppState {
     /// Offline, `AssetCache` falls back to the disk copy.
     pub async fn ensure_tables(&self, recheck: bool) -> Result<(), String> {
         let mut status = self.tables.lock().await;
-        if status.loaded && !recheck {
+        // A copy of the previous version's tables stands in (the new
+        // download failed): ask again, at most every `TABLES_RETRY_AFTER`.
+        let stale = self.assets.tables_stale();
+        if status.loaded && !recheck && !stale {
             return Ok(());
         }
-        if !status.loaded {
+        if !status.loaded || (stale && !recheck) {
             if let Some(t) = status.last_failure {
                 if t.elapsed() < TABLES_RETRY_AFTER {
-                    return Err("asset tables unavailable".into());
+                    return if status.loaded {
+                        Ok(())
+                    } else {
+                        Err("asset tables unavailable".into())
+                    };
                 }
             }
         }
         match self.assets.refresh_tables().await {
             Ok(refetched) => {
                 status.loaded = true;
-                status.last_failure = None;
+                status.last_failure = self.assets.tables_stale().then(Instant::now);
                 let acts = self.assets.acts().unwrap_or_default();
                 log::info!(
                     "asset tables {} ({} acts)",

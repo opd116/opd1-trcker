@@ -236,3 +236,52 @@ async fn content_is_asked_before_any_answer_but_backs_off_after_one() {
         1
     );
 }
+
+/// Finding 10 of the backend review: after a patch (a new version, which is
+/// also when a new act starts) one table failing must not leave the app
+/// without act tables when a disk copy exists.
+#[tokio::test]
+async fn a_failed_table_download_after_a_patch_keeps_the_old_acts_and_asks_again() {
+    let h = harness().await;
+    mount_asset_tables(&h.assets_server).await;
+    h.st.ensure_tables(false).await.expect("tables load");
+    let before = h.st.acts().len();
+    assert!(before > 0);
+    assert!(!h.st.assets.tables_stale());
+
+    // Patched: a new version, the seasons table down (priority 1 beats the
+    // v1 mocks above).
+    Mock::given(method("GET"))
+        .and(path("/v1/version"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"status": 200, "data": {"version": "test-2"}})),
+        )
+        .with_priority(1)
+        .mount(&h.assets_server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/v1/seasons"))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&h.assets_server)
+        .await;
+    // A fresh process after the patch: nothing in memory, the v1 copy on disk.
+    let fresh = AssetCache::with_base(h._dir.path().join("assets"), h.assets_server.uri());
+    assert!(!fresh.refresh_tables().await.unwrap());
+    assert!(fresh.tables_stale());
+    assert_eq!(fresh.acts().unwrap().len(), before, "the old acts load");
+
+    // First launch after the patch, through the app's own gate: tables load
+    // (the old ones), and the retry is owed.
+    let st = AppState::new(
+        Box::new(Sink(Arc::new(Recorder::default()))),
+        Repo::new(open_db(Path::new(":memory:")).unwrap()),
+        AssetCache::with_base(h._dir.path().join("assets"), h.assets_server.uri()),
+        h._dir.path().join("debug"),
+        Some(ME.into()),
+    );
+    st.ensure_tables(false).await.expect("the old tables load");
+    assert_eq!(st.acts().len(), before);
+    assert!(st.assets.tables_stale());
+}

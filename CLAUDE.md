@@ -161,7 +161,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 ## Riot local API essentials
 
 - **Lockfile:** `%LOCALAPPDATA%\Riot Games\Riot Client\Config\lockfile`, format `name:pid:port:password:protocol`. Local calls use `https://127.0.0.1:{port}` with Basic auth `riot:{password}` and a self-signed cert.
-- **Tokens:** `/entitlements/v1/token` gives the access token + entitlements JWT.
+- **Tokens:** `/entitlements/v1/token` gives the access token + entitlements JWT. Re-fetched before a call when the cached one is over 50 minutes old, and once per call on 401, 403 or 400 `BAD_CLAIMS` (R166). Riot answers decode tolerantly: a missing or `null` non-identity field never fails a whole answer, and a roster entry whose hidden flag is missing counts as hidden (R166).
 - **Remote headers:**
   - `Authorization: Bearer`
   - `X-Riot-Entitlements-JWT`

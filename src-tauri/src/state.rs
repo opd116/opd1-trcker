@@ -1440,16 +1440,17 @@ impl AppState {
         })
     }
 
-    /// R160: `true` when no other job of `puuid` is waiting out a hold to run
-    /// the Details sync again (and marks this one): a page reopened during the
-    /// wait does not leave two reruns. [`Self::end_details_rerun`] when the
-    /// wait is over.
-    pub fn begin_details_rerun(&self, puuid: &str) -> bool {
-        lock(&self.details_rerun).insert(puuid.to_string())
-    }
-
-    pub fn end_details_rerun(&self, puuid: &str) {
-        lock(&self.details_rerun).remove(puuid);
+    /// R160: marks `puuid`'s Details sync as waiting out a hold to run again,
+    /// unless another job of that player already waits (`None`): a page
+    /// reopened during the wait does not leave two reruns. The mark ends when
+    /// the guard is dropped, on every path.
+    pub fn begin_details_rerun(self: &Arc<Self>, puuid: &str) -> Option<DetailsRerunGuard> {
+        lock(&self.details_rerun)
+            .insert(puuid.to_string())
+            .then(|| DetailsRerunGuard {
+                st: self.clone(),
+                puuid: puuid.to_string(),
+            })
     }
 
     /// Gives back a [`Self::claim_details_sync`]: the sync did not get its data
@@ -1481,6 +1482,19 @@ struct OpenMatch {
     match_id: String,
     focus_puuid: String,
     view: MatchDetailsView,
+}
+
+/// A player's waiting Details rerun ([`AppState::begin_details_rerun`]);
+/// dropping it ends the mark.
+pub struct DetailsRerunGuard {
+    st: Arc<AppState>,
+    puuid: String,
+}
+
+impl Drop for DetailsRerunGuard {
+    fn drop(&mut self) {
+        lock(&self.st.details_rerun).remove(&self.puuid);
+    }
 }
 
 /// See [`AppState::claim_details_fetch`].
@@ -2193,6 +2207,24 @@ mod tests {
         m.reset_names_hold();
         assert!(!m.names_needed().is_empty());
         assert!(!m.names_wakeup_due());
+    }
+
+    #[tokio::test]
+    async fn a_waiting_details_rerun_is_one_per_player_and_ends_with_its_guard() {
+        // R160: a reopen during the wait finds the mark taken; the mark ends
+        // when the guard drops, whichever way the job leaves.
+        let h = crate::pipeline_tests::harness().await;
+        let first = h.st.begin_details_rerun("p1").expect("free");
+        assert!(h.st.begin_details_rerun("p1").is_none(), "one per player");
+        let other =
+            h.st.begin_details_rerun("p2")
+                .expect("another player is free");
+        drop(first);
+        assert!(
+            h.st.begin_details_rerun("p1").is_some(),
+            "ended with the guard"
+        );
+        drop(other);
     }
 
     #[test]

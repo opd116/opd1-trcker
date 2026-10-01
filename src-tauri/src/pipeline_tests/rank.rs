@@ -6,7 +6,7 @@
 //! The waits (20 s, then 60 s) are never slept: the live model's test clock
 //! (`LiveModel::advance_clock`) moves forward instead.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::*;
 
@@ -320,10 +320,12 @@ fn retries_done(h: &Harness, puuid: &str) -> Option<usize> {
 async fn a_retry_that_only_met_the_mmr_hold_uses_no_turn() {
     // R160: the first pass's mmr is a real 429 (sent: counts, a retry in 20 s).
     // The retry finds the family still held (nothing sent): its turn is given
-    // back and it runs again after the hold. The hold is real time (0.5 s,
-    // slept once); the retry schedule is the model's test clock.
+    // back and it runs again after the hold. The hold is real time (1.5 s,
+    // slept once, so a slow runner cannot let it lapse before the retry looks);
+    // the retry schedule is the model's test clock.
     let h = harness().await;
-    mmr_429_once(&h, ME, "0.5").await;
+    mmr_429_once(&h, ME, "1.5").await;
+    let hold_set = Instant::now();
     lobby(&h);
 
     assert!(drain(&h).await);
@@ -343,8 +345,8 @@ async fn a_retry_that_only_met_the_mmr_hold_uses_no_turn() {
     // Not due again at once, nor before the hold is over (+ slack).
     assert!(!drain(&h).await);
     advance(&h, S);
-    assert!(!drain(&h).await, "0.5 s hold + 1.5 s slack, 1 s passed");
-    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(!drain(&h).await, "hold + 1.5 s slack, 1 s passed");
+    tokio::time::sleep(Duration::from_millis(1_600).saturating_sub(hold_set.elapsed())).await;
     advance(&h, S);
     assert!(drain(&h).await, "after the hold");
     assert_eq!(count(&h.server, "GET", &mmr_path(ME)).await, 2);
@@ -508,7 +510,8 @@ async fn a_details_sync_held_by_the_mmr_hold_gives_its_claim_back_and_runs_again
 #[tokio::test]
 async fn a_details_sync_held_by_the_hold_is_not_run_again_for_a_page_that_closed() {
     let h = harness().await;
-    comp_429_once(&h, "0.3").await;
+    // 1 s: still held when the job starts, however slow the runner.
+    comp_429_once(&h, "1.0").await;
     open_details_of_me(&h).await;
     assert!(h.session.comp_updates(ME, Some(0), Some(5)).await.is_err());
     assert!(h.st.claim_details_sync(ME));
@@ -618,15 +621,16 @@ async fn a_match_that_could_not_be_downloaded_for_a_hold_is_synced_again_after_i
     // (nothing used of R155's retries), like a held rank part.
     let h = harness().await;
     let session = session_with_other_wait(&h, Duration::from_millis(100)).await;
-    // The history call 429s (holds `other` for 0.4 s, over the 100 ms bound).
+    // The history call 429s (holds `other` for 1.5 s, over the 100 ms bound).
     Mock::given(method("GET"))
         .and(path(format!("/match-history/v1/history/{ME}").as_str()))
-        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.4"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1.5"))
         .up_to_n_times(1)
         .with_priority(1)
         .mount(&h.server)
         .await;
     lobby(&h);
+    let hold_set = Instant::now();
     let id = lock(&h.st.live).try_start_worker().unwrap();
     run_worker(h.st.clone(), session.clone(), id).await;
 
@@ -639,7 +643,7 @@ async fn a_match_that_could_not_be_downloaded_for_a_hold_is_synced_again_after_i
         0
     );
     assert_eq!(retries_done(&h, ME), Some(0), "waiting, nothing used");
-    tokio::time::sleep(Duration::from_millis(450)).await;
+    tokio::time::sleep(Duration::from_millis(1_600).saturating_sub(hold_set.elapsed())).await;
     advance(&h, 3 * S);
     let id = lock(&h.st.live).try_start_worker().expect("due");
     run_worker(h.st.clone(), session, id).await;

@@ -1943,7 +1943,7 @@ mod tests {
         let session = session_with_other_wait(&h, Duration::from_millis(100)).await;
         Mock::given(method("PUT"))
             .and(path("/name-service/v2/players"))
-            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.4"))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1.5"))
             .up_to_n_times(1)
             .with_priority(1)
             .mount(&h.server)
@@ -1958,6 +1958,7 @@ mod tests {
                 .count()
         };
         let visible = [opd1_riot::VisiblePuuid::new(OTHER.to_string(), false).unwrap()];
+        let hold_set = Instant::now();
         assert!(
             session.names(&visible).await.is_err(),
             "the 429 sets the hold"
@@ -2004,7 +2005,9 @@ mod tests {
         assert_eq!(puts().await, 1);
 
         // The deferral and the real hold run out, with no other event.
-        sleep(Duration::from_millis(450)).await;
+        // (The real hold is 1.5 s against a 100 ms bound: the refusals above
+        // have a 1.4 s margin on a slow runner.)
+        sleep(Duration::from_millis(1_600).saturating_sub(hold_set.elapsed())).await;
         lock(&h.st.live).advance_clock(Duration::from_secs(3));
         poller.connected_tick(&session).await.unwrap();
         for _ in 0..250 {

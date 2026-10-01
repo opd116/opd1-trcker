@@ -1,21 +1,33 @@
 //! Per-player "sync, don't refetch" (CLAUDE.md "Smart data", R33) and the
 //! background worker that walks the live roster.
 //!
-//! Per player, in order:
+//! Per player, in two phases (R165):
+//!
+//! *Rank phase* ([`sync_rank`]):
 //! 1. `comp_updates(0..5)` — the last-5 competitive match ids + RR deltas
 //!    (one mmr-bucket call; upserted, and indexed as competitive history).
-//! 2. `match_history(0..2, any queue)` — each player's last two matches in
-//!    any mode (Task 6's party detection needs them; indexed).
-//! 3. `match_details` only for ids not already in the DB (immutable —
-//!    fetched once, stored forever as compact rows), up to
-//!    [`DETAILS_CONCURRENCY`] in flight (the session's token bucket still
-//!    paces the actual requests).
-//! 4. `mmr` only when `mmr_refresh_needed(latest comp match)` — no new
+//! 2. `mmr` only when `mmr_refresh_needed(latest comp match)` — no new
 //!    competitive match means the rank can't have changed, unless the stored
 //!    snapshot predates the current snapshot version (refetched once). When
 //!    `comp_updates` failed there is no "latest" to compare (R160): `mmr` is
 //!    then asked for a player with no stored snapshot, and skipped when one
 //!    exists (it keeps showing).
+//!    The card is stored and published right after (rank, peak, win rate).
+//!
+//! *Matches phase* ([`sync_matches`]):
+//! 3. `match_history(0..2, any queue)` — each player's last two matches in
+//!    any mode (Task 6's party detection needs them; indexed).
+//! 4. `match_details` only for ids not already in the DB (immutable —
+//!    fetched once, stored forever as compact rows), up to
+//!    [`DETAILS_CONCURRENCY`] in flight (the session's token bucket still
+//!    paces the actual requests). The ids are the player's newest stored
+//!    competitive updates and the history's.
+//!
+//! The worker runs the rank phase for the whole roster first (up to
+//! [`RANK_CONCURRENCY`](crate::state::RANK_CONCURRENCY) players at once, one
+//! `Job::Rank`), then the matches phases one player at a time in display
+//! order, so no card waits for another player's match-details downloads
+//! (R165). The request count is unchanged.
 //!
 //! Behind all of that, at the lowest priority, the worker also runs the
 //! user's own-history backfill ([`backfill_step`], R101) and, ahead of it,
@@ -30,14 +42,20 @@
 //! "attempted" rule, never a stuck skeleton. `ClientGone` aborts the whole
 //! run — the poll loop notices the client is gone on its own next tick.
 //!
-//! A failed rank part (`comp_updates` or `mmr`) is retried, bounded (R155,
-//! `crate::rank_retry`): the worker syncs the player again 20 s after the
-//! failure and 60 s after that, while they are on the live roster, behind the
-//! first-pass syncs and ahead of the names fill and the backfill. A rank part
-//! that did not run only because the mmr request family was on hold after a
-//! Riot 429 (R160, `RiotError::Held`: nothing was sent) is not a failure: the
-//! player is synced again when the hold ends and no retry is used up. The
-//! worker never waits for a hold.
+//! A failed rank part (`comp_updates` or `mmr`) or a partial matches phase (the
+//! history call or a match-details download failed, R165) is retried, bounded
+//! (R155, `crate::rank_retry`): the worker syncs the player again (both
+//! phases; only the missing ids are fetched) 20 s after the failure and 60 s
+//! after that, while they are on the live roster, behind the first-pass syncs
+//! and ahead of the names fill and the backfill. A rank part that did not run
+//! only because the mmr request family was on hold after a Riot 429 (R160,
+//! `RiotError::Held`: nothing was sent) is not a failure: the player is synced
+//! again when the hold ends and no retry is used up. The worker never waits
+//! for a hold.
+//!
+//! A failed live names lookup (R165) is not an answer either: the player is
+//! asked again after a short delay, at most three tries a stage
+//! ([`names_step`], `LiveModel::note_names_failed`).
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
@@ -59,7 +77,9 @@ use crate::state::{
     lock, now_ms, unnamed_others, wait_for_details_fetch, AppState, BackfillRun, DetailsClaim,
     DetailsFetchGuard, Job,
 };
-use crate::store::{mmr_refresh_needed, save_player, trim_mmr, PlayerUpdate, SELF_LOADOUT_KEY};
+use crate::store::{
+    mmr_refresh_needed, recent_comp_updates, save_player, trim_mmr, PlayerUpdate, SELF_LOADOUT_KEY,
+};
 
 /// Match-details requests in flight at once. They're large responses
 /// (hundreds of KB each); a small window overlaps latency without holding
@@ -150,28 +170,50 @@ pub fn counts_toward_skip(e: &RiotError) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Gone;
 
-/// What a per-player sync learned beyond the DB writes.
+/// What a rank phase learned beyond the DB writes (R165).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SyncOutcome {
+pub struct RankOutcome {
+    /// The rank part really failed: the `comp_updates` call or the `mmr` call
+    /// answered with an error (any but `ClientGone`, which aborts the sync
+    /// instead, and `Held`, which is `held`). R155: such a player is synced
+    /// again later (`LiveModel::note_rank_sync`).
+    pub failed: bool,
+    /// R160: the rank part did not run, only because the mmr request family
+    /// was on hold — nothing was sent — and this is the longest of what was
+    /// left of the hold. `None` when a call really failed (`failed`) or
+    /// nothing was held. Not a failure: `LiveModel::note_rank_held` syncs the
+    /// player again when the hold ends and uses up no retry.
+    pub held: Option<Duration>,
+}
+
+/// What a matches phase learned beyond the DB writes (R165).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchesOutcome {
     /// The player's match-history call answered *and* was written to
     /// SQLite. Party detection reads the stored history, so a player whose
     /// history failed this cycle (the call or the write) must not take part:
     /// the stored one may be from an earlier session (a false stripe).
     pub history_ok: bool,
-    /// The rank part really failed: the `comp_updates` call or the `mmr` call
-    /// answered with an error (any but `ClientGone`, which aborts the sync
-    /// instead, and `Held`, which is `rank_held`). R155: such a player is
-    /// synced again later (`LiveModel::note_rank_sync`).
-    pub rank_failed: bool,
-    /// R160: a call of the sync did not run, only because its request family
-    /// was on hold — nothing was sent (`RiotError::Held`: the mmr family, or
-    /// the `other` one when more than 10 s of its hold was left: the history,
-    /// the match-details) — and this is the longest of what was left of the
-    /// hold. `None` when a rank call really failed (`rank_failed`: the R155
-    /// retry covers the rest) or nothing was held. Not a failure:
-    /// `LiveModel::note_rank_held` syncs the player again when the hold ends
-    /// and uses up no retry.
-    pub rank_held: Option<Duration>,
+    /// The phase did not get everything: the history call failed, or a
+    /// match-details download did (or its rows could not be stored). R165:
+    /// such a player is synced again later (`LiveModel::note_partial_sync`),
+    /// and the retry fetches only what is still missing.
+    pub partial: bool,
+    /// R160: a call of the phase (the history, a match-details download) was
+    /// refused only because the `other` request family was on hold — nothing
+    /// was sent (`RiotError::Held`, when more than 10 s of its hold was
+    /// left) — and this is the longest of what was left. Not a failure and
+    /// not `partial`: the player is synced again when the hold ends and no
+    /// R155 retry is used up (`LiveModel::note_matches_held`).
+    pub held: Option<Duration>,
+}
+
+/// What a whole per-player sync learned ([`sync_player`]).
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SyncOutcome {
+    pub rank: RankOutcome,
+    pub matches: MatchesOutcome,
 }
 
 /// The warn line a failed call leaves in the log (R158): what failed, for
@@ -230,10 +272,13 @@ impl RankPart {
         self.held = Some(self.held.map_or(left, |h| h.max(left)));
     }
 
-    /// `(rank_failed, rank_held)`: a hold only counts when nothing failed for
-    /// real (a real failure schedules the R155 retry, which covers the hold).
-    fn outcome(&self) -> (bool, Option<Duration>) {
-        (self.failed, self.held.filter(|_| !self.failed))
+    /// A hold only counts when nothing failed for real (a real failure
+    /// schedules the R155 retry, which covers the hold).
+    fn outcome(&self) -> RankOutcome {
+        RankOutcome {
+            failed: self.failed,
+            held: self.held.filter(|_| !self.failed),
+        }
     }
 }
 
@@ -360,30 +405,53 @@ pub async fn fetch_missing_details(
     session: &Arc<RiotSession>,
     ids: Vec<String>,
 ) -> Result<(), Gone> {
-    fetch_missing_details_checked(st, session, ids)
+    fetch_missing_details_full(st, session, ids)
         .await
         .map(|_| ())
 }
 
-/// [`fetch_missing_details`] that also says whether a download was refused
-/// only because the `other` request family was on hold (R160, `Held`:
-/// nothing sent): the longest of what was left of the hold. Those ids are not
-/// stored (a failure the next sync repeats), so a caller that can run again
-/// when the hold ends does.
+/// How a [`fetch_missing_details_full`] went.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DetailsFetch {
+    /// R160: a download was refused only because the `other` request family
+    /// was on hold (`Held`: nothing sent): the longest of what was left of the
+    /// hold. Those ids are not stored; a caller that can run again when the
+    /// hold ends does.
+    pub held: Option<Duration>,
+    /// R165: some id is still not stored for a real reason — a download
+    /// failed (anything but a gone client, which is `Err`, and a hold), its
+    /// rows could not be written, or the download this call waited for did
+    /// not end up stored.
+    pub incomplete: bool,
+}
+
+/// [`fetch_missing_details_full`] reduced to its hold (R160): `Some` when a
+/// download was refused only because of the `other` family's hold.
 pub async fn fetch_missing_details_checked(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
     ids: Vec<String>,
 ) -> Result<Option<Duration>, Gone> {
+    fetch_missing_details_full(st, session, ids)
+        .await
+        .map(|f| f.held)
+}
+
+/// [`fetch_missing_details`] that also says how the fetch went ([`DetailsFetch`]).
+pub async fn fetch_missing_details_full(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    ids: Vec<String>,
+) -> Result<DetailsFetch, Gone> {
     let ids = dedupe(ids);
     if ids.is_empty() {
-        return Ok(None);
+        return Ok(DetailsFetch::default());
     }
     let Some(missing) = st.db(move |repo| repo.new_match_ids(&ids)).await else {
-        return Ok(None);
+        return Ok(DetailsFetch::default());
     };
     if missing.is_empty() {
-        return Ok(None);
+        return Ok(DetailsFetch::default());
     }
     let mut claimed: HashMap<String, DetailsFetchGuard> = HashMap::new();
     let mut busy = Vec::new();
@@ -392,7 +460,7 @@ pub async fn fetch_missing_details_checked(
             DetailsClaim::Mine(guard) => {
                 claimed.insert(id, guard);
             }
-            DetailsClaim::Busy(waiter) => busy.push(waiter),
+            DetailsClaim::Busy(waiter) => busy.push((id, waiter)),
         }
     }
     log::debug!(
@@ -418,12 +486,15 @@ pub async fn fetch_missing_details_checked(
     }
 
     let mut gone = false;
+    let mut incomplete = false;
     let mut held: Option<Duration> = None;
     while let Some(joined) = set.join_next().await {
         match joined {
             Ok((id, Ok(details))) => {
-                // A failed write is logged; the live sync goes on.
-                store_details(st, details).await;
+                // A failed write is logged; the live sync goes on (partial).
+                if store_details(st, details).await.is_none() {
+                    incomplete = true;
+                }
                 // Stored: whoever waits on this id can read it now.
                 claimed.remove(&id);
             }
@@ -436,11 +507,23 @@ pub async fn fetch_missing_details_checked(
                 held = Some(held.map_or(left, |h| h.max(left)));
                 claimed.remove(&id);
             }
+            // Riot no longer has the match (404): terminal, like the backfill
+            // (R137) treats it. A retry cannot get it, so the sync is not
+            // partial because of it.
+            Ok((id, Err(e @ RiotError::Status(404, _)))) => {
+                log::warn!("match details {} skipped: {e}", short(&id));
+                st.note_details_404(&id);
+                claimed.remove(&id);
+            }
             Ok((id, Err(e))) => {
                 log::warn!("match details {} failed: {e}", short(&id));
                 claimed.remove(&id);
+                incomplete = true;
             }
-            Err(e) => log::warn!("match details task failed: {e}"),
+            Err(e) => {
+                log::warn!("match details task failed: {e}");
+                incomplete = true;
+            }
         }
         spawn_next(&mut set, &mut pending);
     }
@@ -450,27 +533,35 @@ pub async fn fetch_missing_details_checked(
     if gone {
         return Err(Gone);
     }
-    for waiter in busy {
+    let (waited, waiters): (Vec<String>, Vec<_>) = busy.into_iter().unzip();
+    for waiter in waiters {
         wait_for_details_fetch(waiter).await;
     }
-    Ok(held)
+    // The downloads this call waited for may have failed in their own task:
+    // look again, so a retry is scheduled for them too.
+    if !incomplete && !waited.is_empty() {
+        let owner = st.clone();
+        incomplete = st
+            .db(move |repo| repo.new_match_ids(&waited))
+            .await
+            // A waited-for id that answered 404 in its own task is terminal.
+            .is_some_and(|still| still.iter().any(|id| !owner.details_404(id)));
+    }
+    Ok(DetailsFetch { held, incomplete })
 }
 
-/// The full per-player sync (see the module docs for the call order).
-pub async fn sync_player(
+/// The rank phase (R165): `comp_updates(0..5)`, then `mmr` when it is needed.
+/// Stores both; the caller publishes the card ([`rank_step`]).
+pub async fn sync_rank(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
     puuid: &str,
-) -> Result<SyncOutcome, Gone> {
-    let mut ids = Vec::new();
+) -> Result<RankOutcome, Gone> {
     // R155/R160: how the rank part ended, for the retry.
     let mut rank = RankPart::default();
 
     let comp = match comp_updates_call(st, session, puuid, 5).await? {
-        RankCall::Ok(rows) => {
-            ids.extend(rows.iter().map(|r| r.match_id.clone()));
-            Some(rows)
-        }
+        RankCall::Ok(rows) => Some(rows),
         RankCall::Held(left) => {
             rank.held(left);
             None
@@ -480,34 +571,6 @@ pub async fn sync_player(
             None
         }
     };
-
-    let history_ok = match session.match_history(puuid, Some(0), Some(2), None).await {
-        Ok(resp) => {
-            let entries = history_entries(&resp);
-            ids.extend(entries.iter().map(|e| e.match_id.clone()));
-            let p = puuid.to_string();
-            // A SQLite failure (`None`) leaves the earlier session's rows.
-            st.db(move |repo| repo.index_history(&p, &entries))
-                .await
-                .is_some()
-        }
-        Err(RiotError::Held(left)) => {
-            log::debug!(
-                "{}",
-                failure_line("match history", puuid, &RiotError::Held(left))
-            );
-            rank.held(left);
-            false
-        }
-        Err(e) => {
-            check(e, "match history", puuid)?;
-            false
-        }
-    };
-
-    if let Some(left) = fetch_missing_details_checked(st, session, ids).await? {
-        rank.held(left);
-    }
 
     // MMR when a new competitive match appeared since the snapshot (or the
     // snapshot is from an older shape). R160: no longer tied to comp_updates
@@ -550,12 +613,84 @@ pub async fn sync_player(
             RankCall::Failed => rank.failed = true,
         }
     }
-    let (rank_failed, rank_held) = rank.outcome();
-    Ok(SyncOutcome {
+    Ok(rank.outcome())
+}
+
+/// The matches phase (R165): `match_history(0..2)`, then match-details for
+/// the ids the DB lacks — the history's and the player's newest five stored
+/// competitive updates (the rank phase's rows). Stores them; the caller
+/// publishes the card ([`matches_step`]).
+pub async fn sync_matches(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    puuid: &str,
+) -> Result<MatchesOutcome, Gone> {
+    let p = puuid.to_string();
+    let mut ids: Vec<String> = st
+        .db(move |repo| {
+            Ok(recent_comp_updates(repo.conn(), &p, 5)?
+                .into_iter()
+                .map(|r| r.match_id)
+                .collect())
+        })
+        .await
+        .unwrap_or_default();
+
+    let mut partial = false;
+    let mut held: Option<Duration> = None;
+    let mut hold = |left: Duration| held = Some(held.map_or(left, |h| h.max(left)));
+    let history_ok = match session.match_history(puuid, Some(0), Some(2), None).await {
+        Ok(resp) => {
+            let entries = history_entries(&resp);
+            ids.extend(entries.iter().map(|e| e.match_id.clone()));
+            let p = puuid.to_string();
+            // A SQLite failure (`None`) leaves the earlier session's rows.
+            let written = st
+                .db(move |repo| repo.index_history(&p, &entries))
+                .await
+                .is_some();
+            partial |= !written;
+            written
+        }
+        Err(RiotError::Held(left)) => {
+            log::debug!(
+                "{}",
+                failure_line("match history", puuid, &RiotError::Held(left))
+            );
+            hold(left);
+            false
+        }
+        Err(e) => {
+            check(e, "match history", puuid)?;
+            partial = true;
+            false
+        }
+    };
+    // A history that did not answer, held or failed, leaves no fresh history
+    // (`history_ok`): party marks wait. Only a real failure is `partial`.
+    let fetched = fetch_missing_details_full(st, session, ids).await?;
+    partial |= fetched.incomplete;
+    if let Some(left) = fetched.held {
+        hold(left);
+    }
+    Ok(MatchesOutcome {
         history_ok,
-        rank_failed,
-        rank_held,
+        partial,
+        held: held.filter(|_| !partial),
     })
+}
+
+/// Both phases back to back, nothing published in between (the tests; the
+/// worker publishes after each phase: [`rank_step`], [`matches_step`]).
+#[cfg(test)]
+pub async fn sync_player(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    puuid: &str,
+) -> Result<SyncOutcome, Gone> {
+    let rank = sync_rank(st, session, puuid).await?;
+    let matches = sync_matches(st, session, puuid).await?;
+    Ok(SyncOutcome { rank, matches })
 }
 
 /// How [`sync_details`] ended (R160).
@@ -1113,8 +1248,9 @@ pub async fn run_worker(st: Arc<AppState>, session: Arc<RiotSession>, id: u64) {
         let outcome = match job {
             None => return,
             Some(Job::Names(needed)) => names_step(&st, &session, needed).await,
-            Some(Job::Sync(puuid)) => sync_step(&st, &session, puuid, false).await,
-            Some(Job::RankRetry(puuid)) => sync_step(&st, &session, puuid, true).await,
+            Some(Job::Rank(batch)) => rank_batch_step(&st, &session, batch).await,
+            Some(Job::Sync(puuid)) => sync_step(&st, &session, puuid).await,
+            Some(Job::RankRetry(puuid)) => retry_step(&st, &session, puuid).await,
             Some(Job::FillNames) => fill_names_step(&st, &session).await,
             Some(Job::Backfill) => backfill_step(&st, &session).await,
         };
@@ -1125,43 +1261,167 @@ pub async fn run_worker(st: Arc<AppState>, session: Arc<RiotSession>, id: u64) {
     }
 }
 
-async fn sync_step(
+/// The player's stored bundle (`None`: the read failed, the bundle already on
+/// screen stays) into the live slot, `mark` applied under the same lock, then
+/// the card is published and an open Details of the player follows (R23).
+async fn publish_player(
     st: &Arc<AppState>,
-    session: &Arc<RiotSession>,
-    puuid: String,
-    retry: bool,
-) -> Result<(), Gone> {
-    let outcome = sync_player(st, session, &puuid).await?;
-    let (p, me) = (puuid.clone(), session.self_puuid().to_string());
+    session: &RiotSession,
+    puuid: &str,
+    mark: impl FnOnce(&mut crate::state::LiveModel, bool),
+) {
+    let (p, me) = (puuid.to_string(), session.self_puuid().to_string());
     // A failed read keeps the bundle already on screen.
     let db = st
         .db(move |repo| crate::store::load_player_db(repo, Some(&me), &p))
         .await;
     {
         let mut live = lock(&st.live);
-        live.synced.insert(puuid.clone());
-        // Party marks need the stored history to be this cycle's: the
-        // history was written and the bundle built from it was read back.
-        // Either SQLite step failing leaves the slot on earlier rows.
-        if outcome.history_ok && db.is_some() {
-            live.party_ready.insert(puuid.clone());
-        }
-        // R155: a failed rank part is synced again later, bounded. R160: one
-        // that only met the mmr hold waits for it instead, uncounted.
-        match outcome.rank_held {
-            Some(left) => live.note_rank_held(&puuid, left, retry),
-            None => live.note_rank_sync(&puuid, outcome.rank_failed, retry),
-        }
+        mark(&mut live, db.is_some());
         if let (Some(db), Some(slot)) =
             (db, live.slots.iter_mut().find(|s| s.roster.puuid == puuid))
         {
             slot.db = db;
         }
     }
-    log::debug!("synced {}", short(&puuid));
     st.publish();
     // R23: an open Details of this player shows the settled card too.
-    crate::details::refresh(st, &puuid).await;
+    crate::details::refresh(st, puuid).await;
+}
+
+/// R165: the rank phase of one player, then their card is published: the
+/// MMR fields (rank, peak, previous act, win rate) settle, the matches-derived
+/// ones (K/D, HS%, last 5) wait for the matches phase.
+///
+/// `first_pass`: the outcome is noted for the R155/R160 schedule in the same
+/// critical section as the `ranked` mark, before the awaits of the publish: a
+/// worker aborted by a stage change cannot leave a player marked ranked with
+/// the retry of its failure never recorded. (A retry is noted once, after both
+/// of its phases: [`retry_step`]; its turn was counted when it was handed out.)
+pub(crate) async fn rank_step(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    puuid: &str,
+    first_pass: bool,
+) -> Result<RankOutcome, Gone> {
+    let outcome = sync_rank(st, session, puuid).await?;
+    publish_player(st, session, puuid, |live, _| {
+        live.synced.mark_ranked(puuid);
+        if first_pass {
+            match outcome.held {
+                Some(left) => live.note_rank_held(puuid, left, false),
+                None => live.note_rank_sync(puuid, outcome.failed, false),
+            }
+        }
+    })
+    .await;
+    log::debug!("rank synced {}", short(puuid));
+    Ok(outcome)
+}
+
+/// R165: the matches phase of one player, then their card is published. Party
+/// marks need the stored history to be this cycle's: the history was written
+/// and the bundle built from it was read back; either SQLite step failing
+/// leaves the slot on earlier rows. `first_pass`: a partial outcome joins the
+/// R155 retries (`LiveModel::note_partial_sync`), one that only met the
+/// `other` hold waits for it and uses no retry (`note_matches_held`, R160) —
+/// noted under the same lock as the `synced` mark, like [`rank_step`].
+pub(crate) async fn matches_step(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    puuid: &str,
+    first_pass: bool,
+) -> Result<MatchesOutcome, Gone> {
+    let outcome = sync_matches(st, session, puuid).await?;
+    publish_player(st, session, puuid, |live, db_ok| {
+        live.synced.insert(puuid.to_string());
+        if outcome.history_ok && db_ok {
+            live.party_ready.insert(puuid.to_string());
+        }
+        if first_pass {
+            match (outcome.partial, outcome.held) {
+                (true, _) => live.note_partial_sync(puuid),
+                (false, Some(left)) => live.note_matches_held(puuid, left),
+                (false, None) => {}
+            }
+        }
+    })
+    .await;
+    log::debug!("synced {}", short(puuid));
+    Ok(outcome)
+}
+
+/// One `Job::Rank`: the rank phases of up to
+/// [`RANK_CONCURRENCY`](crate::state::RANK_CONCURRENCY) players at once, each
+/// published as it ends. Inside the session's buckets and holds; the worker
+/// stays one job loop (this is one job). R155/R160: a first-pass failure or
+/// hold schedules the player's retry. A gone client ends the job and aborts
+/// the rest of the batch (the set is dropped).
+pub(crate) async fn rank_batch_step(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    batch: Vec<String>,
+) -> Result<(), Gone> {
+    let mut set = JoinSet::new();
+    for puuid in &batch {
+        let (st, session, puuid) = (st.clone(), session.clone(), puuid.clone());
+        set.spawn(async move { rank_step(&st, &session, &puuid, true).await.map(|_| ()) });
+    }
+    let (mut gone, mut panicked) = (false, false);
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(Err(Gone)) => {
+                gone = true;
+                break;
+            }
+            Ok(Ok(())) => {}
+            Err(e) => {
+                log::warn!("rank sync task failed: {e}");
+                panicked = true;
+            }
+        }
+    }
+    if gone {
+        return Err(Gone);
+    }
+    // A task that panicked must not be handed out again forever.
+    if panicked {
+        let mut live = lock(&st.live);
+        for puuid in &batch {
+            live.synced.mark_ranked(puuid);
+        }
+    }
+    Ok(())
+}
+
+/// One `Job::Sync`: the matches phase of one player (R165).
+async fn sync_step(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    puuid: String,
+) -> Result<(), Gone> {
+    matches_step(st, session, &puuid, true).await.map(|_| ())
+}
+
+/// One `Job::RankRetry` (R155): both phases of the player again, the card
+/// published after each. The matches phase fetches only the ids still
+/// missing. One outcome is noted: a real failure (a failed rank part, a
+/// partial matches phase) moves the schedule on; otherwise a hold (R160)
+/// uses up no retry.
+async fn retry_step(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    puuid: String,
+) -> Result<(), Gone> {
+    let rank = rank_step(st, session, &puuid, false).await?;
+    let matches = matches_step(st, session, &puuid, false).await?;
+    let failed = rank.failed || matches.partial;
+    let held = rank.held.into_iter().chain(matches.held).max();
+    let mut live = lock(&st.live);
+    match held.filter(|_| !failed) {
+        Some(left) => live.note_rank_held(&puuid, left, true),
+        None => live.note_rank_sync(&puuid, failed, true),
+    }
     Ok(())
 }
 
@@ -1200,8 +1460,30 @@ async fn names_step(
             return Ok(());
         }
         Err(e) => {
-            log::warn!("names for {} players failed: {e}", asked.len());
-            Vec::new()
+            // R165: an error is not an answer. The players are not marked
+            // attempted: they are asked again after a short delay, at most
+            // three tries a stage (`LiveModel::note_names_failed`), and until
+            // then the card keeps its skeleton or, once synced, shows `—`.
+            let retry = {
+                let mut live = lock(&st.live);
+                let retry = live.note_names_failed(&asked);
+                // The worker never waits: the poll loop's tick starts one when
+                // the earliest waiting retry is due
+                // (`LiveModel::names_wakeup_due`). Nothing else is blocked:
+                // a player who joins meanwhile is asked at once.
+                live.arm_names_retry_wake();
+                retry
+            };
+            log::warn!(
+                "names for {} players failed: {e}; {}",
+                asked.len(),
+                match retry {
+                    Some(wait) => format!("asking again in {}s", wait.as_secs()),
+                    None => "giving up".to_string(),
+                }
+            );
+            st.publish();
+            return Ok(());
         }
     };
 
@@ -1214,10 +1496,14 @@ async fn names_step(
         .collect();
     {
         let mut live = lock(&st.live);
+        // Answered (any 2xx, blank names included): attempted from here on.
         live.names_attempted.extend(asked.iter().cloned());
         for (p, n, t) in &learned {
             live.known_names.insert(p.clone(), (n.clone(), t.clone()));
         }
+        // Players of an earlier failed lookup may still be waiting for their
+        // retry (their counts differ): keep a wake-up for the next one.
+        live.arm_names_retry_wake();
     }
     log::debug!("names: {} of {} resolved", learned.len(), asked.len());
     save_names(st, learned).await;

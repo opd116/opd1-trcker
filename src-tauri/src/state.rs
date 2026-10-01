@@ -109,6 +109,141 @@ pub fn unnamed_others<'a>(
         .map(|p| p.puuid.clone())
 }
 
+/// R165: how many players' rank phases (`comp_updates` + `mmr`) the worker
+/// runs at once. Inside the session's own buckets (the mmr burst covers ten
+/// players' two calls); the worker stays a single job loop, the batch is one
+/// job.
+pub const RANK_CONCURRENCY: usize = 3;
+
+/// R165: the waits before the retries of a failed live names lookup: a failed
+/// lookup is asked again after the first, and once more after the second, so a
+/// puuid gets at most `NAMES_RETRY_DELAYS.len() + 1` tries per stage.
+pub const NAMES_RETRY_DELAYS: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(6)];
+
+/// The players whose per-player sync ran (`LiveModel::synced`), in the two
+/// phases of R165: the *rank* phase (`comp_updates` + `mmr`, run for the
+/// whole roster first) and the *matches* phase (history + match-details). A
+/// player counts as synced (`contains`) when the matches phase ended; a
+/// player counts as ranked ([`Self::rank_done`]) when the rank phase did, or
+/// the full sync did. Cleared, and a puuid removed, together: the poll loop's
+/// resets (`synced.clear()`, `synced.remove(..)`) start both phases over.
+#[derive(Debug, Default, Clone)]
+pub struct SyncedSet {
+    synced: HashSet<String>,
+    ranked: HashSet<String>,
+}
+
+impl SyncedSet {
+    /// The matches phase (so the whole sync) ran.
+    pub fn contains(&self, puuid: &str) -> bool {
+        self.synced.contains(puuid)
+    }
+
+    /// The whole sync ran (the rank phase too).
+    pub fn insert(&mut self, puuid: String) -> bool {
+        self.synced.insert(puuid)
+    }
+
+    pub fn remove(&mut self, puuid: &str) -> bool {
+        self.ranked.remove(puuid);
+        self.synced.remove(puuid)
+    }
+
+    pub fn clear(&mut self) {
+        self.ranked.clear();
+        self.synced.clear();
+    }
+
+    #[cfg(test)]
+    pub fn extend(&mut self, puuids: impl IntoIterator<Item = String>) {
+        self.synced.extend(puuids);
+    }
+
+    /// The rank phase ran (R165).
+    pub fn mark_ranked(&mut self, puuid: &str) {
+        self.ranked.insert(puuid.to_string());
+    }
+
+    /// The rank phase ran, or the whole sync did.
+    pub fn rank_done(&self, puuid: &str) -> bool {
+        self.ranked.contains(puuid) || self.synced.contains(puuid)
+    }
+}
+
+/// One puuid's failed live names lookups (see [`NamesAttempted`]).
+#[derive(Debug, Clone, Copy)]
+struct NameFails {
+    fails: usize,
+    /// Asked again from this instant on.
+    due: Instant,
+}
+
+/// The players a `names()` call was *answered* for (`LiveModel::names_attempted`):
+/// a visible name still unknown after that is Missing, not Loading. R165: a
+/// failed request is not an answer; it only counts a try
+/// ([`Self::fail`]) and the player is asked again after
+/// [`NAMES_RETRY_DELAYS`]. The tries are dropped with the set (`clear`, the
+/// poll loop's stage reset) and when the player is answered.
+#[derive(Debug, Default, Clone)]
+pub struct NamesAttempted {
+    set: HashSet<String>,
+    failed: HashMap<String, NameFails>,
+}
+
+impl NamesAttempted {
+    pub fn contains(&self, puuid: &str) -> bool {
+        self.set.contains(puuid)
+    }
+
+    pub fn insert(&mut self, puuid: String) -> bool {
+        self.failed.remove(&puuid);
+        self.set.insert(puuid)
+    }
+
+    pub fn extend(&mut self, puuids: impl IntoIterator<Item = String>) {
+        for p in puuids {
+            self.insert(p);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        self.set.clear();
+        self.failed.clear();
+    }
+
+    /// When `puuid`'s next try is due, while it is still waiting after `now`.
+    fn due_after(&self, puuid: &str, now: Instant) -> Option<Instant> {
+        self.failed.get(puuid).map(|f| f.due).filter(|d| *d > now)
+    }
+
+    /// The player's next try is not due yet.
+    fn waiting(&self, puuid: &str, now: Instant) -> bool {
+        self.failed.get(puuid).is_some_and(|f| f.due > now)
+    }
+
+    /// A lookup for `puuid` failed at `now`: `Some(wait)` before the next try,
+    /// or `None` after the last try — the player is attempted from then on.
+    fn fail(&mut self, puuid: &str, now: Instant) -> Option<Duration> {
+        let fails = self.failed.get(puuid).map_or(0, |f| f.fails) + 1;
+        match NAMES_RETRY_DELAYS.get(fails - 1) {
+            Some(delay) => {
+                self.failed.insert(
+                    puuid.to_string(),
+                    NameFails {
+                        fails,
+                        due: now + *delay,
+                    },
+                );
+                Some(*delay)
+            }
+            None => {
+                self.insert(puuid.to_string());
+                None
+            }
+        }
+    }
+}
+
 /// R161: the ranked tiers (by puuid) an Agent Select answer carried, bound to
 /// the match they came from. Pregame's `ID` is the core-game `MatchID` of the
 /// same match, so the In Game roster can tell a tier of its own match from a
@@ -158,9 +293,15 @@ pub enum Job {
     /// always `false` (filtered), carried so the worker builds each
     /// `VisiblePuuid` from the real flag.
     Names(Vec<(String, bool)>),
-    /// The per-player sync of one puuid.
+    /// R165: the rank phase (`comp_updates` + `mmr`, then the card is
+    /// published) of up to [`RANK_CONCURRENCY`] players, run at once. Handed
+    /// out for the whole roster before any `Sync`.
+    Rank(Vec<String>),
+    /// The matches phase of one puuid (R165: history + match-details, then the
+    /// card is published) — only for players whose rank phase ran.
     Sync(String),
-    /// R155: the sync of one puuid again, because its rank part failed
+    /// R155: the sync of one puuid again (both phases), because its rank part
+    /// failed or its matches were only partly fetched
     /// (`LiveModel::due_rank_retry`). Handed out after the first-pass syncs
     /// and before the names fill and the backfill.
     RankRetry(String),
@@ -296,10 +437,11 @@ pub struct LiveModel {
     pub seen_hidden: HashMap<String, Option<String>>,
     /// Players a `names()` call was attempted for (since the last reset):
     /// a visible name still unknown after that is Missing, not Loading.
-    pub names_attempted: HashSet<String>,
+    pub names_attempted: NamesAttempted,
     /// Players whose per-player sync ran (since the last reset): a field
-    /// still unknown after that is Missing, not Loading.
-    pub synced: HashSet<String>,
+    /// still unknown after that is Missing, not Loading. R165: in two phases,
+    /// see [`SyncedSet`].
+    pub synced: SyncedSet,
     /// The subset of `synced` whose match-history call answered this cycle:
     /// only these take part in party detection (a failed history leaves the
     /// stored one from an earlier session, which would draw a false
@@ -324,6 +466,11 @@ pub struct LiveModel {
     /// match that just ended: its players are asked about
     /// (`AppState::match_end_asks`).
     pub match_end_ms: Option<i64>,
+    /// R165: the last match end seen by [`Self::observe_match_end`], with the
+    /// account it belongs to. Unlike `match_end_ms` a new match does not clear
+    /// it, so a match published after the next one has started still raises
+    /// its asks (`AppState::match_end_asks`).
+    last_match_end: Option<(String, i64)>,
     /// R155: the players whose rank sync failed and are synced again later
     /// (`Self::note_rank_sync`, `Self::due_rank_retry`). Only players on the
     /// live roster; dropped with a roster change, an account switch, and when
@@ -334,6 +481,9 @@ pub struct LiveModel {
     /// ([`Self::names_needed`], [`Self::fill_ready`]), so the worker neither
     /// spins on a refused call nor marks anyone as asked.
     names_hold_until: Option<Instant>,
+    /// R165: when the earliest waiting names retry is due ([`Self::arm_names_retry_wake`]);
+    /// only [`Self::names_wakeup_due`] reads it, nothing is blocked by it.
+    names_retry_wake: Option<Instant>,
     /// Test clock: added to "now" wherever the retries are timed, so a test
     /// moves time forward instead of sleeping (`Self::advance_clock`).
     #[cfg(test)]
@@ -361,16 +511,18 @@ impl LiveModel {
             match_tiers: MatchTiers::default(),
             known_names: HashMap::new(),
             seen_hidden: HashMap::new(),
-            names_attempted: HashSet::new(),
-            synced: HashSet::new(),
+            names_attempted: NamesAttempted::default(),
+            synced: SyncedSet::default(),
             party_ready: HashSet::new(),
             worker_id: None,
             next_worker_id: 0,
             backfill: None,
             name_fill: VecDeque::new(),
             match_end_ms: None,
+            last_match_end: None,
             rank_retries: RankRetries::default(),
             names_hold_until: None,
+            names_retry_wake: None,
             #[cfg(test)]
             clock_offset: Duration::ZERO,
             current: LiveState {
@@ -502,7 +654,9 @@ impl LiveModel {
                 seasons: seasonal_map_from_mmr(resp),
                 current_rank: current_rank_from_mmr(resp, current_act_id),
             }),
-            None if data_done => Field::Missing,
+            // R165: the rank phase settles the MMR fields; the matches phase
+            // (`data_done`) settles the rest.
+            None if data_done || self.synced.rank_done(&r.puuid) => Field::Missing,
             None => Field::Loading,
         };
         let last5 = if !slot.db.last5.is_empty() {
@@ -598,29 +752,81 @@ impl LiveModel {
     /// Players to send to name-service: never the user (R43 — their name
     /// comes from the chat session), never anyone whose `Incognito` is
     /// true, only names not known and not yet asked for.
+    ///
+    /// R165: a player whose lookup failed is asked again only once the retry
+    /// delay has passed ([`Self::note_names_failed`]).
     pub fn names_needed(&self) -> Vec<(String, bool)> {
         if self.names_deferred() {
             return Vec::new();
         }
         let self_id = self.self_id();
+        let now = self.now();
         self.slots
             .iter()
             .filter(|s| s.roster.puuid != self_id)
             .filter(|s| !s.roster.incognito)
             .filter(|s| !self.known_names.contains_key(&s.roster.puuid))
             .filter(|s| !self.names_attempted.contains(&s.roster.puuid))
+            .filter(|s| !self.names_attempted.waiting(&s.roster.puuid, now))
             .map(|s| (s.roster.puuid.clone(), s.roster.incognito))
             .collect()
     }
 
-    /// The next player to sync, in display order (self -> party ->
-    /// allies -> enemies).
+    /// R165: a `names()` request for `asked` failed (an error is not an
+    /// answer): each puuid is asked again after [`NAMES_RETRY_DELAYS`], at most
+    /// three tries in all; after the last they count as attempted (the card
+    /// shows `—`). Returns the shortest wait before a retry is due, `None`
+    /// when no puuid has a retry left. Privacy is unchanged: only
+    /// [`Self::names_needed`] (never an incognito player) hands puuids out.
+    pub fn note_names_failed(&mut self, asked: &[String]) -> Option<Duration> {
+        let now = self.now();
+        asked
+            .iter()
+            .filter_map(|p| self.names_attempted.fail(p, now))
+            .min()
+    }
+
+    /// R165: arms the wake-up of the earliest still-waiting names retry: the
+    /// earliest due time among players who are on the roster and still need a
+    /// name (not the user, not hidden, not known, not attempted). Read only by
+    /// [`Self::names_wakeup_due`]: unlike [`Self::defer_names`] (R160's hold)
+    /// it blocks nothing, so a new player's first ask is never delayed. Called
+    /// after every names step, so each staggered retry is woken in turn.
+    pub fn arm_names_retry_wake(&mut self) {
+        let now = self.now();
+        let self_id = self.self_id();
+        self.names_retry_wake = self
+            .slots
+            .iter()
+            .filter(|s| s.roster.puuid != self_id && !s.roster.incognito)
+            .filter(|s| !self.known_names.contains_key(&s.roster.puuid))
+            .filter(|s| !self.names_attempted.contains(&s.roster.puuid))
+            .filter_map(|s| self.names_attempted.due_after(&s.roster.puuid, now))
+            .min();
+    }
+
+    /// The next player whose matches phase is due, in display order (self ->
+    /// party -> allies -> enemies).
     pub fn next_unsynced(&self) -> Option<String> {
         self.slots
             .iter()
             .map(|s| &s.roster.puuid)
-            .find(|p| !self.synced.contains(*p))
+            .find(|p| !self.synced.contains(p))
             .cloned()
+    }
+
+    /// R165: the players whose rank phase is due, in display order, at most
+    /// [`RANK_CONCURRENCY`] of them: one `Job::Rank`. Handed out ahead of any
+    /// matches phase, so the whole roster's rank comes before the first
+    /// match-details download.
+    pub fn next_rank_batch(&self) -> Vec<String> {
+        self.slots
+            .iter()
+            .map(|s| &s.roster.puuid)
+            .filter(|p| !self.synced.rank_done(p))
+            .take(RANK_CONCURRENCY)
+            .cloned()
+            .collect()
     }
 
     /// A `Names`, `Sync` or (R155) due `RankRetry` job is waiting: what the
@@ -629,6 +835,25 @@ impl LiveModel {
         !self.names_needed().is_empty()
             || self.next_unsynced().is_some()
             || self.due_rank_retry().is_some()
+    }
+
+    /// R165: records the match end on record (`match_end_ms`) as the last one.
+    /// The poll loop sets `match_end_ms` at the end and clears it when the next
+    /// match starts; this copy is kept for `AppState::match_end_asks`, so a
+    /// match Riot publishes after the next one has begun still raises its
+    /// asks. Called wherever the model is locked for the worker or a publish,
+    /// which is always between the end and the next match.
+    pub fn observe_match_end(&mut self) {
+        if let (Some(end), Some(me)) = (self.match_end_ms, self.self_puuid.clone()) {
+            self.last_match_end = Some((me, end));
+        }
+    }
+
+    /// R165: the last match end of the current account, whether or not a new
+    /// match has cleared `match_end_ms` since.
+    pub fn last_match_end_ms(&self) -> Option<i64> {
+        let (owner, end) = self.last_match_end.as_ref()?;
+        (self.self_puuid.as_deref() == Some(owner.as_str())).then_some(*end)
     }
 
     /// Between matches: Lobby or Closed, and the raw presence is not in a
@@ -674,14 +899,25 @@ impl LiveModel {
     /// cleared here, so a job that cannot run cannot make the tick start a
     /// worker again and again.
     pub fn names_wakeup_due(&mut self) -> bool {
-        let Some(until) = self.names_hold_until else {
-            return false;
-        };
-        if self.now() < until {
-            return false;
+        let now = self.now();
+        let mut wake = false;
+        if self.names_hold_until.is_some_and(|until| now >= until) {
+            self.names_hold_until = None;
+            wake |= !self.names_needed().is_empty() || self.fill_ready();
         }
-        self.names_hold_until = None;
-        !self.names_needed().is_empty() || self.fill_ready()
+        // R165: a waiting names retry came due (one-shot like the hold; the
+        // names step that follows arms the next one).
+        if self.names_retry_wake.is_some_and(|at| now >= at) {
+            self.names_retry_wake = None;
+            wake |= !self.names_needed().is_empty();
+        }
+        wake
+    }
+
+    /// R165: drops the armed names-retry wake-up (the stage reset forgets the
+    /// failure counts with `names_attempted.clear()`, so no retry is waiting).
+    pub fn clear_names_retry_wake(&mut self) {
+        self.names_retry_wake = None;
     }
 
     /// R160: forgets a names deferral. A new session (a reconnect, another
@@ -689,6 +925,7 @@ impl LiveModel {
     /// refused now.
     pub fn reset_names_hold(&mut self) {
         self.names_hold_until = None;
+        self.names_retry_wake = None;
     }
 
     /// The clock the rank retries are timed by.
@@ -760,6 +997,54 @@ impl LiveModel {
         }
         log::info!(
             "rank sync for {} waits for the mmr hold ({}s more); no retry used",
+            short(puuid),
+            left.as_secs_f64().ceil() as u64
+        );
+    }
+
+    /// R165: the matches phase of a first-pass sync of `puuid` was only partly
+    /// done — its history call or a match-details download failed (anything
+    /// but a gone client). It joins the R155 schedule like a failed rank part:
+    /// the first retry is due 20 s from now and syncs the player again (only
+    /// the missing ids are fetched). A round already pending for the player
+    /// (their rank part failed or was held in the same pass) is left as it is.
+    /// Same guards as [`Self::note_rank_sync`].
+    pub fn note_partial_sync(&mut self, puuid: &str) {
+        if self.stage == Stage::Closed || !self.shows(puuid) {
+            self.rank_retries.forget(puuid);
+            return;
+        }
+        if self.rank_retries.retries_done(puuid).is_some() {
+            return;
+        }
+        let now = self.now();
+        self.rank_retries.first_pass(puuid, true, now);
+        log::info!(
+            "sync for {} was partial; retry 1 of {} in {}s",
+            short(puuid),
+            RANK_RETRY_DELAYS.len(),
+            RANK_RETRY_DELAYS[0].as_secs()
+        );
+    }
+
+    /// R160/R165: the matches phase of a first-pass sync of `puuid` found the
+    /// `other` request family on hold (`left` of it to go) and sent nothing:
+    /// not a failure, so no retry is used. The player is synced again once the
+    /// hold is over, unless a round is already pending for them (a failed or
+    /// held rank part of the same pass): that round's sync covers it. Same
+    /// guards as [`Self::note_rank_sync`].
+    pub fn note_matches_held(&mut self, puuid: &str, left: Duration) {
+        if self.stage == Stage::Closed || !self.shows(puuid) {
+            self.rank_retries.forget(puuid);
+            return;
+        }
+        if self.rank_retries.retries_done(puuid).is_some() {
+            return;
+        }
+        let now = self.now();
+        self.rank_retries.first_pass_held(puuid, left, now);
+        log::info!(
+            "sync for {} waits for the request hold ({}s more); no retry used",
             short(puuid),
             left.as_secs_f64().ceil() as u64
         );
@@ -910,9 +1195,16 @@ impl LiveModel {
         if self.worker_id != Some(id) {
             return None;
         }
+        self.observe_match_end();
         let names = self.names_needed();
         if !names.is_empty() {
             return Some(Job::Names(names));
+        }
+        // R165: the rank of the whole roster first (rank, then publish), the
+        // matches phases after.
+        let batch = self.next_rank_batch();
+        if !batch.is_empty() {
+            return Some(Job::Rank(batch));
         }
         if let Some(puuid) = self.next_unsynced() {
             return Some(Job::Sync(puuid));
@@ -1156,6 +1448,11 @@ pub struct AppState {
     /// the live sync, a Details sync, Match Details and the backfill can all
     /// want the same match at once, and it is downloaded once.
     details_inflight: Mutex<HashMap<String, tokio::sync::watch::Sender<()>>>,
+    /// R165: match ids Riot answered 404 for (`sync::fetch_missing_details_full`
+    /// records them). Read only by the waiter recheck there: a task that waited
+    /// on another's download of such an id does not count it as missing.
+    /// Bounded; it does not stop a later sync from asking for the id again.
+    details_404: Mutex<HashSet<String>>,
     /// The Match Details the UI has open, if any (R150): replaced by the next
     /// `match_details` call, dropped when the Player Details is opened again
     /// (Back from the match). The UI has no signal for leaving the match
@@ -1220,6 +1517,7 @@ impl AppState {
             skins_inflight: Mutex::new(HashMap::new()),
             open_details: Mutex::new(None),
             details_inflight: Mutex::new(HashMap::new()),
+            details_404: Mutex::new(HashSet::new()),
             open_match: Mutex::new(None),
             details_gate: Mutex::new(OpenGate::default()),
             match_gate: Mutex::new(OpenGate::default()),
@@ -1553,6 +1851,7 @@ impl AppState {
     pub fn publish(&self) {
         let acts = self.acts();
         let mut live = lock(&self.live);
+        live.observe_match_end();
         if live.map_id.is_none() {
             if let Some(path) = live.map_path.clone() {
                 live.map_id = self.map_uuid(&path);
@@ -1680,6 +1979,20 @@ impl AppState {
         self.worker_kick.store(true, Ordering::Release);
     }
 
+    /// R165: Riot no longer has this match (404): remembered for the session.
+    pub fn note_details_404(&self, match_id: &str) {
+        let mut set = lock(&self.details_404);
+        if set.len() >= 512 {
+            set.clear();
+        }
+        set.insert(match_id.to_string());
+    }
+
+    /// R165: this match answered 404 earlier ([`Self::note_details_404`]).
+    pub fn details_404(&self, match_id: &str) -> bool {
+        lock(&self.details_404).contains(match_id)
+    }
+
     /// `true` once after each [`Self::queue_name_fill`]: the poll loop calls
     /// it every tick and, when it is set, makes sure a worker runs.
     pub fn take_worker_kick(&self) -> bool {
@@ -1695,8 +2008,10 @@ impl AppState {
     /// the next match). Who may actually be asked is decided later, when the
     /// fill runs (`LiveModel::take_fill`).
     pub fn match_end_asks(&self, m: &Match, players: &[MatchPlayer]) -> Vec<NameAsk> {
-        let live = lock(&self.live);
-        let (Some(me), Some(end)) = (live.self_puuid.as_deref(), live.match_end_ms) else {
+        let mut live = lock(&self.live);
+        live.observe_match_end();
+        // R165: the last end, which a new match does not clear.
+        let (Some(me), Some(end)) = (live.self_puuid.as_deref(), live.last_match_end_ms()) else {
             return Vec::new();
         };
         if m.start_ms > end
@@ -2456,6 +2771,8 @@ mod tests {
             .try_start_worker()
             .expect("work pending -> worker claimed");
         assert!(m.try_start_worker().is_none(), "one worker at a time");
+        assert_eq!(m.next_job(id), Some(Job::Rank(vec!["me".into()])));
+        m.synced.mark_ranked("me");
         assert_eq!(m.next_job(id), Some(Job::Sync("me".into())));
         m.synced.insert("me".into());
 
@@ -2477,6 +2794,12 @@ mod tests {
         m.names_attempted.insert("late".into());
         m.slots.push(slot("later", false));
         m.names_attempted.insert("later".into());
+        assert_eq!(
+            m.next_job(id2),
+            Some(Job::Rank(vec!["late".into(), "later".into()]))
+        );
+        m.synced.mark_ranked("late");
+        m.synced.mark_ranked("later");
         assert_eq!(m.next_job(id2), Some(Job::Sync("late".into())));
         m.synced.insert("late".into());
         assert_eq!(m.next_job(id2), Some(Job::Sync("later".into())));
@@ -2508,6 +2831,12 @@ mod tests {
         assert!(m.live_job_pending());
         assert!(matches!(m.next_job(id), Some(Job::Names(_))));
         m.names_attempted.extend(["p1".to_string()]);
+        assert_eq!(
+            m.next_job(id),
+            Some(Job::Rank(vec!["me".into(), "p1".into()]))
+        );
+        m.synced.mark_ranked("me");
+        m.synced.mark_ranked("p1");
         assert_eq!(m.next_job(id), Some(Job::Sync("me".into())));
         m.synced.insert("me".into());
         assert_eq!(m.next_job(id), Some(Job::Sync("p1".into())));
@@ -2521,6 +2850,8 @@ mod tests {
         m.slots.push(slot("late", false));
         m.names_attempted.insert("late".into());
         assert!(m.live_job_pending());
+        assert_eq!(m.next_job(id), Some(Job::Rank(vec!["late".into()])));
+        m.synced.mark_ranked("late");
         assert_eq!(m.next_job(id), Some(Job::Sync("late".into())));
         m.synced.insert("late".into());
         assert_eq!(m.next_job(id), Some(Job::Backfill));
@@ -2726,6 +3057,8 @@ mod tests {
         let id = m.try_start_worker().expect("work pending");
 
         // p2 was never synced: a first pass goes before any retry.
+        assert_eq!(m.next_job(id), Some(Job::Rank(vec!["p2".into()])));
+        m.synced.mark_ranked("p2");
         assert_eq!(m.next_job(id), Some(Job::Sync("p2".into())));
         m.synced.insert("p2".into());
         // The due retry goes before the names fill and the backfill.
@@ -2972,6 +3305,12 @@ mod tests {
 
         assert!(matches!(m.next_job(id), Some(Job::Names(_))));
         m.names_attempted.insert("p1".into());
+        assert_eq!(
+            m.next_job(id),
+            Some(Job::Rank(vec!["me".into(), "p1".into()]))
+        );
+        m.synced.mark_ranked("me");
+        m.synced.mark_ranked("p1");
         assert_eq!(m.next_job(id), Some(Job::Sync("me".into())));
         m.synced.insert("me".into());
         assert_eq!(m.next_job(id), Some(Job::Sync("p1".into())));
@@ -2989,7 +3328,7 @@ mod tests {
         assert_eq!(m.next_job(id), Some(Job::FillNames));
         m.slots.push(slot("late", false));
         m.names_attempted.insert("late".into());
-        assert_eq!(m.next_job(id), Some(Job::Sync("late".into())));
+        assert_eq!(m.next_job(id), Some(Job::Rank(vec!["late".into()])));
     }
 
     #[test]
@@ -3453,5 +3792,359 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -- R165: rank first, retries of names and partial syncs ---------------
+
+    /// A model whose players are all named (names are not what is under test).
+    fn ranked_model(puuids: &[&str]) -> LiveModel {
+        let mut m = model(puuids.iter().map(|p| slot(p, false)).collect());
+        for p in puuids {
+            m.names_attempted.insert(p.to_string());
+        }
+        m
+    }
+
+    #[test]
+    fn the_rank_phase_of_the_whole_roster_comes_before_any_matches_phase() {
+        let mut m = ranked_model(&["me", "a1", "a2", "e1", "e2"]);
+        let id = m.try_start_worker().expect("work");
+        // Display order, three at a time (RANK_CONCURRENCY).
+        assert_eq!(
+            m.next_job(id),
+            Some(Job::Rank(vec!["me".into(), "a1".into(), "a2".into()]))
+        );
+        // Not finished yet (the worker is mid-job): the same batch again.
+        assert_eq!(
+            m.next_job(id),
+            Some(Job::Rank(vec!["me".into(), "a1".into(), "a2".into()]))
+        );
+        for p in ["me", "a1", "a2"] {
+            m.synced.mark_ranked(p);
+        }
+        assert_eq!(
+            m.next_job(id),
+            Some(Job::Rank(vec!["e1".into(), "e2".into()]))
+        );
+        m.synced.mark_ranked("e1");
+        m.synced.mark_ranked("e2");
+        // Only now the matches phases, in display order.
+        assert_eq!(m.next_job(id), Some(Job::Sync("me".into())));
+        m.synced.insert("me".into());
+        assert_eq!(m.next_job(id), Some(Job::Sync("a1".into())));
+    }
+
+    #[test]
+    fn a_fully_synced_player_needs_no_rank_phase_and_a_reset_brings_it_back() {
+        let mut m = ranked_model(&["me", "p"]);
+        m.synced.insert("me".into());
+        assert!(m.synced.rank_done("me"), "a full sync includes the rank");
+        assert_eq!(m.next_rank_batch(), vec!["p".to_string()]);
+        // A later joiner goes through the rank phase before its matches.
+        m.synced.mark_ranked("p");
+        m.slots.push(slot("late", false));
+        m.names_attempted.insert("late".into());
+        assert_eq!(m.next_rank_batch(), vec!["late".to_string()]);
+        // A match end re-syncs the party (`synced.remove`): both phases again.
+        m.synced.remove("me");
+        assert!(!m.synced.rank_done("me"));
+        assert_eq!(
+            m.next_rank_batch(),
+            vec!["me".to_string(), "late".to_string()]
+        );
+        // A reset (Menus/Closed, account switch) forgets everything.
+        m.synced.insert("p".into());
+        m.synced.mark_ranked("me");
+        m.synced.clear();
+        assert!(!m.synced.rank_done("p") && !m.synced.rank_done("me"));
+        assert!(!m.synced.contains("p"));
+    }
+
+    #[test]
+    fn names_come_before_the_rank_phase() {
+        let mut m = model(vec![slot("me", false), slot("a", false)]);
+        m.names_attempted.insert("me".into());
+        let id = m.try_start_worker().expect("work");
+        assert!(matches!(m.next_job(id), Some(Job::Names(_))));
+    }
+
+    #[test]
+    fn a_card_after_the_rank_phase_has_its_rank_fields_settled_and_nothing_else() {
+        let mut m = model(vec![slot("p1", false)]);
+        m.names_attempted.insert("p1".into());
+        let card = &m.build(&[], 0, &|_| None).players[0];
+        assert!(card.rank.is_loading() && card.peak.is_loading());
+        // The rank phase ran (here: MMR gave nothing): the MMR fields are
+        // `—` now; what the matches phase brings is still loading.
+        m.synced.mark_ranked("p1");
+        let card = &m.build(&[], 0, &|_| None).players[0];
+        assert_eq!(card.rank, Field::Missing);
+        assert_eq!(card.peak, Field::Missing);
+        assert_eq!(card.act_winrate, Field::Missing);
+        assert!(card.last5.is_loading(), "the matches are still coming");
+        assert!(card.kd.is_loading());
+        // The matches phase ended: everything has settled.
+        m.synced.insert("p1".into());
+        let card = &m.build(&[], 0, &|_| None).players[0];
+        assert_eq!(card.last5, Field::Missing);
+        assert_eq!(card.kd, Field::Missing);
+    }
+
+    #[test]
+    fn a_partial_first_pass_sync_is_retried_like_a_failed_rank() {
+        let mut m = settled_lobby(&["me"]);
+        m.note_partial_sync("me");
+        assert!(!m.has_pending_work(), "waiting is not work");
+        m.advance_clock(19 * S);
+        assert_eq!(m.due_rank_retry(), None);
+        m.advance_clock(S);
+        let id = m.try_start_worker().expect("due");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+        // The retry is partial again: the same bounded schedule, 60 s later.
+        m.note_rank_sync("me", true, true);
+        assert_eq!(m.next_job(id), None);
+        m.advance_clock(60 * S);
+        let id = m.try_start_worker().expect("the second retry");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+        m.note_rank_sync("me", true, true);
+        assert_eq!(m.next_job(id), None);
+        m.advance_clock(100_000 * S);
+        assert!(m.try_start_worker().is_none(), "no third retry");
+    }
+
+    #[test]
+    fn a_partial_sync_does_not_move_a_round_a_failed_rank_already_started() {
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_sync("me", true, false);
+        m.advance_clock(15 * S);
+        // The matches phase of the same pass was partial too: the round
+        // started 15 s ago stays (due in 5 s), it is not restarted.
+        m.note_partial_sync("me");
+        m.advance_clock(5 * S);
+        assert_eq!(m.due_rank_retry().as_deref(), Some("me"));
+        // Likewise a hold's round.
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_held("me", 10 * S, false);
+        m.note_partial_sync("me");
+        m.advance_clock(11 * S);
+        assert_eq!(m.due_rank_retry(), None, "1.5 s slack of the hold's round");
+        m.advance_clock(S);
+        assert_eq!(m.due_rank_retry().as_deref(), Some("me"));
+    }
+
+    #[test]
+    fn a_partial_sync_off_the_roster_or_while_closed_schedules_nothing() {
+        let mut m = settled_lobby(&["me"]);
+        m.note_partial_sync("ghost");
+        m.stage = Stage::Closed;
+        m.note_partial_sync("me");
+        m.stage = Stage::Menus;
+        m.advance_clock(100 * S);
+        assert_eq!(m.due_rank_retry(), None);
+    }
+
+    #[test]
+    fn a_failed_names_lookup_is_retried_after_a_delay_and_three_tries_at_most() {
+        let mut m = model(vec![slot("me", false), slot("a", false), slot("b", false)]);
+        m.synced
+            .extend(["me".to_string(), "a".to_string(), "b".to_string()]);
+        m.names_attempted.insert("me".into());
+        assert_eq!(m.names_needed().len(), 2);
+        // Try 1 failed: not attempted, but not asked again straight away.
+        let wait = m.note_names_failed(&["a".to_string(), "b".to_string()]);
+        assert_eq!(wait, Some(NAMES_RETRY_DELAYS[0]));
+        assert!(
+            !m.names_attempted.contains("a"),
+            "an error is not an answer"
+        );
+        assert!(m.names_needed().is_empty(), "not before the delay");
+        m.advance_clock(NAMES_RETRY_DELAYS[0] - Duration::from_millis(1));
+        assert!(m.names_needed().is_empty());
+        m.advance_clock(Duration::from_millis(1));
+        assert_eq!(
+            m.names_needed(),
+            vec![("a".to_string(), false), ("b".to_string(), false)]
+        );
+        // Try 2 failed.
+        assert_eq!(
+            m.note_names_failed(&["a".to_string(), "b".to_string()]),
+            Some(NAMES_RETRY_DELAYS[1])
+        );
+        m.advance_clock(NAMES_RETRY_DELAYS[1]);
+        assert_eq!(m.names_needed().len(), 2);
+        // Try 3 failed: the last. They count as attempted from here (the
+        // card shows `—`), and nothing is asked again this stage.
+        assert_eq!(
+            m.note_names_failed(&["a".to_string(), "b".to_string()]),
+            None
+        );
+        assert!(m.names_attempted.contains("a") && m.names_attempted.contains("b"));
+        m.advance_clock(1_000 * S);
+        assert!(m.names_needed().is_empty());
+    }
+
+    #[test]
+    fn an_answered_names_lookup_ends_the_tries_and_a_stage_reset_starts_them_over() {
+        let mut m = model(vec![slot("me", false), slot("a", false)]);
+        m.note_names_failed(&["a".to_string()]);
+        m.names_attempted.insert("a".into()); // answered on the retry
+        m.advance_clock(1_000 * S);
+        assert!(m.names_needed().is_empty());
+        // A reset forgets the tries too: try 1 of the next stage.
+        m.names_attempted.clear();
+        assert_eq!(
+            m.note_names_failed(&["a".to_string()]),
+            Some(NAMES_RETRY_DELAYS[0]),
+            "a fresh stage: the first failure again"
+        );
+        m.names_attempted.clear();
+        m.note_names_failed(&["a".to_string()]);
+        m.note_names_failed(&["a".to_string()]);
+        m.names_attempted.clear();
+        assert_eq!(
+            m.note_names_failed(&["a".to_string()]),
+            Some(NAMES_RETRY_DELAYS[0]),
+            "tries do not survive a reset"
+        );
+    }
+
+    #[test]
+    fn a_name_waiting_for_its_retry_still_settles_its_card_once_synced_and_fills_in_later() {
+        let mut m = model(vec![slot("a", false)]);
+        m.note_names_failed(&["a".to_string()]);
+        let card = &m.build(&[], 0, &|_| None).players[0];
+        assert!(card.name.is_loading(), "retry pending, nothing synced yet");
+        m.synced.insert("a".into());
+        let card = &m.build(&[], 0, &|_| None).players[0];
+        assert_eq!(card.name, Field::Missing, "never a stuck skeleton");
+        // The retry answers: the name is there.
+        m.known_names
+            .insert("a".into(), ("Name".into(), "TAG".into()));
+        let card = &m.build(&[], 0, &|_| None).players[0];
+        assert!(matches!(card.name, Field::Value(_)));
+    }
+
+    #[test]
+    fn the_last_match_end_outlives_the_match_that_clears_the_current_one() {
+        let mut m = LiveModel::new(Some("me".into()));
+        m.match_end_ms = Some(5_000);
+        m.observe_match_end();
+        // The next match starts: the poll loop clears the live marker.
+        m.match_end_ms = None;
+        m.observe_match_end();
+        assert_eq!(m.last_match_end_ms(), Some(5_000));
+        // A newer end replaces it.
+        m.match_end_ms = Some(9_000);
+        m.observe_match_end();
+        assert_eq!(m.last_match_end_ms(), Some(9_000));
+        // Another account's end is not this account's.
+        m.self_puuid = Some("other".into());
+        assert_eq!(m.last_match_end_ms(), None);
+    }
+
+    #[test]
+    fn a_matches_phase_held_by_the_other_hold_waits_for_it_and_uses_no_retry() {
+        // R160 through R165: nothing was sent, so nothing is spent.
+        let mut m = settled_lobby(&["me"]);
+        m.note_matches_held("me", 10 * S);
+        assert!(!m.has_pending_work(), "waiting is not work");
+        m.advance_clock(11 * S);
+        assert_eq!(m.due_rank_retry(), None, "1.5 s of slack after the hold");
+        m.advance_clock(S);
+        assert_eq!(m.due_rank_retry().as_deref(), Some("me"));
+        let id = m.try_start_worker().expect("due");
+        assert_eq!(m.next_job(id), Some(Job::RankRetry("me".into())));
+        assert_eq!(m.rank_retries.retries_done("me"), Some(1));
+        // Held again on the retry: the turn is given back.
+        m.note_rank_held("me", 5 * S, true);
+        assert_eq!(m.rank_retries.retries_done("me"), Some(0));
+    }
+
+    #[test]
+    fn a_matches_hold_leaves_a_round_already_pending_alone_and_ignores_strangers() {
+        let mut m = settled_lobby(&["me"]);
+        m.note_rank_sync("me", true, false);
+        m.advance_clock(15 * S);
+        m.note_matches_held("me", 100 * S);
+        m.advance_clock(5 * S);
+        assert_eq!(m.due_rank_retry().as_deref(), Some("me"), "20 s round kept");
+        let mut m = settled_lobby(&["me"]);
+        m.note_matches_held("ghost", S);
+        m.stage = Stage::Closed;
+        m.note_matches_held("me", S);
+        m.stage = Stage::Menus;
+        m.advance_clock(100 * S);
+        assert_eq!(m.due_rank_retry(), None);
+    }
+
+    #[test]
+    fn staggered_names_retries_are_each_woken_and_nothing_else_is_blocked() {
+        // R165 fix rounds: `a` is on its second failure (due +6 s) while `c`,
+        // who joined later, is on its first (due +2 s). After every names
+        // step the wake-up goes to the earliest still-waiting retry of a
+        // player who still needs a name, so the tick wakes a worker for `c`
+        // and then again for `a`. The wake-up blocks nothing.
+        let mut m = model(vec![slot("me", false), slot("a", false)]);
+        m.synced.extend(["me".to_string(), "a".to_string()]);
+        m.names_attempted.insert("me".into());
+        assert_eq!(m.note_names_failed(&["a".to_string()]), Some(2 * S));
+        m.arm_names_retry_wake();
+        assert!(!m.names_wakeup_due());
+        m.advance_clock(2 * S);
+        assert!(m.names_wakeup_due(), "a is due");
+        m.slots.push(slot("c", false));
+        m.synced.insert("c".into());
+        m.note_names_failed(&["a".to_string(), "c".to_string()]);
+        m.arm_names_retry_wake();
+        assert!(!m.names_wakeup_due(), "c's first failure: +2 s");
+        m.advance_clock(2 * S);
+        assert!(m.names_wakeup_due(), "c is due");
+        assert_eq!(m.names_needed(), vec![("c".to_string(), false)]);
+        // c answers; a is still waiting and gets its own wake-up.
+        m.names_attempted.insert("c".into());
+        m.arm_names_retry_wake();
+        m.advance_clock(3 * S);
+        assert!(!m.names_wakeup_due());
+        m.advance_clock(S);
+        assert!(m.names_wakeup_due(), "a is due");
+        assert_eq!(m.names_needed(), vec![("a".to_string(), false)]);
+        // Nothing is waiting any more: nothing to arm.
+        m.names_attempted.insert("a".into());
+        m.arm_names_retry_wake();
+        m.advance_clock(1_000 * S);
+        assert!(!m.names_wakeup_due());
+    }
+
+    #[test]
+    fn a_player_who_joins_while_a_retry_waits_is_needed_at_once() {
+        let mut m = model(vec![slot("me", false), slot("a", false)]);
+        m.synced.extend(["me".to_string(), "a".to_string()]);
+        m.names_attempted.insert("me".into());
+        m.note_names_failed(&["a".to_string()]);
+        m.arm_names_retry_wake();
+        m.slots.push(slot("d", false));
+        assert_eq!(
+            m.names_needed(),
+            vec![("d".to_string(), false)],
+            "d is asked now, a waits for its retry"
+        );
+        // The older retry still wakes on time.
+        m.names_attempted.insert("d".into());
+        m.arm_names_retry_wake();
+        m.advance_clock(2 * S);
+        assert!(m.names_wakeup_due());
+        assert_eq!(m.names_needed(), vec![("a".to_string(), false)]);
+    }
+
+    #[test]
+    fn the_retry_wake_ignores_players_who_left_or_no_longer_need_a_name() {
+        let mut m = model(vec![slot("me", false), slot("a", false), slot("b", false)]);
+        m.names_attempted.insert("me".into());
+        m.note_names_failed(&["a".to_string(), "b".to_string()]);
+        m.slots.retain(|s| s.roster.puuid != "a");
+        m.known_names.insert("b".into(), ("B".into(), "T".into()));
+        m.arm_names_retry_wake();
+        m.advance_clock(100 * S);
+        assert!(!m.names_wakeup_due(), "nobody left who needs one");
     }
 }

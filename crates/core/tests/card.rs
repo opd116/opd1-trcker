@@ -293,6 +293,39 @@ fn card_resolves_rank_peak_prev_act_tier_and_winrate_from_mmr() {
 }
 
 #[test]
+fn card_peak_is_never_below_the_current_rank_r164() {
+    use opd1_core::stats::SeasonInfo;
+    use std::collections::HashMap;
+
+    // Promoted to tier 15 this act, with every win recorded at tier 14.
+    let mut seasons = HashMap::new();
+    seasons.insert(
+        CURRENT_ACT_ID.to_string(),
+        SeasonInfo {
+            competitive_tier: 15,
+            wins_by_tier: HashMap::from([(14, 4)]),
+            number_of_wins: 4,
+            number_of_games: 6,
+        },
+    );
+    let mut input = base_input(identity());
+    input.mmr = Field::Value(MmrInput {
+        seasons,
+        current_rank: Some(CurrentRank { tier: 15, rr: 3 }),
+    });
+
+    let card = build_card(input);
+
+    match card.peak {
+        Field::Value(peak) => {
+            assert_eq!(peak.tier, 15);
+            assert_eq!(peak.since_act_end_ms, None, "the current act: This Act");
+        }
+        other => panic!("expected peak to be present, got {other:?}"),
+    }
+}
+
+#[test]
 fn card_mmr_loading_propagates_to_dependent_fields() {
     let mut input = base_input(identity());
     input.mmr = Field::Loading;

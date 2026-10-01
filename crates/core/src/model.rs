@@ -1018,7 +1018,9 @@ fn build_mmr_fields(
 
             let prev_act_tier = stats::prev_act_tier(&mmr_input.seasons, ordered_acts).into();
 
-            let peak = match stats::peak(&mmr_input.seasons, ordered_acts) {
+            // R164: never below the rank the card shows as Current.
+            let current = mmr_input.current_rank.map(|cr| (cr.tier, current_act_id));
+            let peak = match stats::peak(&mmr_input.seasons, ordered_acts, current) {
                 Some(p) => match ordered_acts.iter().find(|a| a.id == p.season_id) {
                     Some(act) => Field::Value(PeakInfo {
                         tier: p.tier,

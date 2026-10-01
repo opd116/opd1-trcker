@@ -55,19 +55,19 @@ Connected     ── local presence every 2s (5s while VALORANT is closed)
                  sessionLoopState / queueId change → plan_transition()
                     MENUS   → party roster (re-fetched when partyId / partySize change)
                     PREGAME → ally team   (re-polled every 3s only to pick up agent selections, R39)
-                    INGAME  → both teams + loadouts
+                    INGAME  → both teams first, then loadouts (R164)
                     PREGAME / INGAME in a free-for-all queue → stays MENUS (R41)
                     INGAME → MENUS = match end: back to Lobby + post-match follow-up
               ── ClientGone / 5 presence errors / VALORANT relaunched under a game-less session ──► Disconnected
 ```
 
-1. **Poll stage machine (`poll.rs`).** With the lockfile missing, the only idle work is one file check every 5s. A connected session reads the local presence and derives the stage. A stage change fetches the roster (`pregame`, `core-game`, `parties`). A failed roster fetch never leaves the previous stage's players on screen: the new stage is emitted at once with only the user's own card, and the fetch retries with back-off.
+1. **Poll stage machine (`poll.rs`).** With the lockfile missing, the only idle work is one file check every 5s. A connected session reads the local presence and derives the stage. A stage change fetches the roster (`pregame`, `core-game`, `parties`). A failed roster fetch never leaves the previous stage's players on screen: the new stage is emitted at once with only the user's own card, and the fetch retries every 2s for the first five retries, then with back-off 3s, 6s, 12s, 24s, 30s (R164). Presence can say PREGAME or INGAME a moment before the player endpoint answers. In Game, the roster is applied and the worker started before the core-game loadouts are asked for; a slow or failed loadouts call never delays or fails the roster.
 2. **Cached-first cards.** `apply_roster` builds every card from the DB first, so the screen fills immediately. Fields still loading are absent on the wire (the UI draws a skeleton); missing values are `null` (the UI shows `—`) (R23).
 3. **Background worker (`sync::run_worker`).** It walks the roster in order (self, party, allies, enemies), syncs one player at a time (see below), and re-publishes after each player. Its job order, decided under the lock in `LiveModel::next_job`, is: names for the live roster, the first-pass syncs, a due rank retry (R155), the names fill (R150), the own-history backfill. It never waits for a retry that is not due yet.
 4. **`AppState::publish` → `emit("live")`.** It rebuilds `LiveState` and emits `"live"` only when the serialized bytes differ from the last emission. Build, compare and emit happen under one lock, so events leave in the order the states were built, and an older snapshot can never land after a newer one.
 5. **`"details"` event.** `player_details` returns what is cached at once (card, recent matches, top teammates, loadout, encounters). It then syncs that player in the background and emits `"details"` if it found more.
 6. **`"match"` event (R150).** `match_details` returns the stored scoreboard at once and records it as the open match (`AppState::open_match`). When the names fill stores names, `match_details::refresh_open` rebuilds that scoreboard from the DB and emits `"match"` (a `MatchDetailsView`, the same shape the command returns) only if the view changed. The UI's Match page calls `close_match` when it is left, and Rust then forgets the open match, so nothing is rebuilt or emitted for a page nobody sees. `player_details` clears it too (the UI reaches Player Details from a match only by going Back).
-7. **Post-match.** When a match ends, follow-up checks at +30s and +90s look at `competitiveupdates` (not the match list) so the rank and RR refresh in the Lobby (R48). The same match end arms the names fill (see below).
+7. **Post-match.** When a match ends, follow-up checks at about +10s, +20s, +40s, +80s and +160s (each one DB lookup plus the re-sync, stopping at the first success, R164) look at `competitiveupdates` (not the match list) so the rank and RR refresh in the Lobby (R48). The same match end arms the names fill (see below).
 
 ## Commands
 

@@ -35,6 +35,9 @@ export function applyLive(s: LiveState | null): void {
   if (s) {
     onStage(prevStage, s.stage);
     prevStage = s.stage;
+    // R163 (M1): a Details or Match page that settled empty gets its one retry on the next live event.
+    openDetails.retrySettled();
+    openMatch.retrySettled();
   } else {
     prevStage = null;
   }
@@ -58,14 +61,24 @@ export async function startFeeds(): Promise<void> {
   const failed = (what: string) => (err: unknown) => console.error(`${what} failed`, err);
   // Not awaited: while the asset tables are unavailable it keeps retrying (see loadMeta), and the other feeds
   // must not wait for it. Only the first failure is logged, so an offline session doesn't repeat itself.
+  // R163: Rust also pushes a `meta` event whenever the tables first load or are refreshed (a table that loaded by
+  // another route, a patch's new ids); it replaces the store, and the retries stop once one arrived.
+  let metaPushed = false;
   void loadMeta(
     tauriBridge,
     (m) => meta.set(m),
     (err, attempt) => {
       if (attempt === 0) failed("meta()")(err);
     },
+    () => metaPushed,
   );
   await Promise.all([
+    tauriBridge
+      .listen<Meta>("meta", (e) => {
+        metaPushed = true;
+        meta.set(e.payload);
+      })
+      .catch(failed("meta listener")),
     startLive(tauriBridge, applyLive).catch(failed("live feed")),
     tauriBridge
       .listen<PlayerDetails>("details", (e) => openDetails.event(e.payload))

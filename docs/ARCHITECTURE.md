@@ -29,7 +29,7 @@ flowchart LR
   T --> C
   C --> DB
   R --> IMG
-  T -->|emit live / details / match| UI
+  T -->|emit live / details / match / meta| UI
   UI -->|invoke commands, img://| T
 ```
 
@@ -66,8 +66,10 @@ Connected     ── local presence every 2s (5s while VALORANT is closed)
 3. **Background worker (`sync::run_worker`).** It walks the roster in order (self, party, allies, enemies), syncs one player at a time (see below), and re-publishes after each player. Its job order, decided under the lock in `LiveModel::next_job`, is: names for the live roster, the first-pass syncs, a due rank retry (R155), the names fill (R150), the own-history backfill. It never waits for a retry that is not due yet.
 4. **`AppState::publish` → `emit("live")`.** It rebuilds `LiveState` and emits `"live"` only when the serialized bytes differ from the last emission. Build, compare and emit happen under one lock, so events leave in the order the states were built, and an older snapshot can never land after a newer one.
 5. **`"details"` event.** `player_details` returns what is cached at once (card, recent matches, top teammates, loadout, encounters). It then syncs that player in the background and emits `"details"` if it found more.
-6. **`"match"` event (R150).** `match_details` returns the stored scoreboard at once and records it as the open match (`AppState::open_match`). When the names fill stores names, `match_details::refresh_open` rebuilds that scoreboard from the DB and emits `"match"` (a `MatchDetailsView`, the same shape the command returns) only if the view changed. The UI's Match page calls `close_match` when it is left, and Rust then forgets the open match, so nothing is rebuilt or emitted for a page nobody sees. `player_details` clears it too (the UI reaches Player Details from a match only by going Back).
-7. **Post-match.** When a match ends, follow-up checks at about +10s, +20s, +40s, +80s and +160s (each one DB lookup plus the re-sync, stopping at the first success, R164) look at `competitiveupdates` (not the match list) so the rank and RR refresh in the Lobby (R48). The same match end arms the names fill (see below).
+6. **`"match"` event (R150).** `match_details` returns the stored scoreboard at once and records it as the open match (`AppState::open_match`). When the names fill stores names, `match_details::refresh_open` rebuilds that scoreboard from the DB and emits `"match"` (a `MatchDetailsView`, the same shape the command returns) only if the view changed. The UI's Match page calls `close_match(matchId)` when it is left, and Rust then forgets the open match, so nothing is rebuilt or emitted for a page nobody sees. `player_details` clears it too (the UI reaches Player Details from a match only by going Back).
+7. **Open-page gates (R163).** `player_details` and `match_details` take a ticket (`AppState::begin_open_details` / `begin_open_match`) before their build and set the open page only if it is still the latest ticket (`set_open_details` / `set_open_match`, checked under the gate lock). A keyed close voids the tickets of its page, so a build that ends after Back, or after a newer open, never re-opens or overwrites a page.
+8. **`"meta"` event (R163).** `AppState::ensure_tables` emits `"meta"` (the same `Meta` the `meta` command returns) when the asset tables first load and whenever they were downloaded again, not on a plain version re-check. The UI replaces its names and colours on it, so a table that loaded by another route, or a patch's new ids, reach it without waiting for the UI's own retry.
+9. **Post-match.** When a match ends, follow-up checks at about +10s, +20s, +40s, +80s and +160s (each one DB lookup plus the re-sync, stopping at the first success, R164) look at `competitiveupdates` (not the match list) so the rank and RR refresh in the Lobby (R48). The same match end arms the names fill (see below).
 
 ## Commands
 
@@ -75,13 +77,13 @@ Registered in `src-tauri/src/lib.rs`, implemented in `commands.rs`:
 
 | Command | Returns |
 |---|---|
-| `meta` | Agents, maps, tiers and acts from valorant-api (names and colours), fetched once per app start |
+| `meta` | Agents, maps, tiers and acts from valorant-api (names and colours), fetched once per app start; Rust also pushes them as a `"meta"` event when they load or are refreshed (R163) |
 | `live_state` | The current `LiveState` (the UI's first snapshot; later ones arrive as `"live"` events) |
 | `player_details` | `PlayerDetails` for one puuid, then a possible `"details"` event |
-| `close_details` | Nothing. The UI left Player Details (Back, or another page): the open Details is forgotten, so no `"details"` event is built for it (R149) |
+| `close_details` | Nothing. The UI left Player Details (Back, or another page): the open Details is forgotten, so no `"details"` event is built for it (R149). Takes the optional `puuid` of the page left (R163): a close for another player than the one open or being opened is ignored, and an open still being built for this one is void |
 | `my_stats` | `Option<MyStats>` for the user's own account and the current act (`null` until the user and the act are known) |
 | `match_details` | `MatchDetailsView` for `(matchId, focusPuuid)`: one match as the Match Details scoreboard (ACS, K/D/A, +/−, ADR, HS%, half scores, each player's rank during the match). Both ids must be uuids. It reads the stored match; a match the DB doesn't have is fetched once from match-details (through the session's throttle), stored like every match, and read again. `Err("unknown match")` when it still isn't there (no session, the fetch failed). Names follow the hidden-name rules below (R74, R93) |
-| `close_match` | Nothing, no arguments. The UI left Match Details: the open match is forgotten, so no `"match"` event is built for it. Idempotent (closing with nothing open does nothing), and a later `match_details` opens the slot again. It stays trivial so it cannot land after a newer `match_details` and close the new match (R150) |
+| `close_match` | Nothing; the optional `matchId` of the page left (R163: a close for another match is ignored, and an open still being built for this one is void). The UI left Match Details: the open match is forgotten, so no `"match"` event is built for it. Idempotent (closing with nothing open does nothing), and a later `match_details` opens the slot again. Keyed, so a late close cannot close a newer `match_details` (R150, R163) |
 | `copy_log` | The last 500 log lines. The UI writes them to the clipboard with `navigator.clipboard` on Ctrl+Shift+L (bound in `App.svelte`, decided by `keyAction` in `ui/src/lib/boot.ts`, only inside the Tauri shell), so there is no clipboard plugin (R30) |
 | `dump_raw` | Writes the redacted raw Riot responses to `debug/` in the app data dir, for fixtures (Ctrl+Shift+D, bound the same way). The dump keeps one body per endpoint, so `match_details.json` is only the last match-details fetched, and `player_loadout.json` is the user's own loadout (R90). Since R158 it also writes `log.txt` (exactly what `copy_log` returns; written even with no session or nothing captured) and, for each endpoint whose last answer was not 2xx, `<key>.error.json` (`{"status", "body"}`) or `<key>.error.txt` (first line `HTTP N`). Error bodies are redacted, cut to 4 KB and have full puuids shortened to 8 characters, and the `*.error.*` files of an earlier dump are removed on each dump so a stale one never blames an endpoint that works now |
 

@@ -8,6 +8,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { retryImg } from "../../lib/imgRetry";
   import { halvesText, whenText, type MatchFrom } from "../../lib/details";
   import { score } from "../../lib/format";
   import { mapName } from "../../lib/meta";
@@ -28,7 +29,7 @@
 
 {#if view}
   <div class="mhead">
-    {#if view.mapId}<img class="mmap" src={assetUrl("mapList", view.mapId)} alt="" />{:else}<div class="mmap"></div>{/if}
+    {#if view.mapId}<img {@attach retryImg} class="mmap" src={assetUrl("mapList", view.mapId)} alt="" />{:else}<div class="mmap"></div>{/if}
     <div class="mtext">
       <span class="mtitle">{#if map === undefined}<Skel w={120} h={18} />{:else}{map ?? "—"}{/if}</span>
       <span class="mwhen">{view.teams.length === 0 ? "—" : whenText(view, from, $now)}</span>

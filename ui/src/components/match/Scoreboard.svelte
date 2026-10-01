@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { retryImg } from "../../lib/imgRetry";
   import { pmText, shortName, teamLabel } from "../../lib/details";
   import { pct0 } from "../../lib/format";
   import { isRankedTier } from "../../lib/meta";
@@ -56,9 +57,9 @@
           {#if p.isFocus && !p.isSelf}<div class="focusbar"></div>{/if}
           {#if p.isSelf}<div class="selfframe"></div>{/if}
           <div class="pcell">
-            {#if p.agentId}<img class="sagent" src={assetUrl("agent", p.agentId)} alt="" />{:else}<div class="sagent"></div>{/if}
+            {#if p.agentId}<img {@attach retryImg} class="sagent" src={assetUrl("agent", p.agentId)} alt="" />{:else}<div class="sagent"></div>{/if}
             {#if isRankedTier(p.tier)}
-              <img class="srank" src={assetUrl("tier", p.tier)} alt="" use:tip={rankTip($meta, p.tier)} />
+              <img {@attach retryImg} class="srank" src={assetUrl("tier", p.tier)} alt="" use:tip={rankTip($meta, p.tier)} />
             {:else}
               <div class="srank"></div>
             {/if}

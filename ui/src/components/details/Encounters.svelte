@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { retryImg } from "../../lib/imgRetry";
   import { rowKeydown, shortName } from "../../lib/details";
   import { dateShort, score } from "../../lib/format";
   import { isRankedTier, mapName, tierLabel } from "../../lib/meta";
@@ -33,8 +34,8 @@
   {@const t = isRankedTier(tier) ? tier : null}
   {@const tname = t === null ? null : tierLabel($meta, t)}
   <div class="ewho">
-    {#if agentId}<img class="eagent" src={assetUrl("agent", agentId)} alt="" />{:else}<div class="eagent"></div>{/if}
-    {#if t !== null}<img class="etier" src={assetUrl("tier", t)} alt="" />{:else}<div class="etier"></div>{/if}
+    {#if agentId}<img {@attach retryImg} class="eagent" src={assetUrl("agent", agentId)} alt="" />{:else}<div class="eagent"></div>{/if}
+    {#if t !== null}<img {@attach retryImg} class="etier" src={assetUrl("tier", t)} alt="" />{:else}<div class="etier"></div>{/if}
     <span class={["tname", t === null && "dash"]}>{#if tname === undefined}<Skel w={60} h={10} />{:else}{tname ?? "—"}{/if}</span>
   </div>
 {/snippet}
@@ -48,7 +49,7 @@
     {@const map = mapName($meta, e.mapId)}
     <div class="erow" role="button" tabindex="0" onclick={() => onopen(e.matchId)} onkeydown={rowKeydown(() => onopen(e.matchId))}>
       <div class="emap" use:tip={encounterMapTip(e, $now)}>
-        {#if e.mapId}<img class="mimg" src={assetUrl("mapList", e.mapId)} alt="" />{:else}<div class="mimg"></div>{/if}
+        {#if e.mapId}<img {@attach retryImg} class="mimg" src={assetUrl("mapList", e.mapId)} alt="" />{:else}<div class="mimg"></div>{/if}
         <div class="mcol">
           <span class="mname">{#if map === undefined}<Skel w={60} h={10} />{:else}{map ?? "—"}{/if}</span>
           <span class="date">{dateShort(e.startMs, $now)}</span>

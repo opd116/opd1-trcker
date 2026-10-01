@@ -9,12 +9,13 @@
      here, and flip the fit-live agent-box test (task 17 review F8; ruled R127). -->
 <script lang="ts">
   import { assetUrl } from "../lib/assets";
+  import { retryImg } from "../lib/imgRetry";
 
   let { agentId }: { agentId: string | null } = $props();
 </script>
 
 {#if agentId}
-  <img class="agent" src={assetUrl("agent", agentId)} alt="" />
+  <img {@attach retryImg} class="agent" src={assetUrl("agent", agentId)} alt="" />
 {:else}
   <div class="agent"></div>
 {/if}

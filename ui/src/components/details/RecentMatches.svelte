@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { retryImg } from "../../lib/imgRetry";
   import { ago, kd2, pct0, score } from "../../lib/format";
   import { rowKeydown } from "../../lib/details";
   import { isRankedTier, mapName } from "../../lib/meta";
@@ -51,7 +52,7 @@
       {@const map = mapName($meta, m.mapId)}
       <div class="rrow" role="button" tabindex="0" onclick={() => onopen(m.matchId)} onkeydown={rowKeydown(() => onopen(m.matchId))}>
         <div class="rmap">
-          {#if m.mapId}<img class="mimg" src={assetUrl("mapList", m.mapId)} alt="" />{:else}<div class="mimg mbox"></div>{/if}
+          {#if m.mapId}<img {@attach retryImg} class="mimg" src={assetUrl("mapList", m.mapId)} alt="" />{:else}<div class="mimg mbox"></div>{/if}
           <div class="mcol">
             <span class="mname" data-ellipsis
               >{#if map === undefined}<Skel w={60} h={10} />{:else}{map ?? "—"}{/if}</span
@@ -59,9 +60,9 @@
             <span class="ago" use:tip={recentTimeTip(m.startMs)}>{ago(m.startMs, $now)}</span>
           </div>
         </div>
-        {#if m.agentId}<img class="ragent" src={assetUrl("agent", m.agentId)} alt="" />{:else}<div class="ragent"></div>{/if}
+        {#if m.agentId}<img {@attach retryImg} class="ragent" src={assetUrl("agent", m.agentId)} alt="" />{:else}<div class="ragent"></div>{/if}
         {#if isRankedTier(m.tier)}
-          <img class="rrank" src={assetUrl("tier", m.tier)} alt="" use:tip={rankTip($meta, m.tier)} />
+          <img {@attach retryImg} class="rrank" src={assetUrl("tier", m.tier)} alt="" use:tip={rankTip($meta, m.tier)} />
         {:else}
           <div class="rrank"></div>
         {/if}

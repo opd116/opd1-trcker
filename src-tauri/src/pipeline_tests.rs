@@ -56,6 +56,7 @@ struct Recorder {
     live: Mutex<Vec<LiveState>>,
     details: Mutex<Vec<PlayerDetails>>,
     matches: Mutex<Vec<MatchDetailsView>>,
+    metas: Mutex<Vec<opd1_riot::assets::Meta>>,
 }
 
 struct Sink(Arc<Recorder>);
@@ -69,6 +70,9 @@ impl EventSink for Sink {
     }
     fn match_view(&self, view: &MatchDetailsView) {
         self.0.matches.lock().unwrap().push(view.clone());
+    }
+    fn meta(&self, meta: &opd1_riot::assets::Meta) {
+        self.0.metas.lock().unwrap().push(meta.clone());
     }
 }
 
@@ -1238,3 +1242,7 @@ mod diagnostics;
 /// harness).
 #[cfg(test)]
 mod act;
+
+/// R163's keyed close and late-open tests (their own file; same harness).
+#[cfg(test)]
+mod ui_open;

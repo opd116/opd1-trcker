@@ -8,12 +8,14 @@
 //! - `player_details(puuid)` — cached details now; a background sync (and
 //!   the worker's sync of that player) then emits `"details"` if it found
 //!   more.
-//! - `close_details()` — the UI left the Details page: the open Details is
-//!   forgotten, so nothing is rebuilt or emitted for it.
+//! - `close_details(puuid?)` — the UI left the Details page: the open Details
+//!   is forgotten, so nothing is rebuilt or emitted for it. A close for
+//!   another player than the open one is ignored (R163).
 //! - `match_details(matchId, focusPuuid)` — one match as the Match Details
 //!   scoreboard, from the DB (fetched once when it isn't stored yet).
-//! - `close_match()` — the UI left the Match Details page: the open match is
-//!   forgotten, so no `"match"` event is built or emitted for it.
+//! - `close_match(matchId?)` — the UI left the Match Details page: the open
+//!   match is forgotten, so no `"match"` event is built or emitted for it. A
+//!   close for another match than the open one is ignored (R163).
 //! - `my_stats()` — the user's My Stats for the current act, from the DB
 //!   only (no Riot call); `null` while the user or the act is unknown.
 //! - `copy_log()` — the last 500 log lines (R30; the UI copies them).
@@ -108,10 +110,18 @@ pub(crate) async fn player_details_for(
     // resolving task panics (R97).
     let resolving =
         crate::details::skins_pending(&st, &puuid).then(|| st.begin_skin_resolve(&puuid));
+    // R163: the ticket is taken before the build, so a Back (or a newer open)
+    // that happens while it runs voids this open.
+    let ticket = st.begin_open_details(&puuid);
     let details = crate::details::build(&st, &puuid).await?;
     // The open view: every later rebuild of it (the jobs below, and the
     // worker's sync of this player, R23) is emitted only when it changed.
-    st.set_open_details(&details);
+    if !st.set_open_details(ticket, &details) {
+        // The page was left (or a newer open took over) while this build ran:
+        // nobody sees this answer, so no name asks, skin fetch or sync for it
+        // (R163). The caller still gets its answer; the UI drops it.
+        return Ok(details);
+    }
     // R150: the names this page shows as missing, asked between matches.
     st.queue_name_fill(details_asks(&details));
 
@@ -244,29 +254,48 @@ fn details_asks(details: &PlayerDetails) -> Vec<NameAsk> {
 }
 
 /// The UI left the Player Details page (Back, or another page): nothing is
-/// open any more, so a closed page is never refreshed or emitted to.
+/// open any more, so a closed page is never refreshed or emitted to. The UI
+/// sends the player's `puuid` (R163): a close for any other player than the
+/// one open or being opened is ignored, and an open still being built for
+/// this player is void.
 #[tauri::command]
-pub fn close_details(state: AppStateRef<'_>) {
-    close_details_for(state.inner());
+pub fn close_details(puuid: Option<String>, state: AppStateRef<'_>) {
+    close_details_key_for(state.inner(), puuid.as_deref());
+}
+
+/// `close_details` without the Tauri wrapper and without a key: closes
+/// whatever is open.
+#[cfg(test)]
+pub(crate) fn close_details_for(st: &Arc<AppState>) {
+    st.close_details(None);
 }
 
 /// `close_details` without the Tauri wrapper.
-pub(crate) fn close_details_for(st: &Arc<AppState>) {
-    st.close_details();
+pub(crate) fn close_details_key_for(st: &Arc<AppState>, puuid: Option<&str>) {
+    st.close_details(puuid);
 }
 
 /// The UI left the Match Details page (Back, or another page): nothing is
 /// open any more, so a closed scoreboard is never rebuilt or emitted to.
 /// Closing with nothing open does nothing; a later `match_details` or
-/// `player_details` call works as before.
+/// `player_details` call works as before. The UI sends the `match_id`
+/// (R163): a close for any other match than the one open or being opened is
+/// ignored, and an open still being built for this match is void.
 #[tauri::command]
-pub fn close_match(state: AppStateRef<'_>) {
-    close_match_for(state.inner());
+pub fn close_match(match_id: Option<String>, state: AppStateRef<'_>) {
+    close_match_key_for(state.inner(), match_id.as_deref());
+}
+
+/// `close_match` without the Tauri wrapper and without a key: closes
+/// whatever is open.
+#[cfg(test)]
+pub(crate) fn close_match_for(st: &Arc<AppState>) {
+    st.close_match(None);
 }
 
 /// `close_match` without the Tauri wrapper.
-pub(crate) fn close_match_for(st: &Arc<AppState>) {
-    st.close_match();
+pub(crate) fn close_match_key_for(st: &Arc<AppState>, match_id: Option<&str>) {
+    st.close_match(match_id);
 }
 
 #[tauri::command]

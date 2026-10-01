@@ -23,7 +23,7 @@ use opd1_core::model::{
 use opd1_core::party::detect_parties;
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
-use opd1_riot::assets::AssetCache;
+use opd1_riot::assets::{AssetCache, Meta};
 use opd1_riot::endpoints::ContentActs;
 use opd1_riot::to_core::{current_rank_from_mmr, seasonal_map_from_mmr};
 use opd1_riot::RiotSession;
@@ -1019,6 +1019,9 @@ pub trait EventSink: Send + Sync {
     fn details(&self, details: &PlayerDetails);
     /// R150: the open Match Details, rebuilt because names arrived.
     fn match_view(&self, view: &MatchDetailsView);
+    /// R163: the asset tables (names, colours) loaded or were refreshed.
+    /// Default: nothing (test sinks that do not record it).
+    fn meta(&self, _meta: &Meta) {}
 }
 
 impl EventSink for AppHandle {
@@ -1037,6 +1040,12 @@ impl EventSink for AppHandle {
     fn match_view(&self, view: &MatchDetailsView) {
         if let Err(e) = self.emit("match", view) {
             log::warn!("emit match failed: {e}");
+        }
+    }
+
+    fn meta(&self, meta: &Meta) {
+        if let Err(e) = self.emit("meta", meta) {
+            log::warn!("emit meta failed: {e}");
         }
     }
 }
@@ -1153,6 +1162,10 @@ pub struct AppState {
     /// page for Live, so it can outlive the page: a rebuild is one DB read,
     /// and it emits only on a change.
     open_match: Mutex<Option<OpenMatch>>,
+    /// R163: which `player_details` / `match_details` call may open its page
+    /// ([`OpenGate`]). Lock order: a gate, then its open slot.
+    details_gate: Mutex<OpenGate>,
+    match_gate: Mutex<OpenGate>,
     /// R150: set when names-fill asks are queued (`queue_name_fill`), taken
     /// by the poll loop (`take_worker_kick`), which owns the worker's handle:
     /// a command can't start a worker itself.
@@ -1208,6 +1221,8 @@ impl AppState {
             open_details: Mutex::new(None),
             details_inflight: Mutex::new(HashMap::new()),
             open_match: Mutex::new(None),
+            details_gate: Mutex::new(OpenGate::default()),
+            match_gate: Mutex::new(OpenGate::default()),
             worker_kick: AtomicBool::new(false),
             debug_dir,
         }
@@ -1477,6 +1492,7 @@ impl AppState {
                 }
             }
         }
+        let first = !status.loaded;
         match self.assets.refresh_tables().await {
             Ok(refetched) => {
                 status.loaded = true;
@@ -1497,6 +1513,15 @@ impl AppState {
                     );
                 }
                 self.set_base_acts(acts);
+                // R163: the UI's names and colours follow the tables: sent
+                // when they first load and whenever they were downloaded
+                // again (a new patch), not on a plain version re-check.
+                if first || refetched {
+                    match self.assets.meta() {
+                        Ok(meta) => self.sink.meta(&meta),
+                        Err(e) => log::warn!("meta event: {e}"),
+                    }
+                }
                 if stale && !still_stale {
                     // Healed: the cards were built from the old tables.
                     self.publish();
@@ -1548,29 +1573,69 @@ impl AppState {
         live.current = state;
     }
 
+    /// A `player_details` call starts opening `puuid`'s page: the ticket it
+    /// must hand to [`Self::set_open_details`] once its build is done. Any
+    /// earlier ticket is void from now on (R163).
+    pub fn begin_open_details(&self, puuid: &str) -> u64 {
+        lock(&self.details_gate).begin(puuid)
+    }
+
     /// Records `details` as the open Player Details, as the UI was just
-    /// given them (the `player_details` answer). Opening a Player Details
-    /// also closes any Match Details: the UI only gets here from the match
-    /// page by going Back.
-    pub fn set_open_details(&self, details: &PlayerDetails) {
+    /// given them (the `player_details` answer), when `ticket` is still the
+    /// latest open and its page was not left meanwhile (R163: a build that
+    /// finishes after Back, or after a newer open, must not set the open
+    /// page); `false` when it lost. Opening a Player Details also closes any
+    /// Match Details: the UI only gets here from the match page by going
+    /// Back.
+    pub fn set_open_details(&self, ticket: u64, details: &PlayerDetails) -> bool {
+        let gate = lock(&self.details_gate);
+        if gate.seq != ticket {
+            return false;
+        }
         *lock(&self.open_details) = Some(details.clone());
         *lock(&self.open_match) = None;
+        true
+    }
+
+    /// A `match_details` call starts opening `match_id`'s page (like
+    /// [`Self::begin_open_details`]).
+    pub fn begin_open_match(&self, match_id: &str) -> u64 {
+        lock(&self.match_gate).begin(match_id)
     }
 
     /// Records `view` as the open Match Details, as the UI was just given it
-    /// (the `match_details` answer).
-    pub fn set_open_match(&self, match_id: &str, focus_puuid: &str, view: &MatchDetailsView) {
+    /// (the `match_details` answer), when `ticket` is still the latest open
+    /// of its page; `false` when it lost (R163).
+    pub fn set_open_match(
+        &self,
+        ticket: u64,
+        match_id: &str,
+        focus_puuid: &str,
+        view: &MatchDetailsView,
+    ) -> bool {
+        let gate = lock(&self.match_gate);
+        if gate.seq != ticket {
+            return false;
+        }
         *lock(&self.open_match) = Some(OpenMatch {
             match_id: match_id.to_string(),
             focus_puuid: focus_puuid.to_string(),
             view: view.clone(),
         });
+        true
     }
 
     /// The UI left the Match Details page (`close_match`): nothing is open,
     /// so no `match` event is built or emitted until the next
-    /// `match_details` call. A no-op with nothing open.
-    pub fn close_match(&self) {
+    /// `match_details` call, and an open still being built is void. With a
+    /// `match_id`, a close for any other match than the one open or being
+    /// opened is ignored (R163: a late close of a page already replaced).
+    /// A no-op with nothing open.
+    pub fn close_match(&self, match_id: Option<&str>) {
+        let mut gate = lock(&self.match_gate);
+        if !gate.close(match_id) {
+            return;
+        }
         *lock(&self.open_match) = None;
     }
 
@@ -1672,8 +1737,14 @@ impl AppState {
     }
 
     /// The UI left the Details page (`close_details`): nothing is open, so
-    /// no rebuild is done or emitted for it until the next open.
-    pub fn close_details(&self) {
+    /// no rebuild is done or emitted for it until the next open, and an open
+    /// still being built is void. With a `puuid`, a close for any other
+    /// player than the one open or being opened is ignored (R163).
+    pub fn close_details(&self, puuid: Option<&str>) {
+        let mut gate = lock(&self.details_gate);
+        if !gate.close(puuid) {
+            return;
+        }
         *lock(&self.open_details) = None;
     }
 
@@ -1800,6 +1871,40 @@ impl AppState {
         }
         map.insert(puuid.to_string(), now);
         log::debug!("details sync claimed for {}", short(puuid));
+        true
+    }
+}
+
+/// Which open of one page (Player Details, or Match Details) is the latest
+/// (R163). Every `player_details` / `match_details` call takes a ticket when
+/// it starts ([`OpenGate::begin`]) and may set the open page only while its
+/// ticket is still `seq`; a close for the page voids every ticket taken so
+/// far. Held across the check and the write, so a close can never fall in
+/// between.
+#[derive(Default)]
+struct OpenGate {
+    /// The latest ticket; bumped by every `begin` and every effective close.
+    seq: u64,
+    /// What the latest `begin` is opening (a puuid, a match id); `None` once
+    /// closed.
+    key: Option<String>,
+}
+
+impl OpenGate {
+    fn begin(&mut self, key: &str) -> u64 {
+        self.seq += 1;
+        self.key = Some(key.to_string());
+        self.seq
+    }
+
+    /// `false` when `key` is given and is not what is open or being opened
+    /// (nothing changes); otherwise voids every ticket and returns `true`.
+    fn close(&mut self, key: Option<&str>) -> bool {
+        if key.is_some_and(|k| self.key.as_deref() != Some(k)) {
+            return false;
+        }
+        self.seq += 1;
+        self.key = None;
         true
     }
 }

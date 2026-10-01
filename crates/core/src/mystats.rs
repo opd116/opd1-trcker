@@ -12,14 +12,17 @@
 //!   time-of-day buckets: the act's stored matches;
 //! - net RR, the RR chart and rank changes: the act's stored competitive
 //!   updates; "last 7 days": the stored updates of the last 7 days;
-//! - tier and RR: the stored MMR snapshot (as on the live card).
+//! - tier and RR: the stored MMR snapshot (as on the live card); without one,
+//!   the live card's fallback chain (R167): the newest current-act RR row, then
+//!   a stored current-act match's tier with no RR.
 
 use std::collections::HashMap;
 
-use crate::db::repo::{CompMatchRow, CompUpdateRow};
+use crate::db::repo::{CompMatchRow, CompUpdateRow, StoredTier};
 use crate::model::{
-    match_result, match_summary, CurrentRank, Insight, InsightKind, MatchResultKind, MyStats,
-    RankChange, RankSummary, RrPoint, SessionSummary, StatRow, StreakMark, WinCell,
+    match_result, match_summary, rank_without_mmr, CurrentRank, Insight, InsightKind,
+    MatchResultKind, MyStats, RankChange, RankInfo, RankSummary, RrPoint, SessionSummary, StatRow,
+    StreakMark, WinCell,
 };
 use crate::stats::{self, Act, DEFAULT_SESSION_GAP_MS};
 
@@ -63,6 +66,15 @@ pub struct MyStatsInput<'a> {
     pub comp_updates: &'a [CompUpdateRow],
     /// The current act's rank from the MMR snapshot.
     pub current_rank: Option<CurrentRank>,
+    /// R167: a stored MMR snapshot of the user answered. It is the authority
+    /// for the rank card, even when it has no rank this act (placements);
+    /// only without one (`false`) does the card fall back like the live card
+    /// (R154): `comp_updates`, then `stored_tier`.
+    pub has_mmr: bool,
+    /// R167: the user's newest stored competitive match with a ranked tier
+    /// (`Repo::newest_ranked_match_tier`), read only without a snapshot; used
+    /// only when it is from the current act and no RR row names a rank.
+    pub stored_tier: Option<StoredTier>,
     /// valorant-api map uuid -> display name, for insight text. A map
     /// without a name gets no insight rather than a made-up label.
     pub map_names: &'a HashMap<String, String>,
@@ -89,6 +101,8 @@ pub fn build(input: MyStatsInput) -> MyStats {
         matches,
         comp_updates,
         current_rank,
+        has_mmr,
+        stored_tier,
         map_names,
         now_ms,
         utc_offset_ms,
@@ -134,7 +148,11 @@ pub fn build(input: MyStatsInput) -> MyStats {
     insights.extend(last_7_days(comp_updates, now_ms));
 
     MyStats {
-        rank: rank_summary(current_rank, &played, &updates),
+        rank: rank_summary(
+            current_rank_of(act, current_rank, has_mmr, stored_tier, comp_updates),
+            &played,
+            &updates,
+        ),
         rr_series: updates
             .iter()
             .filter_map(|u| {
@@ -320,8 +338,38 @@ fn table(played: &[Played], key: fn(&CompMatchRow) -> Option<&str>) -> Vec<StatR
 // rank card / session
 // ---------------------------------------------------------------------
 
+/// R167: the rank the card shows — the snapshot's, exact. With no snapshot
+/// at all (`has_mmr` false) the live card's chain
+/// ([`rank_without_mmr`](crate::model::rank_without_mmr)): the newest
+/// current-act RR row (exact RR), else the tier of a stored current-act match
+/// (RR unknown). A snapshot with no rank this act stays "no rank".
+fn current_rank_of(
+    act: &Act,
+    snapshot: Option<CurrentRank>,
+    has_mmr: bool,
+    stored_tier: Option<StoredTier>,
+    comp_updates: &[CompUpdateRow],
+) -> Option<RankInfo> {
+    if let Some(c) = snapshot {
+        return Some(RankInfo {
+            tier: c.tier,
+            rr: Some(c.rr),
+        });
+    }
+    if has_mmr {
+        return None;
+    }
+    rank_without_mmr(
+        Some(comp_updates),
+        None,
+        stored_tier,
+        std::slice::from_ref(act),
+        &act.id,
+    )
+}
+
 fn rank_summary(
-    current: Option<CurrentRank>,
+    current: Option<RankInfo>,
     played: &[Played],
     updates: &[&CompUpdateRow],
 ) -> RankSummary {
@@ -329,10 +377,10 @@ fn rank_summary(
     let any_match = !played.is_empty();
     RankSummary {
         tier: current.map(|c| c.tier),
-        rr: current.map(|c| c.rr),
+        rr: current.and_then(|c| c.rr),
         wins: any_match.then(|| count(MatchResultKind::Win)),
         losses: any_match.then(|| count(MatchResultKind::Loss)),
-        rr_to_next: current.and_then(|c| rr_to_next(c.tier, c.rr)),
+        rr_to_next: current.and_then(|c| rr_to_next(c.tier, c.rr?)),
         net_rr: (!updates.is_empty()).then(|| updates.iter().map(|u| u.rr_earned as i32).sum()),
         avg_win: mean(&rr_of(played, MatchResultKind::Win)),
         avg_loss: mean(&rr_of(played, MatchResultKind::Loss)),

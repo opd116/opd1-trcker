@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use serde_json::json;
 
-use opd1_core::db::repo::{CompMatchRow, CompUpdateRow};
+use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, StoredTier};
 use opd1_core::model::{CurrentRank, InsightKind, MatchResultKind, StreakMark};
 use opd1_core::mystats::{build, rr_to_next, MyStatsInput};
 use opd1_core::stats::Act;
@@ -155,6 +155,10 @@ fn input<'a>(
         matches,
         comp_updates,
         current_rank: None,
+        // A stored snapshot answered (with no rank): no fallback unless a
+        // test turns it off.
+        has_mmr: true,
+        stored_tier: None,
         map_names,
         now_ms: ACT_START + 30 * DAY,
         utc_offset_ms: &utc,
@@ -230,6 +234,102 @@ fn rr_to_next_immortal_edge() {
         ..input(&a, &[], &[], &n)
     });
     assert_eq!(asc3.rank.rr_to_next, Some(40));
+}
+
+// ---------------------------------------------------------------------
+// R167: the rank card without an MMR snapshot — the live card's chain
+// ---------------------------------------------------------------------
+
+fn no_mmr<'a>(
+    a: &'a Act,
+    updates: &'a [CompUpdateRow],
+    n: &'a HashMap<String, String>,
+    stored_tier: Option<StoredTier>,
+) -> MyStatsInput<'a> {
+    MyStatsInput {
+        has_mmr: false,
+        stored_tier,
+        ..input(a, &[], updates, n)
+    }
+}
+
+#[test]
+fn rank_card_without_a_snapshot_uses_the_newest_current_act_rr_row() {
+    let a = act();
+    let n = names();
+    let updates = vec![
+        // Newest of the previous act: says nothing about the rank now.
+        update("p1", PREV, ACT_START - HOUR, (20, 20), 90, 10),
+        update("c1", ACT, ACT_START + DAY, (15, 16), 5, 20),
+        update("c2", ACT, ACT_START + 3 * DAY, (16, 16), 41, 36),
+        // Placement row of the act, unranked after: not a tier.
+        update("c0", ACT, ACT_START + 2 * DAY, (0, 2), 0, 0),
+    ];
+    // The stored match tier would say something else: RR rows come first.
+    let stored = StoredTier {
+        start_ms: ACT_START + 5 * DAY,
+        tier: 19,
+    };
+    let s = build(no_mmr(&a, &updates, &n, Some(stored)));
+    assert_eq!((s.rank.tier, s.rank.rr), (Some(16), Some(41)));
+    assert_eq!(s.rank.rr_to_next, Some(59));
+}
+
+#[test]
+fn rank_card_without_a_snapshot_or_rr_row_uses_the_current_act_match_tier_without_rr() {
+    let a = act();
+    let n = names();
+    let stored = StoredTier {
+        start_ms: ACT_START + DAY,
+        tier: 17,
+    };
+    let s = build(no_mmr(&a, &[], &n, Some(stored)));
+    assert_eq!((s.rank.tier, s.rank.rr), (Some(17), None));
+    // No exact RR: nothing to count down from.
+    assert_eq!(s.rank.rr_to_next, None);
+    let json = serde_json::to_value(&s.rank).unwrap();
+    assert_eq!(json["rr"], serde_json::Value::Null);
+    assert_eq!(json["tier"], 17);
+}
+
+#[test]
+fn rank_card_fallback_ignores_a_previous_acts_rows_and_matches() {
+    let a = act();
+    let n = names();
+    let updates = vec![update("p1", PREV, ACT_START - HOUR, (20, 20), 90, 10)];
+    let old = StoredTier {
+        start_ms: ACT_START - HOUR,
+        tier: 20,
+    };
+    let s = build(no_mmr(&a, &updates, &n, Some(old)));
+    assert_eq!((s.rank.tier, s.rank.rr), (None, None));
+    let s = build(no_mmr(&a, &[], &n, None));
+    assert_eq!((s.rank.tier, s.rank.rr), (None, None));
+}
+
+#[test]
+fn rank_card_fallback_never_overrides_a_snapshot() {
+    // A snapshot that answered is the authority, even with "no rank this
+    // act" (placements): the RR rows do not fill it in.
+    let a = act();
+    let n = names();
+    let updates = vec![update("c1", ACT, ACT_START + DAY, (15, 16), 5, 20)];
+    let s = build(MyStatsInput {
+        has_mmr: true,
+        stored_tier: Some(StoredTier {
+            start_ms: ACT_START + DAY,
+            tier: 17,
+        }),
+        ..input(&a, &[], &updates, &n)
+    });
+    assert_eq!((s.rank.tier, s.rank.rr), (None, None));
+    // And a snapshot's own rank is kept as it is.
+    let s = build(MyStatsInput {
+        has_mmr: true,
+        current_rank: Some(CurrentRank { tier: 23, rr: 60 }),
+        ..input(&a, &[], &updates, &n)
+    });
+    assert_eq!((s.rank.tier, s.rank.rr), (Some(23), Some(60)));
 }
 
 #[test]

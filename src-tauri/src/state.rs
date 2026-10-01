@@ -914,6 +914,12 @@ impl LiveModel {
         wake
     }
 
+    /// R165: drops the armed names-retry wake-up (the stage reset forgets the
+    /// failure counts with `names_attempted.clear()`, so no retry is waiting).
+    pub fn clear_names_retry_wake(&mut self) {
+        self.names_retry_wake = None;
+    }
+
     /// R160: forgets a names deferral. A new session (a reconnect, another
     /// account) has its own, empty hold: what the old one refused is not
     /// refused now.
@@ -1442,9 +1448,10 @@ pub struct AppState {
     /// the live sync, a Details sync, Match Details and the backfill can all
     /// want the same match at once, and it is downloaded once.
     details_inflight: Mutex<HashMap<String, tokio::sync::watch::Sender<()>>>,
-    /// R165: match ids Riot answered 404 for (terminal: `sync::fetch_missing_details_full`
-    /// skips them without a retry); a task that waited on another's download
-    /// of such an id does not count it as missing. Bounded.
+    /// R165: match ids Riot answered 404 for (`sync::fetch_missing_details_full`
+    /// records them). Read only by the waiter recheck there: a task that waited
+    /// on another's download of such an id does not count it as missing.
+    /// Bounded; it does not stop a later sync from asking for the id again.
     details_404: Mutex<HashSet<String>>,
     /// The Match Details the UI has open, if any (R150): replaced by the next
     /// `match_details` call, dropped when the Player Details is opened again

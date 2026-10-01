@@ -675,6 +675,8 @@ impl Poller {
                 live.synced.clear();
                 live.party_ready.clear();
                 live.names_attempted.clear();
+                // R165: the failure counts went with it; so does the wake-up.
+                live.clear_names_retry_wake();
                 // R161: a match is over or VALORANT closed.
                 live.match_tiers.clear();
             }
@@ -1751,6 +1753,7 @@ mod tests {
         // R161: the Agent Select tiers belong to the match that just ended; a
         // failed party fetch (no mock answers it here) must not leave them
         // for the next In Game roster.
+        const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
         let h = harness().await;
         mock_presence(&h, "MENUS", "unrated").await;
         let mut poller = Poller::new(h.st.clone());
@@ -1762,12 +1765,33 @@ mod tests {
             live.match_tiers
                 .set_pregame("pg-1", [(ME.to_string(), 22)].into());
             assert!(!live.match_tiers.is_empty());
+            // R165: a names retry is waiting with its wake-up armed.
+            live.slots = vec![crate::state::Slot {
+                roster: roster(OTHER, false),
+                db: Default::default(),
+            }];
+            live.note_names_failed(&[OTHER.to_string()]);
+            live.arm_names_retry_wake();
         }
 
         poller.presence_tick(&h.session).await.unwrap();
 
         assert_eq!(lock(&h.st.live).stage, Stage::Menus);
         assert!(lock(&h.st.live).match_tiers.is_empty());
+        {
+            // The stage reset forgot the failure counts and the wake-up: the
+            // player needs a name again, and a stale wake-up must not fire.
+            let mut live = lock(&h.st.live);
+            if !live.slots.iter().any(|s| s.roster.puuid == OTHER) {
+                live.slots.push(crate::state::Slot {
+                    roster: roster(OTHER, false),
+                    db: Default::default(),
+                });
+            }
+            live.advance_clock(std::time::Duration::from_secs(100));
+            assert!(!live.names_needed().is_empty());
+            assert!(!live.names_wakeup_due(), "no stale names wake-up");
+        }
         poller.stop_worker();
     }
 

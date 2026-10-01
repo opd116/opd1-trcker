@@ -80,6 +80,11 @@ const POST_MATCH_DELAYS: [Duration; 5] = [
     Duration::from_secs(80),
 ];
 
+/// R164: the In Game loadouts only feed Player Details, and the poll loop
+/// awaits them inline after the roster is on screen, so a call stuck in a
+/// throttle hold or a slow answer is cut off after this long (log and skip).
+const INGAME_LOADOUTS_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// The wait before the next roster retry after `failures` failed fetches
 /// (the first one counts; `failures >= 1`).
 fn roster_retry_delay(failures: u32) -> Duration {
@@ -139,6 +144,9 @@ pub(crate) struct Poller {
     /// Riot answered `LoadoutsValid` for the current Agent Select: the
     /// pre-game loadouts are not asked for again (R83).
     pregame_loadouts_valid: bool,
+    /// How long the In Game loadouts call may take (a field so a test can
+    /// shorten it).
+    pub(crate) ingame_loadouts_timeout: Duration,
     next_presence: Instant,
     next_pregame: Option<Instant>,
     /// When the next roster retry is due and how many fetches failed so far.
@@ -176,6 +184,7 @@ impl Poller {
             self_party: HashSet::new(),
             pregame_match_id: None,
             pregame_loadouts_valid: false,
+            ingame_loadouts_timeout: INGAME_LOADOUTS_TIMEOUT,
             next_presence: Instant::now(),
             next_pregame: None,
             roster_retry: None,
@@ -889,8 +898,14 @@ impl Poller {
         // holds the ten cards back (as in Agent Select, R83).
         self.apply_roster(session, Stage::Ingame, Some(m.map_id), roster)
             .await;
-        match session.coregame_loadouts(&match_id).await {
-            Ok(resp) => {
+        let asked = tokio::time::timeout(
+            self.ingame_loadouts_timeout,
+            session.coregame_loadouts(&match_id),
+        )
+        .await;
+        match asked {
+            Err(_) => log::warn!("loadouts skipped: no answer in time"),
+            Ok(Ok(resp)) => {
                 let found = extract_loadouts(&resp);
                 if !found.is_empty() {
                     lock(&self.st.live).loadouts.extend(found);
@@ -898,8 +913,8 @@ impl Poller {
                     crate::details::refresh_open_after_live_change(&self.st).await;
                 }
             }
-            Err(RiotError::ClientGone) => return Err(RiotError::ClientGone),
-            Err(e) => log::warn!("loadouts failed: {e}"),
+            Ok(Err(RiotError::ClientGone)) => return Err(RiotError::ClientGone),
+            Ok(Err(e)) => log::warn!("loadouts failed: {e}"),
         }
         Ok(())
     }

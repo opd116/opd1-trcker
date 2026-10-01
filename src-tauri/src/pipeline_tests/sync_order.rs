@@ -534,3 +534,25 @@ async fn a_client_that_goes_away_mid_batch_ends_the_worker_and_marks_nobody() {
     }
     assert!(live.rank_retries.is_empty(), "no retry round");
 }
+
+#[tokio::test]
+async fn every_failed_names_try_leaves_a_wake_up_for_the_next_one() {
+    // The worker exits after a failed names step and never waits; the poll
+    // tick's `names_wakeup_due` is what starts the next one, so each failure
+    // must leave a deferral that ends at the next retry.
+    let h = harness().await;
+    fails(&h, "PUT", put_names(), 500, Some(2)).await;
+    names_only(&h);
+
+    assert!(drain(&h).await, "try 1 fails");
+    assert!(!lock(&h.st.live).names_wakeup_due(), "not before the delay");
+    advance(&h, 3 * S);
+    assert!(lock(&h.st.live).names_wakeup_due(), "woken for try 2");
+    assert!(drain(&h).await, "try 2 fails");
+    assert!(!lock(&h.st.live).names_wakeup_due());
+    advance(&h, 7 * S);
+    assert!(lock(&h.st.live).names_wakeup_due(), "woken for try 3");
+    assert!(drain(&h).await, "try 3 answers");
+    assert_eq!(count(&h.server, "PUT", put_names()).await, 3);
+    assert_eq!(card_json(&h.st, OTHER)["name"]["name"], "Other");
+}

@@ -368,3 +368,37 @@ async fn a_match_backfill_aborted_after_it_stored_a_match_still_pushes() {
     idle(&h.st).await;
     assert!(computed(&h.st) >= 1);
 }
+
+#[tokio::test]
+async fn the_slow_tick_recomputes_and_the_unchanged_bytes_are_not_emitted_again() {
+    let h = harness().await;
+    let tick = tokio::spawn(my_stats::periodic(h.st.clone(), Duration::from_millis(40)));
+    // The first tick is the startup's own: the interval's immediate one does
+    // not ask. Then one recompute per period.
+    wait_until("three periods asked for a recompute", || {
+        computed(&h.st) >= 3
+    })
+    .await;
+    tick.abort();
+    idle(&h.st).await;
+    assert_eq!(pushed(&h).len(), 1, "same bytes: one emission");
+    assert!(computed(&h.st) >= 3);
+}
+
+#[tokio::test]
+async fn the_slow_tick_picks_up_a_change_nothing_notified() {
+    // The reason for the tick: what the DB says changes with the clock or
+    // with a write nobody announced.
+    let h = harness().await;
+    my_stats::notify(&h.st);
+    idle(&h.st).await;
+    assert_eq!(pushed(&h).len(), 1);
+    assert!(pushed(&h)[0].rr_series.is_empty());
+
+    store_rr_row_of_a(&h).await;
+    lock(&h.st.live).self_puuid = Some(ACCOUNT_A.into());
+    let tick = tokio::spawn(my_stats::periodic(h.st.clone(), Duration::from_millis(40)));
+    wait_until("the tick's recompute was emitted", || pushed(&h).len() >= 2).await;
+    tick.abort();
+    assert_eq!(pushed(&h).last().unwrap().rr_series.len(), 1);
+}

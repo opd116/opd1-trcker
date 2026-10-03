@@ -135,6 +135,9 @@ pub fn run() {
                     my_stats::notify(&tables_st);
                 }
             });
+            // B2: the slow tick (every 15 minutes) that keeps what depends on
+            // the clock alone current; the push's byte dedup makes it free.
+            my_stats::start_periodic(&st);
             poll::start(st);
             Ok(())
         })

@@ -14,14 +14,22 @@
 //! and the same task reads once more, so a burst (a backfill's pages) is one
 //! or two reads, and emissions leave in the order of the reads, each read
 //! strictly after the change that asked for it. Nothing here touches the poll
-//! loop's presence tick.
+//! loop's presence tick. A slow tick ([`start_periodic`]) asks again every
+//! [`PERIOD`] so what depends on the clock alone (a session that expired, a
+//! last-7-days window) catches up; the byte comparison makes it free when
+//! nothing changed.
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use opd1_core::model::MyStats;
+use tokio::time::{interval, MissedTickBehavior};
 
 use crate::state::{lock, now_ms, AppState};
+
+/// How often the slow tick asks for a recompute (15 minutes).
+pub const PERIOD: Duration = Duration::from_secs(15 * 60);
 
 /// Where the push stands, behind one lock (`AppState::my_stats_push`).
 #[derive(Debug, Default)]
@@ -121,6 +129,25 @@ pub fn notify(st: &Arc<AppState>) {
 pub fn notify_if_own(st: &Arc<AppState>, own: &str, puuid: &str) {
     if own == puuid {
         notify(st);
+    }
+}
+
+/// The slow tick: once, at startup, from `setup`. Every [`PERIOD`] it asks
+/// for a recompute, which costs one DB read and no event when nothing
+/// changed. Never driven by the presence tick.
+pub fn start_periodic(st: &Arc<AppState>) {
+    tauri::async_runtime::spawn(periodic(st.clone(), PERIOD));
+}
+
+pub(crate) async fn periodic(st: Arc<AppState>, every: Duration) {
+    let mut tick = interval(every);
+    // A machine that slept does not owe the missed ticks: one is enough.
+    tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // The first tick is immediate; the startup's own notifications cover it.
+    tick.tick().await;
+    loop {
+        tick.tick().await;
+        notify(&st);
     }
 }
 

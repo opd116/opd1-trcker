@@ -442,8 +442,22 @@ fn live_state_matches_golden() {
         stage: Stage::Ingame,
         map_id: Some(SPLIT_UUID.into()),
         players,
+        settled: true,
     };
     check_golden("live_state", &serde_json::to_value(&state).unwrap());
+
+    // `settled` is a plain boolean, on the wire both ways: the model's starting
+    // Closed (the poll loop has not looked yet) is `false`.
+    let starting = LiveState {
+        stage: Stage::Closed,
+        map_id: None,
+        players: Vec::new(),
+        settled: false,
+    };
+    assert_eq!(
+        serde_json::to_value(&starting).unwrap(),
+        json!({"stage": "closed", "mapId": null, "players": [], "settled": false})
+    );
 }
 
 // ---------------------------------------------------------------------
@@ -850,6 +864,8 @@ const DAY_MS: i64 = 24 * HOUR_MS;
 /// Monday 2025-08-18 00:00 UTC: the start of the My Stats act.
 const MS_ACT_START: i64 = 20_318 * DAY_MS;
 const MS_ACT_ID: &str = "act-my-stats";
+/// The user's PUUID in the My Stats goldens.
+const MS_PUUID: &str = "a1b2c3d4-0000-4000-8000-00000000cafe";
 
 fn ms_act() -> Act {
     Act {
@@ -963,6 +979,7 @@ fn my_stats_full() -> Value {
     let names = ms_map_names();
     let utc = |_: i64| 0;
     let stats = mystats::build(MyStatsInput {
+        puuid: MS_PUUID,
         act: &act,
         matches: &matches,
         comp_updates: &updates,
@@ -996,29 +1013,32 @@ fn my_stats_full() -> Value {
 /// null, R102) on an unknown map with no agent, a draw, and nothing in the last 6h (`session` null) or enough
 /// to say anything (`insights` empty).
 fn my_stats_edge() -> Value {
-    let row = |id: &str, day: i64, hour: i64, result: Option<&str>, map: &str, agent: Option<&str>| CompMatchRow {
-        match_id: id.into(),
-        map_id: map.into(),
-        start_ms: ms_at(day, hour, 0),
-        winning_team: result.map(str::to_string),
-        team_id: "Blue".into(),
-        agent_id: agent.map(str::to_string),
-        kills: 0,
-        deaths: 0,
-        assists: 0,
-        score: 0,
-        rounds: None,
-        hs: 0,
-        bs: 0,
-        ls: 0,
-        rounds_won: None,
-        rounds_lost: None,
-        rr_earned: None,
-        season_id: None,
-        tier_before: None,
-        tier_after: None,
-        tier: None,
-    };
+    let row =
+        |id: &str, day: i64, hour: i64, result: Option<&str>, map: &str, agent: Option<&str>| {
+            CompMatchRow {
+                match_id: id.into(),
+                map_id: map.into(),
+                start_ms: ms_at(day, hour, 0),
+                winning_team: result.map(str::to_string),
+                team_id: "Blue".into(),
+                agent_id: agent.map(str::to_string),
+                kills: 0,
+                deaths: 0,
+                assists: 0,
+                score: 0,
+                rounds: None,
+                hs: 0,
+                bs: 0,
+                ls: 0,
+                rounds_won: None,
+                rounds_lost: None,
+                rr_earned: None,
+                season_id: None,
+                tier_before: None,
+                tier_after: None,
+                tier: None,
+            }
+        };
     let mut draw = row("edge-draw", 3, 20, None, SPLIT_UUID, Some("agent-jett"));
     (draw.kills, draw.deaths, draw.assists) = (12, 12, 3);
     (draw.score, draw.rounds) = (4320, Some(24));
@@ -1027,13 +1047,21 @@ fn my_stats_edge() -> Value {
     let matches = vec![
         draw,
         row("edge-bare", 5, 9, Some("Blue"), "", None),
-        row("edge-loss", 6, 22, Some("Red"), ASCENT_UUID, Some("agent-omen")),
+        row(
+            "edge-loss",
+            6,
+            22,
+            Some("Red"),
+            ASCENT_UUID,
+            Some("agent-omen"),
+        ),
     ];
 
     let act = ms_act();
     let names = ms_map_names();
     let utc = |_: i64| 0;
     let stats = mystats::build(MyStatsInput {
+        puuid: MS_PUUID,
         act: &act,
         matches: &matches,
         comp_updates: &[],
@@ -1050,14 +1078,25 @@ fn my_stats_edge() -> Value {
         utc_offset_ms: &utc,
     });
 
-    assert_eq!(stats.rank.tier, Some(14), "R167 fallback: the stored match's tier");
+    assert_eq!(
+        stats.rank.tier,
+        Some(14),
+        "R167 fallback: the stored match's tier"
+    );
     assert!(stats.rank.rr.is_none() && stats.rank.rr_to_next.is_none());
-    assert!(stats.rank.net_rr.is_none() && stats.rank.avg_win.is_none() && stats.rank.avg_loss.is_none());
+    assert!(
+        stats.rank.net_rr.is_none()
+            && stats.rank.avg_win.is_none()
+            && stats.rank.avg_loss.is_none()
+    );
     assert!(stats.rr_series.is_empty() && stats.rank.changes.is_empty());
     assert!(stats.session.is_none() && stats.insights.is_empty());
     assert_eq!(stats.last5.len(), 3);
     assert!(
-        stats.last5.iter().any(|m| m.kills.is_none() && m.acs.is_none()),
+        stats
+            .last5
+            .iter()
+            .any(|m| m.kills.is_none() && m.acs.is_none()),
         "a match with no stats row"
     );
     serde_json::to_value(&stats).unwrap()
@@ -1087,6 +1126,10 @@ fn spec(list: &[&str]) -> BTreeSet<String> {
 #[test]
 fn wire_keys_are_the_ones_spec_7_1_spells() {
     let cards = serde_json::to_value(live_cards()).unwrap();
+    // LiveState itself (the `live_state.json` golden's top level).
+    let live: Value =
+        serde_json::from_str(&std::fs::read_to_string(golden_path("live_state")).unwrap()).unwrap();
+    assert_eq!(keys(&live), spec(&["stage", "mapId", "players", "settled"]));
     // A fully populated card has exactly the spec's PlayerCard keys.
     assert_eq!(
         keys(&cards[0]),
@@ -1229,6 +1272,7 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
     assert_eq!(
         keys(&stats),
         spec(&[
+            "puuid",
             "rank",
             "rrSeries",
             "session",
@@ -1246,8 +1290,14 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
             "tier", "rr", "wins", "losses", "rrToNext", "netRr", "avgWin", "avgLoss", "changes"
         ])
     );
-    assert_eq!(keys(&stats["rank"]["changes"][0]), spec(&["tier", "up", "startMs"]));
-    assert_eq!(keys(&stats["rrSeries"][0]), spec(&["startMs", "absoluteRr"]));
+    assert_eq!(
+        keys(&stats["rank"]["changes"][0]),
+        spec(&["tier", "up", "startMs"])
+    );
+    assert_eq!(
+        keys(&stats["rrSeries"][0]),
+        spec(&["startMs", "absoluteRr"])
+    );
     assert_eq!(
         keys(&stats["session"]),
         spec(&["netRr", "wins", "losses", "startedMs", "streak"])
@@ -1257,7 +1307,10 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
         keys(&stats["maps"][0]),
         spec(&["id", "games", "wins", "losses", "winrate", "netRr", "kd", "acs"])
     );
-    assert_eq!(keys(&stats["byWeekday"][0]), spec(&["games", "wins", "winrate"]));
+    assert_eq!(
+        keys(&stats["byWeekday"][0]),
+        spec(&["games", "wins", "winrate"])
+    );
     assert_eq!(stats["byWeekday"].as_array().map(Vec::len), Some(7));
     assert_eq!(stats["byDaypart"].as_array().map(Vec::len), Some(4));
     assert_eq!(

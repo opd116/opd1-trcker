@@ -462,6 +462,7 @@ pub fn load_my_stats(
         repo.newest_ranked_match_tier(me)?
     };
     Ok(mystats::build(MyStatsInput {
+        puuid: me,
         act,
         matches: &matches,
         comp_updates: &comp_updates,
@@ -1123,11 +1124,13 @@ mod tests {
                 "insights",
                 "last5",
                 "maps",
+                "puuid",
                 "rank",
                 "rrSeries",
                 "session"
             ]
         );
+        assert_eq!(v["puuid"], json!("me"), "the user's own, for Match Details");
         assert_eq!(v["rank"]["tier"], json!(15));
         assert_eq!(v["rank"]["rr"], json!(42));
         assert_eq!(v["rank"]["rrToNext"], json!(58));

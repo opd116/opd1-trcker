@@ -228,6 +228,7 @@
         "wins": 2
       }
     ],
+    "puuid": "a1b2c3d4-0000-4000-8000-00000000cafe",
     "rank": {
       "avgLoss": -15.0,
       "avgWin": 19.75,
@@ -502,6 +503,7 @@
         "wins": 0
       }
     ],
+    "puuid": "a1b2c3d4-0000-4000-8000-00000000cafe",
     "rank": {
       "avgLoss": null,
       "avgWin": null,

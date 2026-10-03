@@ -53,6 +53,8 @@ const WEEKEND: [usize; 2] = [5, 6];
 const DAYPARTS: [&str; 4] = ["morning", "afternoon", "evening", "night"];
 
 pub struct MyStatsInput<'a> {
+    /// The user's PUUID: sent with the page (`MyStats::puuid`).
+    pub puuid: &'a str,
     pub act: &'a Act,
     /// The user's competitive matches, any order — at least those dated
     /// within [`ACT_EDGE_MS`] of the act; rows outside `act` (see
@@ -97,6 +99,7 @@ pub fn rr_to_next(tier: u8, rr: u16) -> Option<u16> {
 /// comes from.
 pub fn build(input: MyStatsInput) -> MyStats {
     let MyStatsInput {
+        puuid,
         act,
         matches,
         comp_updates,
@@ -148,6 +151,7 @@ pub fn build(input: MyStatsInput) -> MyStats {
     insights.extend(last_7_days(comp_updates, now_ms));
 
     MyStats {
+        puuid: puuid.to_string(),
         rank: rank_summary(
             current_rank_of(act, current_rank, has_mmr, stored_tier, comp_updates),
             &played,

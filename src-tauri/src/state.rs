@@ -550,6 +550,11 @@ pub struct LiveModel {
     /// moves time forward instead of sleeping (`Self::advance_clock`).
     #[cfg(test)]
     clock_offset: Duration,
+    /// The poll loop has reached its first verdict on whether VALORANT is
+    /// running (`LiveState::settled`). Starts `false`, set once by
+    /// [`Self::settle`] and never cleared: a supervisor restart (R169) resets
+    /// the rest of the model, not this, so the UI's start page is decided once.
+    settled: bool,
     /// The last built/emitted state (`live_state()` returns it).
     pub current: LiveState,
     last_bytes: Vec<u8>,
@@ -591,13 +596,29 @@ impl LiveModel {
             names_retry_wake: None,
             #[cfg(test)]
             clock_offset: Duration::ZERO,
+            settled: false,
             current: LiveState {
                 stage: Stage::Closed,
                 map_id: None,
                 players: Vec::new(),
+                settled: false,
             },
             last_bytes: Vec::new(),
         }
+    }
+
+    /// The poll loop's first verdict is in (VALORANT running in some stage,
+    /// absent for good, the Riot Client not there, or not reachable): from now
+    /// on the published state says `settled`. `true` when this call changed it
+    /// (the caller then publishes).
+    pub fn settle(&mut self) -> bool {
+        !std::mem::replace(&mut self.settled, true)
+    }
+
+    /// Whether the first verdict is in (see [`Self::settle`]).
+    #[cfg(test)]
+    pub fn is_settled(&self) -> bool {
+        self.settled
     }
 
     fn self_id(&self) -> &str {
@@ -620,6 +641,7 @@ impl LiveModel {
         LiveState {
             stage: self.stage,
             map_id: self.map_id.clone(),
+            settled: self.settled,
             players: self
                 .slots
                 .iter()

@@ -16,6 +16,8 @@ const DAY: i64 = 24 * HOUR;
 /// Monday 2025-08-18 00:00 UTC.
 const ACT_START: i64 = 20_318 * DAY;
 const ACT: &str = "act-cur";
+/// The user's PUUID in these tests.
+const PUUID: &str = "11111111-2222-4333-8444-555555555555";
 const PREV: &str = "act-prev";
 const NEXT: &str = "act-next";
 
@@ -151,6 +153,7 @@ fn input<'a>(
     map_names: &'a HashMap<String, String>,
 ) -> MyStatsInput<'a> {
     MyStatsInput {
+        puuid: PUUID,
         act,
         matches,
         comp_updates,

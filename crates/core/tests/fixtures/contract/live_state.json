@@ -496,5 +496,6 @@
       "team": "enemy"
     }
   ],
+  "settled": true,
   "stage": "ingame"
 }

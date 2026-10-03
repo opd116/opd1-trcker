@@ -342,12 +342,16 @@ impl Poller {
 
     async fn disconnected_tick(&mut self) {
         let Some(lad) = self.local_app_data.clone() else {
+            // No Riot Client can be found: the first verdict is "closed".
+            self.settle();
             sleep(CLOSED_CHECK).await;
             return;
         };
         let lockfile = lockfile_path(&lad);
         let Ok(meta) = std::fs::metadata(&lockfile) else {
-            // Riot Client closed: back to the plain 5s existence check.
+            // Riot Client closed: back to the plain 5s existence check. That
+            // is the first verdict (VALORANT cannot be running without it).
+            self.settle();
             self.last_connect_error = None;
             self.connect_failures = 0;
             self.lockfile_mtime = None;
@@ -371,6 +375,9 @@ impl Poller {
                 self.on_connected(Arc::new(session)).await;
             }
             Err(e) => {
+                // A client that cannot be reached tells nothing about the game:
+                // the first verdict is "closed" (a later success still moves on).
+                self.settle();
                 self.connect_failures = self.connect_failures.saturating_add(1);
                 let delay = connect_retry_delay(self.connect_failures);
                 self.next_connect = Instant::now() + delay;
@@ -635,6 +642,8 @@ impl Poller {
                     log::info!("VALORANT is not running");
                     self.change_stage(session, Stage::Closed, None).await?;
                 }
+                // Absent twice: the first verdict (or a later one, no change).
+                self.settle();
                 return Ok(());
             }
         }
@@ -694,6 +703,8 @@ impl Poller {
             // (and its worker running) before the backfill is queued.
             self.begin_backfill(session).await;
         }
+        // VALORANT is running and its stage is on screen: the first verdict.
+        self.settle();
         Ok(())
     }
 
@@ -1233,6 +1244,15 @@ impl Poller {
         }
         self.st.publish();
         self.ensure_worker(session);
+    }
+
+    /// The first verdict on whether VALORANT is running is in: from now on the
+    /// published `LiveState` says `settled` (the UI picks its start page from
+    /// it, once). Idempotent; publishes only when it changed.
+    fn settle(&self) {
+        if lock(&self.st.live).settle() {
+            self.st.publish();
+        }
     }
 
     /// Closed: the user's own card from the DB (nothing if unknown).
@@ -2157,6 +2177,163 @@ mod tests {
         poller.connected_tick(&h.session).await.unwrap();
         sleep(Duration::from_millis(300)).await;
         assert_eq!(content_requests(&h).await, 1, "never answered, so due");
+    }
+
+    // -- the start page's signal: LiveState.settled ---------------------
+
+    /// The disconnected tick runs in a task (it sleeps 5 s after deciding, and
+    /// the first verdict is made before that sleep): wait for `settled`, then
+    /// stop it. Returns whether the published state said settled in time.
+    async fn settled_after_a_disconnected_tick(h: &Harness, poller: Poller) -> bool {
+        let task = tokio::spawn(async move {
+            let mut poller = poller;
+            poller.disconnected_tick().await;
+        });
+        let mut settled = false;
+        for _ in 0..100 {
+            if h.st.live_state().settled {
+                settled = true;
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        task.abort();
+        settled
+    }
+
+    #[tokio::test]
+    async fn the_published_state_is_unsettled_until_the_first_verdict() {
+        // The model's starting Closed is not a verdict: nothing has looked yet.
+        let h = harness().await;
+        assert!(!h.st.live_state().settled);
+        h.st.publish();
+        assert!(!h.st.live_state().settled);
+        assert!(!lock(&h.st.live).is_settled());
+        // The Closed card of a connect is not one either.
+        let mut poller = Poller::new(h.st.clone());
+        poller.enter_closed().await;
+        assert_eq!(h.st.live_state().stage, Stage::Closed);
+        assert!(!h.st.live_state().settled);
+    }
+
+    #[tokio::test]
+    async fn no_lockfile_at_the_first_check_is_the_first_verdict_closed() {
+        let h = harness().await;
+        let empty = tempfile::tempdir().unwrap();
+        let mut poller = Poller::new(h.st.clone());
+        poller.local_app_data = Some(empty.path().to_path_buf());
+        assert!(settled_after_a_disconnected_tick(&h, poller).await);
+        assert_eq!(h.st.live_state().stage, Stage::Closed);
+    }
+
+    #[tokio::test]
+    async fn a_machine_with_no_riot_client_location_is_settled_closed() {
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.local_app_data = None;
+        assert!(settled_after_a_disconnected_tick(&h, poller).await);
+    }
+
+    #[tokio::test]
+    async fn a_failed_connect_attempt_is_the_first_verdict_closed() {
+        // A lockfile that names nothing usable: `connect` fails.
+        let h = harness().await;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir
+            .path()
+            .join("Riot Games")
+            .join("Riot Client")
+            .join("Config");
+        std::fs::create_dir_all(&cfg).unwrap();
+        std::fs::write(cfg.join("lockfile"), "not a lockfile").unwrap();
+        let mut poller = Poller::new(h.st.clone());
+        poller.local_app_data = Some(dir.path().to_path_buf());
+        assert!(settled_after_a_disconnected_tick(&h, poller).await);
+        assert_eq!(h.st.live_state().stage, Stage::Closed);
+    }
+
+    #[tokio::test]
+    async fn connected_but_no_presence_verdict_yet_stays_unsettled() {
+        // The connect itself (the Closed card), then a presence call that
+        // fails: no verdict, the app has not looked at the game yet.
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        assert!(!h.st.live_state().settled);
+        poller.presence_tick(&h.session).await.unwrap(); // no presence mock: 404
+        assert!(!h.st.live_state().settled);
+        assert_eq!(poller.presence_errors, 1);
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn the_first_absent_presence_is_not_a_verdict_the_second_is() {
+        // Two strikes (GameWatch::ABSENT_TICKS_TO_CLOSE): one odd payload must
+        // not settle the start page on Closed.
+        let h = harness().await;
+        Mock::given(method("GET"))
+            .and(path("/chat/v4/presences"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"presences": []})))
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        poller.presence_tick(&h.session).await.unwrap();
+        assert!(!h.st.live_state().settled, "one absent tick");
+        poller.presence_tick(&h.session).await.unwrap();
+        let state = h.st.live_state();
+        assert!(state.settled, "two absent ticks: VALORANT is closed");
+        assert_eq!(state.stage, Stage::Closed);
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn the_first_presence_with_a_stage_settles_the_state_with_that_stage() {
+        // VALORANT was already running when the app started: the first state
+        // with `settled: true` is the Lobby, never a settled Closed.
+        let h = harness().await;
+        mock_presence(&h, "MENUS", "unrated").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        assert!(!h.st.live_state().settled);
+        poller.presence_tick(&h.session).await.unwrap();
+        let state = h.st.live_state();
+        assert!(state.settled);
+        assert_eq!(state.stage, Stage::Menus);
+        // Every state a UI could have received with `settled: true` was a stage.
+        let settled: Vec<_> = h.live_events().into_iter().filter(|s| s.settled).collect();
+        assert!(!settled.is_empty());
+        for s in settled {
+            assert_eq!(s.stage, Stage::Menus);
+        }
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn once_settled_it_stays_settled_through_a_later_presence_and_a_model_reset() {
+        let h = harness().await;
+        let cell = switchable_presence(&h, "MENUS", "unrated").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        poller.presence_tick(&h.session).await.unwrap();
+        assert!(h.st.live_state().settled);
+        *cell.lock().unwrap() = ("PREGAME".into(), "unrated".into());
+        poller.presence_tick(&h.session).await.unwrap();
+        assert!(h.st.live_state().settled);
+        // The supervisor's reset after a panic (R169) and the Closed card it
+        // publishes do not unsettle it, and neither does a reconnect's.
+        reset_after_panic(&h.st);
+        show_closed(&h.st).await;
+        let state = h.st.live_state();
+        assert_eq!(state.stage, Stage::Closed);
+        assert!(
+            state.settled,
+            "the restarted poller does not start the verdict over"
+        );
+        poller.drop_session().await;
+        assert!(h.st.live_state().settled);
+        poller.stop_worker();
     }
 
     #[tokio::test]

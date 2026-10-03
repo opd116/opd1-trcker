@@ -268,6 +268,13 @@ pub(crate) struct Harness {
     rec: Arc<Recorder>,
 }
 
+impl Harness {
+    /// Every `"live"` event the sink has received, oldest first.
+    pub(crate) fn live_events(&self) -> Vec<LiveState> {
+        self.rec.live.lock().unwrap().clone()
+    }
+}
+
 /// A second session on the harness's mock Riot client whose `other`-family
 /// in-call wait is `max` instead of 10 s (R160), so a hold the session
 /// refuses (`RiotError::Held`) can be short in a test.

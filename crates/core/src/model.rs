@@ -305,6 +305,13 @@ pub struct LiveState {
     /// UI looks assets up by uuid.
     pub map_id: Option<String>,
     pub players: Vec<PlayerCard>,
+    /// The poll loop has reached its first verdict on whether VALORANT is
+    /// running: `false` while `Closed` is only the model's starting value (the
+    /// app has not looked yet), `true` from the first verdict on, for the rest
+    /// of the app's life (a supervisor restart keeps it). The UI picks its
+    /// start page (My Stats while the game is closed) only from a settled
+    /// state, so a game that was already running never lands on My Stats.
+    pub settled: bool,
 }
 
 // ---------------------------------------------------------------------
@@ -580,6 +587,10 @@ pub struct ScoreRow {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MyStats {
+    /// The user's own PUUID, the account these numbers are for: the page
+    /// opens Match Details with it as the focus player, so its rows work
+    /// whenever My Stats exists (no live card needed).
+    pub puuid: String,
     pub rank: RankSummary,
     /// The RR chart, oldest first (one point per ranked competitive
     /// update).

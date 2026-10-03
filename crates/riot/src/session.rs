@@ -24,6 +24,7 @@ use serde_json::Value;
 use opd1_core::lockfile::parse_lockfile;
 use opd1_core::shards::{parse_client_version, parse_shards};
 
+use crate::locks::locked;
 use crate::raw_capture::{excerpt, shorten_uuids, ErrorDump, RawCaptures, LOG_EXCERPT_CHARS};
 use crate::throttle::{Hold, Throttle, MAX_HOLD_SECS};
 
@@ -545,7 +546,7 @@ impl RiotSession {
             return false;
         };
         let (was, was_from) = {
-            let mut auth = self.auth.lock().unwrap();
+            let mut auth = locked(&self.auth);
             if auth.client_version_source == VersionSource::Presence {
                 return false;
             }
@@ -568,12 +569,12 @@ impl RiotSession {
 
     /// The `X-Riot-ClientVersion` this session sends on pd/glz calls.
     pub fn client_version(&self) -> String {
-        self.auth.lock().unwrap().client_version.clone()
+        locked(&self.auth).client_version.clone()
     }
 
     /// Where [`client_version`](Self::client_version) came from.
     pub fn client_version_source(&self) -> VersionSource {
-        self.auth.lock().unwrap().client_version_source
+        locked(&self.auth).client_version_source
     }
 
     /// `GET`s a path on the local client (`127.0.0.1:{port}`), with Basic
@@ -688,7 +689,7 @@ impl RiotSession {
         };
         let url = format!("{base}{path}");
         let (access_token, entitlements_jwt, client_version, generation) = {
-            let auth = self.auth.lock().unwrap();
+            let auth = locked(&self.auth);
             (
                 auth.access_token.clone(),
                 auth.entitlements_jwt.clone(),
@@ -817,7 +818,7 @@ impl RiotSession {
     /// gone is an error.
     async fn refresh_if_stale(&self) -> Result<(), RiotError> {
         let (generation, due) = {
-            let auth = self.auth.lock().unwrap();
+            let auth = locked(&self.auth);
             let now = Instant::now();
             (
                 auth.generation,
@@ -833,8 +834,7 @@ impl RiotSession {
             Err(RiotError::ClientGone) => Err(RiotError::ClientGone),
             Err(e) => {
                 log::warn!("fresh token not fetched ({e}); going on with the cached one");
-                self.auth.lock().unwrap().proactive_retry_at =
-                    Instant::now() + PROACTIVE_RETRY_PAUSE;
+                locked(&self.auth).proactive_retry_at = Instant::now() + PROACTIVE_RETRY_PAUSE;
                 Ok(())
             }
         }
@@ -855,7 +855,7 @@ impl RiotSession {
     ) -> Result<(), RiotError> {
         let _one_at_a_time = self.refresh_gate.lock().await;
         {
-            let auth = self.auth.lock().unwrap();
+            let auth = locked(&self.auth);
             if auth.generation != seen_generation
                 || (proactive && Instant::now() < auth.proactive_retry_at)
             {
@@ -865,7 +865,7 @@ impl RiotSession {
         self.check_alive()?;
         let entitlements =
             fetch_entitlements(&self.local_client, &self.local_base, &self.basic_auth).await?;
-        let mut auth = self.auth.lock().unwrap();
+        let mut auth = locked(&self.auth);
         auth.access_token = entitlements.access_token;
         auth.entitlements_jwt = entitlements.token;
         auth.generation += 1;
@@ -1138,6 +1138,81 @@ mod tests {
                 "{bad}"
             );
         }
+    }
+
+    /// A session on a mock client: the lockfile, `ShooterGame.log` and token
+    /// answer `connect` needs, and `GET /ok` on the "remote" side. (The
+    /// integration tests' support code is out of reach of a unit test, which
+    /// needs the private `auth` lock.)
+    async fn mock_session(dir: &Path, server: &wiremock::MockServer) -> RiotSession {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let config = dir.join("Riot Games").join("Riot Client").join("Config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("lockfile"),
+            format!("Riot Client:1:{}:pw:http", server.address().port()),
+        )
+        .unwrap();
+        let logs = dir.join("VALORANT").join("Saved").join("Logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("ShooterGame.log"),
+            "https://pd.eu.a.pvp.net/account-xp/v1/players/x\nhttps://glz-eu-1.eu.a.pvp.net/x\n",
+        )
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/entitlements/v1/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "accessToken": "a", "entitlements": [], "issuer": "i",
+                "subject": "puuid-1", "token": "t"
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/ok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"fine": true})))
+            .mount(server)
+            .await;
+        let base = server.uri();
+        RiotSession::connect_with_overrides(
+            dir,
+            ConnectOverrides {
+                pd_base: Some(base.clone()),
+                glz_base: Some(base.clone()),
+                valorant_api_base: Some(base),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("connect to the mock client")
+    }
+
+    #[tokio::test]
+    async fn an_auth_lock_poisoned_by_a_panicking_caller_does_not_stop_later_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        let session = mock_session(dir.path(), &server).await;
+
+        std::thread::scope(|s| {
+            let _ = s
+                .spawn(|| {
+                    let _held = session.auth.lock().unwrap();
+                    panic!("a caller panicked while it held the auth lock");
+                })
+                .join();
+        });
+        assert!(session.auth.is_poisoned());
+
+        // The readers, the writer and a throttled remote call (which reads the
+        // headers under the lock) all still work.
+        let before = session.client_version();
+        let _ = session.client_version_source();
+        assert!(!session.note_presence_version("not base64 at all"));
+        assert_eq!(session.client_version(), before);
+        let answer: Value = session.pd("/ok").await.expect("the call still goes out");
+        assert_eq!(answer, json!({"fine": true}));
     }
 
     #[test]

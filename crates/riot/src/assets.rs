@@ -79,6 +79,7 @@ use serde_json::Value;
 use opd1_core::model::WeaponSkin;
 use opd1_core::stats::Act;
 
+use crate::locks::{locked, read_lock, write_lock};
 use crate::to_core::{self, SeasonEntry};
 
 /// How long to wait for the TCP+TLS handshake alone — short regardless of
@@ -580,7 +581,7 @@ impl AssetCache {
                         move || load_tables_from_disk_sync(&dir)
                     })
                     .await?;
-                    *self.tables.write().unwrap() = tables;
+                    *write_lock(&self.tables) = tables;
                     Ok(false)
                 } else {
                     Err(network_err)
@@ -597,7 +598,7 @@ impl AssetCache {
                 move || load_tables_from_disk_sync(&dir)
             })
             .await?;
-            *self.tables.write().unwrap() = tables;
+            *write_lock(&self.tables) = tables;
             return Ok(false);
         }
 
@@ -617,7 +618,7 @@ impl AssetCache {
                 Ok(content_tiers) => content_tiers,
                 Err(e) => {
                     log::warn!("content tiers fetch failed, keeping the cached tables: {e}");
-                    *self.tables.write().unwrap() = tables;
+                    *write_lock(&self.tables) = tables;
                     return Ok(false);
                 }
             };
@@ -628,7 +629,7 @@ impl AssetCache {
             })
             .await?;
             tables.content_tiers = content_tiers;
-            *self.tables.write().unwrap() = tables;
+            *write_lock(&self.tables) = tables;
             return Ok(true);
         }
 
@@ -658,7 +659,7 @@ impl AssetCache {
                     move || load_tables_from_disk_sync(&dir)
                 })
                 .await?;
-                *self.tables.write().unwrap() = tables;
+                *write_lock(&self.tables) = tables;
                 return Ok(false);
             }
             Err(e) => return Err(e),
@@ -685,7 +686,7 @@ impl AssetCache {
         })
         .await?;
 
-        *self.tables.write().unwrap() = Tables {
+        *write_lock(&self.tables) = Tables {
             agents,
             maps,
             tiers,
@@ -838,7 +839,7 @@ impl AssetCache {
     // -- UI-facing lookups (require refresh_tables() to have run) ------
 
     fn tables_snapshot(&self) -> Result<Tables, AssetError> {
-        let tables = self.tables.read().unwrap();
+        let tables = read_lock(&self.tables);
         tables.ensure_loaded()?;
         Ok(tables.clone())
     }
@@ -897,7 +898,7 @@ impl AssetCache {
     /// runs once per remembered card on every publish, so it must not copy
     /// the whole [`Tables`] (unlike [`Self::tables_snapshot`]).
     pub fn map_uuid_for_path(&self, riot_map_path: &str) -> Result<Option<String>, AssetError> {
-        let tables = self.tables.read().unwrap();
+        let tables = read_lock(&self.tables);
         tables.ensure_loaded()?;
         Ok(tables
             .maps
@@ -953,7 +954,7 @@ impl AssetCache {
     /// download -> write" critical section, so concurrent callers for the
     /// same asset serialize instead of racing.
     fn lock_for(&self, kind: AssetKind, id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.image_locks.lock().unwrap();
+        let mut locks = locked(&self.image_locks);
         locks
             .entry((kind, id.to_string()))
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -1132,7 +1133,7 @@ impl AssetCache {
         if !is_valid_uuid(skin_id) || !is_valid_uuid(chroma_id) {
             return None;
         }
-        let skins = self.skins.read().unwrap();
+        let skins = read_lock(&self.skins);
         skins
             .get(&skin_id.to_ascii_lowercase())
             .map(|skin| skin.weapon_skin(&chroma_id.to_ascii_lowercase()))
@@ -1190,14 +1191,12 @@ impl AssetCache {
             }
         };
         let found = entry.weapon_skin(&chroma);
-        self.skins.write().unwrap().insert(skin, entry);
+        write_lock(&self.skins).insert(skin, entry);
         Ok(found)
     }
 
     fn skin_lock(&self, skin: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.skin_locks
-            .lock()
-            .unwrap()
+        locked(&self.skin_locks)
             .entry(skin.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()

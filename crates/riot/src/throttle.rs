@@ -15,6 +15,8 @@ use std::time::{Duration, Instant};
 
 use tokio::time::sleep;
 
+use crate::locks::locked;
+
 /// The smallest `rps` a [`Throttle`] will ever actually use. Guards
 /// against a nonsensical `rps <= 0` (or NaN) causing a divide-by-zero (or
 /// by-a-negative-number) when computing how long to wait for the next
@@ -83,7 +85,7 @@ impl Hold {
     /// moves time by passing later instants.
     fn hold_until(&self, now: Instant, secs: f64) -> Duration {
         let until = now + Duration::from_secs_f64(clamp_hold_secs(secs));
-        let mut slot = self.until.lock().unwrap();
+        let mut slot = locked(&self.until);
         let held = match *slot {
             Some(existing) if existing > until => existing,
             _ => until,
@@ -98,7 +100,7 @@ impl Hold {
     }
 
     fn remaining_at(&self, now: Instant) -> Option<Duration> {
-        let until = (*self.until.lock().unwrap())?;
+        let until = (*locked(&self.until))?;
         (until > now).then(|| until - now)
     }
 
@@ -198,7 +200,7 @@ impl Throttle {
     /// Refills the bucket for elapsed time, then either takes a token
     /// (`Ok`) or reports how long to wait for the next one (`Err`).
     fn try_take_token(&self) -> Result<(), Duration> {
-        let mut inner = self.inner.lock().unwrap();
+        let mut inner = locked(&self.inner);
         let now = Instant::now();
         let elapsed = inner
             .last_refill
@@ -271,6 +273,41 @@ mod tests {
     #[test]
     fn clamp_hold_secs_clamps_a_huge_finite_value_to_the_max() {
         assert_eq!(clamp_hold_secs(1_000_000.0), MAX_HOLD_SECS);
+    }
+
+    /// Poisons `m` the way a panicking caller would: a thread dies holding it.
+    fn poison<T: Send>(m: &Mutex<T>) {
+        std::thread::scope(|s| {
+            let _ = s
+                .spawn(|| {
+                    let _held = m.lock().unwrap();
+                    panic!("a caller panicked while it held the lock");
+                })
+                .join();
+        });
+        assert!(m.is_poisoned());
+    }
+
+    #[tokio::test]
+    async fn a_lock_poisoned_by_a_panicking_caller_does_not_stop_later_calls() {
+        let t = Throttle::new(2.0, 1000.0);
+        poison(&t.inner);
+        poison(&t.hold.until);
+
+        // Every path that takes either lock still answers.
+        assert!(t.try_take_token().is_ok());
+        t.take().await;
+        assert_eq!(t.take_unless_held().await, Ok(()));
+        assert!(t.hold.remaining().is_none());
+        assert!(t.hold_for(30.0) > Duration::from_secs(29));
+        assert!(t.hold.remaining().is_some());
+        assert_eq!(
+            t.take_unless_held()
+                .await
+                .map_err(|left| left.as_secs() >= 29),
+            Err(true),
+            "the hold set after the poisoning is honoured"
+        );
     }
 
     #[test]

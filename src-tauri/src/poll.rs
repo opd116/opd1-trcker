@@ -182,10 +182,10 @@ where
 }
 
 /// What the dead poll loop left in the shared model. Its worker task is
-/// detached (the handle died with the poller): revoking the claim stops it at
-/// its next job. Its backfill run and its session are the dead loop's: the new
-/// one connects again from the lockfile like at startup, and the cursor of an
-/// interrupted run is never trusted (R101).
+/// aborted by the poller's own drop ([`Poller`]'s `Drop`); the claim is
+/// revoked here too, so nothing waits on it. Its backfill run and its session
+/// are the dead loop's: the new one connects again from the lockfile like at
+/// startup, and the cursor of an interrupted run is never trusted (R101).
 fn reset_after_panic(st: &AppState) {
     {
         let mut live = lock(&st.live);
@@ -197,24 +197,35 @@ fn reset_after_panic(st: &AppState) {
 }
 
 pub fn start(st: Arc<AppState>) {
-    tauri::async_runtime::spawn(supervise(
-        {
+    spawn_supervised(
+        st.clone(),
+        // The poller is built inside the task, so even `new` is covered.
+        move || {
             let st = st.clone();
-            // The poller is built inside the task, so even `new` is covered.
-            move || {
-                let st = st.clone();
-                async move { Poller::new(st).run().await }
-            }
+            async move { Poller::new(st).run().await }
         },
         POLLER_RESTARTS,
-        move |message, wait| {
-            log::error!(
-                "the poll loop panicked ({message}); restarting in {} s",
-                wait.as_secs()
-            );
-            reset_after_panic(&st);
-        },
-    ));
+    );
+}
+
+/// [`start`]'s wiring with the loop a parameter (the test seam): `make` under
+/// the supervisor, and at each panic the error line, [`reset_after_panic`],
+/// and the Closed view — the user's own card from the DB, published at once —
+/// so the cards of the dead loop are not what the UI shows during the wait.
+fn spawn_supervised<F, Fut>(st: Arc<AppState>, make: F, pacing: RestartPacing) -> JoinHandle<()>
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tauri::async_runtime::spawn(supervise(make, pacing, move |message, wait| {
+        log::error!(
+            "the poll loop panicked ({message}); restarting in {} s",
+            wait.as_secs()
+        );
+        reset_after_panic(&st);
+        let st = st.clone();
+        tauri::async_runtime::spawn(async move { show_closed(&st).await });
+    }))
 }
 
 pub(crate) struct Poller {
@@ -263,6 +274,16 @@ pub(crate) struct Poller {
     /// The lockfile's mtime at the last check — a rewritten lockfile (the
     /// Riot Client restarted) retries at once, whatever the backoff.
     lockfile_mtime: Option<SystemTime>,
+}
+
+impl Drop for Poller {
+    /// A poller that dies — a panic unwinding its task — takes its worker with
+    /// it: the handle is aborted, not left running detached.
+    fn drop(&mut self) {
+        if let Some((handle, _)) = self.worker.take() {
+            handle.abort();
+        }
+    }
 }
 
 impl Poller {
@@ -1218,33 +1239,7 @@ impl Poller {
     pub(crate) async fn enter_closed(&mut self) {
         self.stop_worker();
         self.stage = Stage::Closed;
-        let me = lock(&self.st.live).self_puuid.clone();
-        let slot = match me {
-            Some(me) => {
-                let p = me.clone();
-                let db = self
-                    .st
-                    .db(move |repo| load_player_db(repo, Some(&p), &p))
-                    .await
-                    .unwrap_or_default();
-                closed_self_slot(&me, db)
-            }
-            None => None,
-        };
-        {
-            let mut live = lock(&self.st.live);
-            live.stage = Stage::Closed;
-            live.in_match = false;
-            live.map_path = None;
-            live.map_id = None;
-            live.coregame_match_id = None;
-            live.loadouts.clear();
-            live.match_tiers.clear();
-            live.slots = slot.into_iter().collect();
-            // R155: nothing is retried while VALORANT is closed.
-            live.prune_rank_retries();
-        }
-        self.st.publish();
+        show_closed(&self.st).await;
     }
 
     /// A match ended: once Riot has published it, the user's party needs a
@@ -1297,6 +1292,37 @@ impl Poller {
             });
         }
     }
+}
+
+/// The shared model in the Closed stage, published: the user's own card from
+/// the DB (when it knows them), nothing else.
+async fn show_closed(st: &Arc<AppState>) {
+    let me = lock(&st.live).self_puuid.clone();
+    let slot = match me {
+        Some(me) => {
+            let p = me.clone();
+            let db = st
+                .db(move |repo| load_player_db(repo, Some(&p), &p))
+                .await
+                .unwrap_or_default();
+            closed_self_slot(&me, db)
+        }
+        None => None,
+    };
+    {
+        let mut live = lock(&st.live);
+        live.stage = Stage::Closed;
+        live.in_match = false;
+        live.map_path = None;
+        live.map_id = None;
+        live.coregame_match_id = None;
+        live.loadouts.clear();
+        live.match_tiers.clear();
+        live.slots = slot.into_iter().collect();
+        // R155: nothing is retried while VALORANT is closed.
+        live.prune_rank_retries();
+    }
+    st.publish();
 }
 
 fn lockfile_path(local_app_data: &Path) -> PathBuf {
@@ -1513,6 +1539,121 @@ mod tests {
         );
         assert!(!live.worker_running(), "the detached worker is revoked");
         assert!(h.st.session().is_none());
+    }
+
+    #[tokio::test]
+    async fn a_dropped_poller_aborts_its_worker_task() {
+        // The poller that dies in a panic takes its worker with it: the task is
+        // aborted, not left detached.
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct SetOnDrop(Arc<AtomicBool>);
+        impl Drop for SetOnDrop {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        let h = harness().await;
+        let dropped = Arc::new(AtomicBool::new(false));
+        let guard = SetOnDrop(dropped.clone());
+        let mut poller = Poller::new(h.st.clone());
+        poller.worker = Some((
+            tauri::async_runtime::spawn(async move {
+                let _guard = guard;
+                std::future::pending::<()>().await
+            }),
+            1,
+        ));
+        sleep(Duration::from_millis(20)).await;
+        assert!(!dropped.load(Ordering::SeqCst), "it is running");
+
+        drop(poller);
+
+        crate::pipeline_tests::wait_until("the worker task was aborted", || {
+            dropped.load(Ordering::SeqCst)
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn a_panic_under_the_supervisor_resets_the_model_and_shows_the_closed_card() {
+        // `start`'s own wiring (`spawn_supervised`): at a panic the dead loop's
+        // claims are dropped and the UI gets the Closed view (the user's own
+        // card) at once, not the dead loop's cards for the whole wait.
+        let h = harness().await;
+        let now = now_ms();
+        h.st.db(move |repo| {
+            save_player(
+                repo.conn(),
+                &PlayerUpdate {
+                    puuid: ME.into(),
+                    name: Some(("Me".into(), "OPD1".into())),
+                    account_level: 87,
+                    card_id: "card".into(),
+                },
+                now,
+            )
+        })
+        .await
+        .unwrap();
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Ingame;
+            live.in_match = true;
+            live.slots = ["cccccccc-0000-0000-0000-000000000003", ME]
+                .map(|p| Slot {
+                    roster: roster(p, false),
+                    db: PlayerDb::default(),
+                })
+                .into();
+            live.start_backfill(None, None);
+            live.start_comp_backfill(None, None);
+            assert!(
+                live.try_start_worker().is_some(),
+                "a worker holds the claim"
+            );
+        }
+        h.st.set_session(Some(h.session.clone()));
+        h.st.publish();
+        assert_eq!(h.st.live_state().stage, Stage::Ingame);
+        assert_eq!(h.st.live_state().players.len(), 2);
+
+        let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task = spawn_supervised(
+            h.st.clone(),
+            {
+                let runs = runs.clone();
+                move || {
+                    let first = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0;
+                    async move {
+                        if first {
+                            panic!("boom");
+                        }
+                        std::future::pending::<()>().await
+                    }
+                }
+            },
+            FAST,
+        );
+
+        crate::pipeline_tests::wait_until("the Closed view was published", || {
+            h.st.live_state().stage == Stage::Closed
+        })
+        .await;
+        let live_state = h.st.live_state();
+        assert_eq!(live_state.players.len(), 1, "only the user's own card");
+        assert_eq!(live_state.players[0].puuid, ME);
+        {
+            let live = lock(&h.st.live);
+            assert!(live.backfill.is_none() && live.comp_backfill.is_none());
+            assert!(!live.worker_running(), "the claim is revoked");
+            assert!(!live.in_match);
+        }
+        assert!(h.st.session().is_none());
+        crate::pipeline_tests::wait_until("the loop was started again", || {
+            runs.load(std::sync::atomic::Ordering::SeqCst) == 2
+        })
+        .await;
+        task.abort();
     }
 
     /// Waits (up to ~5s) for a finished backfill run's anchor.
@@ -2265,7 +2406,7 @@ mod tests {
         // B1: "after each match end like the backfill": In Game -> Menus.
         let h = harness().await;
         mount_feed(&h.server, Feed::new(1)).await;
-        mount_comp_feed(&h.server, 30, None).await;
+        mount_comp_feed(&h.server, 7, None).await;
         let presence = switchable_presence(&h, "INGAME", "unrated").await;
         let mut poller = Poller::new(h.st.clone());
         poller.stage = Stage::Ingame;
@@ -2301,7 +2442,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_paused_competitive_updates_run_gets_a_worker_at_the_tick_once_its_hold_is_over() {
+    async fn a_paused_competitive_updates_run_gets_a_worker_at_the_tick_once_its_pause_is_over() {
         let h = harness().await;
         mount_comp_feed(&h.server, 30, None).await;
         let mut poller = Poller::new(h.st.clone());
@@ -2310,14 +2451,38 @@ mod tests {
         synced_lobby(&h);
         crate::sync::start_comp_backfill_run(&h.st).await;
         lock(&h.st.live).pause_comp_backfill(Duration::from_secs(10));
+        let comp_pages = || async {
+            requests(&h.server)
+                .await
+                .iter()
+                .filter(|r| r.url.path() == format!("/mmr/v1/players/{ME}/competitiveupdates"))
+                .count()
+        };
 
         // Inside the pause: the tick starts nothing.
         poller.connected_tick(&h.session).await.unwrap();
         assert!(!lock(&h.st.live).worker_running());
-        assert_eq!(stored_comp_anchor(&h.st).await, None);
+        assert_eq!(comp_pages().await, 0);
 
-        // The pause is over: the tick wakes a worker, which pages the run.
+        // The pause is over: the tick wakes a worker, which asks for one page.
         lock(&h.st.live).advance_clock(Duration::from_secs(11));
+        poller.connected_tick(&h.session).await.unwrap();
+        for _ in 0..250 {
+            if comp_pages().await >= 1 && !lock(&h.st.live).worker_running() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(comp_pages().await, 1, "one page a job");
+        assert_eq!(stored_comp_anchor(&h.st).await, None, "the run is not over");
+
+        // The gap between pages: a tick inside it starts nothing, the first
+        // one after it wakes the worker for the last page.
+        lock(&h.st.live).advance_clock(Duration::from_millis(500));
+        poller.connected_tick(&h.session).await.unwrap();
+        assert!(!lock(&h.st.live).worker_running());
+        assert_eq!(comp_pages().await, 1);
+        lock(&h.st.live).advance_clock(Duration::from_secs(3));
         poller.connected_tick(&h.session).await.unwrap();
         for _ in 0..250 {
             if stored_comp_anchor(&h.st).await.is_some() {
@@ -2325,6 +2490,7 @@ mod tests {
             }
             sleep(Duration::from_millis(20)).await;
         }
+        assert_eq!(comp_pages().await, 2);
         assert_eq!(
             stored_comp_anchor(&h.st).await.map(|a| a.0),
             Some(row_id(0))

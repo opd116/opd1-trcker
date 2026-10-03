@@ -1324,6 +1324,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn locks_poisoned_by_a_panicking_caller_do_not_stop_later_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = AssetCache::new(dir.path().join("assets"));
+        std::thread::scope(|s| {
+            let holders = [
+                s.spawn(|| {
+                    let _held = cache.tables.write().unwrap();
+                    panic!("a caller panicked while it held the tables lock");
+                }),
+                s.spawn(|| {
+                    let _held = cache.skins.write().unwrap();
+                    panic!("a caller panicked while it held the skins lock");
+                }),
+                s.spawn(|| {
+                    let _held = cache.image_locks.lock().unwrap();
+                    panic!("a caller panicked while it held the image locks");
+                }),
+                s.spawn(|| {
+                    let _held = cache.skin_locks.lock().unwrap();
+                    panic!("a caller panicked while it held the skin locks");
+                }),
+            ];
+            for holder in holders {
+                let _ = holder.join();
+            }
+        });
+        assert!(cache.tables.is_poisoned() && cache.skins.is_poisoned());
+        assert!(cache.image_locks.is_poisoned() && cache.skin_locks.is_poisoned());
+
+        // Every path that takes one of them still answers (the tables were
+        // never loaded: an error, not a panic).
+        assert!(cache.meta().is_err());
+        assert!(cache.acts().is_err());
+        assert!(cache.map_uuid_for_path("/Game/Maps/Ascent/Ascent").is_err());
+        assert_eq!(
+            cache.weapon_skin_cached(
+                "aaaaaaaa-0000-0000-0000-000000000001",
+                "bbbbbbbb-0000-0000-0000-000000000002"
+            ),
+            None
+        );
+        let _ = cache.lock_for(AssetKind::Agent, "aaaaaaaa-0000-0000-0000-000000000001");
+        let _ = cache.skin_lock("a-skin");
+    }
+
+    #[test]
     fn validate_id_accepts_a_well_formed_uuid() {
         assert!(validate_id(AssetKind::Agent, "aaaaaaaa-0000-0000-0000-000000000001").is_ok());
     }

@@ -14,7 +14,7 @@ use super::*;
 use crate::pipeline_tests::backfill::{base_ms, entry_start, requests};
 use crate::sync::{
     anchor_json, comp_anchor_key, comp_backfill_step, parse_anchor, start_comp_backfill_run, Gone,
-    COMP_BACKFILL_MAX_PAGES, COMP_BACKFILL_PAGE,
+    COMP_BACKFILL_MAX_PAGES, COMP_BACKFILL_PAGE, COMP_BACKFILL_PAGE_GAP,
 };
 
 /// Row `i` of the synthetic competitive updates.
@@ -26,9 +26,20 @@ fn comp_path() -> String {
     format!("/mmr/v1/players/{ME}/competitiveupdates")
 }
 
-/// Mounts ME's competitive updates: `rows` of them, beating the harness's own
-/// two-answer mock (`with_priority(1)`); pages from `fail_from` on answer 500.
+/// Mounts ME's competitive updates: `rows` of them, a minute apart, beating the
+/// harness's own two-answer mock (`with_priority(1)`); pages from `fail_from`
+/// on answer 500.
 pub(crate) async fn mount_comp_feed(server: &MockServer, rows: usize, fail_from: Option<usize>) {
+    mount_comp_feed_spaced(server, rows, fail_from, 60_000).await;
+}
+
+/// [`mount_comp_feed`] with the rows `step_ms` apart.
+pub(crate) async fn mount_comp_feed_spaced(
+    server: &MockServer,
+    rows: usize,
+    fail_from: Option<usize>,
+    step_ms: i64,
+) {
     let base = base_ms();
     Mock::given(method("GET"))
         .and(path(comp_path().as_str()))
@@ -49,7 +60,7 @@ pub(crate) async fn mount_comp_feed(server: &MockServer, rows: usize, fail_from:
                 .map(|i| {
                     json!({
                         "MatchID": row_id(i), "MapID": "/Game/Maps/Ascent/Ascent",
-                        "SeasonID": ACT, "MatchStartTime": entry_start(base, i),
+                        "SeasonID": ACT, "MatchStartTime": base - i as i64 * step_ms,
                         "TierAfterUpdate": 15, "TierBeforeUpdate": 15,
                         "RankedRatingAfterUpdate": 42, "RankedRatingBeforeUpdate": 30,
                         "RankedRatingEarned": 12
@@ -119,21 +130,86 @@ fn run_active(st: &AppState) -> bool {
 }
 
 /// What the poll loop does on connect: start a run from the stored anchor,
-/// claim the worker and let it drain.
-async fn run_comp_backfill(h: &Harness) {
+/// then — a page a job, the next one not before the gap — claim the worker
+/// and let it drain, moving the model's clock past the gap between the pages
+/// (the poll tick's wake-up). Ends when the run has.
+pub(crate) async fn run_comp_backfill(h: &Harness) {
     start_comp_backfill_run(&h.st).await;
-    let id = lock(&h.st.live)
-        .try_start_worker()
-        .expect("a run is pending work");
-    run_worker(h.st.clone(), h.session.clone(), id).await;
-    assert!(!lock(&h.st.live).worker_running(), "claim released on exit");
+    drain_run(h).await;
+}
+
+/// The worker passes of a started run (see [`run_comp_backfill`]).
+async fn drain_run(h: &Harness) {
+    let mut passes = 0;
+    loop {
+        advance(h, COMP_BACKFILL_PAGE_GAP + Duration::from_millis(500));
+        let Some(id) = lock(&h.st.live).try_start_worker() else {
+            break;
+        };
+        run_worker(h.st.clone(), h.session.clone(), id).await;
+        assert!(!lock(&h.st.live).worker_running(), "claim released on exit");
+        passes += 1;
+        assert!(passes <= 20, "the run never ends");
+    }
+    assert!(!run_active(&h.st), "the run ended");
 }
 
 #[tokio::test]
 async fn a_first_run_pages_back_to_the_act_start_and_leaves_an_anchor() {
+    const H6: i64 = 6 * 3_600_000;
+    let h = harness().await;
+    // Rows six hours apart: row i is 6 h * i before the base.
+    mount_comp_feed_spaced(&h.server, 100, None, H6).await;
+    // My Stats takes rows up to a day (the edge) before the act's start, so
+    // the run reaches that far: the act starts a day after the point between
+    // rows 45 and 46.
+    h.st.set_acts_for_test(vec![Act {
+        id: ACT.into(),
+        name: "ACT V".into(),
+        episode_name: "V26".into(),
+        start_ms: base_ms() - 45 * H6 - H6 / 2 + opd1_core::mystats::ACT_EDGE_MS,
+        end_ms: now_ms() + 30 * 86_400_000,
+    }]);
+
+    run_comp_backfill(&h).await;
+
+    // The third page (rows 40..60) holds rows before the edge: the last.
+    assert_eq!(comp_starts(&h).await, ["0", "20", "40"]);
+    let reqs = requests(&h.server).await;
+    let param = |r: &Request, key: &str| -> Option<String> {
+        r.url
+            .query_pairs()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.into_owned())
+    };
+    for r in reqs.iter().filter(|r| r.url.path() == comp_path()) {
+        assert_eq!(param(r, "queue").as_deref(), Some("competitive"));
+        let (start, end) = (
+            param(r, "startIndex").unwrap(),
+            param(r, "endIndex").unwrap(),
+        );
+        assert_eq!(
+            end.parse::<u32>().unwrap(),
+            start.parse::<u32>().unwrap() + COMP_BACKFILL_PAGE,
+            "20 rows a page"
+        );
+    }
+    assert_eq!(stored_rows(&h.st).await, 60, "the three pages are stored");
+    assert_eq!(
+        stored_comp_anchor(&h.st).await,
+        Some((row_id(0), base_ms()))
+    );
+    assert!(!run_active(&h.st));
+}
+
+#[tokio::test]
+async fn rows_before_the_act_start_but_within_the_edge_are_still_paged_for() {
+    // Review round 1: My Stats counts a row up to a day before valorant-api's
+    // act start (Riot's rollout is hours off), decided by its season. The
+    // minute-apart rows are all within the edge: the run pages to the end of
+    // the history, five full pages and an empty one.
     let h = harness().await;
     mount_comp_feed(&h.server, 100, None).await;
-    // The act starts between rows 45 and 46: row 46 and older are before it.
     h.st.set_acts_for_test(vec![Act {
         id: ACT.into(),
         name: "ACT V".into(),
@@ -144,34 +220,8 @@ async fn a_first_run_pages_back_to_the_act_start_and_leaves_an_anchor() {
 
     run_comp_backfill(&h).await;
 
-    // The third page (rows 40..60) holds rows before the act start: the last.
-    assert_eq!(comp_starts(&h).await, ["0", "20", "40"]);
-    let reqs = requests(&h.server).await;
-    assert!(
-        reqs.iter()
-            .filter(|r| r.url.path() == comp_path())
-            .all(|r| r
-                .url
-                .query_pairs()
-                .any(|(k, v)| k == "queue" && v == "competitive")
-                && r.url.query_pairs().any(|(k, v)| k == "endIndex"
-                    && v.parse::<u32>().unwrap()
-                        == r.url
-                            .query_pairs()
-                            .find(|(k, _)| k == "startIndex")
-                            .unwrap()
-                            .1
-                            .parse::<u32>()
-                            .unwrap()
-                            + COMP_BACKFILL_PAGE)),
-        "competitive queue, 20 rows a page"
-    );
-    assert_eq!(stored_rows(&h.st).await, 60, "the three pages are stored");
-    assert_eq!(
-        stored_comp_anchor(&h.st).await,
-        Some((row_id(0), entry_start(base_ms(), 0)))
-    );
-    assert!(!run_active(&h.st));
+    assert_eq!(comp_starts(&h).await.len(), 6);
+    assert_eq!(stored_rows(&h.st).await, 100);
 }
 
 #[tokio::test]
@@ -293,12 +343,12 @@ async fn a_real_failure_stops_the_run_keeps_the_anchor_and_the_next_trigger_star
 async fn a_hold_pauses_the_run_without_a_failure_and_it_resumes_after_it() {
     let h = harness().await;
     // A 429 on an earlier mmr call (the live rank phase of someone) sets the
-    // mmr family's hold, a real 1 s of it (still on when the step looks, however
-    // slow the runner). Mounted first: at the same
-    // priority the first mock that matches answers.
+    // mmr family's hold: a minute, which nothing waits out — the model's clock
+    // moves past the pause, and the hold itself is ended explicitly. Mounted
+    // first: at the same priority the first mock that matches answers.
     Mock::given(method("GET"))
         .and(path(comp_path().as_str()))
-        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "1.0"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
         .up_to_n_times(1)
         .with_priority(1)
         .mount(&h.server)
@@ -313,29 +363,39 @@ async fn a_hold_pauses_the_run_without_a_failure_and_it_resumes_after_it() {
     assert_eq!(comp_starts(&h).await.len(), 1, "nothing sent while held");
     assert!(run_active(&h.st), "the run waits, it did not fail");
     assert!(!lock(&h.st.live).comp_backfill_ready());
-    assert!(
-        !lock(&h.st.live).comp_backfill_resume_due(),
-        "the pause covers the hold and its slack"
-    );
     assert!(lock(&h.st.live).try_start_worker().is_none(), "no work yet");
 
-    // The hold ends (real time) and the pause with it (model clock).
-    tokio::time::sleep(Duration::from_millis(1_200)).await;
-    advance(&h, Duration::from_secs(3));
+    // The pause is the hold's rest plus slack, not just the slack.
+    advance(&h, Duration::from_secs(30));
+    assert!(
+        !lock(&h.st.live).comp_backfill_ready(),
+        "still the hold's time"
+    );
+    assert!(!lock(&h.st.live).comp_backfill_resume_due());
+
+    // The pause is over but Riot's hold still is (it is real time): the page
+    // is refused again, not sent and not failed, and the run waits again.
+    advance(&h, Duration::from_secs(40));
     assert!(
         lock(&h.st.live).comp_backfill_resume_due(),
         "the tick wakes it"
     );
     assert!(drain(&h).await);
+    assert_eq!(comp_starts(&h).await.len(), 1, "still nothing sent");
+    assert!(run_active(&h.st), "paused again, not failed");
 
-    // 30 rows: a full page, then a short one ends it.
+    // The hold ends: the run goes on and finishes (30 rows: a full page, then
+    // a short one).
+    h.session.end_holds();
+    advance(&h, Duration::from_secs(70));
+    assert!(lock(&h.st.live).comp_backfill_resume_due());
+    drain_run(&h).await;
     assert_eq!(comp_starts(&h).await, ["0", "0", "20"]);
     assert_eq!(stored_rows(&h.st).await, 30);
     assert_eq!(
         stored_comp_anchor(&h.st).await.map(|a| a.0),
         Some(row_id(0))
     );
-    assert!(!run_active(&h.st));
 }
 
 #[tokio::test]
@@ -370,7 +430,7 @@ async fn no_page_goes_out_during_a_match() {
             live.stage = Stage::Menus;
             live.in_match = false;
         }
-        assert!(drain(&h).await);
+        drain_run(&h).await;
         assert_eq!(stored_rows(&h.st).await, 30, "{stage:?}");
     }
 }
@@ -438,4 +498,101 @@ async fn a_step_of_another_account_is_gone() {
     lock(&h.st.live).self_puuid = Some("another-account".into());
     assert_eq!(comp_backfill_step(&h.st, &h.session).await, Err(Gone));
     assert!(comp_starts(&h).await.is_empty());
+}
+
+#[tokio::test]
+async fn the_next_page_waits_for_the_gap_and_the_tick_wakes_it() {
+    // Review round 1: a run never sends two pages closer than the gap; the
+    // job does not sleep, the run is not ready until then.
+    let h = harness().await;
+    mount_comp_feed(&h.server, 100, None).await;
+    start_comp_backfill_run(&h.st).await;
+    assert!(drain(&h).await);
+    assert_eq!(comp_starts(&h).await, ["0"], "one page, then it waits");
+
+    assert!(lock(&h.st.live).try_start_worker().is_none(), "no work yet");
+    advance(&h, COMP_BACKFILL_PAGE_GAP - Duration::from_millis(100));
+    assert!(!lock(&h.st.live).comp_backfill_resume_due());
+    assert!(lock(&h.st.live).try_start_worker().is_none());
+
+    advance(&h, Duration::from_millis(200));
+    assert!(
+        lock(&h.st.live).comp_backfill_resume_due(),
+        "the tick wakes it"
+    );
+    assert!(drain(&h).await);
+    assert_eq!(comp_starts(&h).await, ["0", "20"]);
+
+    // In a match the wake-up is no wake-up.
+    advance(&h, COMP_BACKFILL_PAGE_GAP);
+    lock(&h.st.live).in_match = true;
+    assert!(!lock(&h.st.live).comp_backfill_resume_due());
+}
+
+/// ME's own rank sync as the worker runs it, against the comp feed: stores the
+/// newest five rows (`comp_updates(0..5)`).
+async fn own_rank_sync(h: &Harness) {
+    crate::sync::rank_step(&h.st, &h.session, ME, true)
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn the_first_page_is_skipped_when_the_rank_syncs_rows_hold_the_anchor() {
+    let h = harness().await;
+    mount_comp_feed(&h.server, 100, None).await;
+    // The last finished run saw row 3 as its newest; the rank sync's five
+    // newest rows (0..5) hold it.
+    store_comp_anchor_for(&h.st, ME, 3).await;
+    own_rank_sync(&h).await;
+    assert_eq!(comp_starts(&h).await, ["0"], "the rank sync's call");
+
+    run_comp_backfill(&h).await;
+
+    assert_eq!(comp_starts(&h).await, ["0"], "no page for the run");
+    assert_eq!(stored_rows(&h.st).await, 5, "the rank sync's rows");
+    assert_eq!(
+        stored_comp_anchor(&h.st).await.map(|a| a.0),
+        Some(row_id(0)),
+        "the anchor moved to the newest row"
+    );
+}
+
+#[tokio::test]
+async fn the_first_page_is_asked_for_when_the_rank_syncs_rows_miss_the_anchor() {
+    let h = harness().await;
+    mount_comp_feed(&h.server, 100, None).await;
+    // Row 25 is behind the rank sync's five rows: pages are needed.
+    store_comp_anchor_for(&h.st, ME, 25).await;
+    own_rank_sync(&h).await;
+
+    run_comp_backfill(&h).await;
+
+    assert_eq!(
+        comp_starts(&h).await,
+        ["0", "0", "20"],
+        "rank sync, then the pages"
+    );
+    assert_eq!(stored_rows(&h.st).await, 40);
+}
+
+#[tokio::test]
+async fn another_accounts_head_or_no_anchor_never_skips_the_first_page() {
+    // A head of another account holding the same id is not ME's.
+    let h = harness().await;
+    mount_comp_feed(&h.server, 30, None).await;
+    store_comp_anchor_for(&h.st, ME, 3).await;
+    lock(&h.st.live).own_comp_head = Some((
+        "another-account".into(),
+        vec![(row_id(3), entry_start(base_ms(), 3))],
+    ));
+    run_comp_backfill(&h).await;
+    assert_eq!(comp_starts(&h).await, ["0"], "page 0 was asked for");
+
+    // No anchor (a first run): the head is no reason to skip.
+    let h = harness().await;
+    mount_comp_feed(&h.server, 30, None).await;
+    own_rank_sync(&h).await;
+    run_comp_backfill(&h).await;
+    assert_eq!(comp_starts(&h).await, ["0", "0", "20"]);
 }

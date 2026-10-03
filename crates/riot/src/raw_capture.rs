@@ -468,6 +468,42 @@ mod tests {
     use serde_json::json;
 
     #[test]
+    fn locks_poisoned_by_a_panicking_caller_do_not_stop_later_captures() {
+        let captures = RawCaptures::new();
+        std::thread::scope(|s| {
+            let holders = [
+                s.spawn(|| {
+                    let _held = captures.inner.lock().unwrap();
+                    panic!("a caller panicked while it held the captures lock");
+                }),
+                s.spawn(|| {
+                    let _held = captures.errors.lock().unwrap();
+                    panic!("a caller panicked while it held the errors lock");
+                }),
+            ];
+            for holder in holders {
+                let _ = holder.join();
+            }
+        });
+        assert!(captures.inner.is_poisoned() && captures.errors.is_poisoned());
+
+        captures.record("/mmr/v1/players/abc", br#"{"ok":true}"#);
+        captures.record_error(
+            "/match-history/v1/history/abc",
+            500,
+            br#"{"errorCode":"X"}"#,
+        );
+        let keys: Vec<String> = captures.snapshot().into_iter().map(|(k, _)| k).collect();
+        assert_eq!(keys, ["mmr"]);
+        let errors: Vec<String> = captures
+            .error_snapshot()
+            .into_iter()
+            .map(|e| e.key)
+            .collect();
+        assert_eq!(errors, ["match_history"]);
+    }
+
+    #[test]
     fn endpoint_key_recognizes_known_paths() {
         assert_eq!(endpoint_key("/pregame/v1/players/abc"), "pregame_player");
         assert_eq!(endpoint_key("/pregame/v1/matches/abc"), "pregame_match");

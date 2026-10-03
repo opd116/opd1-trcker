@@ -9,12 +9,11 @@
 use opd1_core::model::MyStats;
 
 use super::backfill::{mount_feed, run_backfill, Feed};
-use super::comp_backfill::mount_comp_feed;
+use super::comp_backfill::{mount_comp_feed, run_comp_backfill};
 use super::names_fill::DbHold;
-use super::rank::drain;
 use super::*;
 use crate::my_stats::{self, idle};
-use crate::sync::{matches_step, rank_step, start_comp_backfill_run};
+use crate::sync::{matches_step, rank_step};
 
 fn pushed(h: &Harness) -> Vec<MyStats> {
     h.rec.my_stats.lock().unwrap().clone()
@@ -169,8 +168,7 @@ async fn another_players_sync_asks_for_nothing() {
 async fn a_competitive_updates_page_pushes() {
     let h = harness().await;
     mount_comp_feed(&h.server, 30, None).await;
-    start_comp_backfill_run(&h.st).await;
-    drain(&h).await;
+    run_comp_backfill(&h).await;
     idle(&h.st).await;
 
     let events = pushed(&h);

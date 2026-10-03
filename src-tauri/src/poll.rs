@@ -1,4 +1,5 @@
-//! The live poll loop — one Tokio task started in `setup`.
+//! The live poll loop — one Tokio task started in `setup`, restarted by a
+//! supervisor ([`supervise`]) if it ever panics.
 //!
 //! ```text
 //!            lockfile missing (check every 5s — the ONLY idle work)
@@ -112,10 +113,107 @@ struct PostMatch {
     attempt: usize,
 }
 
+/// How the supervisor ([`supervise`]) paces the restarts of a poll loop that
+/// panicked: the first restart waits `delays[0]`, the second `delays[1]`, every
+/// later one `delays[2]`; a poller that ran at least `healthy_after` before it
+/// panicked starts the count over (it was a one-off, not a crash loop).
+#[derive(Debug, Clone, Copy)]
+struct RestartPacing {
+    delays: [Duration; 3],
+    healthy_after: Duration,
+}
+
+/// 1 s, then 5 s, then 30 s; a run of a minute resets it.
+const POLLER_RESTARTS: RestartPacing = RestartPacing {
+    delays: [
+        Duration::from_secs(1),
+        Duration::from_secs(5),
+        Duration::from_secs(30),
+    ],
+    healthy_after: Duration::from_secs(60),
+};
+
+impl RestartPacing {
+    /// The wait after the `failures`-th panic in a row (counted from 1).
+    fn delay(&self, failures: u32) -> Duration {
+        let last = self.delays.len() - 1;
+        self.delays[(failures.saturating_sub(1) as usize).min(last)]
+    }
+}
+
+/// The text of a task's panic payload (`panic!("…")` gives a `&str` or a
+/// `String`; anything else has no text to show).
+fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("no message")
+}
+
+/// Runs `make()` as its own task and starts a fresh one whenever that task
+/// panics, so one bug in the poll loop cannot freeze every card for the rest
+/// of the session (release builds unwind, R138: a panic ends the task, not the
+/// app). Each restart waits as `pacing` says; `on_panic(message, wait)` runs
+/// right at the panic, before the wait (log it, reset what the dead loop left
+/// behind). A task that returns normally ends the supervisor; so does a
+/// cancelled one (the runtime is shutting down).
+async fn supervise<F, Fut>(make: F, pacing: RestartPacing, mut on_panic: impl FnMut(&str, Duration))
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut failures = 0u32;
+    loop {
+        let started = Instant::now();
+        let error = match tokio::spawn(make()).await {
+            Ok(()) => return,
+            Err(e) if e.is_panic() => e,
+            Err(_) => return,
+        };
+        if started.elapsed() >= pacing.healthy_after {
+            failures = 0;
+        }
+        failures = failures.saturating_add(1);
+        let wait = pacing.delay(failures);
+        on_panic(panic_text(&*error.into_panic()), wait);
+        sleep(wait).await;
+    }
+}
+
+/// What the dead poll loop left in the shared model. Its worker task is
+/// detached (the handle died with the poller): revoking the claim stops it at
+/// its next job. Its backfill run and its session are the dead loop's: the new
+/// one connects again from the lockfile like at startup, and the cursor of an
+/// interrupted run is never trusted (R101).
+fn reset_after_panic(st: &AppState) {
+    {
+        let mut live = lock(&st.live);
+        live.revoke_worker();
+        live.backfill = None;
+    }
+    st.set_session(None);
+}
+
 pub fn start(st: Arc<AppState>) {
-    tauri::async_runtime::spawn(async move {
-        Poller::new(st).run().await;
-    });
+    tauri::async_runtime::spawn(supervise(
+        {
+            let st = st.clone();
+            // The poller is built inside the task, so even `new` is covered.
+            move || {
+                let st = st.clone();
+                async move { Poller::new(st).run().await }
+            }
+        },
+        POLLER_RESTARTS,
+        move |message, wait| {
+            log::error!(
+                "the poll loop panicked ({message}); restarting in {} s",
+                wait.as_secs()
+            );
+            reset_after_panic(&st);
+        },
+    ));
 }
 
 pub(crate) struct Poller {
@@ -1208,6 +1306,189 @@ mod tests {
     };
     use crate::pipeline_tests::{card_json, harness, roster, session_with_other_wait, Harness, ME};
     use crate::store::{save_player, PlayerUpdate};
+
+    // -- the supervisor (A1) -----------------------------------------
+
+    /// Short waits so the tests need no mock clock.
+    const FAST: RestartPacing = RestartPacing {
+        delays: [
+            Duration::from_millis(5),
+            Duration::from_millis(10),
+            Duration::from_millis(20),
+        ],
+        healthy_after: Duration::from_millis(150),
+    };
+
+    /// What one run of a scripted poll loop does.
+    #[derive(Clone, Copy)]
+    enum Run {
+        /// Panics at once.
+        Panic,
+        /// Runs this many ms, then panics.
+        PanicAfter(u64),
+        /// Never ends.
+        Pend,
+        /// Ends normally.
+        Return,
+    }
+
+    /// A supervised scripted loop (run `n` does `script[n]`, the last entry
+    /// repeats): how often it was started, and what `on_panic` was told.
+    struct Supervised {
+        runs: Arc<std::sync::atomic::AtomicUsize>,
+        panics: Arc<std::sync::Mutex<Vec<(String, Duration)>>>,
+        task: tokio::task::JoinHandle<()>,
+    }
+
+    impl Supervised {
+        fn start(script: Vec<Run>, pacing: RestartPacing) -> Self {
+            use std::sync::atomic::Ordering::SeqCst;
+            let runs = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let panics = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let make = {
+                let runs = runs.clone();
+                move || {
+                    let n = runs.fetch_add(1, SeqCst);
+                    let run = script[n.min(script.len() - 1)];
+                    async move {
+                        match run {
+                            Run::Panic => panic!("boom"),
+                            Run::PanicAfter(ms) => {
+                                sleep(Duration::from_millis(ms)).await;
+                                panic!("boom after {ms} ms");
+                            }
+                            Run::Pend => std::future::pending::<()>().await,
+                            Run::Return => {}
+                        }
+                    }
+                }
+            };
+            let seen = panics.clone();
+            let task = tokio::spawn(supervise(make, pacing, move |text, wait| {
+                seen.lock().unwrap().push((text.to_string(), wait));
+            }));
+            Self { runs, panics, task }
+        }
+
+        /// Waits (up to ~5 s) until `n` runs have started.
+        async fn until_started(&self, n: usize) {
+            for _ in 0..500 {
+                if self.runs.load(std::sync::atomic::Ordering::SeqCst) >= n {
+                    return;
+                }
+                sleep(Duration::from_millis(10)).await;
+            }
+            panic!(
+                "only {} runs started",
+                self.runs.load(std::sync::atomic::Ordering::SeqCst)
+            );
+        }
+
+        fn waits(&self) -> Vec<Duration> {
+            self.panics
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(_, w)| *w)
+                .collect()
+        }
+    }
+
+    fn ms(n: u64) -> Duration {
+        Duration::from_millis(n)
+    }
+
+    #[tokio::test]
+    async fn a_poll_loop_that_panics_is_started_again_and_the_panic_is_reported() {
+        let sup = Supervised::start(vec![Run::Panic, Run::Pend], FAST);
+        sup.until_started(2).await;
+        assert!(!sup.task.is_finished(), "the supervisor keeps watching");
+        let panics = sup.panics.lock().unwrap().clone();
+        assert_eq!(panics, vec![("boom".to_string(), ms(5))]);
+        sup.task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_panic_with_a_formatted_message_is_reported_with_it() {
+        let sup = Supervised::start(vec![Run::PanicAfter(1), Run::Pend], FAST);
+        sup.until_started(2).await;
+        let panics = sup.panics.lock().unwrap().clone();
+        assert_eq!(panics, vec![("boom after 1 ms".to_string(), ms(5))]);
+        sup.task.abort();
+    }
+
+    #[test]
+    fn the_restart_waits_are_1_then_5_then_30_seconds_and_stay_there() {
+        let waits: Vec<u64> = (1..=6)
+            .map(|n| POLLER_RESTARTS.delay(n).as_secs())
+            .collect();
+        assert_eq!(waits, [1, 5, 30, 30, 30, 30]);
+        assert_eq!(POLLER_RESTARTS.healthy_after, Duration::from_secs(60));
+    }
+
+    #[tokio::test]
+    async fn restarts_back_off_and_hold_at_the_cap_while_it_keeps_panicking() {
+        let sup = Supervised::start(
+            vec![Run::Panic, Run::Panic, Run::Panic, Run::Panic, Run::Pend],
+            FAST,
+        );
+        sup.until_started(5).await;
+        assert_eq!(sup.waits(), [ms(5), ms(10), ms(20), ms(20)]);
+        sup.task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_poller_that_ran_long_enough_starts_the_backoff_over() {
+        // Two quick panics (5 ms, 10 ms), a run of 200 ms (>= the 150 ms that
+        // counts as healthy) that panics, then a quick one: back to the
+        // first wait, then the second.
+        let sup = Supervised::start(
+            vec![
+                Run::Panic,
+                Run::Panic,
+                Run::PanicAfter(200),
+                Run::Panic,
+                Run::Pend,
+            ],
+            FAST,
+        );
+        sup.until_started(5).await;
+        assert_eq!(sup.waits(), [ms(5), ms(10), ms(5), ms(10)]);
+        sup.task.abort();
+    }
+
+    #[tokio::test]
+    async fn a_poll_loop_that_returns_is_not_started_again() {
+        let sup = Supervised::start(vec![Run::Return], FAST);
+        tokio::time::timeout(Duration::from_secs(5), sup.task)
+            .await
+            .expect("the supervisor ends with the loop")
+            .unwrap();
+        assert_eq!(sup.runs.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert!(sup.panics.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_dead_loops_claims_are_dropped_so_the_new_one_starts_clean() {
+        let h = harness().await;
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Menus;
+            live.start_backfill(None, None);
+            assert!(
+                live.try_start_worker().is_some(),
+                "a worker holds the claim"
+            );
+        }
+        h.st.set_session(Some(h.session.clone()));
+
+        reset_after_panic(&h.st);
+
+        let live = lock(&h.st.live);
+        assert!(live.backfill.is_none(), "an interrupted run is dropped");
+        assert!(!live.worker_running(), "the detached worker is revoked");
+        assert!(h.st.session().is_none());
+    }
 
     /// Waits (up to ~5s) for a finished backfill run's anchor.
     async fn wait_for_anchor(st: &AppState) -> Option<(String, i64)> {

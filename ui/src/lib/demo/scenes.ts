@@ -8,6 +8,7 @@ import type {
   LiveState,
   MatchDetailsView,
   Meta,
+  MyStats,
   PlayerCard,
   PlayerDetails,
   ScoreRow,
@@ -30,6 +31,15 @@ import {
   SINCE,
 } from "./cdv8";
 import { LONGEST_NAME, LONGEST_TAG, peak } from "./fixtures";
+import demoMeta from "./meta.json";
+import {
+  longNameMeta,
+  myStatsFull,
+  myStatsImmortal,
+  myStatsLongnames,
+  myStatsRrNull,
+  myStatsUnranked,
+} from "./mystats";
 
 export type SceneName =
   | "boot" | "closed" | "closed-empty" | "lobby1" | "lobby2" | "lobby2-loading" | "lobby2-unranked" | "lobby3" | "lobby4" | "lobby5"
@@ -37,7 +47,9 @@ export type SceneName =
   | "ingame-loading" | "ingame-nometa" | "ingame-remembered" | "ingame-rr-unknown"
   | "details" | "details-more" | "details-self" | "details-hidden" | "details-empty" | "details-loading" | "details-longnames" | "details-partial"
   | "details-nostats"
-  | "match" | "match-enc" | "match-hidden" | "match-dm" | "match-loading" | "match-longnames" | "match-nostats";
+  | "match" | "match-enc" | "match-hidden" | "match-dm" | "match-loading" | "match-longnames" | "match-nostats"
+  | "mystats" | "mystats-new" | "mystats-loading" | "mystats-unranked" | "mystats-immortal" | "mystats-rrnull"
+  | "mystats-longnames" | "mystats-closed";
 
 export type Scene = {
   /** null: no LiveState has arrived yet (`boot`). */
@@ -49,6 +61,16 @@ export type Scene = {
   matches?: Record<string, MatchDetailsView | "pending">;
   /** Defaults to demo/meta.json; 'pending' never resolves (`ingame-nometa`). */
   meta?: Meta | "pending";
+  /**
+   * The My Stats answer: data, `null` (Rust does not know the user or the act yet), or 'pending' (never answered: the
+   * skeleton). Omitted: the full demo data, so the My Stats tab has something in every scene.
+   */
+  mystats?: MyStats | null | "pending";
+  /**
+   * Leave the route to the app: the first LiveState picks the start page itself (VALORANT closed → My Stats), so the
+   * scene tests that rule instead of setting the route. `route` is then only what an `&route=` override replaces.
+   */
+  autoRoute?: true;
 };
 
 // ── live states ─────────────────────────────────────────────────────────────────
@@ -240,6 +262,18 @@ function matchLongnames(): MatchDetailsView {
 
 const unrankedLive = state("ingame", MAPS.Haven, unrankedRoster());
 
+// ── My Stats ────────────────────────────────────────────────────────────────────
+const MYSTATS_ROUTE: Route = { name: "mystats" };
+
+const LONGNAMES = myStatsLongnames();
+
+/** The demo meta with the longest real map and agent names (`mystats-longnames`): the two most played of each are renamed. */
+function longnamesMeta(stats: MyStats): Meta {
+  const m = demoMeta as Meta;
+  const long = longNameMeta(stats);
+  return { ...m, maps: { ...m.maps, ...long.maps }, agents: { ...m.agents, ...long.agents } };
+}
+
 // ── R133: every `—` cell of Details and Match ───────────────────────────────────
 /** Zephyr in `ingame-unranked`: level, rank, peak, prev and every stat null, `last5: []`. */
 const ZEPHYR = PUUID.zephyr!;
@@ -420,6 +454,16 @@ export const SCENES: Record<SceneName, Scene> = {
     matches: { [MARA_RECENT]: matchLongnames() },
   },
   "match-nostats": { live: unrankedLive, route: matchRoute(NOSTATS_MATCH, ZEPHYR, "recent"), matches: nostatsMatches() },
+
+  mystats: { live: ingame(), route: MYSTATS_ROUTE, mystats: myStatsFull() },
+  "mystats-new": { live: ingame(), route: MYSTATS_ROUTE, mystats: null },
+  "mystats-loading": { live: ingame(), route: MYSTATS_ROUTE, mystats: "pending" },
+  "mystats-unranked": { live: ingame(), route: MYSTATS_ROUTE, mystats: myStatsUnranked() },
+  "mystats-immortal": { live: ingame(), route: MYSTATS_ROUTE, mystats: myStatsImmortal() },
+  "mystats-rrnull": { live: ingame(), route: MYSTATS_ROUTE, mystats: myStatsRrNull() },
+  "mystats-longnames": { live: ingame(), route: MYSTATS_ROUTE, mystats: LONGNAMES, meta: longnamesMeta(LONGNAMES) },
+  // VALORANT closed at startup: the app's own start-page rule opens My Stats (no route is set here).
+  "mystats-closed": { live: closed(), route: LIVE_ROUTE, autoRoute: true, mystats: myStatsFull() },
 };
 
 // ── the DEV `api.ts` answers ────────────────────────────────────────────────────
@@ -427,6 +471,20 @@ const sceneOf = (scene: string | null): Scene | undefined =>
   scene !== null && Object.hasOwn(SCENES, scene) ? SCENES[scene as SceneName] : undefined;
 
 const never = <T>() => new Promise<T>(() => {});
+
+/** What the scene's My Stats store starts as: its data, null, or undefined (pending: nothing answered yet). */
+export function sceneMyStats(s: Scene): MyStats | null | undefined {
+  if (s.mystats === "pending") return undefined;
+  return s.mystats === undefined ? myStatsFull() : s.mystats;
+}
+
+/** `my_stats` for the DEV browser: the scene's own answer (a copy); 'pending' never resolves. */
+export async function resolveMyStats(scene: string | null): Promise<MyStats | null> {
+  const s = sceneOf(scene);
+  if (s?.mystats === "pending") return never();
+  const v = s ? sceneMyStats(s) : myStatsFull();
+  return v === undefined ? never() : structuredClone(v);
+}
 
 /** DEV: `close_details` has no Rust side in the browser; the count is `data-details-closed` on <html> (Playwright reads it). */
 export function noteDetailsClosed(): void {

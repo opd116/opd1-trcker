@@ -3,15 +3,16 @@
 //
 // Scene selection:
 //   URL  ?scene=<any SceneName>            (Playwright; spec §8.2)
+//        &route=mystats                    open My Stats
 //        &route=details&puuid=…[&more=1]   open Player Details
 //        &route=match&match=…&puuid=…&from=recent|encounter
 //   keys 1–5 lobby with n players · 6 pregame · 7 ingame · 8 ingame-longnames · 0 closed
 // Theme options (?tone= …) are read by themeStore. No on-screen control, so layout is never affected.
 import type { Writable } from "svelte/store";
 import { go, type Route } from "../router.svelte";
-import type { LiveState, Meta } from "../types";
+import type { LiveState, Meta, MyStats } from "../types";
 import demoMeta from "./meta.json";
-import { SCENES, type SceneName } from "./scenes";
+import { SCENES, sceneMyStats, type SceneName } from "./scenes";
 
 const KEYS: Record<string, SceneName> = {
   "0": "closed",
@@ -35,6 +36,8 @@ export function routeFromSearch(q: URLSearchParams, fallback: Route): Route {
   switch (q.get("route")) {
     case "live":
       return { name: "live" };
+    case "mystats":
+      return { name: "mystats" };
     case "details":
       return puuid ? { name: "details", puuid, more: q.get("more") === "1" } : fallback;
     case "match": {
@@ -55,7 +58,11 @@ export function routeFromSearch(q: URLSearchParams, fallback: Route): Route {
 
 let running = false;
 
-export function startDemo(apply: (s: LiveState | null) => void, meta: Writable<Meta | null>): void {
+export function startDemo(
+  apply: (s: LiveState | null) => void,
+  meta: Writable<Meta | null>,
+  mystats: Writable<MyStats | null | undefined>,
+): void {
   if (running) return;
   running = true;
 
@@ -65,8 +72,11 @@ export function startDemo(apply: (s: LiveState | null) => void, meta: Writable<M
   const show = (name: SceneName, route?: Route) => {
     const scene = SCENES[name];
     meta.set(scene.meta === "pending" ? null : (scene.meta ?? (demoMeta as Meta)));
+    mystats.set(sceneMyStats(scene));
     apply(scene.live);
-    go(route ?? scene.route);
+    // An `autoRoute` scene (VALORANT closed at startup) leaves the route to the app's own start-page rule, unless the
+    // URL names one.
+    if (route || !scene.autoRoute) go(route ?? scene.route);
   };
   // A key press changes the scene: keep the address bar honest and drop the route overrides of the old one.
   const syncUrl = (name: SceneName) => {
@@ -79,7 +89,7 @@ export function startDemo(apply: (s: LiveState | null) => void, meta: Writable<M
   const q = new URLSearchParams(location.search);
   const fromUrl = q.get("scene");
   const first = isScene(fromUrl) ? fromUrl : DEFAULT_SCENE;
-  show(first, routeFromSearch(q, SCENES[first].route));
+  show(first, q.has("route") ? routeFromSearch(q, SCENES[first].route) : undefined);
   if (first !== fromUrl) syncUrl(first);
 
   window.addEventListener("keydown", (e) => {

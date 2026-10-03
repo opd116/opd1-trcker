@@ -82,3 +82,30 @@ describe("closeMatch", () => {
     invoke.mockImplementation(async () => undefined);
   });
 });
+
+describe("myStats", () => {
+  it("under Tauri: invoke('my_stats') with no arguments; its answer (data or null) comes through as is", async () => {
+    invoke.mockResolvedValueOnce({ marker: "stats" } as never);
+    const { myStats } = await import("./api");
+    expect(await myStats()).toEqual({ marker: "stats" });
+    expect(invoke).toHaveBeenCalledWith("my_stats");
+    invoke.mockResolvedValueOnce(null as never);
+    expect(await myStats()).toBeNull();
+  });
+
+  it("a rejected my_stats rejects (the caller logs it)", async () => {
+    invoke.mockRejectedValueOnce(new Error("db busy"));
+    const { myStats } = await import("./api");
+    await expect(myStats()).rejects.toThrow("db busy");
+  });
+
+  it("in the DEV browser (no Tauri): no invoke, the scene named in the URL answers", async () => {
+    tauri = false;
+    vi.stubGlobal("location", { search: "?scene=mystats-new" });
+    const { myStats } = await import("./api");
+    expect(await myStats()).toBeNull();
+    expect(invoke).not.toHaveBeenCalled();
+    vi.stubGlobal("location", { search: "?scene=mystats" });
+    expect((await myStats())?.rrSeries).toHaveLength(60);
+  });
+});

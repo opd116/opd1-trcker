@@ -1,7 +1,7 @@
 import { get } from "svelte/store";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { openDetails } from "./boot";
-import { back, go, onStage, router, scrollHost, showMore, type Route } from "./router.svelte";
+import { activeTab, back, go, onStage, router, scrollHost, showMore, type Route } from "./router.svelte";
 import type { PlayerDetails } from "./types";
 import { hideTip, tipOver, tipState } from "./tooltip.svelte";
 
@@ -81,6 +81,38 @@ describe("router", () => {
     expect(get(openDetails)).toBeNull();
   });
 
+  it("My Stats is a route of its own; the router leaves it alone on Back and Show more", () => {
+    go({ name: "mystats" });
+    expect(router.route).toEqual({ name: "mystats" });
+    back(); // the My Stats page has no Back button
+    expect(router.route).toEqual({ name: "mystats" });
+    showMore(); // and "Show more" is Details'
+    expect(router.route).toEqual({ name: "mystats" });
+    go(LIVE);
+    expect(router.route).toEqual(LIVE);
+  });
+
+  it("a Match opened from My Stats goes Back to My Stats; one opened from Details still goes to Details (more kept)", () => {
+    go({ name: "mystats" });
+    go({ name: "match", matchId: "m1", focusPuuid: "me", from: "recent", back: "mystats" });
+    back();
+    expect(router.route).toEqual({ name: "mystats" });
+
+    go(details("p1", true));
+    go({ name: "match", matchId: "m2", focusPuuid: "p1", from: "recent", back: { puuid: "p1", more: true } });
+    back();
+    expect(router.route).toEqual(details("p1", true));
+  });
+
+  it("entering Agent Select leaves My Stats, and a Match opened from it, for Live", () => {
+    go({ name: "mystats" });
+    onStage("menus", "pregame");
+    expect(router.route).toEqual(LIVE);
+    go({ name: "match", matchId: "m1", focusPuuid: "me", from: "recent", back: "mystats" });
+    onStage("menus", "pregame");
+    expect(router.route).toEqual(LIVE);
+  });
+
   it("showMore only applies to details", () => {
     showMore();
     expect(router.route).toEqual(LIVE);
@@ -131,5 +163,56 @@ describe("go", () => {
     go(details("p2"));
     vi.advanceTimersByTime(1000);
     expect(tipState.tip).toBeNull();
+  });
+});
+
+describe("activeTab (spec §2.2)", () => {
+  const match = (back: Extract<Route, { name: "match" }>["back"]): Route => ({
+    name: "match",
+    matchId: "m1",
+    focusPuuid: "p1",
+    from: "recent",
+    back,
+  });
+
+  it("My Stats and a Match opened from it are the My Stats tab; everything else is Live", () => {
+    expect(activeTab({ name: "mystats" })).toBe("mystats");
+    expect(activeTab(match("mystats"))).toBe("mystats");
+    expect(activeTab(LIVE)).toBe("live");
+    expect(activeTab(details("p1"))).toBe("live");
+    expect(activeTab(match({ puuid: "p1", more: false }))).toBe("live");
+  });
+});
+
+describe("startPage (the first LiveState picks the start page)", () => {
+  // `started` is module state: a fresh module per case.
+  async function fresh() {
+    vi.resetModules();
+    return import("./router.svelte");
+  }
+
+  it("closed goes to My Stats; any other stage stays on Live", async () => {
+    for (const stage of ["menus", "pregame", "ingame"] as const) {
+      const r = await fresh();
+      r.startPage(stage);
+      expect(r.router.route, stage).toEqual(LIVE);
+    }
+    const r = await fresh();
+    r.startPage("closed");
+    expect(r.router.route).toEqual({ name: "mystats" });
+  });
+
+  it("once: a second call changes nothing, whatever the stage", async () => {
+    const r = await fresh();
+    r.startPage("menus");
+    r.startPage("closed");
+    expect(r.router.route).toEqual(LIVE);
+  });
+
+  it("never moves a user who has already navigated", async () => {
+    const r = await fresh();
+    r.go(details("p1"));
+    r.startPage("closed");
+    expect(r.router.route).toEqual(details("p1"));
   });
 });

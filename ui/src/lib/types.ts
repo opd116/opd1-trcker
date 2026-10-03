@@ -108,7 +108,7 @@ export interface LiveState {
   players: PlayerCard[];
 }
 
-/** One row of `PlayerDetails.recent`. */
+/** One row of `PlayerDetails.recent`, and of `MyStats.last5` (the same Rust struct). */
 export interface MatchSummary {
   matchId: string;
   mapId: string;
@@ -228,6 +228,114 @@ export interface MatchDetailsView {
   perspective: "self" | "focus";
   /** [0] = the perspective team; one entry for no-team modes. */
   teams: MatchTeamView[];
+}
+
+// ── My Stats (`invoke("my_stats")`, the `mystats` event; crates/core/src/model.rs, spec §9) ─────────────────────────
+// The user's own account over the current act, built by Rust from the DB. `null` always means "the DB does not know"
+// (shown as —); a 0 is only ever a counted zero. None of these fields is tri-state: the page has no loading state of
+// its own beyond `my_stats` still being unanswered.
+
+/** A session streak mark. The wire letters are W / L / D, not the `Result` words. */
+export type StreakMark = "W" | "L" | "D";
+
+/** One tier change of the rank card, newest first in `RankSummary.changes`. */
+export interface RankChange {
+  /** The tier reached. */
+  tier: number;
+  up: boolean;
+  startMs: number;
+}
+
+/** Section 1, the rank card. */
+export interface RankSummary {
+  /** From the stored MMR snapshot, like the live card's rank. */
+  tier: number | null;
+  /** null when the exact RR is unknown (the tier may then still be known: the card shows `— RR`). */
+  rr: number | null;
+  /** Counted from the act's stored matches; draws are neither. */
+  wins: number | null;
+  losses: number | null;
+  /** null from Immortal up (RR accumulates, no fixed next step) and when unranked. */
+  rrToNext: number | null;
+  /** Sum of the act's stored RR changes. */
+  netRr: number | null;
+  /** Mean RR change over ranked wins / losses with a known RR change (`avgLoss` is negative). */
+  avgWin: number | null;
+  avgLoss: number | null;
+  /** The latest tier changes, newest first, at most 5. */
+  changes: RankChange[];
+}
+
+/** One point of the RR chart. `absoluteRr` is `tier × 100 + rr` below Immortal, `2400 + rr` from Immortal 1 up. */
+export interface RrPoint {
+  startMs: number;
+  absoluteRr: number;
+}
+
+/** Section 3. */
+export interface SessionSummary {
+  /** null when no match in the session has a stored RR change. */
+  netRr: number | null;
+  wins: number;
+  losses: number;
+  startedMs: number;
+  /** Every result of the session, oldest first. */
+  streak: StreakMark[];
+}
+
+/** One row of the Maps or Agents table; `id` is a valorant-api map or agent uuid. */
+export interface StatRow {
+  id: string;
+  games: number;
+  wins: number;
+  losses: number;
+  /** Fraction 0..1: wins / games (a draw counts as a game). */
+  winrate: number;
+  /** null when none of the row's matches has a stored RR change. */
+  netRr: number | null;
+  kd: number;
+  /** null when no match of the row has a known round count. */
+  acs: number | null;
+}
+
+/** One weekday or time-of-day bucket. */
+export interface WinCell {
+  games: number;
+  wins: number;
+  /** Fraction 0..1; null when the bucket has no games. */
+  winrate: number | null;
+}
+
+export type InsightKind = "bestMap" | "worstMap" | "timeOfDay" | "weekdayWeekend" | "rrEconomy" | "last7Days";
+
+/** Section 8. `text` is finished English UI copy; `matches` is the sample it rests on. */
+export interface Insight {
+  kind: InsightKind;
+  text: string;
+  matches: number;
+  /** Good news (a strength, RR gained) against a weak spot. */
+  positive: boolean;
+}
+
+type Tuple<T, N extends number, A extends T[] = []> = A["length"] extends N ? A : Tuple<T, N, [...A, T]>;
+
+export interface MyStats {
+  rank: RankSummary;
+  /** The RR chart, oldest first. */
+  rrSeries: RrPoint[];
+  /** null when the act's newest match started more than 6h ago (that session is over), or there is none. */
+  session: SessionSummary | null;
+  /** The act's newest 5 competitive matches, newest first. */
+  last5: MatchSummary[];
+  /** Most played first. */
+  maps: StatRow[];
+  /** Most played first. */
+  agents: StatRow[];
+  /** Local time, Monday first: index 0 = Monday … 6 = Sunday. */
+  byWeekday: Tuple<WinCell, 7>;
+  /** Local time, in this order: Morning 05–12, Afternoon 12–17, Evening 17–22, Night 22–05. */
+  byDaypart: Tuple<WinCell, 4>;
+  insights: Insight[];
 }
 
 /** `invoke("meta")` in Tauri; a static valorant-api snapshot in the DEV browser (R21). */

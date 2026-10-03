@@ -1,12 +1,34 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { readable, writable } from "svelte/store";
-import { tauriBridge } from "./api";
-import { loadMeta, openDetails, openMatch, startLive } from "./boot";
-import { onStage } from "./router.svelte";
-import type { LiveState, MatchDetailsView, Meta, PlayerDetails, Stage } from "./types";
+import { get, readable, writable } from "svelte/store";
+import { myStats, tauriBridge } from "./api";
+import { loadMeta, openDetails, openMatch, startLive, startMyStats } from "./boot";
+import { onStage, startPage } from "./router.svelte";
+import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails, Stage } from "./types";
 
 /** Live stage + roster. Pushed by Rust (`emit("live")`); the UI never polls Riot. null = nothing received yet. */
 export const live = writable<LiveState | null>(null);
+
+/**
+ * The My Stats page's data (`invoke("my_stats")` once at startup, then Rust's `mystats` events; the UI never asks
+ * Riot). Tri-state like the card fields (R23): `undefined` = nothing answered yet (the page draws its skeleton),
+ * `null` = Rust answered "unknown" (the user's puuid or the current act is not known yet: the frames show `—`).
+ */
+export const mystats = writable<MyStats | null | undefined>(undefined);
+
+/**
+ * Called when the My Stats page opens: while it has no data (nothing answered yet, or Rust answered null because the
+ * user or the act was not known at startup) the snapshot is asked for again, a local DB read. An event, or an answer
+ * that landed meanwhile, is never overwritten. A failure keeps what is there.
+ */
+export async function refreshMyStats(): Promise<void> {
+  if (get(mystats)) return;
+  try {
+    const s = await myStats();
+    if (!get(mystats)) mystats.set(s);
+  } catch (err) {
+    console.error("my_stats failed", err);
+  }
+}
 
 /** Names and colors for agents, maps and tiers (`invoke("meta")`). null = still pending (spec §5.8). */
 export const meta = writable<Meta | null>(null);
@@ -30,9 +52,13 @@ export const now = readable(Date.now(), (set) => {
 
 let prevStage: Stage | null = null;
 
-/** Every LiveState goes through here so entering Agent Select can switch the route to Live. */
+/**
+ * Every LiveState goes through here: the first one picks the start page (VALORANT closed → My Stats), and entering
+ * Agent Select switches the route to Live.
+ */
 export function applyLive(s: LiveState | null): void {
   if (s) {
+    startPage(s.stage);
     onStage(prevStage, s.stage);
     prevStage = s.stage;
   } else {
@@ -51,7 +77,7 @@ export async function startFeeds(): Promise<void> {
   // DEV in a plain browser: the demo feed (dynamic import → compiled out of `vite build`).
   if (import.meta.env.DEV && !isTauri()) {
     const { startDemo } = await import("./demo/feed");
-    startDemo(applyLive, meta);
+    startDemo(applyLive, meta, mystats);
     return;
   }
 
@@ -67,6 +93,8 @@ export async function startFeeds(): Promise<void> {
   );
   await Promise.all([
     startLive(tauriBridge, applyLive).catch(failed("live feed")),
+    // Never rejects: a failed `my_stats()` settles the page on its `—` frames (see startMyStats).
+    startMyStats(tauriBridge, (s) => mystats.set(s), failed("my_stats")),
     tauriBridge
       .listen<PlayerDetails>("details", (e) => openDetails.event(e.payload))
       .catch(failed("details listener")),

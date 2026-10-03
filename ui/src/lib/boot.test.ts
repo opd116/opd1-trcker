@@ -13,10 +13,11 @@ import {
   retryOnce,
   runKeyAction,
   startLive,
+  startMyStats,
   type Bridge,
 } from "./boot";
 import { EMPTY_META } from "./meta";
-import type { LiveState, MatchDetailsView, Meta, PlayerDetails } from "./types";
+import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails } from "./types";
 
 const live = (stage: LiveState["stage"]): LiveState => ({ stage, mapId: null, players: [] });
 
@@ -71,6 +72,107 @@ describe("startLive", () => {
     f.emit(live("pregame"));
     f.emit(live("ingame"));
     expect(applied).toEqual(["menus", "pregame", "ingame"]);
+  });
+});
+
+describe("startMyStats", () => {
+  const stats = (marker: string) => ({ marker }) as unknown as MyStats;
+
+  /** A bridge whose `my_stats` answer the test settles by hand (`resolve` / `reject`). */
+  function fakeStats(opts: { listenFails?: boolean } = {}) {
+    const calls: string[] = [];
+    const handlers: Array<(e: { payload: MyStats }) => void> = [];
+    let resolve!: (s: MyStats | null) => void;
+    let reject!: (e: unknown) => void;
+    const b: Bridge = {
+      listen: (async (ev: string, cb: (e: { payload: MyStats }) => void) => {
+        calls.push(`listen:${ev}`);
+        if (opts.listenFails) throw new Error("no events");
+        handlers.push(cb);
+        return () => {};
+      }) as Bridge["listen"],
+      invoke: ((cmd: string) => {
+        calls.push(`invoke:${cmd}`);
+        return new Promise<MyStats | null>((res, rej) => ((resolve = res), (reject = rej)));
+      }) as Bridge["invoke"],
+    };
+    return {
+      b,
+      calls,
+      emit: (s: MyStats) => handlers.forEach((h) => h({ payload: s })),
+      resolve: (s: MyStats | null) => resolve(s),
+      reject: (e: unknown) => reject(e),
+    };
+  }
+
+  it("listen('mystats') before invoke('my_stats'), then the answer is applied", async () => {
+    const f = fakeStats();
+    const applied: Array<MyStats | null> = [];
+    const done = startMyStats(f.b, (s) => applied.push(s));
+    await vi.waitFor(() => expect(f.calls).toContain("invoke:my_stats"));
+    expect(f.calls).toEqual(["listen:mystats", "invoke:my_stats"]);
+    f.resolve(stats("snapshot"));
+    await done;
+    expect(applied).toEqual([stats("snapshot")]);
+  });
+
+  it("a null answer (the user or the act is not known yet) is applied as null", async () => {
+    const f = fakeStats();
+    const applied: Array<MyStats | null> = [];
+    const done = startMyStats(f.b, (s) => applied.push(s));
+    await vi.waitFor(() => expect(f.calls).toContain("invoke:my_stats"));
+    f.resolve(null);
+    await done;
+    expect(applied).toEqual([null]);
+  });
+
+  it("an event that arrives while the snapshot is in flight wins; later events keep applying", async () => {
+    const f = fakeStats();
+    const applied: string[] = [];
+    const done = startMyStats(f.b, (s) => applied.push((s as unknown as { marker: string }).marker));
+    await vi.waitFor(() => expect(f.calls).toContain("invoke:my_stats"));
+    f.emit(stats("event"));
+    f.resolve(stats("snapshot")); // older: must not overwrite
+    await done;
+    f.emit(stats("newer"));
+    expect(applied).toEqual(["event", "newer"]);
+  });
+
+  it("a failed my_stats() settles on null (never an endless skeleton) and reports the error; an event still lands after it", async () => {
+    const f = fakeStats();
+    const applied: Array<MyStats | null> = [];
+    const errors: unknown[] = [];
+    const done = startMyStats(f.b, (s) => applied.push(s), (e) => errors.push(e));
+    await vi.waitFor(() => expect(f.calls).toContain("invoke:my_stats"));
+    f.reject(new Error("db busy"));
+    await done; // never rejects
+    expect(applied).toEqual([null]);
+    expect(errors).toHaveLength(1);
+    f.emit(stats("event"));
+    expect(applied).toEqual([null, stats("event")]);
+  });
+
+  it("a failed my_stats() after an event keeps what the event brought", async () => {
+    const f = fakeStats();
+    const applied: Array<MyStats | null> = [];
+    const done = startMyStats(f.b, (s) => applied.push(s), () => {});
+    await vi.waitFor(() => expect(f.calls).toContain("invoke:my_stats"));
+    f.emit(stats("event"));
+    f.reject(new Error("db busy"));
+    await done;
+    expect(applied).toEqual([stats("event")]);
+  });
+
+  it("when listening fails the snapshot is still asked for (the page still gets its first answer)", async () => {
+    const f = fakeStats({ listenFails: true });
+    const applied: Array<MyStats | null> = [];
+    const errors: unknown[] = [];
+    const done = startMyStats(f.b, (s) => applied.push(s), (e) => errors.push(e));
+    await vi.waitFor(() => expect(f.calls).toContain("invoke:my_stats"));
+    f.resolve(stats("snapshot"));
+    await done;
+    expect(errors).toHaveLength(1);
+    expect(applied).toEqual([stats("snapshot")]);
   });
 });
 

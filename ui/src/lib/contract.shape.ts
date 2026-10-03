@@ -13,20 +13,28 @@ import type {
   DisplayName,
   EncounterCount,
   EncounterDetailRow,
+  Insight,
   Last5Entry,
   LiveState,
   Loadout,
   MatchDetailsView,
   MatchSummary,
   MatchTeamView,
+  MyStats,
   PartyMark,
   Peak,
   PlayerCard,
   PlayerDetails,
   Rank,
+  RankChange,
+  RankSummary,
+  RrPoint,
   ScoreRow,
+  SessionSummary,
+  StatRow,
   TeammateSummary,
   WeaponSkin,
+  WinCell,
 } from "./types";
 
 export type Kind = "string" | "number" | "boolean" | "null" | "object" | "array";
@@ -38,6 +46,8 @@ export const enums = {
   team: ["ally", "enemy"],
   perspective: ["self", "focus"],
   rememberedSource: ["ownMatch", "otherMatch", "seen"],
+  streakMark: ["W", "L", "D"],
+  insightKind: ["bestMap", "worstMap", "timeOfDay", "weekdayWeekend", "rrEconomy", "last7Days"],
 } as const satisfies Record<string, readonly string[]>;
 
 export type Desc = {
@@ -203,6 +213,63 @@ export const shapes = {
     perspective: { kinds: ["string"], enum: "perspective" },
     teams: { kinds: ["array"], shape: "MatchTeamView" },
   } satisfies ShapeOf<MatchDetailsView>,
+
+  // ── My Stats (my_stats.json holds [a full case, an edge case]) ──
+  RankChange: { tier: num, up: bool, startMs: num } satisfies ShapeOf<RankChange>,
+
+  RankSummary: {
+    tier: numOrNull,
+    rr: numOrNull,
+    wins: numOrNull,
+    losses: numOrNull,
+    rrToNext: numOrNull,
+    netRr: numOrNull,
+    avgWin: numOrNull,
+    avgLoss: numOrNull,
+    changes: { kinds: ["array"], shape: "RankChange" },
+  } satisfies ShapeOf<RankSummary>,
+
+  RrPoint: { startMs: num, absoluteRr: num } satisfies ShapeOf<RrPoint>,
+
+  SessionSummary: {
+    netRr: numOrNull,
+    wins: num,
+    losses: num,
+    startedMs: num,
+    streak: { kinds: ["array"], enum: "streakMark" },
+  } satisfies ShapeOf<SessionSummary>,
+
+  StatRow: {
+    id: str,
+    games: num,
+    wins: num,
+    losses: num,
+    winrate: { kinds: ["number"], fraction: true },
+    netRr: numOrNull,
+    kd: num,
+    acs: numOrNull,
+  } satisfies ShapeOf<StatRow>,
+
+  WinCell: { games: num, wins: num, winrate: { kinds: ["number", "null"], fraction: true } } satisfies ShapeOf<WinCell>,
+
+  Insight: {
+    kind: { kinds: ["string"], enum: "insightKind" },
+    text: str,
+    matches: num,
+    positive: bool,
+  } satisfies ShapeOf<Insight>,
+
+  MyStats: {
+    rank: { kinds: ["object"], shape: "RankSummary" },
+    rrSeries: { kinds: ["array"], shape: "RrPoint" },
+    session: { kinds: ["object", "null"], shape: "SessionSummary" },
+    last5: { kinds: ["array"], shape: "MatchSummary" },
+    maps: { kinds: ["array"], shape: "StatRow" },
+    agents: { kinds: ["array"], shape: "StatRow" },
+    byWeekday: { kinds: ["array"], shape: "WinCell" },
+    byDaypart: { kinds: ["array"], shape: "WinCell" },
+    insights: { kinds: ["array"], shape: "Insight" },
+  } satisfies ShapeOf<MyStats>,
 };
 
 /** One descriptor per `DisplayName` variant, keyed by its `kind` tag. */

@@ -3,7 +3,7 @@
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Bridge } from "./boot";
-import type { MatchDetailsView, PlayerDetails } from "./types";
+import type { MatchDetailsView, MyStats, PlayerDetails } from "./types";
 
 export const tauriBridge: Bridge = {
   listen: (ev, cb) => listen(ev, cb),
@@ -12,6 +12,18 @@ export const tauriBridge: Bridge = {
 
 /** DEV only: the scene the demo feed is showing (it keeps ?scene= current). */
 const devScene = () => new URLSearchParams(location.search).get("scene");
+
+/**
+ * `invoke('my_stats')`: the user's own My Stats for the current act, read from the DB (never from Riot), or null
+ * while the user's puuid or the current act is not known. Never resolves for a demo scene marked 'pending'.
+ */
+export async function myStats(): Promise<MyStats | null> {
+  if (import.meta.env.DEV && !isTauri()) {
+    const { resolveMyStats } = await import("./demo/scenes");
+    return resolveMyStats(devScene());
+  }
+  return invoke<MyStats | null>("my_stats");
+}
 
 /** `invoke('player_details', { puuid })`. Never resolves for a demo scene entry marked 'pending'. */
 export async function getPlayerDetails(puuid: string): Promise<PlayerDetails> {

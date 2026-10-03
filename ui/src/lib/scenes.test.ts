@@ -7,9 +7,9 @@ import { writable } from "svelte/store";
 import demoMeta from "./demo/meta.json";
 import { DEMO_NOW, detailsFor, encounterMatchId, matchFor, PUUID, recentMatchId, roster } from "./demo/cdv8";
 import * as fixtures from "./demo/fixtures";
-import { resolveDetails, resolveMatch, SCENES, type SceneName } from "./demo/scenes";
+import { resolveDetails, resolveMatch, resolveMyStats, SCENES, type SceneName } from "./demo/scenes";
 import { dateLong, durationMin, score, time12 } from "./format";
-import type { DisplayName, LiveState, MatchDetailsView, Meta, PlayerCard, PlayerDetails } from "./types";
+import type { DisplayName, LiveState, MatchDetailsView, Meta, MyStats, PlayerCard, PlayerDetails } from "./types";
 
 const NAMES: SceneName[] = [
   "boot", "closed", "closed-empty", "lobby1", "lobby2", "lobby2-loading", "lobby2-unranked", "lobby3", "lobby4", "lobby5",
@@ -18,6 +18,8 @@ const NAMES: SceneName[] = [
   "details", "details-more", "details-self", "details-hidden", "details-empty", "details-loading", "details-longnames",
   "details-partial", "details-nostats",
   "match", "match-enc", "match-hidden", "match-dm", "match-loading", "match-longnames", "match-nostats",
+  "mystats", "mystats-new", "mystats-loading", "mystats-unranked", "mystats-immortal", "mystats-rrnull",
+  "mystats-longnames", "mystats-closed",
 ];
 
 const meta = demoMeta as Meta;
@@ -679,7 +681,7 @@ describe("feed", () => {
     expect(b.dataset.feed).toBeUndefined();
     const applied: Array<LiveState | null> = [];
     const m = writable<Meta | null>(null);
-    startDemo((s) => applied.push(s), m);
+    startDemo((s) => applied.push(s), m, writable<MyStats | null | undefined>(undefined));
     expect(b.dataset.feed).toBe("demo-feed");
     expect(applied.at(-1)?.stage).toBe("ingame");
     let seen: Meta | null = null;
@@ -693,7 +695,7 @@ describe("feed", () => {
     const { startDemo } = await import("./demo/feed");
     const applied: Array<LiveState | null> = [];
     const m = writable<Meta | null>(null);
-    startDemo((s) => applied.push(s), m);
+    startDemo((s) => applied.push(s), m, writable<MyStats | null | undefined>(undefined));
     expect(applied.at(-1)?.players).toHaveLength(10);
     let seen: Meta | null | "unset" = "unset";
     m.subscribe((v) => (seen = v))();
@@ -703,7 +705,7 @@ describe("feed", () => {
     stubBrowser("?scene=boot");
     const again = await import("./demo/feed");
     const applied2: Array<LiveState | null> = [];
-    again.startDemo((s) => applied2.push(s), writable<Meta | null>(null));
+    again.startDemo((s) => applied2.push(s), writable<Meta | null>(null), writable<MyStats | null | undefined>(undefined));
     expect(applied2).toEqual([null]);
   });
 
@@ -713,7 +715,7 @@ describe("feed", () => {
     const feed = await import("./demo/feed");
     const router = await import("./router.svelte");
     const applied: Array<LiveState | null> = [];
-    feed.startDemo((s) => applied.push(s), writable<Meta | null>(null));
+    feed.startDemo((s) => applied.push(s), writable<Meta | null>(null), writable<MyStats | null | undefined>(undefined));
     const press = (k: string) => b.listeners.keydown!(key(k));
     const want: Record<string, [string, number]> = {
       "0": ["closed", 1], "1": ["menus", 1], "2": ["menus", 2], "3": ["menus", 3], "4": ["menus", 4], "5": ["menus", 5],
@@ -729,6 +731,41 @@ describe("feed", () => {
     expect(b.replaceState).toHaveBeenCalled();
     press("9"); // no scene on 9
     expect(applied.at(-1)?.players).toHaveLength(10);
+  });
+
+  it("the demo feed hands the scene's data to the store, and an autoRoute scene sets no route", async () => {
+    vi.resetModules();
+    stubBrowser("?scene=mystats-closed");
+    const feed = await import("./demo/feed");
+    const router = await import("./router.svelte");
+    const store = writable<MyStats | null | undefined>(undefined);
+    const applied: Array<LiveState | null> = [];
+    feed.startDemo(
+      (s) => {
+        applied.push(s);
+        if (s) router.startPage(s.stage); // what applyLive does with the first LiveState
+      },
+      writable<Meta | null>(null),
+      store,
+    );
+    let seen: MyStats | null | undefined;
+    store.subscribe((v) => (seen = v))();
+    expect(seen).toEqual(SCENES["mystats-closed"].mystats);
+    expect(router.router.route).toEqual({ name: "mystats" });
+
+    vi.resetModules();
+    stubBrowser("?scene=mystats-loading");
+    const loading = await import("./demo/feed");
+    const s2 = writable<MyStats | null | undefined>(null);
+    loading.startDemo(() => {}, writable<Meta | null>(null), s2);
+    let seen2: MyStats | null | undefined = null;
+    s2.subscribe((v) => (seen2 = v))();
+    expect(seen2).toBeUndefined();
+  });
+
+  it("routeFromSearch: &route=mystats", async () => {
+    const { routeFromSearch } = await import("./demo/feed");
+    expect(routeFromSearch(new URLSearchParams("route=mystats"), { name: "live" })).toEqual({ name: "mystats" });
   });
 
   it("routeFromSearch: &route=details / match override the scene route (spec §8.1)", async () => {
@@ -750,6 +787,158 @@ describe("feed", () => {
     expect(routeFromSearch(q("route=match&puuid=P"), live)).toEqual(live); // no match id
     expect(routeFromSearch(q("route=nope"), live)).toEqual(live);
     expect(routeFromSearch(q("route=live"), { name: "details", puuid: "x", more: false })).toEqual(live);
+  });
+});
+
+// ── My Stats scenes (spec §9.6) ─────────────────────────────────────────────────
+describe("My Stats scenes", () => {
+  const stats = (s: SceneName): MyStats => {
+    const v = SCENES[s].mystats;
+    if (!v || v === "pending") throw new Error(`${s}: no My Stats data`);
+    return v;
+  };
+  const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+  /** The meta a scene shows: its own, or the demo's. */
+  const meta_ = (n: SceneName): Meta => {
+    const m = SCENES[n].meta;
+    return m && m !== "pending" ? m : meta;
+  };
+
+  it("mystats: about 60 RR points, 7 maps, 8 agents, a session of 15 and 6 insights", () => {
+    const m = stats("mystats");
+    expect(m.rrSeries).toHaveLength(60);
+    expect(m.maps).toHaveLength(7);
+    expect(m.agents).toHaveLength(8);
+    expect(m.session?.streak).toHaveLength(15);
+    expect(m.insights.map((i) => i.kind)).toEqual(["bestMap", "worstMap", "timeOfDay", "weekdayWeekend", "rrEconomy", "last7Days"]);
+    expect(m.last5).toHaveLength(5);
+    expect(SCENES.mystats.route).toEqual({ name: "mystats" });
+  });
+
+  it("every figure agrees with every other: the same 60 matches behind the tables, the weekday and time-of-day cells and the rank", () => {
+    const m = stats("mystats");
+    expect(sum(m.maps.map((r) => r.games))).toBe(60);
+    expect(sum(m.agents.map((r) => r.games))).toBe(60);
+    expect(sum(m.byWeekday.map((c) => c.games))).toBe(60);
+    expect(sum(m.byDaypart.map((c) => c.games))).toBe(60);
+    expect(sum(m.maps.map((r) => r.wins))).toBe(m.rank.wins);
+    expect(sum(m.maps.map((r) => r.losses))).toBe(m.rank.losses);
+    expect(sum(m.maps.map((r) => r.netRr!))).toBe(m.rank.netRr);
+    expect(m.rank.rr! + 100 * (m.rank.tier! - 21)).toBe(m.rrSeries.at(-1)!.absoluteRr - 2100);
+    expect(m.rank.rrToNext).toBe(100 - m.rank.rr!);
+    // The tables come most played first.
+    for (const rows of [m.maps, m.agents]) expect(rows.map((r) => r.games)).toEqual([...rows.map((r) => r.games)].sort((a, b) => b - a));
+    expect(m.maps.map((r) => r.winrate)).toEqual(m.maps.map((r) => r.wins / r.games));
+  });
+
+  it("the series is oldest first, the changes newest first (at most 5), and each change is a tier step of the series", () => {
+    const m = stats("mystats");
+    const starts = m.rrSeries.map((p) => p.startMs);
+    expect([...starts].sort((a, b) => a - b)).toEqual(starts);
+    expect(m.rank.changes.length).toBeGreaterThan(0);
+    expect(m.rank.changes.length).toBeLessThanOrEqual(5);
+    const t = m.rank.changes.map((c) => c.startMs);
+    expect([...t].sort((a, b) => b - a)).toEqual(t);
+    for (const c of m.rank.changes) {
+      const i = starts.indexOf(c.startMs);
+      const [a, b] = [Math.floor(m.rrSeries[i - 1]!.absoluteRr / 100), Math.floor(m.rrSeries[i]!.absoluteRr / 100)];
+      expect([c.tier, c.up]).toEqual([b, b > a]);
+    }
+  });
+
+  it("the session is the run of matches with no 6h gap, ending with the newest; its net RR is theirs", () => {
+    const m = stats("mystats");
+    const s = m.session!;
+    const tail = m.rrSeries.slice(-15);
+    expect(s.startedMs).toBe(tail[0]!.startMs);
+    expect(m.rrSeries.at(-16)!.startMs).toBeLessThan(s.startedMs - 6 * 3_600_000);
+    for (let i = 1; i < tail.length; i++) expect(tail[i]!.startMs - tail[i - 1]!.startMs).toBeLessThan(6 * 3_600_000);
+    expect(s.streak.filter((x) => x === "W")).toHaveLength(s.wins);
+    expect(s.streak.filter((x) => x === "L")).toHaveLength(s.losses);
+    expect(s.netRr).toBe(tail[tail.length - 1]!.absoluteRr - m.rrSeries.at(-16)!.absoluteRr);
+  });
+
+  it("the last 5 are the user's own recent rows (the Match page opens the same matches), newest first, with a stat line each", () => {
+    const m = stats("mystats");
+    expect(m.last5.map((r) => r.matchId)).toEqual([0, 1, 2, 3, 4].map((i) => recentMatchId("fahad", i)));
+    expect(m.last5.map((r) => r.result)).toEqual(["win", "loss", "win", "win", "loss"]);
+    for (const r of m.last5) {
+      expect(r.kills).not.toBeNull();
+      expect(matchFor(r.matchId).teams[0]!.players.some((p) => p.isSelf)).toBe(true);
+    }
+  });
+
+  it("every map and agent id exists in the meta the scene uses; the longest-names scene names each only once", () => {
+    for (const n of NAMES.filter((x) => x.startsWith("mystats"))) {
+      const s = SCENES[n];
+      if (!s.mystats || s.mystats === "pending") continue;
+      const m = meta_(n);
+      const ids = (kind: "maps" | "agents", xs: string[]) => xs.forEach((id) => expect(m[kind][id], `${n}: ${kind} ${id}`).toBeDefined());
+      ids("maps", [...s.mystats.maps.map((r) => r.id), ...s.mystats.last5.map((r) => r.mapId)]);
+      ids("agents", [...s.mystats.agents.map((r) => r.id), ...s.mystats.last5.flatMap((r) => (r.agentId ? [r.agentId] : []))]);
+    }
+    const m = meta_("mystats-longnames");
+    for (const [kind, rows] of [["maps", stats("mystats-longnames").maps], ["agents", stats("mystats-longnames").agents]] as const) {
+      const names = rows.map((r) => m[kind][r.id]!.name);
+      expect(new Set(names).size, `${kind} names are unique`).toBe(names.length);
+    }
+    expect(meta_("mystats-longnames").maps[stats("mystats-longnames").maps[0]!.id]!.name).toBe("Basic Training");
+  });
+
+  it("mystats-new answers null, mystats-loading never answers (the skeleton), the others carry data", async () => {
+    expect(SCENES["mystats-new"].mystats).toBeNull();
+    expect(SCENES["mystats-loading"].mystats).toBe("pending");
+    expect(await resolveMyStats("mystats-new")).toBeNull();
+    const pending = vi.fn();
+    void resolveMyStats("mystats-loading").then(pending);
+    await new Promise((r) => setTimeout(r, 20));
+    expect(pending).not.toHaveBeenCalled();
+  });
+
+  it("mystats-unranked: no rank, no RR anywhere (null, never a counted 0), nothing to chart, no insight", () => {
+    const m = stats("mystats-unranked");
+    expect(m.rank).toMatchObject({ tier: null, rr: null, rrToNext: null, netRr: null, avgWin: null, avgLoss: null, changes: [] });
+    expect(m.rrSeries).toEqual([]);
+    expect(m.insights).toEqual([]);
+    expect(m.session?.netRr).toBeNull();
+    for (const r of [...m.last5]) expect([r.rrEarned, r.tier]).toEqual([null, null]);
+    for (const r of [...m.maps, ...m.agents]) expect(r.netRr).toBeNull();
+  });
+
+  it("mystats-immortal has no next tier and chart values from 2400 up; mystats-rrnull has a tier and no RR", () => {
+    const imm = stats("mystats-immortal");
+    expect([imm.rank.tier, imm.rank.rr, imm.rank.rrToNext]).toEqual([24, 87, null]);
+    expect(imm.rrSeries.at(-1)!.absoluteRr).toBe(2400 + 87);
+    const nul = stats("mystats-rrnull");
+    expect([nul.rank.tier, nul.rank.rr, nul.rank.rrToNext]).toEqual([21, null, null]);
+    expect(nul.rrSeries).toEqual(stats("mystats").rrSeries);
+  });
+
+  it("mystats-longnames holds the widest numbers: 3-digit games, net RR in the hundreds, a session of 30", () => {
+    const m = stats("mystats-longnames");
+    expect(Math.max(...m.maps.map((r) => r.games))).toBeGreaterThanOrEqual(100);
+    expect(Math.min(...m.maps.map((r) => r.netRr!))).toBeLessThanOrEqual(-300);
+    expect(m.session?.streak).toHaveLength(30);
+    expect(m.session?.streak).toContain("D");
+    expect(m.rank.wins! + m.rank.losses!).toBeGreaterThan(300);
+  });
+
+  it("mystats-closed: VALORANT closed at startup, and no route is set for the scene (the app's start page decides)", () => {
+    expect(SCENES["mystats-closed"].live?.stage).toBe("closed");
+    expect(SCENES["mystats-closed"].autoRoute).toBe(true);
+    expect(stats("mystats-closed")).toEqual(stats("mystats"));
+  });
+
+  it("a scene without My Stats data of its own answers the full demo, so the tab has content in every scene", async () => {
+    expect(SCENES.ingame.mystats).toBeUndefined();
+    expect(await resolveMyStats("ingame")).toEqual(stats("mystats"));
+    expect(await resolveMyStats(null)).toEqual(stats("mystats"));
+  });
+
+  it("the answer is a copy: mutating it never reaches the scene", async () => {
+    const a = (await resolveMyStats("mystats"))!;
+    a.rank.netRr = 99999;
+    expect(stats("mystats").rank.netRr).not.toBe(99999);
   });
 });
 

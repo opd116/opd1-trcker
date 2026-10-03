@@ -1,7 +1,7 @@
 // Startup wiring and the open Player Details and Match Details, testable without Tauri (spec §2.4). The Tauri-backed `Bridge` is in api.ts.
 import { writable, type Readable } from "svelte/store";
 import { EMPTY_META } from "./meta";
-import type { LiveState, MatchDetailsView, Meta, PlayerDetails } from "./types";
+import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails } from "./types";
 
 export interface Bridge {
   listen<T>(ev: string, cb: (e: { payload: T }) => void): Promise<() => void>;
@@ -20,6 +20,36 @@ export async function startLive(b: Bridge, apply: (s: LiveState) => void): Promi
   });
   const snapshot = await b.invoke<LiveState>("live_state");
   if (!sawEvent) apply(snapshot);
+}
+
+/**
+ * My Stats (the user's own account, built by Rust from the DB): `listen('mystats')` (payload = a `MyStats`, never
+ * null), then `invoke('my_stats')` (`MyStats | null`: null until the user's puuid and the current act are known).
+ * The same order as `startLive`: listening first misses no event, and the snapshot counts only when no event came
+ * before it. A failed call settles the page on null (its `—` frames) instead of a skeleton that never ends; a later
+ * event still replaces that. Nothing here rejects: `onError` sees each failure.
+ */
+export async function startMyStats(
+  b: Bridge,
+  apply: (s: MyStats | null) => void,
+  onError: (err: unknown) => void = () => {},
+): Promise<void> {
+  let sawEvent = false;
+  try {
+    await b.listen<MyStats>("mystats", (e) => {
+      sawEvent = true;
+      apply(e.payload);
+    });
+  } catch (err) {
+    onError(err);
+  }
+  try {
+    const snapshot = await b.invoke<MyStats | null>("my_stats");
+    if (!sawEvent) apply(snapshot);
+  } catch (err) {
+    onError(err);
+    if (!sawEvent) apply(null);
+  }
 }
 
 /** Retry delays for `loadMeta`: 2s, doubling, capped at 30s (Rust re-tries a failed asset download only after 30s). */

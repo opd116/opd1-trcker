@@ -9,9 +9,10 @@ import { render } from "svelte/server";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { displayNameShapes, enums, shapes, type Desc, type Kind } from "./contract.shape";
 import { detailsFor, encounterMatchId, matchFor, PUUID, recentMatchId, roster } from "./demo/cdv8";
+import { resolveMyStats } from "./demo/scenes";
 import demoMeta from "./demo/meta.json";
 import { SCENES } from "./demo/scenes";
-import type { Meta, PlayerCard as Card, PlayerDetails } from "./types";
+import type { Meta, MyStats, PlayerCard as Card, PlayerDetails } from "./types";
 
 // ── goldens ──────────────────────────────────────────────────────────────────────
 const GOLDEN_DIR = new URL("../../../crates/core/tests/fixtures/contract/", import.meta.url);
@@ -20,6 +21,7 @@ const golden = (name: string): unknown => JSON.parse(readFileSync(new URL(`${nam
 const LIVE = golden("live_state") as { players: Record<string, unknown>[] } & Record<string, unknown>;
 const DETAILS = golden("player_details") as Record<string, unknown>;
 const MATCHES = golden("match_details_view") as Record<string, unknown>[];
+const MY_STATS = golden("my_stats") as Record<string, unknown>[];
 
 // ── the walker ───────────────────────────────────────────────────────────────────
 type Shape = Record<string, Desc>;
@@ -62,6 +64,11 @@ function problems(value: unknown, shapeName: string, path: string): string[] {
       out.push(`${here}: ${JSON.stringify(v)} is not one of ${enums[desc.enum].join("|")}`);
     }
     if (desc.fraction && typeof v === "number" && !(v >= 0 && v <= 1)) out.push(`${here}: ${v} is not a 0..1 fraction`);
+    if (desc.enum && k === "array") {
+      (v as unknown[]).forEach((e, i) => {
+        if (!(enums[desc.enum!] as readonly unknown[]).includes(e)) out.push(`${here}[${i}]: ${JSON.stringify(e)} is not one of ${enums[desc.enum!].join("|")}`);
+      });
+    }
     if (desc.shape && k === "object") out.push(...problems(v, desc.shape, here));
     if (desc.shape && k === "array") (v as unknown[]).forEach((e, i) => out.push(...problems(e, desc.shape!, `${here}[${i}]`)));
   }
@@ -117,6 +124,47 @@ function selfPartyProblems(c: Card): string[] {
   if (c.isSelf && !c.isSelfParty) out.push("isSelf but not isSelfParty");
   if (c.isSelfParty && c.party !== null) out.push(`isSelfParty with party ${JSON.stringify(c.party)}`);
   if (c.isSelfParty && c.encounters !== null) out.push(`isSelfParty with encounters ${JSON.stringify(c.encounters)}`);
+  return out;
+}
+
+/**
+ * What the My Stats page relies on besides the shapes (crates/core/src/mystats.rs): the day and time-of-day buckets are
+ * 7 and 4 long, a bucket has a win rate exactly when it has games, the RR series runs oldest first and the rank
+ * changes newest first (at most 5), the Recent Matches come newest first (at most 5) with a stat line that is null as a
+ * whole (R102), the tables come most played first, the next tier is the RR still needed (none from Immortal up or
+ * without a tier), and the session's W and L are its streak's.
+ */
+function myStatsProblems(m: MyStats): string[] {
+  const out: string[] = [];
+  if (m.byWeekday.length !== 7) out.push(`byWeekday has ${m.byWeekday.length} cells`);
+  if (m.byDaypart.length !== 4) out.push(`byDaypart has ${m.byDaypart.length} cells`);
+  for (const c of [...m.byWeekday, ...m.byDaypart]) {
+    if ((c.winrate === null) !== (c.games === 0)) out.push(`a bucket with ${c.games} games has win rate ${c.winrate}`);
+    if (c.wins > c.games) out.push(`a bucket has ${c.wins} wins in ${c.games} games`);
+  }
+  const starts = m.rrSeries.map((p) => p.startMs);
+  if (![...starts].sort((a, b) => a - b).every((x, i) => x === starts[i])) out.push("rrSeries is not oldest first");
+  const changes = m.rank.changes.map((c) => c.startMs);
+  if (!desc(changes)) out.push("rank.changes is not newest first");
+  if (m.rank.changes.length > 5) out.push(`rank.changes has ${m.rank.changes.length} entries`);
+  if (!desc(m.last5.map((x) => x.startMs))) out.push("last5 is not newest first");
+  if (m.last5.length > 5) out.push(`last5 has ${m.last5.length} matches`);
+  for (const r of m.last5) {
+    if (r.kills === null && [r.deaths, r.assists, r.kd, r.acs, r.hsPct].some((x) => x !== null)) out.push(`last5 ${r.matchId}: a stat line that is not null as a whole`);
+  }
+  for (const [name, rows] of [["maps", m.maps], ["agents", m.agents]] as const) {
+    if (!desc(rows.map((r) => r.games))) out.push(`${name} is not most played first`);
+    for (const r of rows) if (r.wins + r.losses > r.games) out.push(`${name} ${r.id}: ${r.wins}W ${r.losses}L in ${r.games} games`);
+  }
+  const { tier, rr, rrToNext } = m.rank;
+  if (tier === null && rrToNext !== null) out.push("rrToNext without a tier");
+  if (tier !== null && tier >= 24 && rrToNext !== null) out.push("rrToNext from Immortal up");
+  if (tier !== null && tier < 24 && rr !== null && rrToNext !== 100 - rr) out.push(`rrToNext ${rrToNext} for ${rr} RR`);
+  if (m.session) {
+    const count = (mark: string) => m.session!.streak.filter((x) => x === mark).length;
+    if (count("W") !== m.session.wins || count("L") !== m.session.losses) out.push("session wins and losses are not its streak's");
+  }
+  if (new Set(m.insights.map((i) => i.kind)).size !== m.insights.length) out.push("an insight kind appears twice");
   return out;
 }
 
@@ -199,6 +247,13 @@ describe("the walker can fail (a check that cannot fail proves nothing)", () => 
     ]);
   });
 
+  it("an enum on an array checks every element (the session streak is W, L or D)", () => {
+    const session = { netRr: 5, wins: 1, losses: 1, startedMs: 1, streak: ["W", "L"] };
+    expect(problems(session, "SessionSummary", "s")).toEqual([]);
+    expect(problems({ ...session, streak: ["W", "X"] }, "SessionSummary", "s")).toEqual(['s.streak[1]: "X" is not one of W|L|D']);
+    expect(problems({ ...session, streak: ["win"] }, "SessionSummary", "s")).toEqual(['s.streak[0]: "win" is not one of W|L|D']);
+  });
+
   it("every `shape` a descriptor names exists", () => {
     const named = new Set([...Object.keys(registry), "DisplayName"]);
     for (const [owner, shape] of Object.entries(registry)) {
@@ -212,7 +267,7 @@ describe("the walker can fail (a check that cannot fail proves nothing)", () => 
 // ── the goldens ──────────────────────────────────────────────────────────────────
 describe("the goldens match the descriptors", () => {
   it("these are all the goldens: a new one on the Rust side needs a descriptor and a test here", () => {
-    expect(readdirSync(GOLDEN_DIR).sort()).toEqual(["live_state.json", "match_details_view.json", "player_details.json"]);
+    expect(readdirSync(GOLDEN_DIR).sort()).toEqual(["live_state.json", "match_details_view.json", "my_stats.json", "player_details.json"]);
   });
 
   it("live_state.json is a LiveState", () => {
@@ -226,6 +281,11 @@ describe("the goldens match the descriptors", () => {
   it("match_details_view.json holds two MatchDetailsViews (a competitive match and a deathmatch)", () => {
     expect(MATCHES).toHaveLength(2);
     MATCHES.forEach((m, i) => expect(problems(m, "MatchDetailsView", `match_details_view[${i}]`)).toEqual([]));
+  });
+
+  it("my_stats.json holds two MyStats (a full case and an edge case)", () => {
+    expect(MY_STATS).toHaveLength(2);
+    MY_STATS.forEach((m, i) => expect(problems(m, "MyStats", `my_stats[${i}]`)).toEqual([]));
   });
 
   it("the goldens exercise the tri-state: every optional card key is absent on some card and null on another (R23)", () => {
@@ -296,6 +356,26 @@ describe("golden invariants the UI relies on", () => {
     const cards = [...LIVE.players, DETAILS.card as Obj];
     expect(cards.some((c) => c.isSelf === true)).toBe(true);
     for (const c of cards) expect(selfPartyProblems(c as unknown as Card), String(c.puuid)).toEqual([]);
+  });
+
+  it("My Stats: the full case holds every section (all 6 insights, a session, a rank change and an empty bucket), the edge case none of them", () => {
+    const [full, edge] = MY_STATS as unknown as MyStats[];
+    for (const m of [full!, edge!]) expect(myStatsProblems(m)).toEqual([]);
+
+    expect(full!.insights.map((i) => i.kind).sort()).toEqual(["bestMap", "last7Days", "rrEconomy", "timeOfDay", "weekdayWeekend", "worstMap"]);
+    expect(full!.insights.some((i) => i.positive) && full!.insights.some((i) => !i.positive)).toBe(true);
+    expect(full!.session).not.toBeNull();
+    expect(full!.rank.changes.some((c) => c.up) && full!.rank.changes.some((c) => !c.up)).toBe(true);
+    expect([...full!.byWeekday, ...full!.byDaypart].some((c) => c.games === 0)).toBe(true);
+    expect(full!.rank.rr).not.toBeNull();
+    expect(full!.rank.rrToNext).toBe(100 - full!.rank.rr!);
+
+    // R154-style unknowns, all null at once: no rank, no RR rows, no session, nothing to say.
+    expect(edge!.rank).toMatchObject({ tier: null, rr: null, rrToNext: null, netRr: null, avgWin: null, avgLoss: null, changes: [] });
+    expect([edge!.rrSeries, edge!.session, edge!.insights]).toEqual([[], null, []]);
+    expect(edge!.rank.wins).not.toBeNull(); // the matches themselves are stored
+    expect(edge!.last5.some((r) => r.kills === null)).toBe(true); // a match with no stats row: the whole line null (R102)
+    expect(edge!.maps.some((r) => r.acs === null)).toBe(true);
   });
 
   it("hero stats: 1–20 counted act matches, so heroKd is set; heroHs is a 0..1 fraction (R116, R120)", () => {
@@ -490,6 +570,20 @@ describe("the demo fixtures follow the golden contract", () => {
         for (const p of t.players) expect(scorelessProblems(p), `${n} ${p.puuid}`).toEqual([]);
       }
     }
+  });
+
+  it("every scene's My Stats is a MyStats and keeps the My Stats invariants (the demo can never drift from the backend)", async () => {
+    let n = 0;
+    for (const [name, s] of scenes) {
+      if (s.mystats === "pending") continue;
+      const m = await resolveMyStats(name);
+      if (m === null) continue; // `mystats-new`: Rust's "unknown"
+      n++;
+      expect(problems(m, "MyStats", name), name).toEqual([]);
+      expect(myStatsProblems(m), name).toEqual([]);
+    }
+    expect(n).toBeGreaterThan(40); // every scene without data of its own answers the full demo
+    expect(SCENES["mystats-new"].mystats).toBeNull();
   });
 
   it("a no-team mode has one team with no id, result, rounds or halves, and rows with no rank and no ADR", () => {

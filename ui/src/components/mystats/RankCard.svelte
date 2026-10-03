@@ -103,7 +103,7 @@
 
       <div class="chg">
         <span class="lab">Rank changes</span>
-        {#each changes as c (c.startMs)}
+        {#each changes as c, i (i)}
           {@const name = tierLabel($meta, c.tier)}
           <div class="crow">
             <svg class={["arrow", c.up ? "up" : "down"]} width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"

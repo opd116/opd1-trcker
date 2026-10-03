@@ -39,10 +39,10 @@
       <div class="none">{DASH}</div>
     {:else if first && last}
       <svg width={w} height={h} viewBox="0 0 {w} {h}" role="img" aria-label="RR progression">
-        {#each model.grid as g (g.abs)}
+        {#each model.grid as g, i (i)}
           <line class="grid" x1={model.plot.x0} x2={model.plot.x1} y1={g.y} y2={g.y} />
         {/each}
-        {#each model.bands as b (b.tier + ":" + b.y0)}
+        {#each model.bands as b, i (i)}
           {@const name = bandName($meta, b.tier, true)}
           {#if b.labelY !== null && typeof name === "string"}
             <text class="band" x={model.plot.x0 - 12} y={b.labelY} text-anchor="end" dominant-baseline="central">{name}</text>
@@ -50,7 +50,7 @@
         {/each}
         <path class="area" d={model.area} />
         <path class="line" d={model.line} />
-        {#each model.points as p (p.point.startMs)}
+        {#each model.points as p, i (i)}
           <g class="pt">
             <line class="xh" x1={p.x} x2={p.x} y1={model.plot.y0} y2={model.plot.y1} />
             <circle class="hot" cx={p.x} cy={p.y} r="4" />

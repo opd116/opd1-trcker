@@ -1918,7 +1918,7 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
         Some(Stage::Pregame | Stage::Ingame)
     ) {
         log::debug!("names fill not sent: the presence says a match has started");
-        lock(&st.live).defer_names(FILL_RACE_STAND_DOWN);
+        lock(&st.live).stand_down_fill(FILL_RACE_STAND_DOWN);
         return Ok(());
     }
 
@@ -1977,11 +1977,12 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
     Ok(())
 }
 
-/// How long the names fill stands down when the user's own presence says a
-/// match has started before the poll loop has seen it ([`fill_names_step`]):
-/// a little over the poll tick (2 s), so by the time the fill may run again
-/// the stage is applied (`LiveModel::in_match`), or the presence was only a
-/// blip and the asks go out.
+/// How long the names fill (only it: `LiveModel::stand_down_fill`, the live
+/// roster's names step is not held) stands down when the user's own presence
+/// says a match has started before the poll loop has seen it
+/// ([`fill_names_step`]): a little over the poll tick (2 s), so by the time the
+/// fill may run again the stage is applied (`LiveModel::in_match`), or the
+/// presence was only a blip and the asks go out.
 const FILL_RACE_STAND_DOWN: Duration = Duration::from_secs(3);
 
 /// The user's own stage from one local presence read; `None` when the read

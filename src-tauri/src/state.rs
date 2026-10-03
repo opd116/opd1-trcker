@@ -531,6 +531,12 @@ pub struct LiveModel {
     /// ([`Self::names_needed`], [`Self::fill_ready`]), so the worker neither
     /// spins on a refused call nor marks anyone as asked.
     names_hold_until: Option<Instant>,
+    /// Review round 1: the names *fill* stands down until this instant (the
+    /// user's own presence already said a match began, before the poll loop
+    /// saw it, `sync::fill_names_step`). Fill only: the live roster's names
+    /// step is not held by it ([`Self::names_needed`] ignores it), unlike
+    /// the global hold above.
+    fill_stand_down_until: Option<Instant>,
     /// R165: when the earliest waiting names retry is due ([`Self::arm_names_retry_wake`]);
     /// only [`Self::names_wakeup_due`] reads it, nothing is blocked by it.
     names_retry_wake: Option<Instant>,
@@ -574,6 +580,7 @@ impl LiveModel {
             last_match_end: None,
             rank_retries: RankRetries::default(),
             names_hold_until: None,
+            fill_stand_down_until: None,
             names_retry_wake: None,
             #[cfg(test)]
             clock_offset: Duration::ZERO,
@@ -961,7 +968,23 @@ impl LiveModel {
     /// R150: a names fill is queued and it is between matches. The asks wait
     /// in the queue through a match and run after it.
     pub fn fill_ready(&self) -> bool {
-        !self.name_fill.is_empty() && self.between_matches() && !self.names_deferred()
+        !self.name_fill.is_empty()
+            && self.between_matches()
+            && !self.names_deferred()
+            && !self.fill_standing_down()
+    }
+
+    /// Review round 1: the names fill (and only it) is not handed out for
+    /// `wait`: the poll loop has not yet seen the match the presence reports.
+    /// Only ever extended.
+    pub fn stand_down_fill(&mut self, wait: Duration) {
+        let until = self.now() + wait;
+        self.fill_stand_down_until =
+            Some(self.fill_stand_down_until.map_or(until, |u| u.max(until)));
+    }
+
+    fn fill_standing_down(&self) -> bool {
+        self.fill_stand_down_until.is_some_and(|u| self.now() < u)
     }
 
     /// R160: no names job is handed out for `wait` (a name-service call was
@@ -989,6 +1012,11 @@ impl LiveModel {
             self.names_hold_until = None;
             wake |= !self.names_needed().is_empty() || self.fill_ready();
         }
+        // The fill's stand-down ran out: the same wake-up, once.
+        if self.fill_stand_down_until.is_some_and(|until| now >= until) {
+            self.fill_stand_down_until = None;
+            wake |= self.fill_ready();
+        }
         // R165: a waiting names retry came due (one-shot like the hold; the
         // names step that follows arms the next one).
         if self.names_retry_wake.is_some_and(|at| now >= at) {
@@ -1009,6 +1037,7 @@ impl LiveModel {
     /// refused now.
     pub fn reset_names_hold(&mut self) {
         self.names_hold_until = None;
+        self.fill_stand_down_until = None;
         self.names_retry_wake = None;
     }
 

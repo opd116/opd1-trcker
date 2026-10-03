@@ -923,6 +923,41 @@ async fn a_fill_does_not_go_out_when_the_presence_already_says_a_match_began() {
 }
 
 #[tokio::test]
+async fn the_fills_stand_down_does_not_hold_the_live_rosters_names_step() {
+    // Review round 1: the stand-down is the fill's alone. A roster player
+    // whose name is still unknown is handed out for the live names step at
+    // once, exactly as Agent Select begins.
+    let h = harness().await;
+    let t1 = pid(1);
+    mount_name_service(&h.server, &[(t1.clone(), "Real", "ONE")]).await;
+    mount_presence(&h, "PREGAME", None, 1).await;
+    lobby(&h);
+    {
+        let mut live = lock(&h.st.live);
+        live.slots.push(Slot {
+            roster: roster(OTHER, false),
+            db: PlayerDb::default(),
+        });
+        live.queue_name_fill([ask(&t1, Some(5))]);
+        assert!(!live.names_needed().is_empty(), "OTHER's name is unknown");
+    }
+
+    fill_names_step(&h.st, &h.session).await.unwrap();
+
+    let mut live = lock(&h.st.live);
+    assert!(!live.fill_ready(), "the fill stands down");
+    assert!(
+        !live.names_needed().is_empty(),
+        "the live names step is not held"
+    );
+    let id = live.try_start_worker().expect("the names job is work");
+    assert!(
+        matches!(live.next_job(id), Some(Job::Names(_))),
+        "and it is the next job"
+    );
+}
+
+#[tokio::test]
 async fn a_fill_goes_out_when_the_presence_says_menus() {
     let h = harness().await;
     let t1 = pid(1);

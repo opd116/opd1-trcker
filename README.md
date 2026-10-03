@@ -10,7 +10,7 @@ The name is spelled `OPD1 TRCKER` on purpose.
 |---|---|
 | ![In Game](docs/screenshots/live-ingame.png) | ![Agent Select](docs/screenshots/live-agent-select.png) |
 | ![Lobby](docs/screenshots/live-lobby.png) | ![Player Details](docs/screenshots/player-details.png) |
-| ![Match Details](docs/screenshots/match-details.png) | |
+| ![Match Details](docs/screenshots/match-details.png) | ![My Stats](docs/screenshots/my-stats.png) |
 
 ## Features
 
@@ -21,6 +21,7 @@ The name is spelled `OPD1 TRCKER` on purpose.
 - **Encounters**: how many past matches you shared with a player, with or against.
 - **Player Details** (click any card): recent competitive matches, top 3 teammates this act, loadout, and your history with that player.
 - **Match Details**: the full scoreboard of a match.
+- **My Stats**: your own act at a glance: rank, RR, W / L and the RR to the next tier, the RR chart, the current session, your last 5 competitive matches, Maps and Agents tables, win rate by weekday and time of day, and automatic insights. With VALORANT closed the app opens here.
 - **Local memory**: every player and match is stored once in SQLite, so the app only fetches what is new and shows saved data when VALORANT is closed.
 - Fixed 1000×800 window, always on top. Close quits. No tray, no autostart, no auto-updater.
 
@@ -51,6 +52,7 @@ npm --prefix ui run build    # the Rust crate needs ui/dist to exist
 cargo test -p opd1-core -p opd1-riot -p opd1-trcker
 npm --prefix ui run test
 npm --prefix ui run check
+(cd ui && npx playwright test)   # layout, tooltip and navigation checks at 1000×800 (also run by CI on Linux)
 ```
 
 Anything that talks to the real Riot client can only be verified on Windows with VALORANT installed. Press Ctrl+Shift+L in the app to copy its log. Ctrl+Shift+D writes the redacted raw Riot answers to a folder, and that dump now includes `log.txt` and the error body of each failed call.
@@ -73,7 +75,7 @@ Tauri 2 (system WebView2) · Rust core (all Riot and valorant-api HTTP, polling,
 
 ## Status and roadmap
 
-The scope of v0.2.0: the Live page (Lobby, Agent Select, In Game), Player Details and Match Details, with the design options at their defaults. Later, when asked: the My Stats page, the Match History page and a Settings page. The data for My Stats is already computed by the Rust core.
+The scope of v0.3.0: the Live page (Lobby, Agent Select, In Game), Player Details, Match Details and My Stats, with the design options at their defaults. Later, when asked: the Match History page and a Settings page.
 
 ## Privacy
 

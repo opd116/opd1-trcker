@@ -6,10 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-Filled from `git log` (`a1e3315..44ae56d`, then the v0.3.0 round).
+## [0.3.0] - 2026-10-03
+
+Filled from `git log` (`a1e3315..44ae56d`, then the v0.3.0 round `44ae56d..6ebdf5c`).
 
 ### Added
 
+- **My Stats page**: your rank with RR, W / L, the RR left to the next tier, net RR, average win and loss and recent rank changes; the RR chart for the act; the current session; your last 5 competitive matches (click one for Match Details, Back keeps your place); the Maps and Agents tables; win rate by weekday and time of day; and automatic insights. The `My Stats` tab works, and with VALORANT closed the app opens on it (`0809ee9`, `f118477`, `d960872`, `efa8a7f`, `861ac67`, `0562ebb`).
+- My Stats updates by itself: after each of your matches, as your history catches up, and every 15 minutes so an old session drops off (`369df2c`, `bee2ade`, `64e6b4a`, `6ebdf5c`).
+- Your competitive updates for the whole act are fetched quietly in the background, so the RR chart, net RR and rank changes are complete (`07bfec1`, `5bac8f1`).
 - A hidden player's name shows in the remembered style when the app knows it from any source, and the tooltip says where it came from: your match, a past match, or seen before (`d32e6d6`, `e0d9ca6`).
 - Names after a match: once a match ends, the app asks Riot once for the names of that match's other players, including the ones who were hidden during it, and remembers them. Player Details and Match Details ask for the names they lack, and an open Match Details updates when they arrive. Nothing is asked during Agent Select or In Game (`d1a7976`, `d3a2e7a`, `461cf71`, `69e64bd`, `82c4c1a`).
 - The rank never stays empty when Riot's rank request fails: it comes from your stored competitive updates (exact RR), then from the tier Riot sends with the pregame or party answer, then from a stored match (RR shows `—`). My Stats' rank card falls back the same way (`caaf8fb`, `ca994ec`, `95bac32`, `a8c8b63`).
@@ -18,6 +23,8 @@ Filled from `git log` (`a1e3315..44ae56d`, then the v0.3.0 round).
 
 ### Changed
 
+- Back from a Match restores the scroll position of Player Details too (`0562ebb`).
+- The build also runs the whole UI layout, tooltip and navigation test suite on Linux, beside the Windows installer (`2437efe`, `2581e07`).
 - Requests are sent the way Valorant-Scout sends them (client version and User-Agent), and Riot's "slow down" answers are honoured in full, per kind of request, so the rank requests never hold up the rest (`e496ee3`, `1886649`, `6a6b644`, `bc2f1ef`).
 - Cards fill faster: the whole roster's ranks load first, then each player's matches; In Game shows both teams before the loadouts arrive; the roster is retried every 2 s while the game is still loading it; the rank after a match refreshes within seconds (`2d75653`, `f3cd55a`, `f09586f`).
 - Peak is never below the current rank (`f3cd55a`).
@@ -26,6 +33,10 @@ Filled from `git log` (`a1e3315..44ae56d`, then the v0.3.0 round).
 
 ### Fixed
 
+- If the background loop that follows the game ever crashes, it restarts by itself within seconds instead of leaving old cards on screen until the app is reopened (`2674799`, `686386d`, `6ebdf5c`).
+- One failed internal step can no longer make every later Riot request fail (`f27f468`, `e5eac55`).
+- Player Details tries again after a match download fails or Riot asks it to slow down, instead of waiting until you reopen it (`03f970e`, `d02a94d`).
+- No name lookup is sent in the moment a match starts, and the names of players on screen never wait for it (`7d8c689`, `5e4090c`).
 - A failed rank or names request, or a half-finished match download, is retried a few times instead of leaving a card without a name or with partial stats for the whole stage (`108dae0`, `2d75653`, `cff0f1e`, `ca763db`, `cbe9736`, `1f43bf4`).
 - A remembered name reaches the card on screen at once, and a mid-match burst of strangers' matches can no longer crowd out the names of the match that just ended (`4726852`, `8ab2e55`, `cabaab3`, `221cef5`).
 - A match where neither team won is stored as a draw instead of failing (`d7588a7`).

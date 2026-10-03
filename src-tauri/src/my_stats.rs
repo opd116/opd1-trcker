@@ -13,26 +13,35 @@
 //! One task at a time: a notification that arrives while it runs sets a flag
 //! and the same task reads once more, so a burst (a backfill's pages) is one
 //! or two reads, and emissions leave in the order of the reads, each read
-//! strictly after the change that asked for it. Nothing here touches the poll
-//! loop's presence tick. A slow tick ([`start_periodic`]) asks again every
+//! strictly after the change that asked for it. Every read waits a short
+//! trailing moment first ([`COALESCE`]): a backfill stores up to 200 matches
+//! and each one notifies, so the notifications that land inside the wait
+//! become one read instead of one payload per match (review round 2). The
+//! one change that must not wait, an account switch, goes through
+//! [`notify_now`]. A slow tick ([`start_periodic`]) asks again every
 //! [`PERIOD`] so what depends on the clock alone (a session that expired, a
-//! last-7-days window) catches up; the byte comparison makes it free when
-//! nothing changed.
+//! last-7-days window) catches up; the byte comparison makes that free when
+//! nothing changed. Nothing here touches the poll loop's presence tick.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use opd1_core::model::MyStats;
-use tokio::time::{interval, MissedTickBehavior};
+use tokio::sync::Notify;
+use tokio::time::{interval, timeout, MissedTickBehavior};
 
 use crate::state::{lock, now_ms, AppState};
+
+/// The trailing wait before each recompute: notifications inside it are one
+/// read. Short in the tests (they wait for the push to go idle).
+const COALESCE: Duration = Duration::from_millis(if cfg!(test) { 20 } else { 750 });
 
 /// How often the slow tick asks for a recompute (15 minutes).
 pub const PERIOD: Duration = Duration::from_secs(15 * 60);
 
 /// Where the push stands, behind one lock (`AppState::my_stats_push`).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MyStatsPush {
     /// The bytes of the last emission: what a recompute is compared with.
     last: Vec<u8>,
@@ -40,9 +49,35 @@ pub struct MyStatsPush {
     running: bool,
     /// Something changed since the running task last started a read.
     dirty: bool,
+    /// The change that is waiting must not wait ([`notify_now`]).
+    immediate: bool,
+    /// The trailing wait before a read ([`COALESCE`]; tests change it).
+    delay: Duration,
+    /// Wakes a task that is in its trailing wait ([`notify_now`]).
+    wake: Arc<Notify>,
     /// How many times My Stats was computed for a push (tests count them).
     #[cfg(test)]
     pub computed: usize,
+    /// The task is inside its trailing wait (tests).
+    #[cfg(test)]
+    pub waiting: bool,
+}
+
+impl Default for MyStatsPush {
+    fn default() -> Self {
+        Self {
+            last: Vec::new(),
+            running: false,
+            dirty: false,
+            immediate: false,
+            delay: COALESCE,
+            wake: Arc::new(Notify::new()),
+            #[cfg(test)]
+            computed: 0,
+            #[cfg(test)]
+            waiting: false,
+        }
+    }
 }
 
 /// Clears `running` when the task dies — a panic — so a later [`notify`] can
@@ -110,25 +145,34 @@ pub(crate) fn local_offset_ms(utc_ms: i64) -> i64 {
 
 /// The user's own data changed (or My Stats may just have become
 /// computable): recompute in the background and emit `"mystats"` if the
-/// result differs from the last emission. Cheap to call, from any task.
+/// result differs from the last emission. Cheap to call, from any task; the
+/// read follows after the [`COALESCE`] wait.
 pub fn notify(st: &Arc<AppState>) {
-    {
-        let mut push = lock(&st.my_stats_push);
-        push.dirty = true;
-        if push.running {
-            return;
-        }
-        push.running = true;
-    }
-    let st = st.clone();
-    tauri::async_runtime::spawn(async move { push_until_clean(&st).await });
+    request(st, false);
 }
 
-/// [`notify`] when `puuid` is the user (the session's account): the other
-/// players of a roster change nothing My Stats shows.
-pub fn notify_if_own(st: &Arc<AppState>, own: &str, puuid: &str) {
-    if own == puuid {
-        notify(st);
+/// [`notify`] for a change the page must show at once (another account
+/// connected: the old account's numbers must not stay up for the wait): a
+/// task already in its wait is woken and the read does not wait.
+pub fn notify_now(st: &Arc<AppState>) {
+    request(st, true);
+}
+
+fn request(st: &Arc<AppState>, immediate: bool) {
+    let (start, wake) = {
+        let mut push = lock(&st.my_stats_push);
+        push.dirty = true;
+        push.immediate |= immediate;
+        let start = !push.running;
+        push.running = true;
+        (start, push.wake.clone())
+    };
+    if immediate {
+        wake.notify_waiters();
+    }
+    if start {
+        let st = st.clone();
+        tauri::async_runtime::spawn(async move { push_until_clean(&st).await });
     }
 }
 
@@ -151,17 +195,49 @@ pub(crate) async fn periodic(st: Arc<AppState>, every: Duration) {
     }
 }
 
+/// [`notify`] when `puuid` is the user (the session's account): the other
+/// players of a roster change nothing My Stats shows.
+pub fn notify_if_own(st: &Arc<AppState>, own: &str, puuid: &str) {
+    if own == puuid {
+        notify(st);
+    }
+}
+
 async fn push_until_clean(st: &Arc<AppState>) {
     let mut running = RunningGuard { st, armed: true };
     loop {
-        {
+        // Created before the flag is read: a `notify_now` in between wakes
+        // this wait instead of being missed.
+        let wake = lock(&st.my_stats_push).wake.clone();
+        let woken = wake.notified();
+        let wait = {
             let mut push = lock(&st.my_stats_push);
             if !push.dirty {
                 push.running = false;
                 running.armed = false;
                 return;
             }
+            (!push.immediate).then_some(push.delay)
+        };
+        // The trailing wait. A task that dies in it (a panic, an abort)
+        // leaves `dirty` set: the guard frees `running` and the next
+        // notification starts the read.
+        if let Some(delay) = wait {
+            #[cfg(test)]
+            {
+                lock(&st.my_stats_push).waiting = true;
+            }
+            let _ = timeout(delay, woken).await;
+            #[cfg(test)]
+            {
+                lock(&st.my_stats_push).waiting = false;
+            }
+        }
+        {
+            // The read starts after every change that set `dirty` so far.
+            let mut push = lock(&st.my_stats_push);
             push.dirty = false;
+            push.immediate = false;
             #[cfg(test)]
             {
                 push.computed += 1;
@@ -184,6 +260,8 @@ async fn push_until_clean(st: &Arc<AppState>) {
         let mut push = lock(&st.my_stats_push);
         if current.as_deref() != Some(owner.as_str()) {
             push.dirty = true;
+            // The switch is the one change that does not wait.
+            push.immediate = true;
             continue;
         }
         if bytes == push.last {
@@ -195,6 +273,12 @@ async fn push_until_clean(st: &Arc<AppState>) {
         // the next notification emits them.
         push.last = bytes;
     }
+}
+
+/// Tests: the trailing wait before a read (the default is [`COALESCE`]).
+#[cfg(test)]
+pub fn set_delay(st: &AppState, delay: Duration) {
+    lock(&st.my_stats_push).delay = delay;
 }
 
 /// Waits until no push is running or wanted (tests: a notification has been

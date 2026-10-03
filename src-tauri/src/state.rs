@@ -931,9 +931,20 @@ impl LiveModel {
     /// match Riot publishes after the next one has begun still raises its
     /// asks. Called wherever the model is locked for the worker or a publish,
     /// which is always between the end and the next match.
+    ///
+    /// Review round 2: a new end also drops [`Self::own_comp_head`]. That
+    /// copy of the user's newest competitive updates was read before this
+    /// match, so it cannot say there is nothing newer than the backfill's
+    /// anchor; left in place it would make the run skip its first page and
+    /// miss this match. The rank sync after the match stores a fresh head.
+    /// (Once per end: the calls that follow, and the fresh head, stay.)
     pub fn observe_match_end(&mut self) {
         if let (Some(end), Some(me)) = (self.match_end_ms, self.self_puuid.clone()) {
-            self.last_match_end = Some((me, end));
+            let last = Some((me, end));
+            if self.last_match_end != last {
+                self.own_comp_head = None;
+                self.last_match_end = last;
+            }
         }
     }
 
@@ -4620,6 +4631,31 @@ mod tests {
         // Another account's end is not this account's.
         m.self_puuid = Some("other".into());
         assert_eq!(m.last_match_end_ms(), None);
+    }
+
+    #[test]
+    fn a_new_match_end_drops_the_own_comp_head_once() {
+        let head = |id: &str| Some(("me".to_string(), vec![(id.to_string(), 1)]));
+        let mut m = LiveModel::new(Some("me".into()));
+        m.own_comp_head = head("a");
+        // No end on record: nothing to drop.
+        m.observe_match_end();
+        assert!(m.own_comp_head.is_some());
+        // A match ends: the head read before it is stale.
+        m.match_end_ms = Some(5_000);
+        m.observe_match_end();
+        assert!(m.own_comp_head.is_none());
+        // The rank sync after it stores a fresh one: more observations of
+        // the same end (every publish, every job) leave it alone.
+        m.own_comp_head = head("b");
+        m.observe_match_end();
+        m.match_end_ms = None;
+        m.observe_match_end();
+        assert_eq!(m.own_comp_head, head("b"));
+        // The next match's end drops it again.
+        m.match_end_ms = Some(9_000);
+        m.observe_match_end();
+        assert!(m.own_comp_head.is_none());
     }
 
     #[test]

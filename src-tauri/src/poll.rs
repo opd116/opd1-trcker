@@ -156,12 +156,17 @@ fn panic_text(payload: &(dyn std::any::Any + Send)) -> &str {
 /// of the session (release builds unwind, R138: a panic ends the task, not the
 /// app). Each restart waits as `pacing` says; `on_panic(message, wait)` runs
 /// right at the panic, before the wait (log it, reset what the dead loop left
-/// behind). A task that returns normally ends the supervisor; so does a
+/// behind), and the future it returns is awaited to its end before the wait
+/// starts, so whatever it does is ordered before the next loop (review round 2:
+/// the Closed card's DB read must not land after the new poller's first
+/// publish). A task that returns normally ends the supervisor; so does a
 /// cancelled one (the runtime is shutting down).
-async fn supervise<F, Fut>(make: F, pacing: RestartPacing, mut on_panic: impl FnMut(&str, Duration))
+async fn supervise<F, Fut, P, Pf>(make: F, pacing: RestartPacing, mut on_panic: P)
 where
     F: Fn() -> Fut,
     Fut: std::future::Future<Output = ()> + Send + 'static,
+    P: FnMut(&str, Duration) -> Pf,
+    Pf: std::future::Future<Output = ()>,
 {
     let mut failures = 0u32;
     loop {
@@ -176,7 +181,8 @@ where
         }
         failures = failures.saturating_add(1);
         let wait = pacing.delay(failures);
-        on_panic(panic_text(&*error.into_panic()), wait);
+        let payload = error.into_panic();
+        on_panic(panic_text(&*payload), wait).await;
         sleep(wait).await;
     }
 }
@@ -212,6 +218,9 @@ pub fn start(st: Arc<AppState>) {
 /// the supervisor, and at each panic the error line, [`reset_after_panic`],
 /// and the Closed view — the user's own card from the DB, published at once —
 /// so the cards of the dead loop are not what the UI shows during the wait.
+/// The Closed view is finished before the restart wait begins (review round
+/// 2): it was a detached task, so a slow DB read could land after the new
+/// poller's first publish and put Closed over its roster.
 fn spawn_supervised<F, Fut>(st: Arc<AppState>, make: F, pacing: RestartPacing) -> JoinHandle<()>
 where
     F: Fn() -> Fut + Send + 'static,
@@ -224,7 +233,11 @@ where
         );
         reset_after_panic(&st);
         let st = st.clone();
-        tauri::async_runtime::spawn(async move { show_closed(&st).await });
+        async move {
+            // Its own task, awaited: a panic inside it ends that task, not
+            // the supervisor (which must start the loop again).
+            let _ = tauri::async_runtime::spawn(async move { show_closed(&st).await }).await;
+        }
     }))
 }
 
@@ -433,8 +446,9 @@ impl Poller {
         };
         if switched {
             // B2: another account — its My Stats replace the old account's at
-            // once (DB only), not after the asset tables are re-checked below.
-            crate::my_stats::notify(&self.st);
+            // once (DB only), not after the asset tables are re-checked below
+            // and not after the push's trailing wait either.
+            crate::my_stats::notify_now(&self.st);
         }
         let key_value = me.clone();
         self.st
@@ -1432,6 +1446,7 @@ mod tests {
             let seen = panics.clone();
             let task = tokio::spawn(supervise(make, pacing, move |text, wait| {
                 seen.lock().unwrap().push((text.to_string(), wait));
+                async {}
             }));
             Self { runs, panics, task }
         }
@@ -1673,6 +1688,82 @@ mod tests {
             runs.load(std::sync::atomic::Ordering::SeqCst) == 2
         })
         .await;
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn the_restart_waits_for_the_closed_card_so_it_cannot_land_over_the_new_roster() {
+        // Review round 2: the Closed card's read of the user's own row was a
+        // detached task. Slow (the DB busy), it finished after the restarted
+        // poller had published its roster, and put Closed over it. The
+        // supervisor now awaits it before the backoff, so the new loop starts
+        // only after the Closed card is out.
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let h = harness().await;
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Ingame;
+            live.in_match = true;
+        }
+        h.st.publish();
+        assert_eq!(h.st.live_state().stage, Stage::Ingame);
+
+        // The DB is busy: whatever reads it next waits.
+        let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let holder = {
+            let st = h.st.clone();
+            std::thread::spawn(move || {
+                st.db_blocking(|_| {
+                    held_tx.send(()).unwrap();
+                    release_rx.recv().unwrap();
+                    Ok(())
+                });
+            })
+        };
+        held_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let task = spawn_supervised(
+            h.st.clone(),
+            {
+                let runs = runs.clone();
+                move || {
+                    let first = runs.fetch_add(1, SeqCst) == 0;
+                    async move {
+                        if first {
+                            panic!("boom");
+                        }
+                        std::future::pending::<()>().await
+                    }
+                }
+            },
+            FAST,
+        );
+        crate::pipeline_tests::wait_until("the first loop ran", || runs.load(SeqCst) == 1).await;
+        // Far longer than FAST's first restart wait (5 ms): without the await
+        // the second loop would be running by now.
+        sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            runs.load(SeqCst),
+            1,
+            "the restart waits for the Closed card"
+        );
+        assert_eq!(
+            h.st.live_state().stage,
+            Stage::Ingame,
+            "still the dead loop's"
+        );
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+        crate::pipeline_tests::wait_until("the loop was started again", || runs.load(SeqCst) == 2)
+            .await;
+        assert_eq!(
+            h.st.live_state().stage,
+            Stage::Closed,
+            "the Closed card was out before the second loop began"
+        );
         task.abort();
     }
 

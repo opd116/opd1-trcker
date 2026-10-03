@@ -370,6 +370,64 @@ async fn a_match_backfill_aborted_after_it_stored_a_match_still_pushes() {
 }
 
 #[tokio::test]
+async fn notifications_inside_the_trailing_wait_are_one_read() {
+    // Review round 2: a backfill that stores many matches notifies once per
+    // match; they must not become one payload (one read) each.
+    let h = harness().await;
+    my_stats::set_delay(&h.st, Duration::from_millis(400));
+    for _ in 0..8 {
+        my_stats::notify(&h.st);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(computed(&h.st), 0, "nothing is read during the wait");
+    idle(&h.st).await;
+    assert_eq!(computed(&h.st), 1, "eight notifications, one read");
+    assert_eq!(pushed(&h).len(), 1);
+
+    // After the read a new change is a new wait and a new read.
+    my_stats::notify(&h.st);
+    idle(&h.st).await;
+    assert_eq!(computed(&h.st), 2);
+}
+
+#[tokio::test]
+async fn a_change_that_lands_after_the_wait_began_is_in_the_read() {
+    // The wait is before the read, and `dirty` is cleared when the read
+    // starts: a notification during the wait does not cost a second read.
+    let h = harness().await;
+    my_stats::set_delay(&h.st, Duration::from_millis(300));
+    my_stats::notify(&h.st);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    my_stats::notify(&h.st);
+    idle(&h.st).await;
+    assert_eq!(computed(&h.st), 1);
+}
+
+#[tokio::test]
+async fn an_account_switch_does_not_wait() {
+    let h = harness().await;
+    // A wait that would fail the test if anything waited for it.
+    my_stats::set_delay(&h.st, Duration::from_secs(120));
+    let quick = Duration::from_secs(10);
+
+    // A fresh task.
+    my_stats::notify_now(&h.st);
+    tokio::time::timeout(quick, idle(&h.st))
+        .await
+        .expect("a fresh task read at once");
+    assert_eq!(computed(&h.st), 1);
+
+    // A task already in its wait is woken by it.
+    my_stats::notify(&h.st);
+    wait_until("the task is waiting", || lock(&h.st.my_stats_push).waiting).await;
+    my_stats::notify_now(&h.st);
+    tokio::time::timeout(quick, idle(&h.st))
+        .await
+        .expect("the waiting task was woken");
+    assert_eq!(computed(&h.st), 2);
+}
+
+#[tokio::test]
 async fn the_slow_tick_recomputes_and_the_unchanged_bytes_are_not_emitted_again() {
     let h = harness().await;
     let tick = tokio::spawn(my_stats::periodic(h.st.clone(), Duration::from_millis(40)));

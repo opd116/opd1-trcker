@@ -596,3 +596,38 @@ async fn another_accounts_head_or_no_anchor_never_skips_the_first_page() {
     run_comp_backfill(&h).await;
     assert_eq!(comp_starts(&h).await, ["0", "0", "20"]);
 }
+
+#[tokio::test]
+async fn a_match_that_ended_after_the_head_was_read_never_skips_the_first_page() {
+    // Review round 2: the head was read before the match, so it cannot say
+    // nothing is newer than the anchor.
+    let h = harness().await;
+    mount_comp_feed(&h.server, 100, None).await;
+    store_comp_anchor_for(&h.st, ME, 3).await;
+    own_rank_sync(&h).await;
+    assert!(lock(&h.st.live).own_comp_head.is_some());
+
+    // A match ends; the next publish (or worker job) sees the end.
+    lock(&h.st.live).match_end_ms = Some(now_ms());
+    h.st.publish();
+    assert!(
+        lock(&h.st.live).own_comp_head.is_none(),
+        "the stale head is gone"
+    );
+    run_comp_backfill(&h).await;
+    assert_eq!(
+        comp_starts(&h).await,
+        ["0", "0"],
+        "the rank sync's call, then page 0 for the run"
+    );
+
+    // The rank sync after the match stores a fresh head; the calls that
+    // follow keep it (the end is not new any more).
+    own_rank_sync(&h).await;
+    assert!(lock(&h.st.live).own_comp_head.is_some());
+    h.st.publish();
+    assert!(
+        lock(&h.st.live).own_comp_head.is_some(),
+        "the same end does not drop the fresh head again"
+    );
+}

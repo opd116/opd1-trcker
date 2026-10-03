@@ -1,0 +1,519 @@
+[
+  {
+    "agents": [
+      {
+        "acs": 200.0,
+        "games": 8,
+        "id": "agent-omen",
+        "kd": 2.5,
+        "losses": 3,
+        "netRr": 54,
+        "winrate": 0.625,
+        "wins": 5
+      },
+      {
+        "acs": 200.0,
+        "games": 8,
+        "id": "agent-jett",
+        "kd": 2.0,
+        "losses": 5,
+        "netRr": -16,
+        "winrate": 0.375,
+        "wins": 3
+      }
+    ],
+    "byDaypart": [
+      {
+        "games": 0,
+        "winrate": null,
+        "wins": 0
+      },
+      {
+        "games": 8,
+        "winrate": 0.625,
+        "wins": 5
+      },
+      {
+        "games": 8,
+        "winrate": 0.375,
+        "wins": 3
+      },
+      {
+        "games": 0,
+        "winrate": null,
+        "wins": 0
+      }
+    ],
+    "byWeekday": [
+      {
+        "games": 2,
+        "winrate": 0.5,
+        "wins": 1
+      },
+      {
+        "games": 2,
+        "winrate": 0.5,
+        "wins": 1
+      },
+      {
+        "games": 4,
+        "winrate": 0.25,
+        "wins": 1
+      },
+      {
+        "games": 0,
+        "winrate": null,
+        "wins": 0
+      },
+      {
+        "games": 0,
+        "winrate": null,
+        "wins": 0
+      },
+      {
+        "games": 4,
+        "winrate": 0.75,
+        "wins": 3
+      },
+      {
+        "games": 4,
+        "winrate": 0.5,
+        "wins": 2
+      }
+    ],
+    "insights": [
+      {
+        "kind": "bestMap",
+        "matches": 8,
+        "positive": true,
+        "text": "Split is your best map: 75% wins in 8 games."
+      },
+      {
+        "kind": "worstMap",
+        "matches": 8,
+        "positive": false,
+        "text": "Ascent is your weakest map: 25% wins in 8 games."
+      },
+      {
+        "kind": "timeOfDay",
+        "matches": 16,
+        "positive": true,
+        "text": "You win 63% of 8 afternoon games, compared with 38% of 8 evening games."
+      },
+      {
+        "kind": "weekdayWeekend",
+        "matches": 16,
+        "positive": true,
+        "text": "You win 63% of 8 weekend games, compared with 38% of 8 weekday games."
+      },
+      {
+        "kind": "rrEconomy",
+        "matches": 16,
+        "positive": true,
+        "text": "Average +20 RR on wins and -15 RR on losses."
+      },
+      {
+        "kind": "last7Days",
+        "matches": 12,
+        "positive": true,
+        "text": "+30 RR over 12 games in the last 7 days."
+      }
+    ],
+    "last5": [
+      {
+        "acs": 200.0,
+        "agentId": "agent-omen",
+        "assists": 4,
+        "deaths": 8,
+        "hsPct": 0.25,
+        "kd": 2.5,
+        "kills": 20,
+        "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+        "matchId": "ms-15",
+        "result": "loss",
+        "roundsLost": 13,
+        "roundsWon": 11,
+        "rrEarned": -14,
+        "startMs": 1758132600000,
+        "tier": 22
+      },
+      {
+        "acs": 200.0,
+        "agentId": "agent-jett",
+        "assists": 4,
+        "deaths": 8,
+        "hsPct": 0.25,
+        "kd": 2.0,
+        "kills": 16,
+        "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+        "matchId": "ms-14",
+        "result": "loss",
+        "roundsLost": 13,
+        "roundsWon": 11,
+        "rrEarned": -16,
+        "startMs": 1758128400000,
+        "tier": 22
+      },
+      {
+        "acs": 200.0,
+        "agentId": "agent-omen",
+        "assists": 4,
+        "deaths": 8,
+        "hsPct": 0.25,
+        "kd": 2.5,
+        "kills": 20,
+        "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+        "matchId": "ms-13",
+        "result": "win",
+        "roundsLost": 11,
+        "roundsWon": 13,
+        "rrEarned": 19,
+        "startMs": 1758118200000,
+        "tier": 21
+      },
+      {
+        "acs": 200.0,
+        "agentId": "agent-jett",
+        "assists": 4,
+        "deaths": 8,
+        "hsPct": 0.25,
+        "kd": 2.0,
+        "kills": 16,
+        "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+        "matchId": "ms-12",
+        "result": "loss",
+        "roundsLost": 13,
+        "roundsWon": 11,
+        "rrEarned": -14,
+        "startMs": 1758114000000,
+        "tier": 22
+      },
+      {
+        "acs": 200.0,
+        "agentId": "agent-omen",
+        "assists": 4,
+        "deaths": 8,
+        "hsPct": 0.25,
+        "kd": 2.5,
+        "kills": 20,
+        "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+        "matchId": "ms-11",
+        "result": "win",
+        "roundsLost": 11,
+        "roundsWon": 13,
+        "rrEarned": 22,
+        "startMs": 1757881800000,
+        "tier": 21
+      }
+    ],
+    "maps": [
+      {
+        "acs": 200.0,
+        "games": 8,
+        "id": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+        "kd": 2.25,
+        "losses": 2,
+        "netRr": 87,
+        "winrate": 0.75,
+        "wins": 6
+      },
+      {
+        "acs": 200.0,
+        "games": 8,
+        "id": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+        "kd": 2.25,
+        "losses": 6,
+        "netRr": -49,
+        "winrate": 0.25,
+        "wins": 2
+      }
+    ],
+    "rank": {
+      "avgLoss": -15.0,
+      "avgWin": 19.75,
+      "changes": [
+        {
+          "startMs": 1758132600000,
+          "tier": 21,
+          "up": false
+        },
+        {
+          "startMs": 1758118200000,
+          "tier": 22,
+          "up": true
+        },
+        {
+          "startMs": 1758114000000,
+          "tier": 21,
+          "up": false
+        },
+        {
+          "startMs": 1757881800000,
+          "tier": 22,
+          "up": true
+        },
+        {
+          "startMs": 1757874600000,
+          "tier": 21,
+          "up": false
+        }
+      ],
+      "losses": 8,
+      "netRr": 38,
+      "rr": 88,
+      "rrToNext": 12,
+      "tier": 21,
+      "wins": 8
+    },
+    "rrSeries": [
+      {
+        "absoluteRr": 2170,
+        "startMs": 1757336400000
+      },
+      {
+        "absoluteRr": 2154,
+        "startMs": 1757358000000
+      },
+      {
+        "absoluteRr": 2140,
+        "startMs": 1757426400000
+      },
+      {
+        "absoluteRr": 2158,
+        "startMs": 1757448000000
+      },
+      {
+        "absoluteRr": 2180,
+        "startMs": 1757766600000
+      },
+      {
+        "absoluteRr": 2199,
+        "startMs": 1757770200000
+      },
+      {
+        "absoluteRr": 2183,
+        "startMs": 1757786400000
+      },
+      {
+        "absoluteRr": 2203,
+        "startMs": 1757790000000
+      },
+      {
+        "absoluteRr": 2221,
+        "startMs": 1757853000000
+      },
+      {
+        "absoluteRr": 2207,
+        "startMs": 1757862000000
+      },
+      {
+        "absoluteRr": 2191,
+        "startMs": 1757874600000
+      },
+      {
+        "absoluteRr": 2213,
+        "startMs": 1757881800000
+      },
+      {
+        "absoluteRr": 2199,
+        "startMs": 1758114000000
+      },
+      {
+        "absoluteRr": 2218,
+        "startMs": 1758118200000
+      },
+      {
+        "absoluteRr": 2202,
+        "startMs": 1758128400000
+      },
+      {
+        "absoluteRr": 2188,
+        "startMs": 1758132600000
+      }
+    ],
+    "session": {
+      "losses": 3,
+      "netRr": -25,
+      "startedMs": 1758114000000,
+      "streak": [
+        "L",
+        "W",
+        "L",
+        "L"
+      ],
+      "wins": 1
+    }
+  },
+  {
+    "agents": [
+      {
+        "acs": 180.0,
+        "games": 1,
+        "id": "agent-jett",
+        "kd": 1.0,
+        "losses": 0,
+        "netRr": null,
+        "winrate": 0.0,
+        "wins": 0
+      },
+      {
+        "acs": null,
+        "games": 1,
+        "id": "agent-omen",
+        "kd": 0.0,
+        "losses": 1,
+        "netRr": null,
+        "winrate": 0.0,
+        "wins": 0
+      }
+    ],
+    "byDaypart": [
+      {
+        "games": 1,
+        "winrate": 1.0,
+        "wins": 1
+      },
+      {
+        "games": 0,
+        "winrate": null,
+        "wins": 0
+      },
+      {
+        "games": 1,
+        "winrate": 0.0,
+        "wins": 0
+      },
+      {
+        "games": 1,
+        "winrate": 0.0,
+        "wins": 0
+      }
+    ],
+    "byWeekday": [
+      {
+        "games": 0,
+        "winrate": null,
+        "wins": 0
+      },
+      {
+        "games": 0,
+        "winrate": null,
+        "wins": 0
+      },
+      {
+        "games": 0,
+        "winrate": null,
+        "wins": 0
+      },
+      {
+        "games": 1,
+        "winrate": 0.0,
+        "wins": 0
+      },
+      {
+        "games": 0,
+        "winrate": null,
+        "wins": 0
+      },
+      {
+        "games": 1,
+        "winrate": 1.0,
+        "wins": 1
+      },
+      {
+        "games": 1,
+        "winrate": 0.0,
+        "wins": 0
+      }
+    ],
+    "insights": [],
+    "last5": [
+      {
+        "acs": null,
+        "agentId": "agent-omen",
+        "assists": null,
+        "deaths": null,
+        "hsPct": null,
+        "kd": null,
+        "kills": null,
+        "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+        "matchId": "edge-loss",
+        "result": "loss",
+        "roundsLost": null,
+        "roundsWon": null,
+        "rrEarned": null,
+        "startMs": 1756072800000,
+        "tier": null
+      },
+      {
+        "acs": null,
+        "agentId": null,
+        "assists": null,
+        "deaths": null,
+        "hsPct": null,
+        "kd": null,
+        "kills": null,
+        "mapId": "",
+        "matchId": "edge-bare",
+        "result": "win",
+        "roundsLost": null,
+        "roundsWon": null,
+        "rrEarned": null,
+        "startMs": 1755939600000,
+        "tier": null
+      },
+      {
+        "acs": 180.0,
+        "agentId": "agent-jett",
+        "assists": 3,
+        "deaths": 12,
+        "hsPct": 0.20000000298023224,
+        "kd": 1.0,
+        "kills": 12,
+        "mapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+        "matchId": "edge-draw",
+        "result": "draw",
+        "roundsLost": 12,
+        "roundsWon": 12,
+        "rrEarned": null,
+        "startMs": 1755806400000,
+        "tier": null
+      }
+    ],
+    "maps": [
+      {
+        "acs": null,
+        "games": 1,
+        "id": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+        "kd": 0.0,
+        "losses": 1,
+        "netRr": null,
+        "winrate": 0.0,
+        "wins": 0
+      },
+      {
+        "acs": 180.0,
+        "games": 1,
+        "id": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+        "kd": 1.0,
+        "losses": 0,
+        "netRr": null,
+        "winrate": 0.0,
+        "wins": 0
+      }
+    ],
+    "rank": {
+      "avgLoss": null,
+      "avgWin": null,
+      "changes": [],
+      "losses": 1,
+      "netRr": null,
+      "rr": null,
+      "rrToNext": null,
+      "tier": null,
+      "wins": 1
+    },
+    "rrSeries": [],
+    "session": null
+  }
+]

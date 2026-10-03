@@ -29,6 +29,7 @@ use opd1_core::model::{
     EncounterDetailRow, Field, Identity, LiveState, Loadout, MatchResultKind, MmrInput, PartyMark,
     PlayerCard, PlayerDetails, RememberedSource, Team, TeammateSummary, WeaponSkin,
 };
+use opd1_core::mystats::{self, MyStatsInput};
 use opd1_core::names::KnownName;
 use opd1_core::presence::Stage;
 use opd1_core::stats::{Act, SeasonInfo};
@@ -839,6 +840,223 @@ fn match_details_view_matches_golden() {
 }
 
 // ---------------------------------------------------------------------
+// My Stats
+// ---------------------------------------------------------------------
+
+const MIN_MS: i64 = 60_000;
+const HOUR_MS: i64 = 60 * MIN_MS;
+const DAY_MS: i64 = 24 * HOUR_MS;
+/// Monday 2025-08-18 00:00 UTC: the start of the My Stats act.
+const MS_ACT_START: i64 = 20_318 * DAY_MS;
+const MS_ACT_ID: &str = "act-my-stats";
+
+fn ms_act() -> Act {
+    Act {
+        id: MS_ACT_ID.into(),
+        name: "ACT V".into(),
+        episode_name: "V26".into(),
+        start_ms: MS_ACT_START,
+        end_ms: MS_ACT_START + 60 * DAY_MS,
+    }
+}
+
+/// `day` days after the act's start, at `hour:minute` UTC.
+fn ms_at(day: i64, hour: i64, minute: i64) -> i64 {
+    MS_ACT_START + day * DAY_MS + hour * HOUR_MS + minute * MIN_MS
+}
+
+fn ms_map_names() -> HashMap<String, String> {
+    HashMap::from([
+        (SPLIT_UUID.to_string(), "Split".to_string()),
+        (ASCENT_UUID.to_string(), "Ascent".to_string()),
+    ])
+}
+
+/// The full case: 16 competitive matches (8 wins, 8 losses; every count a power of two, so every rate in
+/// the golden is a dyadic fraction) on 2 maps with 2 agents, spread over a Monday, a Tuesday, a weekend
+/// and today (a Wednesday, 4 matches within 6h = the session). It is built so that all six insights fire,
+/// the ladder promotes and demotes (6 rank changes, 5 sent), and Morning and Night are empty buckets.
+fn my_stats_full() -> Value {
+    // (day, hour, minute, won, on Split): idx 0..16 in play order.
+    const GAMES: [(i64, i64, i64, bool, bool); 16] = [
+        (21, 13, 0, true, true),    // Mon
+        (21, 19, 0, false, true),   // Mon
+        (22, 14, 0, false, true),   // Tue
+        (22, 20, 0, true, true),    // Tue
+        (26, 12, 30, true, true),   // Sat
+        (26, 13, 30, true, true),   // Sat
+        (26, 18, 0, false, false),  // Sat
+        (26, 19, 0, true, true),    // Sat
+        (27, 12, 30, true, true),   // Sun
+        (27, 15, 0, false, false),  // Sun
+        (27, 18, 30, false, false), // Sun
+        (27, 20, 30, true, false),  // Sun
+        (30, 13, 0, false, false),  // Wed (the session: 13:00 ... 18:10)
+        (30, 14, 10, true, false),  // Wed
+        (30, 17, 0, false, false),  // Wed
+        (30, 18, 10, false, false), // Wed
+    ];
+    const WIN_RR: [i64; 4] = [20, 18, 22, 19];
+    const LOSS_RR: [i64; 2] = [16, 14];
+
+    // The ladder: Ascendant 1 (tier 21) with 50 RR at the start; 100 RR promotes, below 0 demotes.
+    let (mut tier, mut rr) = (21i64, 50i64);
+    let (mut wins, mut losses) = (0usize, 0usize);
+    let mut matches = Vec::new();
+    let mut updates = Vec::new();
+    for (i, &(day, hour, minute, won, split)) in GAMES.iter().enumerate() {
+        let delta = if won {
+            wins += 1;
+            WIN_RR[(wins - 1) % WIN_RR.len()]
+        } else {
+            losses += 1;
+            -LOSS_RR[(losses - 1) % LOSS_RR.len()]
+        };
+        let before = tier;
+        rr += delta;
+        if rr >= 100 {
+            (tier, rr) = (tier + 1, rr - 100);
+        } else if rr < 0 {
+            (tier, rr) = (tier - 1, rr + 100);
+        }
+        let start_ms = ms_at(day, hour, minute);
+        let id = format!("ms-{i:02}");
+        // Jett on even positions, Omen on odd; 16 kills on even, 20 on odd: K/D 2.25 on both maps.
+        let even = i % 2 == 0;
+        matches.push(CompMatchRow {
+            match_id: id.clone(),
+            map_id: if split { SPLIT_UUID } else { ASCENT_UUID }.into(),
+            start_ms,
+            winning_team: Some(if won { "Blue" } else { "Red" }.into()),
+            team_id: "Blue".into(),
+            agent_id: Some(if even { "agent-jett" } else { "agent-omen" }.into()),
+            kills: if even { 16 } else { 20 },
+            deaths: 8,
+            assists: 4,
+            score: 4800,
+            rounds: Some(24),
+            hs: 25,
+            bs: 50,
+            ls: 25,
+            rounds_won: Some(if won { 13 } else { 11 }),
+            rounds_lost: Some(if won { 11 } else { 13 }),
+            rr_earned: Some(delta),
+            season_id: Some(MS_ACT_ID.into()),
+            tier_before: Some(before),
+            tier_after: Some(tier),
+            tier: Some(before),
+        });
+        updates.push(CompUpdateRow {
+            match_id: id,
+            season_id: MS_ACT_ID.into(),
+            tier_after: tier,
+            tier_before: Some(before),
+            rr_after: rr,
+            rr_earned: delta,
+            map_id: None,
+            start_ms,
+        });
+    }
+
+    let act = ms_act();
+    let names = ms_map_names();
+    let utc = |_: i64| 0;
+    let stats = mystats::build(MyStatsInput {
+        act: &act,
+        matches: &matches,
+        comp_updates: &updates,
+        current_rank: Some(CurrentRank {
+            tier: tier as u8,
+            rr: rr as u16,
+        }),
+        map_names: &names,
+        now_ms: ms_at(30, 19, 0),
+        utc_offset_ms: &utc,
+    });
+
+    // What the golden is meant to show, so a change to the builder cannot quietly hollow it out.
+    assert_eq!(stats.rr_series.len(), 16);
+    assert_eq!(stats.rank.changes.len(), 5, "5 of 6 rank changes are sent");
+    assert_eq!(stats.rank.rr_to_next, Some(12));
+    assert_eq!(stats.rank.net_rr, Some(38));
+    assert_eq!(stats.insights.len(), 6, "every insight fires");
+    assert_eq!(stats.session.as_ref().map(|s| s.streak.len()), Some(4));
+    assert_eq!(stats.last5.len(), 5);
+    assert_eq!((stats.maps.len(), stats.agents.len()), (2, 2));
+    assert!(stats.by_daypart.iter().any(|c| c.winrate.is_none()));
+    serde_json::to_value(&stats).unwrap()
+}
+
+/// The edge case: no MMR snapshot (`tier`, `rr` and `rrToNext` null), no stored competitive update (empty
+/// `rrSeries`, null net RR and averages, no rank change), a match with no stats row (the whole stat line
+/// null, R102) on an unknown map with no agent, a draw, and nothing in the last 6h (`session` null) or enough
+/// to say anything (`insights` empty).
+fn my_stats_edge() -> Value {
+    let row = |id: &str, day: i64, hour: i64, result: Option<&str>, map: &str, agent: Option<&str>| CompMatchRow {
+        match_id: id.into(),
+        map_id: map.into(),
+        start_ms: ms_at(day, hour, 0),
+        winning_team: result.map(str::to_string),
+        team_id: "Blue".into(),
+        agent_id: agent.map(str::to_string),
+        kills: 0,
+        deaths: 0,
+        assists: 0,
+        score: 0,
+        rounds: None,
+        hs: 0,
+        bs: 0,
+        ls: 0,
+        rounds_won: None,
+        rounds_lost: None,
+        rr_earned: None,
+        season_id: None,
+        tier_before: None,
+        tier_after: None,
+        tier: None,
+    };
+    let mut draw = row("edge-draw", 3, 20, None, SPLIT_UUID, Some("agent-jett"));
+    (draw.kills, draw.deaths, draw.assists) = (12, 12, 3);
+    (draw.score, draw.rounds) = (4320, Some(24));
+    (draw.hs, draw.bs, draw.ls) = (8, 24, 8);
+    (draw.rounds_won, draw.rounds_lost) = (Some(12), Some(12));
+    let matches = vec![
+        draw,
+        row("edge-bare", 5, 9, Some("Blue"), "", None),
+        row("edge-loss", 6, 22, Some("Red"), ASCENT_UUID, Some("agent-omen")),
+    ];
+
+    let act = ms_act();
+    let names = ms_map_names();
+    let utc = |_: i64| 0;
+    let stats = mystats::build(MyStatsInput {
+        act: &act,
+        matches: &matches,
+        comp_updates: &[],
+        current_rank: None,
+        map_names: &names,
+        now_ms: ms_at(40, 12, 0),
+        utc_offset_ms: &utc,
+    });
+
+    assert!(stats.rank.tier.is_none() && stats.rank.rr.is_none() && stats.rank.rr_to_next.is_none());
+    assert!(stats.rank.net_rr.is_none() && stats.rank.avg_win.is_none() && stats.rank.avg_loss.is_none());
+    assert!(stats.rr_series.is_empty() && stats.rank.changes.is_empty());
+    assert!(stats.session.is_none() && stats.insights.is_empty());
+    assert_eq!(stats.last5.len(), 3);
+    assert!(
+        stats.last5.iter().any(|m| m.kills.is_none() && m.acs.is_none()),
+        "a match with no stats row"
+    );
+    serde_json::to_value(&stats).unwrap()
+}
+
+#[test]
+fn my_stats_matches_golden() {
+    check_golden("my_stats", &json!([my_stats_full(), my_stats_edge()]));
+}
+
+// ---------------------------------------------------------------------
 // the keys, as spec §7.1 spells them
 // ---------------------------------------------------------------------
 
@@ -992,5 +1210,46 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
             "puuid", "name", "agentId", "tier", "kills", "deaths", "assists", "acs", "adr",
             "hsPct", "isSelf", "isFocus"
         ])
+    );
+
+    // My Stats and its parts (spec §9).
+    let stats = my_stats_full();
+    assert_eq!(
+        keys(&stats),
+        spec(&[
+            "rank",
+            "rrSeries",
+            "session",
+            "last5",
+            "maps",
+            "agents",
+            "byWeekday",
+            "byDaypart",
+            "insights"
+        ])
+    );
+    assert_eq!(
+        keys(&stats["rank"]),
+        spec(&[
+            "tier", "rr", "wins", "losses", "rrToNext", "netRr", "avgWin", "avgLoss", "changes"
+        ])
+    );
+    assert_eq!(keys(&stats["rank"]["changes"][0]), spec(&["tier", "up", "startMs"]));
+    assert_eq!(keys(&stats["rrSeries"][0]), spec(&["startMs", "absoluteRr"]));
+    assert_eq!(
+        keys(&stats["session"]),
+        spec(&["netRr", "wins", "losses", "startedMs", "streak"])
+    );
+    assert_eq!(keys(&stats["last5"][0]), keys(&golden["recent"][0]));
+    assert_eq!(
+        keys(&stats["maps"][0]),
+        spec(&["id", "games", "wins", "losses", "winrate", "netRr", "kd", "acs"])
+    );
+    assert_eq!(keys(&stats["byWeekday"][0]), spec(&["games", "wins", "winrate"]));
+    assert_eq!(stats["byWeekday"].as_array().map(Vec::len), Some(7));
+    assert_eq!(stats["byDaypart"].as_array().map(Vec::len), Some(4));
+    assert_eq!(
+        keys(&stats["insights"][0]),
+        spec(&["kind", "text", "matches", "positive"])
     );
 }

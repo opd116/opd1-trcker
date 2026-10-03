@@ -437,18 +437,6 @@ pub struct DetailsFetch {
     pub incomplete: bool,
 }
 
-/// [`fetch_missing_details_full`] reduced to its hold (R160): `Some` when a
-/// download was refused only because of the `other` family's hold.
-pub async fn fetch_missing_details_checked(
-    st: &Arc<AppState>,
-    session: &Arc<RiotSession>,
-    ids: Vec<String>,
-) -> Result<Option<Duration>, Gone> {
-    fetch_missing_details_full(st, session, ids)
-        .await
-        .map(|f| f.held)
-}
-
 /// [`fetch_missing_details`] that also says how the fetch went ([`DetailsFetch`]).
 pub async fn fetch_missing_details_full(
     st: &Arc<AppState>,
@@ -735,7 +723,9 @@ pub enum DetailsSync {
     /// (`RiotError::Held`, nothing sent); this much of the hold is left. The
     /// data is not there yet: run again when the hold ends.
     Held(Duration),
-    /// The competitive-updates call failed for real (logged).
+    /// The competitive-updates call failed for real (logged), or a
+    /// match-details download did ([`DetailsFetch::incomplete`]): the page is
+    /// short of data and the claim goes back.
     Failed,
 }
 
@@ -746,9 +736,10 @@ pub enum DetailsSync {
 /// resolves their names from valorant-api (`details::resolve_skins`)
 /// before returning, so the caller's rebuild already has them.
 ///
-/// Says how it ended ([`DetailsSync`]): a hold and a failed competitive-updates
-/// call both leave the data missing, and the caller must not count this run
-/// as the page's sync.
+/// Says how it ended ([`DetailsSync`]): a hold, a failed competitive-updates
+/// call and a failed match-details download all leave the data missing, and
+/// the caller must not count this run as the page's sync. A failure wins over
+/// a hold seen in the same run.
 pub async fn sync_details(
     st: &Arc<AppState>,
     session: &Arc<RiotSession>,
@@ -761,7 +752,12 @@ pub async fn sync_details(
     match comp_updates_call(st, session, puuid, TEAMMATE_WINDOW).await? {
         RankCall::Ok(rows) => {
             let targets = details_targets(&rows, season.as_deref());
-            if let Some(left) = fetch_missing_details_checked(st, session, targets).await? {
+            // R165 (finding 8): a download that failed leaves the page short
+            // of matches, so the sync is `Failed` and gives its claim back; a
+            // hold alone is `Held`.
+            let fetched = fetch_missing_details_full(st, session, targets).await?;
+            failed |= fetched.incomplete;
+            if let Some(left) = fetched.held {
                 hold(left);
             }
         }

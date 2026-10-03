@@ -567,6 +567,67 @@ async fn a_details_sync_whose_comp_updates_failed_gives_its_claim_back() {
     assert!(h.st.claim_details_sync(ME), "claimable again");
 }
 
+/// A 500 on the match-details download of `m1` (the match the competitive
+/// updates of the harness name first), ahead of the harness's own answer.
+async fn details_500(h: &Harness) {
+    Mock::given(method("GET"))
+        .and(path("/match-details/v1/matches/m1"))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+}
+
+#[tokio::test]
+async fn a_details_sync_with_a_failed_match_details_download_is_failed_not_done() {
+    // R165 finding 8, the leftover: the competitive updates answered, but a
+    // match-details download did not, so the page is short of a match.
+    let h = harness().await;
+    details_500(&h).await;
+    open_details_of_me(&h).await;
+
+    let ended = crate::sync::sync_details(&h.st, &h.session, ME)
+        .await
+        .unwrap();
+
+    assert_eq!(ended, crate::sync::DetailsSync::Failed);
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m1").await,
+        1
+    );
+    let stored =
+        h.st.db(|repo| repo.new_match_ids(&["m1".to_string()]))
+            .await;
+    assert_eq!(stored, Some(vec!["m1".to_string()]), "m1 is still missing");
+}
+
+#[tokio::test]
+async fn a_details_sync_with_a_failed_match_details_download_gives_its_claim_back() {
+    let h = harness().await;
+    details_500(&h).await;
+    open_details_of_me(&h).await;
+    assert!(h.st.claim_details_sync(ME));
+    crate::commands::details_sync_job(
+        h.st.clone(),
+        h.session.clone(),
+        ME.to_string(),
+        Duration::from_millis(30),
+    )
+    .await;
+    assert_eq!(count(&h.server, "GET", &comp_path(ME)).await, 1, "no rerun");
+    assert!(h.st.claim_details_sync(ME), "claimable again");
+}
+
+#[tokio::test]
+async fn a_details_sync_whose_match_details_all_arrived_is_done() {
+    let h = harness().await;
+    open_details_of_me(&h).await;
+    let ended = crate::sync::sync_details(&h.st, &h.session, ME)
+        .await
+        .unwrap();
+    assert_eq!(ended, crate::sync::DetailsSync::Done);
+}
+
 #[tokio::test]
 async fn a_details_sync_that_worked_keeps_its_claim() {
     let h = harness().await;

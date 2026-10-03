@@ -191,6 +191,7 @@ fn reset_after_panic(st: &AppState) {
         let mut live = lock(&st.live);
         live.revoke_worker();
         live.backfill = None;
+        live.comp_backfill = None;
     }
     st.set_session(None);
 }
@@ -385,6 +386,8 @@ impl Poller {
                 // R101: the previous account's run (and its cursor) is not
                 // this account's.
                 live.backfill = None;
+                // B1: nor is its competitive-updates run.
+                live.comp_backfill = None;
                 // R150: nor are its queued name asks and its last match end
                 // (their hidden players were just forgotten above).
                 live.clear_name_fill();
@@ -446,7 +449,7 @@ impl Poller {
         // nothing. The first presence that settles a stage installs the
         // roster, whose `ensure_worker` runs the queued run behind the live
         // cards (`LiveModel::next_job`).
-        crate::sync::start_backfill_run(&self.st).await;
+        crate::sync::start_own_backfills(&self.st).await;
     }
 
     /// R101: a match ended (VALORANT is running): starts the own-history
@@ -454,15 +457,20 @@ impl Poller {
     /// going) and makes sure a worker will run it — behind any live card
     /// work, which `LiveModel::next_job` puts first.
     async fn begin_backfill(&mut self, session: &Arc<RiotSession>) {
-        crate::sync::start_backfill_run(&self.st).await;
+        crate::sync::start_own_backfills(&self.st).await;
         self.ensure_worker(session);
     }
 
     async fn drop_session(&mut self) {
         self.stop_worker();
         // R101: an interrupted run is dropped; the next connect starts over
-        // from the stored anchor, which only a finished run moves.
-        lock(&self.st.live).backfill = None;
+        // from the stored anchor, which only a finished run moves. B1: the
+        // competitive-updates run likewise.
+        {
+            let mut live = lock(&self.st.live);
+            live.backfill = None;
+            live.comp_backfill = None;
+        }
         self.session = None;
         self.st.set_session(None);
         self.stage = Stage::Closed;
@@ -536,6 +544,11 @@ impl Poller {
         // R160: a names deferral (name-service was refused by a hold) ran out
         // and names or fill asks are waiting: the same wake-up, once.
         if self.stage != Stage::Closed && lock(&self.st.live).names_wakeup_due() {
+            self.ensure_worker(session);
+        }
+        // B1: the same for the competitive-updates run, paused by the mmr
+        // hold: its pause ran out.
+        if self.stage != Stage::Closed && lock(&self.st.live).comp_backfill_resume_due() {
             self.ensure_worker(session);
         }
         Ok(())
@@ -1300,6 +1313,9 @@ mod tests {
         history_path, mount_feed, requests, run_active, store_anchor, store_anchor_for,
         stored_anchor, stored_anchor_of, Feed,
     };
+    use crate::pipeline_tests::comp_backfill::{
+        mount_comp_feed, row_id, store_comp_anchor_for, stored_comp_anchor, stored_comp_anchor_of,
+    };
     use crate::pipeline_tests::{card_json, harness, roster, session_with_other_wait, Harness, ME};
     use crate::store::{save_player, PlayerUpdate};
 
@@ -1471,6 +1487,7 @@ mod tests {
             let mut live = lock(&h.st.live);
             live.stage = Stage::Menus;
             live.start_backfill(None, None);
+            live.start_comp_backfill(None, None);
             assert!(
                 live.try_start_worker().is_some(),
                 "a worker holds the claim"
@@ -1482,6 +1499,10 @@ mod tests {
 
         let live = lock(&h.st.live);
         assert!(live.backfill.is_none(), "an interrupted run is dropped");
+        assert!(
+            live.comp_backfill.is_none(),
+            "so is the competitive-updates run"
+        );
         assert!(!live.worker_running(), "the detached worker is revoked");
         assert!(h.st.session().is_none());
     }
@@ -2170,6 +2191,136 @@ mod tests {
             let run = live.backfill.as_ref().expect("the new account's own run");
             assert_eq!(run.anchor, None, "a first run, not the stale one");
         }
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn connecting_queues_the_competitive_updates_run_from_the_accounts_own_anchor() {
+        // B1: the same trigger as the match backfill's, with its own anchor
+        // per account (the other account's is neither read nor deleted).
+        let h = harness().await;
+        mount_comp_feed(&h.server, 100, None).await;
+        store_comp_anchor_for(&h.st, ME, 40).await;
+        store_comp_anchor_for(&h.st, "previous-account", 7).await;
+        // The app was last connected as another account, with a run under way.
+        lock(&h.st.live).self_puuid = Some("previous-account".into());
+        lock(&h.st.live).start_comp_backfill(Some(("stale".into(), 1)), None);
+        lock(&h.st.live).comp_backfill.as_mut().unwrap().next_index = 60;
+
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+
+        {
+            let live = lock(&h.st.live);
+            let run = live.comp_backfill.as_ref().expect("this account's own run");
+            assert_eq!(
+                run.anchor.as_ref().map(|a| a.0.clone()),
+                Some(row_id(40)),
+                "ME's anchor, not the stale run's"
+            );
+            assert_eq!(run.next_index, 0, "from the start, not the stale cursor");
+            assert!(
+                !live.worker_running(),
+                "queued only: no worker on a Closed start"
+            );
+        }
+        assert_eq!(
+            stored_comp_anchor_of(&h.st, "previous-account")
+                .await
+                .map(|a| a.0),
+            Some(row_id(7)),
+            "the switch deletes nothing"
+        );
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_new_account_with_no_anchor_starts_a_first_run_and_dropping_the_session_ends_it() {
+        let h = harness().await;
+        lock(&h.st.live).self_puuid = Some("previous-account".into());
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        {
+            let live = lock(&h.st.live);
+            let run = live.comp_backfill.as_ref().expect("a run");
+            assert_eq!(run.anchor, None, "a first run");
+            assert!(run.act_start_ms.is_some(), "bounded by the act start");
+        }
+
+        poller.drop_session().await;
+        assert!(lock(&h.st.live).comp_backfill.is_none());
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_match_end_starts_the_competitive_updates_run_too() {
+        // B1: "after each match end like the backfill": In Game -> Menus.
+        let h = harness().await;
+        mount_feed(&h.server, Feed::new(1)).await;
+        mount_comp_feed(&h.server, 30, None).await;
+        let presence = switchable_presence(&h, "INGAME", "unrated").await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Ingame;
+        poller.presence_stage = Stage::Ingame;
+        poller.party_key = mocked_party_key();
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Ingame;
+            live.in_match = true;
+        }
+        poller.presence_tick(&h.session).await.unwrap();
+        assert!(
+            lock(&h.st.live).comp_backfill.is_none(),
+            "no run during the match"
+        );
+
+        *presence.lock().unwrap() = ("MENUS".into(), "unrated".into());
+        poller.presence_tick(&h.session).await.unwrap();
+
+        // The run was queued and the worker pages it behind the live jobs.
+        for _ in 0..250 {
+            if stored_comp_anchor(&h.st).await.is_some() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            stored_comp_anchor(&h.st).await.map(|a| a.0),
+            Some(row_id(0)),
+            "the run finished after the match"
+        );
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn a_paused_competitive_updates_run_gets_a_worker_at_the_tick_once_its_hold_is_over() {
+        let h = harness().await;
+        mount_comp_feed(&h.server, 30, None).await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.next_presence = Instant::now() + Duration::from_secs(3600);
+        synced_lobby(&h);
+        crate::sync::start_comp_backfill_run(&h.st).await;
+        lock(&h.st.live).pause_comp_backfill(Duration::from_secs(10));
+
+        // Inside the pause: the tick starts nothing.
+        poller.connected_tick(&h.session).await.unwrap();
+        assert!(!lock(&h.st.live).worker_running());
+        assert_eq!(stored_comp_anchor(&h.st).await, None);
+
+        // The pause is over: the tick wakes a worker, which pages the run.
+        lock(&h.st.live).advance_clock(Duration::from_secs(11));
+        poller.connected_tick(&h.session).await.unwrap();
+        for _ in 0..250 {
+            if stored_comp_anchor(&h.st).await.is_some() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            stored_comp_anchor(&h.st).await.map(|a| a.0),
+            Some(row_id(0))
+        );
         poller.stop_worker();
     }
 

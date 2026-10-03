@@ -324,6 +324,10 @@ pub enum Job {
     /// during a match
     /// — a free-for-all one included (`LiveModel::in_match`).
     Backfill,
+    /// One page of the user's own competitive updates (B1,
+    /// `sync::comp_backfill_step`): the lowest priority of all, behind the
+    /// match-history backfill, between matches only, like it.
+    CompBackfill,
 }
 
 /// One own-history backfill run (R101; `sync::backfill_step` advances it).
@@ -381,6 +385,32 @@ impl BackfillRun {
             }
         }
     }
+}
+
+/// One own competitive-updates backfill run (B1; `sync::comp_backfill_step`
+/// advances it, one page per job). My Stats' RR chart, net RR and rank changes
+/// read every competitive update of the act, and the live sync only fetches
+/// the newest 5 or 20: this pages the rest in. Like [`BackfillRun`] it lives
+/// in the [`LiveModel`] so a worker aborted by a stage change resumes from the
+/// same cursor, and the stored anchor moves only when a run *finishes*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompBackfillRun {
+    /// The last finished run's newest `(match_id, start_ms)`; `None` on the
+    /// first run ever.
+    pub anchor: Option<(String, i64)>,
+    /// The current act's start (`None` when the act tables aren't loaded; each
+    /// page looks it up again until it is known).
+    pub act_start_ms: Option<i64>,
+    /// The next `startIndex`: the last page's start plus the rows it held.
+    pub next_index: u32,
+    /// Pages fetched so far (`sync::COMP_BACKFILL_MAX_PAGES` bounds it).
+    pub pages: u32,
+    /// Page 0's first row; becomes the anchor when the run finishes.
+    pub newest: Option<(String, i64)>,
+    /// R160: the mmr request family was on hold when the last page was asked
+    /// for (`RiotError::Held`, nothing sent): no page goes out before this
+    /// instant (the hold's end plus a little slack).
+    pub resume_at: Option<Instant>,
 }
 
 /// The live stage/roster plus the session-scoped bookkeeping the sync
@@ -463,6 +493,9 @@ pub struct LiveModel {
     /// The own-history backfill run in progress, if any (R101). Cleared when
     /// the account changes or the session drops.
     pub backfill: Option<BackfillRun>,
+    /// B1: the own competitive-updates backfill run in progress, if any.
+    /// Cleared like [`Self::backfill`] (account switch, session drop).
+    pub comp_backfill: Option<CompBackfillRun>,
     /// R150: the asks waiting for the names fill (`Job::FillNames`), oldest
     /// first, one per puuid. In memory only: a restart loses them, and the
     /// next match end, Details open or backfill asks again.
@@ -533,6 +566,7 @@ impl LiveModel {
             worker_id: None,
             next_worker_id: 0,
             backfill: None,
+            comp_backfill: None,
             name_fill: VecDeque::new(),
             name_fill_low: HashSet::new(),
             match_end_ms: None,
@@ -891,6 +925,38 @@ impl LiveModel {
         self.backfill.is_some() && self.between_matches()
     }
 
+    /// B1: the own competitive-updates backfill has a page to fetch: a run is
+    /// active, it is between matches (same gate as [`Self::backfill_ready`]),
+    /// and the mmr hold the last page met is over.
+    pub fn comp_backfill_ready(&self) -> bool {
+        self.between_matches()
+            && self
+                .comp_backfill
+                .as_ref()
+                .is_some_and(|run| run.resume_at.is_none_or(|at| self.now() >= at))
+    }
+
+    /// B1: a paused run's hold has run out: the poll tick starts a worker (it
+    /// exited when the pause left nothing to do, and the passing of time is no
+    /// other wake-up). Not one-shot: it stays true until the run's next page
+    /// clears the pause, and a worker that is already running ignores it.
+    pub fn comp_backfill_resume_due(&self) -> bool {
+        self.comp_backfill
+            .as_ref()
+            .and_then(|run| run.resume_at)
+            .is_some_and(|at| self.now() >= at)
+            && self.between_matches()
+    }
+
+    /// B1: the mmr family is on hold for `wait` more: the run's next page
+    /// waits for it, uses no failure count (R160).
+    pub fn pause_comp_backfill(&mut self, wait: Duration) {
+        let at = self.now() + wait;
+        if let Some(run) = self.comp_backfill.as_mut() {
+            run.resume_at = Some(run.resume_at.map_or(at, |t| t.max(at)));
+        }
+    }
+
     /// R150: a names fill is queued and it is between matches. The asks wait
     /// in the queue through a match and run after it.
     pub fn fill_ready(&self) -> bool {
@@ -1106,7 +1172,10 @@ impl LiveModel {
     }
 
     pub fn has_pending_work(&self) -> bool {
-        self.live_job_pending() || self.fill_ready() || self.backfill_ready()
+        self.live_job_pending()
+            || self.fill_ready()
+            || self.backfill_ready()
+            || self.comp_backfill_ready()
     }
 
     /// R150: queues asks for the names fill, one per puuid. Asks
@@ -1274,6 +1343,26 @@ impl LiveModel {
         });
     }
 
+    /// B1: starts an own competitive-updates run. A no-op while one is active,
+    /// so a second trigger (a match ended mid-run) keeps its cursor.
+    pub fn start_comp_backfill(
+        &mut self,
+        anchor: Option<(String, i64)>,
+        act_start_ms: Option<i64>,
+    ) {
+        if self.comp_backfill.is_some() {
+            return;
+        }
+        self.comp_backfill = Some(CompBackfillRun {
+            anchor,
+            act_start_ms,
+            next_index: 0,
+            pages: 0,
+            newest: None,
+            resume_at: None,
+        });
+    }
+
     /// R45: claims the worker slot if there is work and no worker owns it
     /// — returns the new worker's id (the caller spawns it), else `None`.
     pub fn try_start_worker(&mut self) -> Option<u64> {
@@ -1326,6 +1415,10 @@ impl LiveModel {
         // matches.
         if self.backfill_ready() {
             return Some(Job::Backfill);
+        }
+        // B1: behind the match-history backfill, one page per job.
+        if self.comp_backfill_ready() {
+            return Some(Job::CompBackfill);
         }
         self.worker_id = None;
         None
@@ -3405,6 +3498,137 @@ mod tests {
         assert_eq!(run.anchor, anchor, "same run");
         assert_eq!((run.next_index, run.scanned), (40, 37));
         assert_eq!(run.pending.len(), 1);
+    }
+
+    // -- B1: the own competitive-updates backfill --------------------------
+
+    #[test]
+    fn the_comp_backfill_job_comes_after_live_cards_the_fill_and_the_match_backfill() {
+        let mut m = model(vec![slot("me", false)]);
+        m.stage = Stage::Menus;
+        m.synced.insert("me".into());
+        m.start_backfill(None, None);
+        m.start_comp_backfill(None, None);
+        let id = m.try_start_worker().expect("work");
+
+        // The names fill and the match backfill both go first.
+        m.queue_name_fill([ask("someone", None)]);
+        assert_eq!(m.next_job(id), Some(Job::FillNames));
+        m.name_fill.clear();
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
+        m.backfill = None;
+
+        // Only now the competitive updates, a page per job until the run ends.
+        assert_eq!(m.next_job(id), Some(Job::CompBackfill));
+        assert_eq!(
+            m.next_job(id),
+            Some(Job::CompBackfill),
+            "until the run ends"
+        );
+        // A roster player added mid-run goes first again.
+        m.slots.push(slot("late", false));
+        m.names_attempted.insert("late".into());
+        assert_eq!(m.next_job(id), Some(Job::Rank(vec!["late".into()])));
+        m.synced.mark_ranked("late");
+        assert_eq!(m.next_job(id), Some(Job::Sync("late".into())));
+        m.synced.insert("late".into());
+        assert_eq!(m.next_job(id), Some(Job::CompBackfill));
+
+        m.comp_backfill = None;
+        assert_eq!(m.next_job(id), None);
+        assert!(!m.worker_running(), "claim released");
+    }
+
+    #[test]
+    fn comp_backfill_waits_for_the_match_to_end() {
+        for (stage, in_match) in [
+            (Stage::Pregame, true),
+            (Stage::Ingame, true),
+            // A free-for-all match keeps the Lobby view.
+            (Stage::Menus, true),
+        ] {
+            let mut m = model(vec![slot("me", false)]);
+            m.synced.insert("me".into());
+            m.stage = stage;
+            m.in_match = in_match;
+            m.start_comp_backfill(None, None);
+            assert!(
+                m.try_start_worker().is_none(),
+                "{stage:?}: a run alone is no work in a match"
+            );
+
+            // A worker that claimed just before the match began.
+            m.stage = Stage::Menus;
+            m.in_match = false;
+            let id = m
+                .try_start_worker()
+                .expect("between matches: the run is work");
+            m.stage = stage;
+            m.in_match = in_match;
+            assert_eq!(m.next_job(id), None, "{stage:?}: never CompBackfill");
+            assert!(m.comp_backfill.is_some(), "{stage:?}: the cursor waits");
+        }
+        // Closed counts as between matches, like the match backfill.
+        let mut m = model(vec![slot("me", false)]);
+        m.synced.insert("me".into());
+        m.stage = Stage::Closed;
+        m.start_comp_backfill(None, None);
+        let id = m.try_start_worker().expect("the run is work");
+        assert_eq!(m.next_job(id), Some(Job::CompBackfill));
+    }
+
+    #[test]
+    fn a_paused_comp_backfill_is_no_work_until_its_hold_ends_and_then_wakes_the_tick() {
+        let mut m = model(vec![slot("me", false)]);
+        m.stage = Stage::Menus;
+        m.synced.insert("me".into());
+        m.start_comp_backfill(None, None);
+        m.pause_comp_backfill(10 * S);
+        assert!(!m.comp_backfill_ready());
+        assert!(!m.comp_backfill_resume_due());
+        assert!(m.try_start_worker().is_none(), "a pause alone is no work");
+        assert!(m.comp_backfill.is_some(), "the cursor waits");
+
+        // A shorter pause never shortens it.
+        m.pause_comp_backfill(2 * S);
+        m.advance_clock(5 * S);
+        assert!(!m.comp_backfill_ready());
+
+        m.advance_clock(6 * S);
+        assert!(m.comp_backfill_ready());
+        assert!(m.comp_backfill_resume_due(), "the tick starts a worker");
+        let id = m.try_start_worker().expect("work again");
+        assert_eq!(m.next_job(id), Some(Job::CompBackfill));
+
+        // The pause ends with the run's next page, and in a match it is no
+        // wake-up at all.
+        m.comp_backfill.as_mut().unwrap().resume_at = None;
+        assert!(!m.comp_backfill_resume_due());
+        m.pause_comp_backfill(S);
+        m.advance_clock(2 * S);
+        m.in_match = true;
+        assert!(!m.comp_backfill_resume_due());
+    }
+
+    #[test]
+    fn start_comp_backfill_is_noop_while_running() {
+        let mut m = model(vec![slot("me", false)]);
+        let anchor = Some(("m9".to_string(), 900));
+        m.start_comp_backfill(anchor.clone(), Some(500));
+        {
+            let run = m.comp_backfill.as_mut().unwrap();
+            assert_eq!(run.anchor, anchor);
+            assert_eq!(run.act_start_ms, Some(500));
+            assert_eq!((run.next_index, run.pages), (0, 0));
+            assert!(run.newest.is_none() && run.resume_at.is_none());
+            run.next_index = 40;
+            run.pages = 2;
+        }
+        // A second trigger (a match ended meanwhile) must not reset it.
+        m.start_comp_backfill(None, None);
+        let run = m.comp_backfill.as_ref().unwrap();
+        assert_eq!(run.anchor, anchor, "same run");
+        assert_eq!((run.next_index, run.pages), (40, 2));
     }
 
     // -- R150: the names fill ---------------------------------------------

@@ -1233,6 +1233,11 @@ mod rank;
 #[cfg(test)]
 mod live_tier;
 
+/// B1's own competitive-updates backfill tests (their own file; same
+/// harness).
+#[cfg(test)]
+pub(crate) mod comp_backfill;
+
 /// R158's diagnostics tests: the failed-call warn line and `dump_raw` (their
 /// own file; same harness).
 #[cfg(test)]

@@ -30,7 +30,9 @@
 //! (R165). The request count is unchanged.
 //!
 //! Behind all of that, at the lowest priority, the worker also runs the
-//! user's own-history backfill ([`backfill_step`], R101) and, ahead of it,
+//! user's own-history backfill ([`backfill_step`], R101), behind that the
+//! user's own competitive updates, one page a job ([`comp_backfill_step`],
+//! B1: My Stats' chart wants the whole act), and, ahead of both,
 //! the names fill ([`fill_names_step`], R150): between matches only, one
 //! batched name-service request for the players of a match that just ended,
 //! of a Details page, or of the matches the backfill stored — including the
@@ -125,6 +127,25 @@ const ANCHOR_KEY_PREFIX: &str = "self_history_anchor";
 /// its one row stays, unused — the account's next run is a first run.)
 pub fn anchor_key(puuid: &str) -> String {
     format!("{ANCHOR_KEY_PREFIX}:{puuid}")
+}
+
+/// B1: how many competitive updates one page asks for (`startIndex` to
+/// `endIndex`; the endpoint's page, as `TEAMMATE_WINDOW` already reads).
+pub const COMP_BACKFILL_PAGE: u32 = 20;
+
+/// B1: the most pages one own competitive-updates run fetches, 200 rows
+/// (Claude's lightness bound; the act start or the anchor usually stops it
+/// sooner).
+pub const COMP_BACKFILL_MAX_PAGES: u32 = 10;
+
+/// The `app_state` key prefix of the competitive-updates backfill anchors.
+const COMP_ANCHOR_KEY_PREFIX: &str = "self_comp_anchor";
+
+/// B1: the `app_state` key holding `puuid`'s competitive-updates anchor: the
+/// newest row the account's last *finished* run saw, the same JSON as
+/// [`anchor_key`]'s. One key per account, for the same reasons (R137).
+pub fn comp_anchor_key(puuid: &str) -> String {
+    format!("{COMP_ANCHOR_KEY_PREFIX}:{puuid}")
 }
 
 /// The `app_state` key prefix of the backfill failure counts (see
@@ -944,6 +965,42 @@ pub async fn start_backfill_run(st: &Arc<AppState>) {
     }
 }
 
+/// B1: starts both own-history runs (match history and competitive updates)
+/// from their stored anchors. What the poll loop calls on connect and when a
+/// match ends; each is a no-op while its run is active.
+pub async fn start_own_backfills(st: &Arc<AppState>) {
+    start_backfill_run(st).await;
+    start_comp_backfill_run(st).await;
+}
+
+/// B1: starts an own competitive-updates run from the stored anchor (a no-op
+/// while one is active). The act's start bounds every run, not just the first:
+/// the chart wants the whole current act and nothing older.
+pub async fn start_comp_backfill_run(st: &Arc<AppState>) {
+    let Some(me) = lock(&st.live).self_puuid.clone() else {
+        return;
+    };
+    let key = comp_anchor_key(&me);
+    // A SQLite failure (`None`, already logged) skips the run: a run without
+    // its anchor would page the whole act again.
+    let Some(stored) = st.db(move |repo| repo.get_state(&key)).await else {
+        return;
+    };
+    let anchor = stored.as_deref().and_then(parse_anchor);
+    log::debug!(
+        "own competitive updates backfill: {}",
+        match &anchor {
+            Some((id, _)) => format!("from anchor {}", short(id)),
+            None => "first run".to_string(),
+        }
+    );
+    let act_start_ms = st.current_act().map(|a| a.start_ms);
+    let mut live = lock(&st.live);
+    if live.self_puuid.as_deref() == Some(me.as_str()) {
+        live.start_comp_backfill(anchor, act_start_ms);
+    }
+}
+
 /// Runs `f` on the active run — only while it is still `me`'s: after an
 /// account switch the model holds another user's run (or none), and a step
 /// of the old session must not touch it.
@@ -1063,6 +1120,178 @@ async fn backfill_page(
         true
     });
     Ok(applied == Some(true))
+}
+
+/// B1: [`with_run`] for the competitive-updates run.
+fn with_comp_run<R>(
+    st: &AppState,
+    me: &str,
+    f: impl FnOnce(&mut crate::state::CompBackfillRun) -> R,
+) -> Option<R> {
+    let mut live = lock(&st.live);
+    if live.self_puuid.as_deref() != Some(me) {
+        return None;
+    }
+    live.comp_backfill.as_mut().map(f)
+}
+
+/// B1: drops `me`'s competitive-updates run without touching the anchor.
+fn end_comp_run(st: &AppState, me: &str) {
+    let mut live = lock(&st.live);
+    if live.self_puuid.as_deref() == Some(me) {
+        live.comp_backfill = None;
+    }
+}
+
+/// B1, pure: whether the page just fetched (`rows`, newest first; the
+/// `pages`-th of the run) is the run's last. It is when
+/// - it is short or empty (the history ended: Riot has no `Total` here);
+/// - it holds the anchor's match, or a row older than the anchor's start (the
+///   anchor row may have left the history): everything newer is in;
+/// - its oldest row is before the current act's start (`act_start_ms`);
+/// - it is the [`COMP_BACKFILL_MAX_PAGES`]-th.
+pub fn comp_backfill_done(
+    rows: &[CompUpdateRow],
+    anchor: Option<&(String, i64)>,
+    act_start_ms: Option<i64>,
+    pages: u32,
+) -> bool {
+    rows.len() < COMP_BACKFILL_PAGE as usize
+        || anchor.is_some_and(|(id, start)| {
+            rows.iter()
+                .any(|r| r.match_id == *id || r.start_ms < *start)
+        })
+        || act_start_ms.is_some_and(|act| rows.iter().any(|r| r.start_ms < act))
+        || pages >= COMP_BACKFILL_MAX_PAGES
+}
+
+/// B1: one page of the own competitive-updates backfill. The page is asked
+/// for from the run's cursor, stored in `comp_updates` (the same upsert the
+/// live sync uses, so rows it already stored are simply written again), and
+/// the cursor moves by the rows the page held. The run ends with the anchor
+/// moved to page 0's newest row when [`comp_backfill_done`] says so.
+///
+/// Never more than one page per call: the worker's next job decision comes
+/// between pages, so live cards, the names fill and the match backfill go
+/// first. R160: an mmr-family hold (`RiotError::Held`, nothing sent) pauses
+/// the run until the hold's end plus slack, no failure counted
+/// (`LiveModel::pause_comp_backfill`; the poll tick wakes a worker). Any real
+/// failure (a 429 that was sent included) ends the run without moving the
+/// anchor; the next trigger starts over from it.
+///
+/// `Err(Gone)`: the client went away, or `session` belongs to an account that
+/// is no longer the current one.
+pub async fn comp_backfill_step(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+) -> Result<(), Gone> {
+    let me = session.self_puuid();
+    {
+        let live = lock(&st.live);
+        if live.self_puuid.as_deref() != Some(me) {
+            return Err(Gone);
+        }
+        // A match started since the job was handed out, or the hold is not
+        // over: not even a page.
+        if !live.comp_backfill_ready() {
+            return Ok(());
+        }
+    }
+    let Some(index) = with_comp_run(st, me, |run| run.next_index) else {
+        return Ok(());
+    };
+    let answer = session
+        .comp_updates(me, Some(index), Some(index + COMP_BACKFILL_PAGE))
+        .await;
+    let resp = match rank_call(answer, "own competitive updates page", me) {
+        Err(Gone) => {
+            end_comp_run(st, me);
+            return Err(Gone);
+        }
+        Ok(RankCall::Held(left)) => {
+            lock(&st.live).pause_comp_backfill(left + HOLD_SLACK);
+            return Ok(());
+        }
+        // Logged by `rank_call`.
+        Ok(RankCall::Failed) => {
+            end_comp_run(st, me);
+            return Ok(());
+        }
+        Ok(RankCall::Ok(resp)) => resp,
+    };
+    let rows = comp_update_rows_from_response(&resp);
+    let Some((anchor, act_start_ms, pages)) =
+        with_comp_run(st, me, |r| (r.anchor.clone(), r.act_start_ms, r.pages))
+    else {
+        return Ok(());
+    };
+    // The asset tables may have loaded since the run started.
+    let act_start_ms = act_start_ms.or_else(|| st.current_act().map(|a| a.start_ms));
+    let done = comp_backfill_done(&rows, anchor.as_ref(), act_start_ms, pages + 1);
+    log::debug!(
+        "own competitive updates page {index}: {} rows{}",
+        rows.len(),
+        if done { ", last page of the run" } else { "" }
+    );
+
+    let (p, stored_rows) = (me.to_string(), rows.clone());
+    if st
+        .db(move |repo| repo.upsert_comp_updates(&p, &stored_rows))
+        .await
+        .is_none()
+    {
+        end_comp_run(st, me);
+        return Ok(());
+    }
+    let applied = with_comp_run(st, me, |run| {
+        if run.next_index != index {
+            return false; // a different run replaced this one meanwhile
+        }
+        if index == 0 {
+            run.newest = rows.first().map(|r| (r.match_id.clone(), r.start_ms));
+        }
+        run.pages += 1;
+        // Kept once found: the later pages don't look the act up again.
+        run.act_start_ms = act_start_ms;
+        // By what the page held, not by what was asked for.
+        run.next_index = index + rows.len() as u32;
+        run.resume_at = None;
+        true
+    });
+    if applied == Some(true) && done {
+        finish_comp_backfill(st, me).await;
+    }
+    Ok(())
+}
+
+/// B1: the run is done and its last page is stored: writes the anchor (the
+/// newest row page 0 showed, if it is a new one) and drops the run.
+async fn finish_comp_backfill(st: &Arc<AppState>, me: &str) {
+    let Some((anchor, newest, pages)) =
+        with_comp_run(st, me, |r| (r.anchor.clone(), r.newest.clone(), r.pages))
+    else {
+        return;
+    };
+    if let Some(newest) = newest.filter(|n| Some(n) != anchor.as_ref()) {
+        // The account's own key: a write that lands after an account switch
+        // is still that account's finished run, so it needs no guard.
+        let (key, raw) = (comp_anchor_key(me), anchor_json(&newest));
+        if st
+            .db(move |repo| repo.set_state(&key, &raw))
+            .await
+            .is_some()
+        {
+            log::info!(
+                "own competitive updates backfill finished: {pages} pages, anchor {}",
+                short(&newest.0)
+            );
+        }
+    } else {
+        log::debug!("own competitive updates backfill finished: nothing new ({pages} pages)");
+    }
+    // Written first, cleared second: an abort in between just finishes the
+    // same run again.
+    end_comp_run(st, me);
 }
 
 /// The run is done and everything it found is stored: writes the anchor (the
@@ -1267,7 +1496,8 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
 /// `LiveModel::try_start_worker`). Each job — one `names()` call for the
 /// visible players still unnamed, one player's sync in display order, a due
 /// rank retry (R155), one names-fill request, or, last of all, one step of the
-/// own-history backfill — is chosen by
+/// own-history backfill or one page of the own competitive updates (B1) — is
+/// chosen by
 /// `LiveModel::next_job` under the model's lock, which also
 /// releases the claim when nothing is left (R45: no roster change can
 /// slip between "nothing to do" and the task ending). Roster changes
@@ -1283,6 +1513,7 @@ pub async fn run_worker(st: Arc<AppState>, session: Arc<RiotSession>, id: u64) {
             Some(Job::RankRetry(puuid)) => retry_step(&st, &session, puuid).await,
             Some(Job::FillNames) => fill_names_step(&st, &session).await,
             Some(Job::Backfill) => backfill_step(&st, &session).await,
+            Some(Job::CompBackfill) => comp_backfill_step(&st, &session).await,
         };
         if outcome.is_err() {
             lock(&st.live).release_worker(id);
@@ -2054,6 +2285,93 @@ mod tests {
     }
     fn ids(t: &BackfillTake) -> Vec<&str> {
         t.entries.iter().map(|e| e.match_id.as_str()).collect()
+    }
+
+    /// `n` competitive-update rows, newest first, one minute apart (row `i`
+    /// starts at `BASE - i * 60_000`), ids `c{offset + i}`.
+    fn comp_rows(offset: usize, n: usize) -> Vec<CompUpdateRow> {
+        (0..n)
+            .map(|i| {
+                row(
+                    &format!("c{}", offset + i),
+                    "act",
+                    BASE - (offset + i) as i64 * 60_000,
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn comp_backfill_done_on_a_short_or_empty_page() {
+        assert!(
+            comp_backfill_done(&[], None, None, 1),
+            "empty: the history ended"
+        );
+        assert!(
+            comp_backfill_done(&comp_rows(0, 19), None, None, 1),
+            "short"
+        );
+        assert!(
+            !comp_backfill_done(&comp_rows(0, 20), None, None, 1),
+            "full: more may follow"
+        );
+    }
+
+    #[test]
+    fn comp_backfill_done_at_the_anchor_or_older_than_its_start() {
+        let page = comp_rows(0, 20);
+        let anchor = ("c12".to_string(), BASE - 12 * 60_000);
+        assert!(
+            comp_backfill_done(&page, Some(&anchor), None, 1),
+            "the anchor row is on the page"
+        );
+        // The anchor left the history: rows 15+ are older than its start.
+        let gone = ("gone".to_string(), BASE - 15 * 60_000 + 1);
+        assert!(comp_backfill_done(&page, Some(&gone), None, 1));
+        // An anchor older than the whole page: keep paging.
+        let older = ("c30".to_string(), BASE - 30 * 60_000);
+        assert!(!comp_backfill_done(&page, Some(&older), None, 1));
+    }
+
+    #[test]
+    fn comp_backfill_done_when_a_row_is_before_the_act_start() {
+        let page = comp_rows(0, 20);
+        // The act starts between rows 7 and 8.
+        let act_start = BASE - 7 * 60_000 - 30_000;
+        assert!(comp_backfill_done(&page, None, Some(act_start), 1));
+        // Every row of the page is inside the act: keep paging.
+        assert!(!comp_backfill_done(
+            &page,
+            None,
+            Some(BASE - 25 * 60_000),
+            1
+        ));
+        // No act known: only the other bounds apply.
+        assert!(!comp_backfill_done(&page, None, None, 1));
+    }
+
+    #[test]
+    fn comp_backfill_done_on_the_tenth_page() {
+        let page = comp_rows(0, 20);
+        assert!(!comp_backfill_done(
+            &page,
+            None,
+            None,
+            COMP_BACKFILL_MAX_PAGES - 1
+        ));
+        assert!(comp_backfill_done(
+            &page,
+            None,
+            None,
+            COMP_BACKFILL_MAX_PAGES
+        ));
+    }
+
+    #[test]
+    fn comp_anchor_keys_are_per_account_and_apart_from_the_match_anchors() {
+        assert_eq!(comp_anchor_key("p1"), "self_comp_anchor:p1");
+        assert_ne!(comp_anchor_key("p1"), comp_anchor_key("p2"));
+        assert_ne!(comp_anchor_key("p1"), anchor_key("p1"));
     }
 
     #[test]

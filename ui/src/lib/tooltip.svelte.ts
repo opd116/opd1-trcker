@@ -38,10 +38,15 @@ export function tipPosition(r: DOMRectReadOnly, R: DOMRectReadOnly): { x: number
     : { x, top: below, transform: "translate(-50%,0)" };
 }
 
-/** `wl:31:22:53` → wins, losses, games. */
-export function parseWl(text: string): { w: number; l: number; g: number } | null {
-  const m = /^wl:(\d+):(\d+):(\d+)$/.exec(text);
-  return m ? { w: Number(m[1]), l: Number(m[2]), g: Number(m[3]) } : null;
+/**
+ * `wl:31:22:53` → wins, losses, games. `wl:31:22:53|This act · Monday` also carries the text of the second row (My
+ * Stats' weekday and time-of-day cells name their slice there); without it the row reads `This act`.
+ */
+export function parseWl(text: string): { w: number; l: number; g: number; scope?: string } | null {
+  const m = /^wl:(\d+):(\d+):(\d+)(?:\|([^\n]+))?$/.exec(text);
+  if (!m) return null;
+  const wl = { w: Number(m[1]), l: Number(m[2]), g: Number(m[3]) };
+  return m[4] === undefined ? wl : { ...wl, scope: m[4] };
 }
 
 /** The spans of the structured W/L row, in order: `31W`, `·`, `22L`, `·`, `53 games`. */
@@ -100,7 +105,7 @@ export function attachTooltips(root: HTMLElement): () => void {
  * the engine does the rest. An empty text leaves an empty `data-tip`, which shows nothing (and, as in the design,
  * shadows an outer trigger).
  */
-export function tip(node: HTMLElement, arg: TipArg): { update(a: TipArg): void; destroy(): void } {
+export function tip(node: Element, arg: TipArg): { update(a: TipArg): void; destroy(): void } {
   const set = (a: TipArg) => {
     node.setAttribute("data-tip", typeof a === "string" ? a : a.text);
     if (typeof a !== "string" && "overflowOnly" in a) node.setAttribute("data-tip-ov", "1");

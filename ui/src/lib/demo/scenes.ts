@@ -31,7 +31,6 @@ import {
   SINCE,
 } from "./cdv8";
 import { LONGEST_NAME, LONGEST_TAG, peak } from "./fixtures";
-import demoMeta from "./meta.json";
 import {
   longNameMeta,
   myStatsFull,
@@ -59,8 +58,11 @@ export type Scene = {
   details?: Record<string, PlayerDetails | "pending">;
   /** Match views by id; 'pending' never resolves. Ids of the demo roster's matches fall back to `resolveMatch`. */
   matches?: Record<string, MatchDetailsView | "pending">;
-  /** Defaults to demo/meta.json; 'pending' never resolves (`ingame-nometa`). */
-  meta?: Meta | "pending";
+  /**
+   * Defaults to demo/meta.json; 'pending' never resolves (`ingame-nometa`); a function edits the default (the feed
+   * reads the JSON, so this module, which Playwright specs import under plain Node, never has to).
+   */
+  meta?: Meta | "pending" | ((base: Meta) => Meta);
   /**
    * The My Stats answer: data, `null` (Rust does not know the user or the act yet), or 'pending' (never answered: the
    * skeleton). Omitted: the full demo data, so the My Stats tab has something in every scene.
@@ -268,11 +270,12 @@ const MYSTATS_ROUTE: Route = { name: "mystats" };
 const LONGNAMES = myStatsLongnames();
 
 /** The demo meta with the longest real map and agent names (`mystats-longnames`): the two most played of each are renamed. */
-function longnamesMeta(stats: MyStats): Meta {
-  const m = demoMeta as Meta;
-  const long = longNameMeta(stats);
-  return { ...m, maps: { ...m.maps, ...long.maps }, agents: { ...m.agents, ...long.agents } };
-}
+const longnamesMeta =
+  (stats: MyStats) =>
+  (m: Meta): Meta => {
+    const long = longNameMeta(stats);
+    return { ...m, maps: { ...m.maps, ...long.maps }, agents: { ...m.agents, ...long.agents } };
+  };
 
 // ── R133: every `—` cell of Details and Match ───────────────────────────────────
 /** Zephyr in `ingame-unranked`: level, rank, peak, prev and every stat null, `last5: []`. */

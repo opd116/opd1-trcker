@@ -56,6 +56,13 @@ export function routeFromSearch(q: URLSearchParams, fallback: Route): Route {
   }
 }
 
+/** What the scene's `meta` field means: pending (null), the demo meta, a copy edited by the scene, or its own. */
+export function sceneMeta(m: (typeof SCENES)[SceneName]["meta"]): Meta | null {
+  if (m === "pending") return null;
+  if (typeof m === "function") return m(demoMeta as Meta);
+  return m ?? (demoMeta as Meta);
+}
+
 let running = false;
 
 export function startDemo(
@@ -71,7 +78,7 @@ export function startDemo(
 
   const show = (name: SceneName, route?: Route) => {
     const scene = SCENES[name];
-    meta.set(scene.meta === "pending" ? null : (scene.meta ?? (demoMeta as Meta)));
+    meta.set(sceneMeta(scene.meta));
     mystats.set(sceneMyStats(scene));
     apply(scene.live);
     // An `autoRoute` scene (VALORANT closed at startup) leaves the route to the app's own start-page rule, unless the

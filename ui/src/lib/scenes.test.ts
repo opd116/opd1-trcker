@@ -790,7 +790,7 @@ describe("feed", () => {
   });
 });
 
-// ── My Stats scenes (spec §9.6) ─────────────────────────────────────────────────
+// ── My Stats scenes (spec §9.7) ─────────────────────────────────────────────────
 describe("My Stats scenes", () => {
   const stats = (s: SceneName): MyStats => {
     const v = SCENES[s].mystats;
@@ -801,6 +801,7 @@ describe("My Stats scenes", () => {
   /** The meta a scene shows: its own, or the demo's. */
   const meta_ = (n: SceneName): Meta => {
     const m = SCENES[n].meta;
+    if (typeof m === "function") return m(meta);
     return m && m !== "pending" ? m : meta;
   };
 

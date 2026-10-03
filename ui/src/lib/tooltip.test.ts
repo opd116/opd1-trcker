@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { hideTip, parseWl, tip, tipOver, tipPosition, tipState, wlRow } from "./tooltip.svelte";
 import {
   ACS_TIP,
+  ACT_SCOPE,
   ADR_TIP,
   actScopeTip,
   aprTip,
@@ -9,6 +10,7 @@ import {
   encounterTip,
   HALVES_TIP,
   heroStatTip,
+  insightTip,
   last5Tip,
   liveTip,
   loadoutTip,
@@ -16,6 +18,12 @@ import {
   partyTip,
   peakTip,
   PM_TIP,
+  RECENT_SCOPE,
+  rrPointTip,
+  rrToNextTip,
+  SESSION_SCOPE,
+  whenTip,
+  winCellTip,
   rankTip,
   recentTimeTip,
   winTip,
@@ -56,6 +64,14 @@ describe("parseWl and wlRow", () => {
   it("parseWl('wl:31:22:53')", () => {
     expect(parseWl("wl:31:22:53")).toEqual({ w: 31, l: 22, g: 53 });
     expect(parseWl("wl:1:0:1")).toEqual({ w: 1, l: 0, g: 1 });
+  });
+
+  it("an optional `|text` names the slice in the second row (My Stats' weekday and time-of-day cells)", () => {
+    expect(parseWl("wl:5:3:8|This act · Monday")).toEqual({ w: 5, l: 3, g: 8, scope: "This act · Monday" });
+    expect(parseWl("wl:5:3:8|This act · 5 PM – 10 PM")?.scope).toBe("This act · 5 PM – 10 PM");
+    expect(parseWl("wl:5:3:8")).not.toHaveProperty("scope");
+    expect(parseWl("wl:5:3:8|")).toBeNull(); // an empty slice is malformed, never an empty row
+    expect(parseWl("wl:5:3:8|a\nb")).toBeNull(); // one line
   });
 
   it("rejects anything else", () => {
@@ -466,5 +482,61 @@ describe("Details and Match tips", () => {
     expect(ACS_TIP).toBe("Average combat score");
     expect(PM_TIP).toBe("Kills minus deaths");
     expect(ADR_TIP).toBe("Average damage per round");
+  });
+});
+
+describe("My Stats tips (spec §9.6)", () => {
+  const NOW = Date.parse("2026-09-29T21:59:00Z");
+
+  it("the scopes: the act, the last 5, the session", () => {
+    expect(ACT_SCOPE).toBe("This act");
+    expect(RECENT_SCOPE).toBe("Last 5 competitive");
+    expect(SESSION_SCOPE).toBe("Current session");
+  });
+
+  it("the progress bar: `74 RR to next tier`; none without a next step", () => {
+    expect(rrToNextTip(74)).toBe("74 RR to next tier");
+    expect(rrToNextTip(1)).toBe("1 RR to next tier");
+    expect(rrToNextTip(null)).toBe("");
+    expect(rrToNextTip(undefined)).toBe("");
+  });
+
+  it("a rank change or a session start: the local date and clock time", () => {
+    expect(whenTip(Date.UTC(2026, 8, 29, 21, 14))).toBe("Sep 29, 2026 · 9:14 PM");
+  });
+
+  it("an RR chart point: `+18 RR · Ascendant 2 · Sep 29`; the first point has no change", () => {
+    const ms = Date.UTC(2026, 8, 29, 16, 40);
+    expect(rrPointTip(18, "Ascendant 2", ms, NOW)).toBe("+18 RR · Ascendant 2 · Sep 29");
+    expect(rrPointTip(-15, "Immortal", ms, NOW)).toBe("−15 RR · Immortal · Sep 29");
+    expect(rrPointTip(0, "Ascendant 2", ms, NOW)).toBe("0 RR · Ascendant 2 · Sep 29");
+    expect(rrPointTip(null, "Ascendant 2", ms, NOW)).toBe("Ascendant 2 · Sep 29");
+    expect(rrPointTip(18, "Ascendant 2", Date.UTC(2025, 11, 30), NOW)).toBe("+18 RR · Ascendant 2 · Dec 30, 2025");
+  });
+
+  it("an RR chart point drops a part it does not know (meta pending or a missing tier), never printing undefined or null", () => {
+    const ms = Date.UTC(2026, 8, 29);
+    expect(rrPointTip(18, undefined, ms, NOW)).toBe("+18 RR · Sep 29");
+    expect(rrPointTip(18, null, ms, NOW)).toBe("+18 RR · Sep 29");
+    expect(rrPointTip(null, null, ms, NOW)).toBe("Sep 29");
+  });
+
+  it("an insight: the sample behind it", () => {
+    expect(insightTip(16)).toBe("From 16 matches");
+    expect(insightTip(1)).toBe("From 1 match");
+    expect(insightTip(0)).toBe("From 0 matches");
+  });
+
+  it("a Win% cell is the structured W·L·games tip; a weekday or time-of-day cell adds its slice to the second row", () => {
+    expect(winCellTip(41, 24, 65)).toBe("wl:41:24:65");
+    expect(winCellTip(5, 3, 8, "Monday")).toBe("wl:5:3:8|This act · Monday");
+    expect(winCellTip(5, 3, 8, "5 PM – 10 PM")).toBe("wl:5:3:8|This act · 5 PM – 10 PM");
+    expect(parseWl(winCellTip(5, 3, 8, "Monday"))).toEqual({ w: 5, l: 3, g: 8, scope: "This act · Monday" });
+    expect(wlRow(parseWl(winCellTip(41, 24, 65))!).join(" ")).toBe("41W · 24L · 65 games");
+  });
+
+  it("no games, no tip", () => {
+    expect(winCellTip(0, 0, 0)).toBe("");
+    expect(winCellTip(0, 0, 0, "Monday")).toBe("");
   });
 });

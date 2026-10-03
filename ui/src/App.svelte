@@ -7,10 +7,11 @@
   import { keyAction, runKeyAction } from "./lib/boot";
   import { cardOpenGuard } from "./lib/clickGuard";
   import { router, scrollHost } from "./lib/router.svelte";
-  import { live } from "./lib/stores";
+  import { live, mystats } from "./lib/stores";
   import Details from "./screens/Details.svelte";
   import Live from "./screens/Live.svelte";
   import Match from "./screens/Match.svelte";
+  import MyStats from "./screens/MyStats.svelte";
 
   // Ctrl+Shift+L / Ctrl+Shift+D (no UI). Only meaningful with the Rust side present.
   function onkeydown(e: KeyboardEvent) {
@@ -34,20 +35,34 @@
   const pageKey = $derived(
     router.route.name === "live"
       ? "live"
-      : router.route.name === "details"
-        ? `details:${router.route.puuid}`
-        : `match:${router.route.matchId}`,
+      : router.route.name === "mystats"
+        ? "mystats"
+        : router.route.name === "details"
+          ? `details:${router.route.puuid}`
+          : `match:${router.route.matchId}`,
   );
 
-  /** A crashed page tries again on the next live update (the likeliest cause is one bad payload). */
-  const retryOnNextLive =
+  /**
+   * A crashed page tries again on the next live update or the next My Stats update (the likeliest cause is one bad
+   * payload).
+   */
+  const retryOnNextUpdate =
     (reset: () => void): Attachment =>
     () => {
-      let first = true;
-      return live.subscribe(() => {
-        if (first) first = false; // the subscription's own first call: the state that crashed
-        else reset();
-      });
+      /** The subscription's own first call is the state that crashed; only a later one is an update. */
+      const onUpdate = () => {
+        let first = true;
+        return () => {
+          if (first) first = false;
+          else reset();
+        };
+      };
+      const offLive = live.subscribe(onUpdate());
+      const offStats = mystats.subscribe(onUpdate());
+      return () => {
+        offLive();
+        offStats();
+      };
     };
 </script>
 
@@ -59,9 +74,11 @@
     {#if router.route.name === "live"}
       <Live live={$live} />
     {:else}
-      <!-- One scroll container for Details and Match (spec §6.1); `go` resets it to the top. -->
+      <!-- One scroll container for My Stats, Details and Match (spec §6.1, §9.1); `go` resets it to the top. -->
       <div class="scroll" use:scrollHost>
-        {#if router.route.name === "details"}
+        {#if router.route.name === "mystats"}
+          <MyStats />
+        {:else if router.route.name === "details"}
           <Details puuid={router.route.puuid} more={router.route.more} />
         {:else}
           <Match matchId={router.route.matchId} focusPuuid={router.route.focusPuuid} from={router.route.from} />
@@ -70,7 +87,7 @@
     {/if}
     <!-- A quiet empty page: no text, no status. The top bar (and its Live tab) stay. -->
     {#snippet failed(_error, reset)}
-      <div class="blank" {@attach retryOnNextLive(reset)}></div>
+      <div class="blank" {@attach retryOnNextUpdate(reset)}></div>
     {/snippet}
   </svelte:boundary>
 {/key}

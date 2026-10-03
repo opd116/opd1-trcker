@@ -12,7 +12,7 @@
 </script>
 
 {#if view}
-  <div class="tip" role="tooltip" style:left="{view.x}px" style:top="{view.top}px" style:transform={view.transform}>{#if wl}{@const [w, d1, l, d2, g] = wlRow(wl)}<span class="wl"><span class="w">{w}</span><span class="dot">{d1}</span><span class="l">{l}</span><span class="dot">{d2}</span><span>{g}</span></span><div class="scope">This act</div>{:else}{view.text}{/if}</div>
+  <div class="tip" role="tooltip" style:left="{view.x}px" style:top="{view.top}px" style:transform={view.transform}>{#if wl}{@const [w, d1, l, d2, g] = wlRow(wl)}<span class="wl"><span class="w">{w}</span><span class="dot">{d1}</span><span class="l">{l}</span><span class="dot">{d2}</span><span>{g}</span></span><div class="scope">{wl.scope ?? "This act"}</div>{:else}{view.text}{/if}</div>
 {/if}
 
 <style>

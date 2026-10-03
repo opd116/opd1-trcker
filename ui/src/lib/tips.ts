@@ -121,3 +121,44 @@ export const HALVES_TIP = "First half · Second half";
 export const ACS_TIP = "Average combat score";
 export const PM_TIP = "Kills minus deaths";
 export const ADR_TIP = "Average damage per round";
+
+// ── My Stats (spec §9.6): the scope of each figure lives here, never on screen ────────────────────────────────────
+
+/** Rank card cells, RR chart, tables, weekday and time-of-day panels: the whole current act. */
+export const ACT_SCOPE = "This act";
+/** The Recent Matches section. */
+export const RECENT_SCOPE = "Last 5 competitive";
+/** The Session section and its figures. */
+export const SESSION_SCOPE = "Current session";
+
+/** The rank card's progress bar: `74 RR to next tier`; none without a next step (Immortal and up, unranked). */
+export function rrToNextTip(n: number | null | undefined): string {
+  return typeof n === "number" ? `${n} RR to next tier` : "";
+}
+
+/** A rank-change row or the session's start: the local date and clock time, `Sep 29, 2026 · 9:14 PM`. */
+export const whenTip = (ms: number): string => `${dateLong(ms)} · ${time12(ms)}`;
+
+/**
+ * One RR chart point: `+18 RR · Ascendant 2 · Sep 29`. The first point has no change to show, so it is the tier and
+ * the date. A part that is unknown (meta pending or a tier the table lacks) is dropped (spec §5.8).
+ */
+export function rrPointTip(delta: number | null, tierName: string | null | undefined, startMs: number, nowMs: number): string {
+  const parts = [delta === null ? null : `${rrDelta(delta)} RR`, tierName, dateShort(startMs, nowMs)];
+  return parts.filter((p): p is string => typeof p === "string" && p !== "").join(" · ");
+}
+
+/** An insight row: the size of the sample it rests on. */
+export function insightTip(matches: number): string {
+  return `From ${matches} ${matches === 1 ? "match" : "matches"}`;
+}
+
+/**
+ * A table's Win% cell, a weekday or a time-of-day cell: the structured W·L·games tip (§4.1). `slice` names what the
+ * second row adds to `This act`: nothing for a table row, `Monday` or `5 PM – 10 PM` for a cell. None without games.
+ */
+export function winCellTip(wins: number, losses: number, games: number, slice?: string): string {
+  if (games <= 0) return "";
+  const base = `wl:${wins}:${losses}:${games}`;
+  return slice ? `${base}|${ACT_SCOPE} · ${slice}` : base;
+}

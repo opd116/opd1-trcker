@@ -1,4 +1,4 @@
-// DEV-only. The My Stats demo data (spec §9.6): a simulated act of competitive matches, aggregated the way
+// DEV-only. The My Stats demo data (spec §9.7): a simulated act of competitive matches, aggregated the way
 // crates/core/src/mystats.rs does (same rules, same insight wording), so every figure on the page agrees with every
 // other. Deterministic (a seeded generator, no clock), anchored at DEMO_NOW; the last five matches are the design's own
 // recent rows of the user (Fahad), so a row opens the same Match page as the Details page does.

@@ -1,23 +1,35 @@
 <!-- Top bar (spec §2.2–§2.3): wordmark, tabs and, on the Live grid route only, the right group: the Average
-     Party Rank in the Lobby (2+ players), the map in Agent Select and In Game. Empty on Details and Match. -->
+     Party Rank in the Lobby (2+ players), the map in Agent Select and In Game. Empty on My Stats, Details and Match.
+     The active tab is My Stats on My Stats and on a Match opened from it, Live everywhere else. -->
 <script lang="ts">
-  import { go, type Route } from "../lib/router.svelte";
+  import { activeTab, go, type Route } from "../lib/router.svelte";
   import type { LiveState } from "../lib/types";
   import AvgPartyRank from "./AvgPartyRank.svelte";
   import MapGroup from "./MapGroup.svelte";
 
   let { route, live }: { route: Route; live: LiveState | null } = $props();
+
+  const TABS = [
+    { id: "live", label: "Live" },
+    { id: "mystats", label: "My Stats" },
+  ] as const;
+  const active = $derived(activeTab(route));
+
+  // A tab already showing its own page stays put (no scroll reset); from a Match or Details it goes to the page.
+  const open = (id: (typeof TABS)[number]["id"]) => {
+    if (id === "mystats" && route.name === "mystats") return;
+    go({ name: id });
+  };
 </script>
 
 <header class="bar">
   <div class="word">OPD1 TRCKER</div>
   <nav class="tabs">
-    <!-- Live is always the active tab, including on Details and Match; clicking it goes to the Live grid. -->
-    <button type="button" class="tab on" aria-current="page" onclick={() => go({ name: "live" })}>
-      Live<span class="ind"></span>
-    </button>
-    <!-- My Stats is inert until that page exists: no handler, default cursor. -->
-    <span class="tab off">My Stats</span>
+    {#each TABS as t (t.id)}
+      <button type="button" class={["tab", active === t.id ? "on" : "off"]} aria-current={active === t.id ? "page" : undefined} onclick={() => open(t.id)}>
+        {t.label}{#if active === t.id}<span class="ind"></span>{/if}
+      </button>
+    {/each}
   </nav>
   <div class="spacer"></div>
   {#if route.name === "live"}
@@ -73,8 +85,11 @@
     color: inherit;
     font: inherit;
     font-size: 14px;
-    font-weight: 600;
     cursor: pointer;
+  }
+
+  button.on {
+    font-weight: 600;
   }
 
   /* R106 focus ring, inset: this tab touches the top edge of #app (overflow hidden), where the global 2px-outside
@@ -83,11 +98,14 @@
     outline-offset: -2px;
   }
 
-  .off {
-    font-size: 14px;
+  /* The tab of the page not shown: the design's inactive look, a little brighter under the pointer [C]. */
+  button.off {
     font-weight: 500;
     color: var(--text2);
-    cursor: default;
+  }
+
+  button.off:hover {
+    color: var(--text-soft);
   }
 
   .ind {

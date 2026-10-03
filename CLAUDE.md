@@ -52,7 +52,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 **Tabs:** `Live` and `My Stats`. The app auto-switches to `Live` when a match is found (Agent Select).
 
 **When VALORANT is closed:**
-- The app opens on `My Stats` with the last saved data. (Until My Stats is built, open on Live with the user's own card — R71.)
+- The app opens on `My Stats` with the last saved data (decided by the first live state the app receives; any other stage opens `Live`). R71's "open on Live until My Stats exists" ended when My Stats was built; the page is `docs/design-spec.md` §9.
 - `Live` shows only the user's own card.
 - Everything refreshes silently when the game opens.
 

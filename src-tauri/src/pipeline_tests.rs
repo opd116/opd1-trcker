@@ -58,6 +58,8 @@ struct Recorder {
     matches: Mutex<Vec<MatchDetailsView>>,
     metas: Mutex<Vec<opd1_riot::assets::Meta>>,
     my_stats: Mutex<Vec<opd1_core::model::MyStats>>,
+    /// The next `"mystats"` emission panics (once): a push task that dies.
+    panic_on_my_stats: std::sync::atomic::AtomicBool,
 }
 
 struct Sink(Arc<Recorder>);
@@ -76,6 +78,13 @@ impl EventSink for Sink {
         self.0.metas.lock().unwrap().push(meta.clone());
     }
     fn my_stats(&self, stats: &opd1_core::model::MyStats) {
+        if self
+            .0
+            .panic_on_my_stats
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("the sink panicked");
+        }
         self.0.my_stats.lock().unwrap().push(stats.clone());
     }
 }

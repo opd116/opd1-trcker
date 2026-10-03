@@ -8,8 +8,9 @@
 
 use opd1_core::model::MyStats;
 
-use super::backfill::{run_backfill, Feed};
+use super::backfill::{mount_feed, run_backfill, Feed};
 use super::comp_backfill::mount_comp_feed;
+use super::names_fill::DbHold;
 use super::rank::drain;
 use super::*;
 use crate::my_stats::{self, idle};
@@ -257,4 +258,115 @@ async fn the_users_own_details_sync_pushes_and_a_strangers_does_not() {
     .await;
     idle(&h.st).await;
     assert_eq!(computed(&h.st), before, "a stranger's Details sync");
+}
+
+/// ACCOUNT_A has one stored competitive RR row, ME none.
+const ACCOUNT_A: &str = "11111111-2222-3333-4444-555555555555";
+
+async fn store_rr_row_of_a(h: &Harness) {
+    h.st.db(|repo| {
+        repo.upsert_comp_updates(
+            ACCOUNT_A,
+            &[CompUpdateRow {
+                match_id: "a-match".into(),
+                season_id: ACT.into(),
+                tier_after: 12,
+                tier_before: Some(12),
+                rr_after: 50,
+                rr_earned: 18,
+                map_id: None,
+                start_ms: now_ms() - 3_600_000,
+            }],
+        )
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn an_account_switch_replaces_the_old_accounts_stats_at_once() {
+    let h = harness().await;
+    store_rr_row_of_a(&h).await;
+    lock(&h.st.live).self_puuid = Some(ACCOUNT_A.into());
+    my_stats::notify(&h.st);
+    idle(&h.st).await;
+    assert_eq!(pushed(&h).len(), 1);
+    assert_eq!(pushed(&h)[0].rr_series.len(), 1, "A's row");
+
+    // ME connects: the switch itself pushes, DB only (the asset tables never
+    // load in this harness, so nothing else would).
+    let mut poller = crate::poll::Poller::new(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    idle(&h.st).await;
+
+    let events = pushed(&h);
+    assert_eq!(events.len(), 2, "the new account's stats are out");
+    assert!(events[1].rr_series.is_empty(), "ME has no rows: not A's");
+    poller.stop_worker();
+}
+
+#[tokio::test]
+async fn a_read_for_the_old_account_that_ends_after_a_switch_is_never_emitted() {
+    let h = harness().await;
+    store_rr_row_of_a(&h).await;
+    lock(&h.st.live).self_puuid = Some(ACCOUNT_A.into());
+
+    // A's read is under way (it waits for the DB) when the account changes.
+    let hold = DbHold::take(&h.st);
+    my_stats::notify(&h.st);
+    wait_until("the read started", || computed(&h.st) == 1).await;
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    lock(&h.st.live).self_puuid = Some(ME.into());
+    my_stats::notify(&h.st);
+    hold.release();
+    idle(&h.st).await;
+
+    let events = pushed(&h);
+    assert_eq!(events.len(), 1, "only the new account's");
+    assert!(events[0].rr_series.is_empty(), "never A's row");
+}
+
+#[tokio::test]
+async fn a_push_task_that_dies_does_not_stop_later_pushes() {
+    let h = harness().await;
+    h.rec
+        .panic_on_my_stats
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    my_stats::notify(&h.st);
+    // The task panicked in the sink: its guard cleared `running`.
+    idle(&h.st).await;
+    assert!(pushed(&h).is_empty());
+
+    // The next notification starts a new task, and the bytes the dead one
+    // never delivered are emitted.
+    my_stats::notify(&h.st);
+    idle(&h.st).await;
+    assert_eq!(pushed(&h).len(), 1);
+}
+
+#[tokio::test]
+async fn a_match_backfill_aborted_after_it_stored_a_match_still_pushes() {
+    // Review round 1: the notification comes when the match is stored, not
+    // when the pass returns — the worker's abort ends a pass mid-await.
+    let h = harness().await;
+    let mut feed = Feed::new(50);
+    // Entry 0 answers at once, entry 1 takes a minute: the pass is parked on
+    // it, and gets aborted there.
+    feed.details_slow.insert(1, Duration::from_secs(60));
+    mount_feed(&h.server, feed).await;
+    crate::sync::start_backfill_run(&h.st).await;
+    assert_eq!(computed(&h.st), 0);
+
+    let step = tokio::spawn({
+        let (st, session) = (h.st.clone(), h.session.clone());
+        async move { crate::sync::backfill_step(&st, &session).await }
+    });
+    wait_until("the first match was stored and My Stats asked", || {
+        computed(&h.st) >= 1
+    })
+    .await;
+    step.abort();
+    assert!(step.await.unwrap_err().is_cancelled(), "it never returned");
+    idle(&h.st).await;
+    assert!(computed(&h.st) >= 1);
 }

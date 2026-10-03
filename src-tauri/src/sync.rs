@@ -1420,22 +1420,6 @@ async fn record_details_failure(st: &Arc<AppState>, me: &str, id: &str) -> Optio
 /// `Err(Gone)`: the client went away, or `session` belongs to an account
 /// that is no longer the current one.
 pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Result<(), Gone> {
-    let mut stored = false;
-    let result = backfill_pass(st, session, &mut stored).await;
-    // B2: a pass that stored matches, however it ended (a failure or a yield
-    // included), changed what My Stats can show.
-    if stored {
-        crate::my_stats::notify(st);
-    }
-    result
-}
-
-/// [`backfill_step`]'s work; `stored` says whether it stored a match.
-async fn backfill_pass(
-    st: &Arc<AppState>,
-    session: &Arc<RiotSession>,
-    stored: &mut bool,
-) -> Result<(), Gone> {
     let me = session.self_puuid();
     {
         let live = lock(&st.live);
@@ -1503,7 +1487,9 @@ async fn backfill_pass(
                     end_run(st, me);
                     return Ok(());
                 };
-                *stored = true;
+                // B2: right as it is stored, not when the pass returns — a pass
+                // the worker's abort ends mid-await still told My Stats.
+                crate::my_stats::notify(st);
                 with_run(st, me, |run| run.add_participants(start_ms, others));
                 pop(st);
             }

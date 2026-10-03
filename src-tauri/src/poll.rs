@@ -403,6 +403,11 @@ impl Poller {
             live.self_name_attempted = false;
             switched
         };
+        if switched {
+            // B2: another account — its My Stats replace the old account's at
+            // once (DB only), not after the asset tables are re-checked below.
+            crate::my_stats::notify(&self.st);
+        }
         let key_value = me.clone();
         self.st
             .db(move |repo| {

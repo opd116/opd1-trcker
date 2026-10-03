@@ -99,13 +99,13 @@ async fn mount_name_book(server: &MockServer, book: NameBook) {
 /// The repo mutex held by a plain thread: whatever asks the DB next (a fill
 /// step's `names_to_ask`) waits until [`DbHold::release`]. Deterministic
 /// stand-in for "the step is between taking its asks and the request".
-struct DbHold {
+pub(super) struct DbHold {
     release: std::sync::mpsc::Sender<()>,
     thread: std::thread::JoinHandle<()>,
 }
 
 impl DbHold {
-    fn take(st: &Arc<AppState>) -> Self {
+    pub(super) fn take(st: &Arc<AppState>) -> Self {
         let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
         let (release, release_rx) = std::sync::mpsc::channel::<()>();
         let st = st.clone();
@@ -122,7 +122,7 @@ impl DbHold {
         Self { release, thread }
     }
 
-    fn release(self) {
+    pub(super) fn release(self) {
         self.release.send(()).unwrap();
         self.thread.join().unwrap();
     }

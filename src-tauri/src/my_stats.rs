@@ -37,13 +37,21 @@ pub struct MyStatsPush {
     pub computed: usize,
 }
 
-/// Clears `running` however the task ends — a panic included — so a later
-/// [`notify`] can start a new one.
-struct RunningGuard<'a>(&'a AppState);
+/// Clears `running` when the task dies — a panic — so a later [`notify`] can
+/// start a new one. A clean exit clears it itself, under the same lock as its
+/// "nothing is dirty" check, and disarms the guard: clearing it again after
+/// that lock was released could land on a task a `notify` had started in
+/// between and let a third run beside it.
+struct RunningGuard<'a> {
+    st: &'a AppState,
+    armed: bool,
+}
 
 impl Drop for RunningGuard<'_> {
     fn drop(&mut self) {
-        lock(&self.0.my_stats_push).running = false;
+        if self.armed {
+            lock(&self.st.my_stats_push).running = false;
+        }
     }
 }
 
@@ -51,6 +59,12 @@ impl Drop for RunningGuard<'_> {
 /// download): `None` until the user's puuid is known (first run) or while no
 /// act is current (the asset tables are not loaded yet).
 pub async fn compute(st: &Arc<AppState>) -> Result<Option<MyStats>, String> {
+    Ok(compute_for_user(st).await?.map(|(_, stats)| stats))
+}
+
+/// [`compute`], with the puuid it was computed for: the push drops a result
+/// whose account is no longer the current one.
+async fn compute_for_user(st: &Arc<AppState>) -> Result<Option<(String, MyStats)>, String> {
     let Some(me) = lock(&st.live).self_puuid.clone() else {
         return Ok(None);
     };
@@ -64,6 +78,7 @@ pub async fn compute(st: &Arc<AppState>) -> Result<Option<MyStats>, String> {
         .unwrap_or_default();
     let assets = st.assets.clone();
     let now = now_ms();
+    let owner = me.clone();
     st.db(move |repo| {
         let lookup = |path: &str| {
             crate::roster::map_uuid(path, |p| assets.map_uuid_for_path(p).ok().flatten())
@@ -71,7 +86,7 @@ pub async fn compute(st: &Arc<AppState>) -> Result<Option<MyStats>, String> {
         crate::store::load_my_stats(repo, &me, &act, now, &lookup, &map_names, &local_offset_ms)
     })
     .await
-    .map(Some)
+    .map(|stats| Some((owner, stats)))
     .ok_or_else(|| "database unavailable".to_string())
 }
 
@@ -110,12 +125,13 @@ pub fn notify_if_own(st: &Arc<AppState>, own: &str, puuid: &str) {
 }
 
 async fn push_until_clean(st: &Arc<AppState>) {
-    let _running = RunningGuard(st);
+    let mut running = RunningGuard { st, armed: true };
     loop {
         {
             let mut push = lock(&st.my_stats_push);
             if !push.dirty {
                 push.running = false;
+                running.armed = false;
                 return;
             }
             push.dirty = false;
@@ -124,8 +140,8 @@ async fn push_until_clean(st: &Arc<AppState>) {
                 push.computed += 1;
             }
         }
-        let stats = match compute(st).await {
-            Ok(Some(stats)) => stats,
+        let (owner, stats) = match compute_for_user(st).await {
+            Ok(Some(computed)) => computed,
             // Not computable yet: whatever makes it so notifies again.
             Ok(None) => continue,
             Err(e) => {
@@ -133,14 +149,24 @@ async fn push_until_clean(st: &Arc<AppState>) {
                 continue;
             }
         };
+        // An account switch while the read ran: these are the old account's
+        // stats. Dropped, and read again for the new one (checked before the
+        // push lock is taken: the model's lock is never nested inside it).
+        let current = lock(&st.live).self_puuid.clone();
         let bytes = serde_json::to_vec(&stats).unwrap_or_default();
         let mut push = lock(&st.my_stats_push);
+        if current.as_deref() != Some(owner.as_str()) {
+            push.dirty = true;
+            continue;
+        }
         if bytes == push.last {
             continue;
         }
-        push.last = bytes;
         log::debug!("emit mystats");
         st.emit_my_stats(&stats);
+        // After the emit: a sink that panics leaves the bytes unrecorded, so
+        // the next notification emits them.
+        push.last = bytes;
     }
 }
 
@@ -153,4 +179,31 @@ pub async fn idle(st: &AppState) {
         !push.running && !push.dirty
     })
     .await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pipeline_tests::harness;
+
+    #[tokio::test]
+    async fn a_clean_exit_never_clears_a_newer_tasks_running_flag() {
+        // The clean exit clears `running` itself, under the lock. A task that
+        // a `notify` started right after that must keep its flag when the
+        // first one's guard is finally dropped.
+        let h = harness().await;
+        lock(&h.st.my_stats_push).running = true; // "task B"
+        drop(RunningGuard {
+            st: &h.st,
+            armed: false,
+        });
+        assert!(lock(&h.st.my_stats_push).running);
+
+        // A task that dies (a panic) clears it, so the next notify can start.
+        drop(RunningGuard {
+            st: &h.st,
+            armed: true,
+        });
+        assert!(!lock(&h.st.my_stats_push).running);
+    }
 }

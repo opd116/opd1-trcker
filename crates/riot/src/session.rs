@@ -509,6 +509,23 @@ impl RiotSession {
         self
     }
 
+    /// What is left of the `other` family's hold (R160), or `None`: after a
+    /// call answered [`RiotError::RateLimited`] this is how long Riot said to
+    /// wait, which the caller can wait out instead of counting a failure.
+    pub fn other_hold_remaining(&self) -> Option<Duration> {
+        self.other_hold.remaining()
+    }
+
+    /// Ends both request families' holds now, so a test that needs a hold of a
+    /// minute to be over does not wait it out. Test-only, like
+    /// [`with_global_rate`](Self::with_global_rate) (R132).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn end_holds(&self) {
+        self.other_hold.end();
+        self.mmr_throttle.end_hold();
+        self.global_throttle.end_hold();
+    }
+
     /// The local player's PUUID, from the entitlements token fetched at
     /// `connect()` time.
     pub fn self_puuid(&self) -> &str {

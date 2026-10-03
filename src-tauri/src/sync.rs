@@ -455,8 +455,18 @@ pub struct DetailsFetch {
     /// R165: some id is still not stored for a real reason — a download
     /// failed (anything but a gone client, which is `Err`, and a hold), its
     /// rows could not be written, or the download this call waited for did
-    /// not end up stored.
+    /// not end up stored. A 429 Riot actually sent counts (R165 ruled it a
+    /// real failure for the live sync's retries); see `rate_limited`.
     pub incomplete: bool,
+    /// Review round 1: a download got a 429 Riot actually sent
+    /// (`RiotError::RateLimited`; the other download refused locally meanwhile
+    /// are `held`): what is left of the `other` hold it set (zero when it is
+    /// over already). The id is not stored, and the caller that can run again
+    /// when the hold ends treats it like `held`.
+    pub rate_limited: Option<Duration>,
+    /// `incomplete` for a reason other than a sent 429 (and other than a
+    /// hold in effect for a download this call only waited for).
+    pub failed: bool,
 }
 
 /// [`fetch_missing_details`] that also says how the fetch went ([`DetailsFetch`]).
@@ -521,7 +531,8 @@ async fn fetch_missing_details_asking(
     }
 
     let mut gone = false;
-    let mut incomplete = false;
+    let mut failed = false;
+    let mut rate_limited: Option<Duration> = None;
     let mut held: Option<Duration> = None;
     while let Some(joined) = set.join_next().await {
         match joined {
@@ -532,7 +543,7 @@ async fn fetch_missing_details_asking(
                         st.queue_name_fill_low(match_asks(start_ms, others));
                     }
                     Some(_) => {}
-                    None => incomplete = true,
+                    None => failed = true,
                 }
                 // Stored: whoever waits on this id can read it now.
                 claimed.remove(&id);
@@ -554,14 +565,25 @@ async fn fetch_missing_details_asking(
                 st.note_details_404(&id);
                 claimed.remove(&id);
             }
+            // Riot answered 429: the `other` hold it set is what is left to
+            // wait for (the session has already logged the 429).
+            Ok((id, Err(RiotError::RateLimited))) => {
+                let left = session.other_hold_remaining().unwrap_or(Duration::ZERO);
+                log::debug!(
+                    "match details {} rate-limited: hold, {left:?} left",
+                    short(&id)
+                );
+                rate_limited = Some(rate_limited.map_or(left, |h| h.max(left)));
+                claimed.remove(&id);
+            }
             Ok((id, Err(e))) => {
                 log::warn!("match details {} failed: {e}", short(&id));
                 claimed.remove(&id);
-                incomplete = true;
+                failed = true;
             }
             Err(e) => {
                 log::warn!("match details task failed: {e}");
-                incomplete = true;
+                failed = true;
             }
         }
         spawn_next(&mut set, &mut pending);
@@ -578,15 +600,29 @@ async fn fetch_missing_details_asking(
     }
     // The downloads this call waited for may have failed in their own task:
     // look again, so a retry is scheduled for them too.
-    if !incomplete && !waited.is_empty() {
+    if !failed && rate_limited.is_none() && !waited.is_empty() {
         let owner = st.clone();
-        incomplete = st
+        let still_missing = st
             .db(move |repo| repo.new_match_ids(&waited))
             .await
             // A waited-for id that answered 404 in its own task is terminal.
             .is_some_and(|still| still.iter().any(|id| !owner.details_404(id)));
+        if still_missing {
+            // The other task's download failed. With the `other` hold in
+            // effect that is most likely its 429: wait for the hold like a
+            // 429 of ours; otherwise a failure.
+            match session.other_hold_remaining() {
+                Some(left) => rate_limited = Some(left),
+                None => failed = true,
+            }
+        }
     }
-    Ok(DetailsFetch { held, incomplete })
+    Ok(DetailsFetch {
+        held,
+        incomplete: failed || rate_limited.is_some(),
+        rate_limited,
+        failed,
+    })
 }
 
 /// The rank phase (R165): `comp_updates(0..5)`, then `mmr` when it is needed.
@@ -775,11 +811,13 @@ pub async fn sync_details(
         RankCall::Ok(rows) => {
             let targets = details_targets(&rows, season.as_deref());
             // R165 (finding 8): a download that failed leaves the page short
-            // of matches, so the sync is `Failed` and gives its claim back; a
-            // hold alone is `Held`.
+            // of matches, so the sync is `Failed` and gives its claim back. A
+            // hold is `Held`, and so is a 429 Riot sent (review round 1): the
+            // `other` hold it set is the wait, after which R160 runs the
+            // sync again.
             let fetched = fetch_missing_details_full(st, session, targets).await?;
-            failed |= fetched.incomplete;
-            if let Some(left) = fetched.held {
+            failed |= fetched.failed;
+            for left in [fetched.held, fetched.rate_limited].into_iter().flatten() {
                 hold(left);
             }
         }

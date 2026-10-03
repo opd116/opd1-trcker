@@ -602,6 +602,67 @@ async fn a_details_sync_with_a_failed_match_details_download_is_failed_not_done(
 }
 
 #[tokio::test]
+async fn a_details_sync_whose_download_got_a_429_is_held_for_the_hold_not_failed() {
+    // Review round 1: Riot answers the first match-details request 429 with a
+    // long Retry-After. That is the `other` family's hold (R160), which the
+    // Details sync waits out and then runs again: `Held`, not `Failed` (a
+    // `Failed` would have given up the automatic rerun).
+    let h = harness().await;
+    Mock::given(method("GET"))
+        .and(path("/match-details/v1/matches/m1"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "15"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    open_details_of_me(&h).await;
+
+    let ended = crate::sync::sync_details(&h.st, &h.session, ME)
+        .await
+        .unwrap();
+
+    match ended {
+        crate::sync::DetailsSync::Held(left) => {
+            assert!(
+                left > Duration::from_secs(10) && left <= Duration::from_secs(15),
+                "the rest of Riot's 15 s: {left:?}"
+            );
+        }
+        other => panic!("held, not {other:?}"),
+    }
+    assert_eq!(
+        count(&h.server, "GET", "/match-details/v1/matches/m1").await,
+        1
+    );
+}
+
+#[tokio::test]
+async fn a_429_on_a_download_is_incomplete_for_the_live_sync_but_not_a_failure() {
+    // R165 still holds for the live matches phase (a sent 429 is a real
+    // failure there: `incomplete`); the new fields tell the Details sync it
+    // was only the rate limit.
+    let h = harness().await;
+    Mock::given(method("GET"))
+        .and(path("/match-details/v1/matches/m1"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "15"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+
+    let fetched = crate::sync::fetch_missing_details_full(&h.st, &h.session, vec!["m1".into()])
+        .await
+        .unwrap();
+
+    assert!(fetched.incomplete);
+    assert!(!fetched.failed);
+    assert!(fetched
+        .rate_limited
+        .is_some_and(|left| left > Duration::from_secs(10)));
+    assert_eq!(fetched.held, None);
+}
+
+#[tokio::test]
 async fn a_details_sync_with_a_failed_match_details_download_gives_its_claim_back() {
     let h = harness().await;
     details_500(&h).await;

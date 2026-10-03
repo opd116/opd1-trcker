@@ -99,6 +99,14 @@ impl Hold {
         self.remaining_at(Instant::now())
     }
 
+    /// Ends the hold now (tests that need a hold of a minute to be over, not
+    /// waited out). Test-only at compile time, like the session's rate knob
+    /// (R132).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn end(&self) {
+        *locked(&self.until) = None;
+    }
+
     fn remaining_at(&self, now: Instant) -> Option<Duration> {
         let until = (*locked(&self.until))?;
         (until > now).then(|| until - now)
@@ -195,6 +203,12 @@ impl Throttle {
     /// is left of the hold (see [`Hold::hold_for`]).
     pub fn hold_for(&self, secs: f64) -> Duration {
         self.hold.hold_for(secs)
+    }
+
+    /// Ends this bucket's hold now (see [`Hold::end`]).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn end_hold(&self) {
+        self.hold.end();
     }
 
     /// Refills the bucket for elapsed time, then either takes a token

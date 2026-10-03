@@ -233,6 +233,38 @@ describe("stores", () => {
       expect(calls).toBe(2);
     });
 
+    it("R163: a meta event replaces the tables, and ends the invoke retries", async () => {
+      vi.useFakeTimers();
+      const fresh: Meta = { agents: { a1: { name: "Gekko" } }, maps: {}, tiers: {} };
+      const { startFeeds, meta, emit, metaCalls } = await underTauri(Number.POSITIVE_INFINITY);
+      await startFeeds();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(get(meta)).toEqual({ agents: {}, maps: {}, tiers: {} }); // the failed first invoke
+      emit("meta", fresh); // Rust loaded the tables by another route
+      expect(get(meta)).toEqual(fresh);
+      const calls = metaCalls();
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(metaCalls()).toBe(calls); // the retry loop stopped
+      emit("meta", good); // a patch refreshed them mid-session
+      expect(get(meta)).toEqual(good);
+    });
+
+    it("R163: a live event gives a settled Details or Match page its one retry", async () => {
+      const { startFeeds, openDetails, openMatch, emit } = await underTauri(0);
+      await startFeeds();
+      const d = (marker: string) => ({ card: { puuid: "p1" }, marker }) as unknown as PlayerDetails;
+      let n = 0;
+      const fetch = vi.fn(async () => {
+        if (n++ === 0) throw new Error("db busy");
+        return d("late");
+      });
+      await openDetails.open("p1", fetch, { settle: () => d("settled") }).catch(() => {});
+      expect((get(openDetails) as unknown as { marker: string }).marker).toBe("settled");
+      emit("live", state("menus"));
+      await vi.waitFor(() => expect((get(openDetails) as unknown as { marker: string }).marker).toBe("late"));
+      expect(get(openMatch)).toBeNull();
+    });
+
     it("a rejected meta() does not leave meta pending: EMPTY_META now, the real tables on a retry", async () => {
       vi.useFakeTimers();
       const { startFeeds, meta, live, invoke } = await underTauri(1);

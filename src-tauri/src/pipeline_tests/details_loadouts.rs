@@ -699,6 +699,16 @@ async fn player_details_resolves_skins_without_riot_sync() {
     h.st.set_session(Some(h.session.clone()));
     mount_skin(&h.assets_server, REAVER, REAVER_RED).await;
     let comp = format!("/mmr/v1/players/{OTHER}/competitiveupdates");
+    // The sync's comp-updates call answers (R160: a failed one gives the
+    // claim back), so the claim below is held for the 120 s.
+    Mock::given(method("GET"))
+        .and(path(comp.as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "Subject": OTHER, "Matches": []
+        })))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
 
     // 1. Opened before any loadout arrived: all four weapons are `null`
     //    (nothing known), never absent, and no name is fetched.
@@ -713,6 +723,19 @@ async fn player_details_resolves_skins_without_riot_sync() {
     assert_eq!(skin_requests(&h).await, 0);
     // The Riot sync claimed OTHER for the next 120 s.
     assert!(!h.st.claim_details_sync(OTHER));
+    // Its background request may still be in flight (a slow runner): wait for
+    // it to land before anything counts requests.
+    for _ in 0..250 {
+        if count(&h.server, "GET", &comp).await >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        count(&h.server, "GET", &comp).await,
+        1,
+        "the first open's sync"
+    );
     let seen = details_events(&h.rec);
 
     // 2. The loadouts arrive. Reopening inside the 120 s (the sync claim
@@ -1682,4 +1705,204 @@ async fn a_late_own_loadout_answer_never_lands_on_another_account() {
             .await
             .unwrap();
     assert!(kept.is_some());
+}
+
+// ---------------------------------------------------------------------
+// R164: the In Game roster is on screen before the loadouts answer
+// ---------------------------------------------------------------------
+
+/// `core-game` player + match `cg-1` with ME (Blue) and OTHER (Red).
+async fn mock_coregame_roster(server: &MockServer) {
+    let player = |puuid: &str, team: &str| {
+        json!({"Subject": puuid, "TeamID": team, "CharacterID": "agent",
+               "PlayerIdentity": {"Incognito": false, "HideAccountLevel": false,
+                                  "AccountLevel": 10, "PlayerCardID": "card"}})
+    };
+    get(
+        server,
+        &format!("/core-game/v1/players/{ME}"),
+        json!({"Subject": ME, "MatchID": "cg-1"}),
+    )
+    .await;
+    get(
+        server,
+        "/core-game/v1/matches/cg-1",
+        json!({"MapID": SPLIT_PATH, "Players": [player(ME, "Blue"), player(OTHER, "Red")]}),
+    )
+    .await;
+}
+
+/// `core-game/.../loadouts` for OTHER (the capture's Reaver Vandal), answered
+/// only after `delay`.
+async fn mock_slow_coregame_loadouts(server: &MockServer, delay: std::time::Duration) {
+    let capture: Value = serde_json::from_str(&riot_fixture("pregame_loadouts.json")).unwrap();
+    let vandal = crate::roster::VANDAL;
+    let items = json!({ vandal: capture["Loadouts"][0]["Items"][vandal].clone() });
+    Mock::given(method("GET"))
+        .and(path("/core-game/v1/matches/cg-1/loadouts"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"Loadouts": [{
+                    "CharacterID": "agent",
+                    "Loadout": {"Subject": OTHER, "Items": items}
+                }]}))
+                .set_delay(delay),
+        )
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn in_game_roster_is_published_before_the_loadouts_answer() {
+    let h = harness().await;
+    mock_coregame_roster(&h.server).await;
+    // A slow loadouts answer: it must not hold the roster back. No wall-clock
+    // bound: the loadouts are merged only after the roster is published, so
+    // when the cards first appear the loadouts are still empty (the old order
+    // had them in before the cards).
+    mock_slow_coregame_loadouts(&h.server, std::time::Duration::from_millis(1_500)).await;
+
+    let mut poller = Poller::new(h.st.clone());
+    let watcher = async {
+        loop {
+            {
+                let live = lock(&h.st.live);
+                if live.slots.len() == 2 {
+                    return (live.loadouts.is_empty(), live.coregame_match_id.clone());
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    let (res, (loadouts_empty, match_id)) =
+        tokio::join!(poller.fetch_ingame(&h.session, ME), watcher);
+    res.unwrap();
+
+    assert!(loadouts_empty, "the ten cards waited for the loadouts");
+    assert_eq!(match_id.as_deref(), Some("cg-1"));
+    // The loadouts still arrive, afterwards, and are merged.
+    let live = lock(&h.st.live);
+    assert_eq!(live.stage, Stage::Ingame);
+    assert!(live.loadouts.contains_key(OTHER), "merged after the roster");
+    drop(live);
+    poller.stop_worker();
+}
+
+#[tokio::test]
+async fn in_game_loadouts_that_arrive_after_the_roster_refresh_an_open_details() {
+    let h = harness().await;
+    mock_coregame_roster(&h.server).await;
+    mock_slow_coregame_loadouts(&h.server, std::time::Duration::from_millis(800)).await;
+    mount_skin(&h.assets_server, REAVER, REAVER_RED).await;
+
+    let mut poller = Poller::new(h.st.clone());
+    // OTHER's Details is opened while the loadouts are still on their way:
+    // every weapon is `—` (null).
+    let opener = async {
+        loop {
+            if lock(&h.st.live).slots.len() == 2 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let opened = crate::commands::player_details_for(&h.st, OTHER)
+            .await
+            .unwrap();
+        (
+            loadout_of(&opened)["vandal"].clone(),
+            details_events(&h.rec),
+        )
+    };
+    let (res, (vandal_at_open, seen)) = tokio::join!(poller.fetch_ingame(&h.session, ME), opener);
+    res.unwrap();
+    poller.stop_worker();
+    assert_eq!(vandal_at_open, Value::Null);
+
+    // The merge rebuilt the open Details, with the skin named.
+    let event = details_event_after(&h.rec, seen, OTHER, |d| {
+        d["loadout"].get("vandal").is_some_and(|v| v.is_object())
+    })
+    .await;
+    assert_eq!(event["loadout"]["vandal"]["skinName"], "Reaver");
+}
+
+#[tokio::test]
+async fn a_stuck_in_game_loadouts_call_is_cut_off_and_leaves_the_roster_alone() {
+    let h = harness().await;
+    mock_coregame_roster(&h.server).await;
+    // The answer would come after 5 s; the call is given 300 ms.
+    mock_slow_coregame_loadouts(&h.server, std::time::Duration::from_secs(5)).await;
+
+    let mut poller = Poller::new(h.st.clone());
+    poller.ingame_loadouts_timeout = std::time::Duration::from_millis(300);
+    let started = std::time::Instant::now();
+    poller
+        .fetch_ingame(&h.session, ME)
+        .await
+        .expect("a loadouts timeout is not a roster failure");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(4),
+        "the call was not cut off: {:?}",
+        started.elapsed()
+    );
+    let live = lock(&h.st.live);
+    assert_eq!(live.slots.len(), 2);
+    assert!(live.loadouts.is_empty());
+    drop(live);
+    poller.stop_worker();
+}
+
+#[tokio::test]
+async fn a_failed_in_game_loadouts_request_leaves_the_roster_alone() {
+    let h = harness().await;
+    mock_coregame_roster(&h.server).await;
+    Mock::given(method("GET"))
+        .and(path("/core-game/v1/matches/cg-1/loadouts"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&h.server)
+        .await;
+
+    let mut poller = Poller::new(h.st.clone());
+    poller
+        .fetch_ingame(&h.session, ME)
+        .await
+        .expect("a loadouts failure is not a roster failure");
+    let live = lock(&h.st.live);
+    assert_eq!(live.slots.len(), 2);
+    assert!(live.loadouts.is_empty());
+    drop(live);
+    poller.stop_worker();
+}
+
+#[tokio::test]
+async fn the_own_loadout_read_waits_for_a_hold_and_tries_again() {
+    // R160: the read is made once per connect; a call refused because the
+    // `other` family was on hold (`Held`, nothing sent) must not end it.
+    let h = harness().await;
+    let session = session_with_other_wait(&h, std::time::Duration::from_millis(100)).await;
+    let (raw, body) = fixture_loadout();
+    let loadout = format!("/personalization/v3/players/{ME}/playerloadout");
+    Mock::given(method("GET"))
+        .and(path(loadout.as_str()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "0.4"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    get(&h.server, &loadout, body).await;
+    // A 429 whose hold is over the (here 100 ms) bound returns at once.
+    assert!(session.player_loadout().await.is_err());
+    assert_eq!(count(&h.server, "GET", &loadout).await, 1);
+
+    crate::sync::fetch_self_loadout_after_holds(
+        &h.st,
+        &session,
+        std::time::Duration::from_millis(30),
+    )
+    .await
+    .unwrap();
+
+    // The held attempt sent nothing; the one after the hold answered.
+    assert_eq!(count(&h.server, "GET", &loadout).await, 2);
+    assert_eq!(lock(&h.st.live).self_loadout, Some(raw));
 }

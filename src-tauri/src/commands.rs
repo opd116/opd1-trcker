@@ -8,20 +8,22 @@
 //! - `player_details(puuid)` — cached details now; a background sync (and
 //!   the worker's sync of that player) then emits `"details"` if it found
 //!   more.
-//! - `close_details()` — the UI left the Details page: the open Details is
-//!   forgotten, so nothing is rebuilt or emitted for it.
+//! - `close_details(puuid?)` — the UI left the Details page: the open Details
+//!   is forgotten, so nothing is rebuilt or emitted for it. A close for
+//!   another player than the open one is ignored (R163).
 //! - `match_details(matchId, focusPuuid)` — one match as the Match Details
 //!   scoreboard, from the DB (fetched once when it isn't stored yet).
-//! - `close_match()` — the UI left the Match Details page: the open match is
-//!   forgotten, so no `"match"` event is built or emitted for it.
+//! - `close_match(matchId?)` — the UI left the Match Details page: the open
+//!   match is forgotten, so no `"match"` event is built or emitted for it. A
+//!   close for another match than the open one is ignored (R163).
 //! - `my_stats()` — the user's My Stats for the current act, from the DB
 //!   only (no Riot call); `null` while the user or the act is unknown.
 //! - `copy_log()` — the last 500 log lines (R30; the UI copies them).
 //! - `dump_raw()` — redacted raw responses (the last 2xx and the last error
 //!   of each endpoint) and the log to `app_data/debug/`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use serde::Serialize;
 use tauri::State;
@@ -29,8 +31,12 @@ use tauri::State;
 use opd1_core::db::repo::NameAsk;
 use opd1_core::model::{DisplayName, Field, LiveState, MatchDetailsView, MyStats, PlayerDetails};
 use opd1_riot::assets::Meta;
+use opd1_riot::RiotSession;
 
-use crate::state::{lock, now_ms, AppState};
+use crate::logbuf::short;
+use crate::rank_retry::HOLD_SLACK;
+use crate::state::AppState;
+use crate::sync::DetailsSync;
 
 type AppStateRef<'a> = State<'a, Arc<AppState>>;
 
@@ -103,10 +109,18 @@ pub(crate) async fn player_details_for(
     // resolving task panics (R97).
     let resolving =
         crate::details::skins_pending(&st, &puuid).then(|| st.begin_skin_resolve(&puuid));
+    // R163: the ticket is taken before the build, so a Back (or a newer open)
+    // that happens while it runs voids this open.
+    let ticket = st.begin_open_details(&puuid);
     let details = crate::details::build(&st, &puuid).await?;
     // The open view: every later rebuild of it (the jobs below, and the
     // worker's sync of this player, R23) is emitted only when it changed.
-    st.set_open_details(&details);
+    if !st.set_open_details(ticket, &details) {
+        // The page was left (or a newer open took over) while this build ran:
+        // nobody sees this answer, so no name asks, skin fetch or sync for it
+        // (R163). The caller still gets its answer; the UI drops it.
+        return Ok(details);
+    }
     // R150: the names this page shows as missing, asked between matches.
     st.queue_name_fill(details_asks(&details));
 
@@ -120,26 +134,90 @@ pub(crate) async fn player_details_for(
             let puuid = puuid.clone();
             let st = st.clone();
             tauri::async_runtime::spawn(async move {
-                if crate::sync::sync_details(&st, &session, &puuid)
-                    .await
-                    .is_err()
-                {
-                    return;
-                }
-                // The card on screen may have gained matches too.
-                st.reload_slot(&puuid).await;
-                crate::details::refresh(&st, &puuid).await;
-                // R153: the sync may have stored matches that put new
-                // teammates into the Top 3; the ones now shown unnamed are
-                // asked too (a puuid already queued or answered blank is not
-                // asked again: `queue_name_fill`, `Repo::names_to_ask`).
-                if let Some(page) = st.open_details_of(&puuid) {
-                    st.queue_name_fill(details_asks(&page));
-                }
+                details_sync_job(st, session, puuid, HOLD_SLACK).await;
             });
         }
     }
     Ok(details)
+}
+
+/// How many times the Details sync waits for a hold and runs again (R160).
+const DETAILS_HOLD_RERUNS: u32 = 3;
+
+/// The Riot sync behind an open Player Details page (the caller holds the
+/// 120 s claim, `claim_details_sync`), and what follows it: the card and the
+/// page are rebuilt, the names it lacks are asked.
+///
+/// R160: a sync that got nothing because a request family was on hold
+/// (`DetailsSync::Held`, nothing sent), or whose competitive-updates call
+/// failed (`Failed`), gives the claim back: it did not sync, so the next open
+/// may try at once instead of waiting out the 120 s. After a hold the sync
+/// runs again once the hold is over (`slack` after it), but only while this
+/// player's page is still the open one, and at most [`DETAILS_HOLD_RERUNS`]
+/// times. A failure is not run again by itself (the next open does).
+pub(crate) async fn details_sync_job(
+    st: Arc<AppState>,
+    session: Arc<RiotSession>,
+    puuid: String,
+    slack: Duration,
+) {
+    let mut session = session;
+    let mut reruns = 0;
+    loop {
+        let ended = crate::sync::sync_details(&st, &session, &puuid).await;
+        let Ok(ended) = ended else {
+            // The Riot client went away: nothing was synced.
+            st.release_details_sync(&puuid);
+            return;
+        };
+        // The card on screen may have gained matches too — and, for the
+        // user's own page, My Stats (B2).
+        st.reload_slot(&puuid).await;
+        crate::my_stats::notify_if_own(&st, session.self_puuid(), &puuid);
+        crate::details::refresh(&st, &puuid).await;
+        // R153: the sync may have stored matches that put new
+        // teammates into the Top 3; the ones now shown unnamed are
+        // asked too (a puuid already queued or answered blank is not
+        // asked again: `queue_name_fill`, `Repo::names_to_ask`).
+        if let Some(page) = st.open_details_of(&puuid) {
+            st.queue_name_fill(details_asks(&page));
+        }
+        match ended {
+            DetailsSync::Done => return,
+            DetailsSync::Failed => {
+                st.release_details_sync(&puuid);
+                return;
+            }
+            DetailsSync::Held(left) => {
+                st.release_details_sync(&puuid);
+                // One waiting rerun per player: a page reopened during the wait
+                // has its own job, which must not leave two.
+                if reruns >= DETAILS_HOLD_RERUNS {
+                    return;
+                }
+                let Some(waiting) = st.begin_details_rerun(&puuid) else {
+                    return;
+                };
+                reruns += 1;
+                log::debug!(
+                    "details sync of {} waits for the hold ({left:?} left)",
+                    short(&puuid)
+                );
+                tokio::time::sleep(left + slack).await;
+                drop(waiting);
+                // Only for the page still open, and only if nobody else
+                // synced this player meanwhile (a reopen's own job).
+                if !st.details_open_for(&puuid) || !st.claim_details_sync(&puuid) {
+                    return;
+                }
+                let Some(current) = st.session() else {
+                    st.release_details_sync(&puuid);
+                    return;
+                };
+                session = current;
+            }
+        }
+    }
 }
 
 /// R150: the names a Player Details page lacks: the hero's own (a card with
@@ -177,29 +255,48 @@ fn details_asks(details: &PlayerDetails) -> Vec<NameAsk> {
 }
 
 /// The UI left the Player Details page (Back, or another page): nothing is
-/// open any more, so a closed page is never refreshed or emitted to.
+/// open any more, so a closed page is never refreshed or emitted to. The UI
+/// sends the player's `puuid` (R163): a close for any other player than the
+/// one open or being opened is ignored, and an open still being built for
+/// this player is void.
 #[tauri::command]
-pub fn close_details(state: AppStateRef<'_>) {
-    close_details_for(state.inner());
+pub fn close_details(puuid: Option<String>, state: AppStateRef<'_>) {
+    close_details_key_for(state.inner(), puuid.as_deref());
+}
+
+/// `close_details` without the Tauri wrapper and without a key: closes
+/// whatever is open.
+#[cfg(test)]
+pub(crate) fn close_details_for(st: &Arc<AppState>) {
+    st.close_details(None);
 }
 
 /// `close_details` without the Tauri wrapper.
-pub(crate) fn close_details_for(st: &Arc<AppState>) {
-    st.close_details();
+pub(crate) fn close_details_key_for(st: &Arc<AppState>, puuid: Option<&str>) {
+    st.close_details(puuid);
 }
 
 /// The UI left the Match Details page (Back, or another page): nothing is
 /// open any more, so a closed scoreboard is never rebuilt or emitted to.
 /// Closing with nothing open does nothing; a later `match_details` or
-/// `player_details` call works as before.
+/// `player_details` call works as before. The UI sends the `match_id`
+/// (R163): a close for any other match than the one open or being opened is
+/// ignored, and an open still being built for this match is void.
 #[tauri::command]
-pub fn close_match(state: AppStateRef<'_>) {
-    close_match_for(state.inner());
+pub fn close_match(match_id: Option<String>, state: AppStateRef<'_>) {
+    close_match_key_for(state.inner(), match_id.as_deref());
+}
+
+/// `close_match` without the Tauri wrapper and without a key: closes
+/// whatever is open.
+#[cfg(test)]
+pub(crate) fn close_match_for(st: &Arc<AppState>) {
+    st.close_match(None);
 }
 
 /// `close_match` without the Tauri wrapper.
-pub(crate) fn close_match_for(st: &Arc<AppState>) {
-    st.close_match();
+pub(crate) fn close_match_key_for(st: &Arc<AppState>, match_id: Option<&str>) {
+    st.close_match(match_id);
 }
 
 #[tauri::command]
@@ -222,42 +319,12 @@ pub async fn my_stats(state: AppStateRef<'_>) -> Result<Option<MyStats>, String>
 /// uses too — a no-op once the asset tables are loaded; at startup it
 /// waits for the first load instead of racing it (the acts and map names
 /// come from those tables). `None` until the user's puuid is known (first
-/// run) or while no act is current.
+/// run) or while no act is current. The computation itself is
+/// [`crate::my_stats::compute`], which the `"mystats"` push shares (B2).
 pub async fn build_my_stats(st: &Arc<AppState>) -> Result<Option<MyStats>, String> {
     // Tables unavailable just means no act yet (-> `None` below).
     let _ = st.ensure_tables(false).await;
-    let Some(me) = lock(&st.live).self_puuid.clone() else {
-        return Ok(None);
-    };
-    let Some(act) = st.current_act() else {
-        return Ok(None);
-    };
-    let map_names: HashMap<String, String> = st
-        .assets
-        .meta()
-        .map(|meta| meta.maps.into_iter().map(|(id, m)| (id, m.name)).collect())
-        .unwrap_or_default();
-    let assets = st.assets.clone();
-    let now = now_ms();
-    st.db(move |repo| {
-        let lookup = |path: &str| {
-            crate::roster::map_uuid(path, |p| assets.map_uuid_for_path(p).ok().flatten())
-        };
-        crate::store::load_my_stats(repo, &me, &act, now, &lookup, &map_names, &local_offset_ms)
-    })
-    .await
-    .map(Some)
-    .ok_or_else(|| "database unavailable".to_string())
-}
-
-/// The machine's UTC offset (ms) at `utc_ms` — per instant, so a match
-/// on the other side of a DST change lands in the right hour.
-fn local_offset_ms(utc_ms: i64) -> i64 {
-    use chrono::{Local, Offset, TimeZone};
-    Local
-        .timestamp_millis_opt(utc_ms)
-        .single()
-        .map_or(0, |t| i64::from(t.offset().fix().local_minus_utc()) * 1000)
+    crate::my_stats::compute(st).await
 }
 
 #[tauri::command]
@@ -386,7 +453,8 @@ mod tests {
     use opd1_riot::assets::AssetCache;
     use serde_json::Value;
 
-    use crate::state::EventSink;
+    use crate::my_stats::local_offset_ms;
+    use crate::state::{now_ms, EventSink};
 
     const ME: &str = "aaaaaaaa-0000-0000-0000-000000000001";
     const DAY: i64 = 86_400_000;

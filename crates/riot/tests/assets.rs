@@ -1366,3 +1366,65 @@ async fn refresh_tables_refetches_when_the_content_tier_file_is_missing() {
         .unwrap_err();
     assert!(matches!(err, AssetError::NotFound), "{err:?}");
 }
+
+#[tokio::test]
+async fn a_failed_table_fetch_after_a_patch_keeps_the_disk_tables_and_is_retried() {
+    // After a patch the version changes and every table is refetched. When
+    // `/v1/version` answers but one table does not (here seasons: 500), the
+    // old tables on disk are loaded rather than leaving the app with none
+    // (no acts, no agents), and the next refresh tries again.
+    let dir = tempdir();
+    let first = MockServer::start().await;
+    mount_all_tables(&first, "v1").await;
+    let old = AssetCache::with_base(dir.path().to_path_buf(), first.uri());
+    assert!(old.refresh_tables().await.unwrap());
+    assert!(!old.tables_stale());
+
+    let patched = MockServer::start().await;
+    mount_version(&patched, "v2").await;
+    mount_agents(&patched, None).await;
+    mount_maps(&patched, None).await;
+    mount_tiers(&patched, None).await;
+    mount_content_tiers(&patched, None).await;
+    Mock::given(method("GET"))
+        .and(path("/v1/seasons"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&patched)
+        .await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), patched.uri());
+    assert!(
+        !cache.refresh_tables().await.unwrap(),
+        "nothing new was stored"
+    );
+    assert!(cache.meta().unwrap().agents.contains_key(AGENT_UUID));
+    assert!(!cache.acts().unwrap().is_empty(), "the old acts are there");
+    assert!(cache.tables_stale(), "the refetch is still owed");
+    let manifest = std::fs::read_to_string(dir.path().join("manifest.json")).unwrap();
+    assert!(
+        manifest.contains("v1"),
+        "the cache still says v1: {manifest}"
+    );
+
+    // The retry, with seasons back, downloads the new set.
+    let healed = MockServer::start().await;
+    mount_all_tables(&healed, "v2").await;
+    let retry = AssetCache::with_base(dir.path().to_path_buf(), healed.uri());
+    assert!(retry.refresh_tables().await.unwrap());
+    assert!(!retry.tables_stale());
+    // The same cache object recovers too.
+    let again = MockServer::start().await;
+    mount_all_tables(&again, "v3").await;
+    let same = AssetCache::with_base(dir.path().to_path_buf(), again.uri());
+    assert!(same.refresh_tables().await.unwrap());
+}
+
+#[tokio::test]
+async fn a_failed_table_fetch_with_no_disk_tables_is_still_an_error() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_version(&server, "v1").await;
+    mount_agents(&server, None).await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    assert!(cache.refresh_tables().await.is_err());
+    assert!(!cache.tables_stale(), "no tables at all is not 'stale'");
+}

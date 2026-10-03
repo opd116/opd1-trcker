@@ -510,7 +510,7 @@
       "netRr": null,
       "rr": null,
       "rrToNext": null,
-      "tier": null,
+      "tier": 14,
       "wins": 1
     },
     "rrSeries": [],

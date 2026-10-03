@@ -6,6 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+Filled from `git log` (`a1e3315..44ae56d`, then the v0.3.0 round).
+
+### Added
+
+- A hidden player's name shows in the remembered style when the app knows it from any source, and the tooltip says where it came from: your match, a past match, or seen before (`d32e6d6`, `e0d9ca6`).
+- Names after a match: once a match ends, the app asks Riot once for the names of that match's other players, including the ones who were hidden during it, and remembers them. Player Details and Match Details ask for the names they lack, and an open Match Details updates when they arrive. Nothing is asked during Agent Select or In Game (`d1a7976`, `d3a2e7a`, `461cf71`, `69e64bd`, `82c4c1a`).
+- The rank never stays empty when Riot's rank request fails: it comes from your stored competitive updates (exact RR), then from the tier Riot sends with the pregame or party answer, then from a stored match (RR shows `—`). My Stats' rank card falls back the same way (`caaf8fb`, `ca994ec`, `95bac32`, `a8c8b63`).
+- The current act comes from Riot's own content service, with the valorant-api dates only as a fallback, so the act change no longer shows `—` for a few hours (`78b6a57`, `1542508`).
+- The debug dump (Ctrl+Shift+D) also writes the log and the error body of each failed call (`58b6d43`).
+
+### Changed
+
+- Requests are sent the way Valorant-Scout sends them (client version and User-Agent), and Riot's "slow down" answers are honoured in full, per kind of request, so the rank requests never hold up the rest (`e496ee3`, `1886649`, `6a6b644`, `bc2f1ef`).
+- Cards fill faster: the whole roster's ranks load first, then each player's matches; In Game shows both teams before the loadouts arrive; the roster is retried every 2 s while the game is still loading it; the rank after a match refreshes within seconds (`2d75653`, `f3cd55a`, `f09586f`).
+- Peak is never below the current rank (`f3cd55a`).
+- Encounters count competitive matches only (`e3a0436`).
+- Riot answers are read tolerantly: a missing field no longer fails a whole roster, history or rank answer. The sign-in token is renewed before it expires and after Riot rejects it (`6053d3a`, `b9829ea`).
+
+### Fixed
+
+- A failed rank or names request, or a half-finished match download, is retried a few times instead of leaving a card without a name or with partial stats for the whole stage (`108dae0`, `2d75653`, `cff0f1e`, `ca763db`, `cbe9736`, `1f43bf4`).
+- A remembered name reaches the card on screen at once, and a mid-match burst of strangers' matches can no longer crowd out the names of the match that just ended (`4726852`, `8ab2e55`, `cabaab3`, `221cef5`).
+- A match where neither team won is stored as a draw instead of failing (`d7588a7`).
+- Player cards keep their art across updates, and closing a page while it loads no longer reopens it (`a6f6dfa`, `9b3285c`).
+- Asset tables on disk are kept when a download fails right after a game patch (`5c98d89`).
+- Act labels never go blank, and the act's episode is picked by date (`9c79d4c`, `fd22774`, `9b4b318`).
+- The live tier from the roster answer is tied to its match and cleared on every stage change (`5bf5c1d`).
+
 ## [0.2.0] - 2026-09-30
 
 Filled from `git log` (`6e9655f..c9ad7f4`, then Phase 2: Tasks 13 to 18, 15b and the merge of the UI lane).

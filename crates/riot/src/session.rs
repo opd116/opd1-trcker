@@ -1,6 +1,7 @@
 //! The Riot local-client session: lockfile -> local auth -> entitlements
-//! -> remote (pd/glz) headers, with auto re-auth on 401/403 and a
-//! `ClientGone` signal the moment the lockfile disappears or changes.
+//! -> remote (pd/glz) headers, with a token refresh (R166: before a call when
+//! the cached one is ~50 minutes old, and once per call on 401/403 or a 400
+//! `BAD_CLAIMS`) and a `ClientGone` signal the moment the lockfile disappears or changes.
 //!
 //! All HTTP goes through two private choke points — [`RiotSession::call_local`]
 //! and [`RiotSession::call_remote`] — which is also where Task 5's
@@ -10,7 +11,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -23,8 +24,9 @@ use serde_json::Value;
 use opd1_core::lockfile::parse_lockfile;
 use opd1_core::shards::{parse_client_version, parse_shards};
 
-use crate::raw_capture::{excerpt, ErrorDump, RawCaptures, LOG_EXCERPT_CHARS};
-use crate::throttle::Throttle;
+use crate::locks::locked;
+use crate::raw_capture::{excerpt, shorten_uuids, ErrorDump, RawCaptures, LOG_EXCERPT_CHARS};
+use crate::throttle::{Hold, Throttle, MAX_HOLD_SECS};
 
 /// The global remote-call bucket (every pd/glz call): burst 10, 10 rps.
 /// Values from Valorant-Scout's `backend/riot_client.py` (`_RIOT_BUCKET`).
@@ -38,7 +40,9 @@ const MMR_RPS: f64 = 0.4;
 
 /// How many times a 429 is retried (after the first attempt) before giving
 /// up with [`RiotError::RateLimited`]. Bounded so a rate-limited field
-/// "eventually becomes `—`, never hangs forever" (CLAUDE.md).
+/// "eventually becomes `—`, never hangs forever" (CLAUDE.md). The `/mmr/`
+/// family never retries in-call (R160, Scout: 0): its 429 sets the hold and
+/// returns at once, the caller retries later.
 const MAX_RATE_LIMIT_RETRIES: u32 = 2;
 
 /// Fallback backoff (seconds) when a `429` has no usable `Retry-After`,
@@ -46,11 +50,30 @@ const MAX_RATE_LIMIT_RETRIES: u32 = 2;
 /// `pd_get` backoff (`backoff = 3.0; backoff += 3.0`).
 const FALLBACK_BACKOFF_SECS: f64 = 3.0;
 
-/// A `Retry-After` value is only ever trusted up to this many seconds.
-/// Guards against a malformed or absurd header (`"inf"`, a huge number)
-/// turning into a multi-hour (or panicking, pre-fix) hold — see the Task 3
-/// fix-round report.
-const MAX_RETRY_AFTER_SECS: f64 = 30.0;
+/// R166: Riot's access token lasts about an hour; a call that finds the cached
+/// one older than this fetches a fresh one from the local client first (cheap,
+/// local), so the first call after a long session is not the one that learns
+/// the token expired.
+const TOKEN_MAX_AGE: Duration = Duration::from_secs(50 * 60);
+
+/// After a proactive refresh fails, the next proactive try waits this long
+/// (the call itself goes on with the cached token), so a broken local endpoint
+/// is not asked by every call in turn.
+const PROACTIVE_RETRY_PAUSE: Duration = Duration::from_secs(60);
+
+/// R160: the longest an `other`-family call waits in the call for a hold, or
+/// for a 429's `Retry-After` before retrying. A hold with more left makes the
+/// call return [`RiotError::Held`] at once (a 429 asking for more:
+/// [`RiotError::RateLimited`]), so a 120 s hold cannot park a caller — the
+/// poll loop's live fetches among them — for minutes. The caller tries again
+/// later; the hold itself is still kept in full.
+const OTHER_MAX_WAIT: Duration = Duration::from_secs(10);
+
+/// A `Retry-After` value is honoured in full up to this many seconds (R160;
+/// the old 30 s cap was shorter than Riot's ~60 s `/mmr/` block, so the next
+/// call 429'd again). Only a sanity ceiling against a malformed or absurd
+/// header (`"inf"`, a huge number) turning into a multi-hour hold.
+const MAX_RETRY_AFTER_SECS: f64 = MAX_HOLD_SECS;
 
 /// Total-request timeouts, matching Scout's `riot_client.py` (`timeout=5`
 /// for local calls, `timeout=8` for pd/glz). Without these, a
@@ -93,13 +116,20 @@ pub enum RiotError {
     /// The local entitlements endpoint didn't return a usable token.
     AuthFailed(String),
     /// A remote call was still rate-limited after
-    /// [`MAX_RATE_LIMIT_RETRIES`] retries.
+    /// [`MAX_RATE_LIMIT_RETRIES`] retries, or Riot answered 429 and the family
+    /// is now held for longer than the call waits ([`OTHER_MAX_WAIT`]; every
+    /// `/mmr/` 429).
     RateLimited,
+    /// R160: a call was refused locally, nothing sent, because its family
+    /// (`mmr` or `other`) is on hold after a 429 — for `other`, only when more
+    /// than [`OTHER_MAX_WAIT`] is left. Carries what is left of the hold: the
+    /// caller tries again then, and it is not a failure of the data asked for.
+    Held(Duration),
     /// A network-level failure (couldn't send the request / read the
     /// response body).
     Http(String),
-    /// A non-2xx HTTP response (other than 401/403, which trigger a
-    /// re-auth, and 429, which triggers a throttled retry): the status and a
+    /// A non-2xx HTTP response (other than a rejected token, which triggers
+    /// one re-auth, and 429, which triggers a throttled retry): the status and a
     /// short log-safe excerpt of Riot's answer (R158: its `errorCode`) —
     /// redacted, on one line, every full puuid shortened, at most
     /// [`LOG_EXCERPT_CHARS`] characters; empty when the body was.
@@ -117,6 +147,11 @@ impl fmt::Display for RiotError {
             RiotError::ShardsUnavailable => write!(f, "the client's region/shard isn't known yet"),
             RiotError::AuthFailed(msg) => write!(f, "Riot local auth failed: {msg}"),
             RiotError::RateLimited => write!(f, "rate-limited by Riot after retrying"),
+            RiotError::Held(left) => write!(
+                f,
+                "not sent: requests are on hold for {}s more (Riot rate limit)",
+                left.as_secs_f64().ceil() as u64
+            ),
             RiotError::Http(msg) => write!(f, "HTTP error talking to Riot: {msg}"),
             RiotError::Status(code, body) if body.is_empty() => {
                 write!(f, "unexpected HTTP status {code} from Riot")
@@ -152,6 +187,14 @@ struct AuthState {
     client_version: String,
     /// Where `client_version` came from (logged once per session, R158).
     client_version_source: VersionSource,
+    /// Bumped on every token refresh (R166): a call that was rejected says
+    /// which generation it used, so only the first of several rejected callers
+    /// refreshes and the others just retry with the new token.
+    generation: u64,
+    /// When the cached token was fetched.
+    fetched_at: Instant,
+    /// The earliest the next *proactive* refresh may be tried after one failed.
+    proactive_retry_at: Instant,
 }
 
 /// Where the `X-Riot-ClientVersion` a session sends came from (R158): logged
@@ -185,6 +228,7 @@ impl VersionSource {
 enum RemoteKind {
     Pd,
     Glz,
+    Shared,
 }
 
 /// A live connection to the local Riot client, plus everything needed to
@@ -204,10 +248,28 @@ pub struct RiotSession {
     remote_client: Client,
     pd_base: String,
     glz_base: String,
+    /// `shared.{pd shard}.a.pvp.net` (content-service, R162).
+    shared_base: String,
     puuid: String,
     auth: Mutex<AuthState>,
+    /// The shared rate (burst 10, 10 rps) every pd/glz call draws from. Its own
+    /// hold is never set: holds are per family (R160).
     global_throttle: Throttle,
+    /// The `/mmr/` family: its own bucket (drawn from before the global one)
+    /// and its hold, set by a 429 on any `/mmr/` path.
     mmr_throttle: Throttle,
+    /// The `other` family's hold (every pd/glz call but `/mmr/`), set by a 429
+    /// on any of them. An `/mmr/` call never looks at it, nor an `other` call
+    /// at the mmr hold.
+    other_hold: Hold,
+    /// The longest an `other` call waits in the call for a hold or a
+    /// `Retry-After` ([`OTHER_MAX_WAIT`]; a test can shorten it).
+    other_max_wait: Duration,
+    /// Held while the token is refreshed, so there is one refresh at a time
+    /// (R166).
+    refresh_gate: tokio::sync::Mutex<()>,
+    /// How old the cached token may get before a call refreshes it first.
+    token_max_age: Duration,
     /// The last response body seen at each of `call_local`/`call_remote`,
     /// for Task 5b's `dump_raw()` (via [`RiotSession::raw_captures`]). See
     /// `raw_capture.rs`'s module docs for what is/isn't captured.
@@ -226,6 +288,11 @@ impl fmt::Debug for RiotSession {
             .field("auth", &"<redacted>")
             .finish_non_exhaustive()
     }
+}
+
+/// The content-service host for a pd shard (Scout builds it the same way).
+fn shared_base_url(pd_shard: &str) -> String {
+    format!("https://shared.{pd_shard}.a.pvp.net")
 }
 
 fn lockfile_path(local_app_data: &Path) -> PathBuf {
@@ -267,6 +334,9 @@ pub struct ConnectOverrides {
     pub valorant_api_base: Option<String>,
     pub local_timeout: Option<Duration>,
     pub remote_timeout: Option<Duration>,
+    /// How old the cached token may get before the next call refreshes it
+    /// first ([`TOKEN_MAX_AGE`]).
+    pub token_max_age: Option<Duration>,
 }
 
 impl RiotSession {
@@ -303,6 +373,7 @@ impl RiotSession {
             valorant_api_base: valorant_api_base_override,
             local_timeout,
             remote_timeout,
+            token_max_age,
         } = overrides;
         let local_timeout = local_timeout.unwrap_or(LOCAL_TIMEOUT);
         let remote_timeout = remote_timeout.unwrap_or(REMOTE_TIMEOUT);
@@ -345,6 +416,7 @@ impl RiotSession {
             .build()
             .map_err(http_error)?;
 
+        let shared_override = pd_base_override.clone();
         let pd_base =
             pd_base_override.unwrap_or_else(|| format!("https://pd.{}.a.pvp.net", shards.pd));
         let glz_base = glz_base_override.unwrap_or_else(|| {
@@ -353,6 +425,9 @@ impl RiotSession {
                 shards.glz_region, shards.glz_shard
             )
         });
+        // A test that points pd at a mock server wants the content-service
+        // there too; production derives the host from the same shard as pd.
+        let shared_base = shared_override.unwrap_or_else(|| shared_base_url(&shards.pd));
         let valorant_api_base =
             valorant_api_base_override.unwrap_or_else(|| "https://valorant-api.com".to_string());
 
@@ -388,15 +463,23 @@ impl RiotSession {
             remote_client,
             pd_base,
             glz_base,
+            shared_base,
             puuid: entitlements.subject,
             auth: Mutex::new(AuthState {
                 access_token: entitlements.access_token,
                 entitlements_jwt: entitlements.token,
                 client_version,
                 client_version_source,
+                generation: 0,
+                fetched_at: Instant::now(),
+                proactive_retry_at: Instant::now(),
             }),
             global_throttle: Throttle::new(GLOBAL_BURST, GLOBAL_RPS),
             mmr_throttle: Throttle::new(MMR_BURST, MMR_RPS),
+            other_hold: Hold::new(),
+            other_max_wait: OTHER_MAX_WAIT,
+            refresh_gate: tokio::sync::Mutex::new(()),
+            token_max_age: token_max_age.unwrap_or(TOKEN_MAX_AGE),
             raw_captures: RawCaptures::new(),
         })
     }
@@ -414,6 +497,33 @@ impl RiotSession {
     pub fn with_global_rate(mut self, rps: f64) -> Self {
         self.global_throttle = Throttle::new(rps, rps);
         self
+    }
+
+    /// Replaces the longest in-call wait of the `other` family
+    /// ([`OTHER_MAX_WAIT`], 10 s), so a test of what happens after a hold the
+    /// call refused does not wait out 10 s of real time. Test-only, like
+    /// [`with_global_rate`](Self::with_global_rate) (R132).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn with_other_max_wait(mut self, max: Duration) -> Self {
+        self.other_max_wait = max;
+        self
+    }
+
+    /// What is left of the `other` family's hold (R160), or `None`: after a
+    /// call answered [`RiotError::RateLimited`] this is how long Riot said to
+    /// wait, which the caller can wait out instead of counting a failure.
+    pub fn other_hold_remaining(&self) -> Option<Duration> {
+        self.other_hold.remaining()
+    }
+
+    /// Ends both request families' holds now, so a test that needs a hold of a
+    /// minute to be over does not wait it out. Test-only, like
+    /// [`with_global_rate`](Self::with_global_rate) (R132).
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn end_holds(&self) {
+        self.other_hold.end();
+        self.mmr_throttle.end_hold();
+        self.global_throttle.end_hold();
     }
 
     /// The local player's PUUID, from the entitlements token fetched at
@@ -453,7 +563,7 @@ impl RiotSession {
             return false;
         };
         let (was, was_from) = {
-            let mut auth = self.auth.lock().unwrap();
+            let mut auth = locked(&self.auth);
             if auth.client_version_source == VersionSource::Presence {
                 return false;
             }
@@ -476,12 +586,12 @@ impl RiotSession {
 
     /// The `X-Riot-ClientVersion` this session sends on pd/glz calls.
     pub fn client_version(&self) -> String {
-        self.auth.lock().unwrap().client_version.clone()
+        locked(&self.auth).client_version.clone()
     }
 
     /// Where [`client_version`](Self::client_version) came from.
     pub fn client_version_source(&self) -> VersionSource {
-        self.auth.lock().unwrap().client_version_source
+        locked(&self.auth).client_version_source
     }
 
     /// `GET`s a path on the local client (`127.0.0.1:{port}`), with Basic
@@ -495,7 +605,9 @@ impl RiotSession {
     /// `GET`s a path on `pd.{shard}.a.pvp.net`, throttled (and, for
     /// `/mmr/` paths, additionally throttled by the mmr bucket). Retries
     /// once on 401/403 (re-authenticating first) and up to
-    /// [`MAX_RATE_LIMIT_RETRIES`] times on 429.
+    /// [`MAX_RATE_LIMIT_RETRIES`] times on 429 (`/mmr/` paths: never in-call,
+    /// see [`remote`](Self::remote)). A 400 `BAD_CLAIMS` (expired token) is
+    /// retried the same way as a 401/403 (R166).
     pub async fn pd<T: DeserializeOwned>(&self, path: &str) -> Result<T, RiotError> {
         self.remote(RemoteKind::Pd, Method::GET, path, None).await
     }
@@ -518,6 +630,13 @@ impl RiotSession {
     /// global bucket with the same 401/403/429 handling as [`pd`](Self::pd).
     pub async fn glz<T: DeserializeOwned>(&self, path: &str) -> Result<T, RiotError> {
         self.remote(RemoteKind::Glz, Method::GET, path, None).await
+    }
+
+    /// `GET`s a path on `shared.{shard}.a.pvp.net`, throttled by the global
+    /// bucket with the same 401/403/429 handling as [`pd`](Self::pd).
+    pub async fn shared<T: DeserializeOwned>(&self, path: &str) -> Result<T, RiotError> {
+        self.remote(RemoteKind::Shared, Method::GET, path, None)
+            .await
     }
 
     /// Re-reads the lockfile and compares it against the snapshot taken at
@@ -579,18 +698,20 @@ impl RiotSession {
         method: Method,
         path: &str,
         body: Option<&Value>,
-    ) -> Result<CapturedResponse, RiotError> {
+    ) -> Result<(CapturedResponse, u64), RiotError> {
         let base = match kind {
             RemoteKind::Pd => &self.pd_base,
             RemoteKind::Glz => &self.glz_base,
+            RemoteKind::Shared => &self.shared_base,
         };
         let url = format!("{base}{path}");
-        let (access_token, entitlements_jwt, client_version) = {
-            let auth = self.auth.lock().unwrap();
+        let (access_token, entitlements_jwt, client_version, generation) = {
+            let auth = locked(&self.auth);
             (
                 auth.access_token.clone(),
                 auth.entitlements_jwt.clone(),
                 auth.client_version.clone(),
+                auth.generation,
             )
         };
         let mut req = self
@@ -615,17 +736,28 @@ impl RiotSession {
             self.raw_captures
                 .record_error(path, captured.status.as_u16(), &captured.body);
         }
-        Ok(captured)
+        Ok((captured, generation))
     }
 
-    /// Throttled pd/glz call with 401/403 re-auth (once) and 429 retry
-    /// (bounded). This is where the mmr-vs-global bucket wiring lives: an
-    /// `/mmr/` path takes from the mmr bucket *and then* the global
-    /// bucket; every other remote call takes only from the global bucket.
-    /// A 429 on an mmr path holds the mmr bucket; any other 429 holds the
-    /// global bucket (which, since mmr calls also draw from the global
-    /// bucket, means a global hold conservatively slows mmr calls too —
-    /// see task-3-report.md).
+    /// Throttled pd/glz call with a token refresh (R166: proactive when the
+    /// cached token is old, reactive once on 401/403/400 `BAD_CLAIMS`) and 429
+    /// handling.
+    ///
+    /// R160, two request families like Scout's: `mmr` (a pd path starting
+    /// `/mmr/`) and `other`. The token bucket (rate) is shared — an `/mmr/`
+    /// call takes from the mmr bucket *and then* the global one — but a 429
+    /// holds only its own family, for Riot's full `Retry-After`:
+    ///
+    /// - `mmr`: while held, a call returns [`RiotError::Held`] at once, nothing
+    ///   sent, and never waits on the `other` hold. A 429 sets the hold and
+    ///   returns [`RiotError::RateLimited`] at once: no in-call retry (Scout:
+    ///   0), so the sync worker is never parked for Riot's ~60 s block.
+    /// - `other`: waits out an `other` hold of at most [`OTHER_MAX_WAIT`]; one
+    ///   with more left returns [`RiotError::Held`] at once, nothing sent. A
+    ///   429 is retried in-call up to [`MAX_RATE_LIMIT_RETRIES`] times, as
+    ///   before, unless its hold comes to more than [`OTHER_MAX_WAIT`]: then the
+    ///   hold is set and [`RiotError::RateLimited`] returned at once instead of
+    ///   sleeping.
     async fn remote<T: DeserializeOwned>(
         &self,
         kind: RemoteKind,
@@ -634,6 +766,7 @@ impl RiotSession {
         body: Option<&Value>,
     ) -> Result<T, RiotError> {
         self.check_alive()?;
+        self.refresh_if_stale().await?;
         let is_mmr = matches!(kind, RemoteKind::Pd) && path.starts_with("/mmr/");
         let mut backoff = FALLBACK_BACKOFF_SECS;
         let mut reauthed = false;
@@ -641,22 +774,48 @@ impl RiotSession {
 
         loop {
             if is_mmr {
-                self.mmr_throttle.take().await;
+                self.mmr_throttle
+                    .take_unless_held()
+                    .await
+                    .map_err(RiotError::Held)?;
+            } else {
+                self.other_hold
+                    .wait_up_to(self.other_max_wait)
+                    .await
+                    .map_err(RiotError::Held)?;
             }
             self.global_throttle.take().await;
 
-            let resp = self.call_remote(&kind, method.clone(), path, body).await?;
+            let (resp, generation) = self.call_remote(&kind, method.clone(), path, body).await?;
+            // R166: an expired or rejected token is re-fetched once per call:
+            // 401/403 as before, and Riot's 400 `BAD_CLAIMS` (what it answers
+            // an expired RSO access token with). Never a loop: a second
+            // rejection of the new token is the answer.
+            if !reauthed && token_rejected(&resp) {
+                reauthed = true;
+                log::info!(
+                    "{} on {}: fetching a fresh token",
+                    resp.status.as_u16(),
+                    shorten_uuids(path.split('?').next().unwrap_or(path))
+                );
+                self.refresh_entitlements_after(generation, false).await?;
+                continue;
+            }
             match resp.status {
-                StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN if !reauthed => {
-                    reauthed = true;
-                    self.refresh_entitlements().await?;
-                }
                 StatusCode::TOO_MANY_REQUESTS => {
                     let retry_after = retry_after_seconds(&resp.headers).unwrap_or(backoff);
-                    if is_mmr {
-                        self.mmr_throttle.hold_for(retry_after);
+                    let (family, left) = if is_mmr {
+                        ("mmr", self.mmr_throttle.hold_for(retry_after))
                     } else {
-                        self.global_throttle.hold_for(retry_after);
+                        ("other", self.other_hold.hold_for(retry_after))
+                    };
+                    log::warn!(
+                        "429 on {}: holding the {family} requests for {}s",
+                        shorten_uuids(path.split('?').next().unwrap_or(path)),
+                        left.as_secs_f64().ceil() as u64
+                    );
+                    if is_mmr || left > self.other_max_wait {
+                        return Err(RiotError::RateLimited);
                     }
                     backoff += FALLBACK_BACKOFF_SECS;
                     rate_limit_attempts += 1;
@@ -669,16 +828,82 @@ impl RiotSession {
         }
     }
 
-    /// Re-fetches the entitlements token (used on a 401/403) and updates
-    /// the cached headers. `self_puuid()` never changes — same account.
-    async fn refresh_entitlements(&self) -> Result<(), RiotError> {
+    /// Fetches a fresh token before a call when the cached one is older than
+    /// the limit (R166). The refresh is best effort: if the local client does
+    /// not answer, the call goes on with the cached token (which may well still
+    /// work) and the next proactive try waits a minute. Only a client that is
+    /// gone is an error.
+    async fn refresh_if_stale(&self) -> Result<(), RiotError> {
+        let (generation, due) = {
+            let auth = locked(&self.auth);
+            let now = Instant::now();
+            (
+                auth.generation,
+                now.duration_since(auth.fetched_at) >= self.token_max_age
+                    && now >= auth.proactive_retry_at,
+            )
+        };
+        if !due {
+            return Ok(());
+        }
+        match self.refresh_entitlements_after(generation, true).await {
+            Ok(()) => Ok(()),
+            Err(RiotError::ClientGone) => Err(RiotError::ClientGone),
+            Err(e) => {
+                log::warn!("fresh token not fetched ({e}); going on with the cached one");
+                locked(&self.auth).proactive_retry_at = Instant::now() + PROACTIVE_RETRY_PAUSE;
+                Ok(())
+            }
+        }
+    }
+
+    /// Re-fetches the entitlements token from the local client and updates the
+    /// cached headers (`self_puuid()` never changes: same account) — unless
+    /// another caller already did since `seen_generation` was read: one refresh
+    /// at a time, and a burst of rejected calls costs one fetch (R166).
+    ///
+    /// `proactive` callers also re-check, once they hold the gate, that no
+    /// failed attempt put the next one off meanwhile: with a hung local client
+    /// the first failure spares the callers queued behind it their own timeout.
+    async fn refresh_entitlements_after(
+        &self,
+        seen_generation: u64,
+        proactive: bool,
+    ) -> Result<(), RiotError> {
+        let _one_at_a_time = self.refresh_gate.lock().await;
+        {
+            let auth = locked(&self.auth);
+            if auth.generation != seen_generation
+                || (proactive && Instant::now() < auth.proactive_retry_at)
+            {
+                return Ok(());
+            }
+        }
         self.check_alive()?;
         let entitlements =
             fetch_entitlements(&self.local_client, &self.local_base, &self.basic_auth).await?;
-        let mut auth = self.auth.lock().unwrap();
+        let mut auth = locked(&self.auth);
         auth.access_token = entitlements.access_token;
         auth.entitlements_jwt = entitlements.token;
+        auth.generation += 1;
+        auth.fetched_at = Instant::now();
         Ok(())
+    }
+}
+
+/// Whether Riot refused the call because of the token, so that a fresh one is
+/// worth a retry: 401, 403, or 400 with `errorCode: "BAD_CLAIMS"` (how Riot
+/// answers an expired RSO access token). Any other 400 is the caller's bug.
+fn token_rejected(resp: &CapturedResponse) -> bool {
+    match resp.status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => true,
+        StatusCode::BAD_REQUEST => {
+            serde_json::from_slice::<Value>(&resp.body)
+                .ok()
+                .and_then(|v| v.get("errorCode")?.as_str().map(|c| c == "BAD_CLAIMS"))
+                == Some(true)
+        }
+        _ => false,
     }
 }
 
@@ -764,7 +989,7 @@ fn parse_json<T: DeserializeOwned>(resp: &CapturedResponse) -> Result<T, RiotErr
 /// HTTP-date form). Returns `None` for anything non-finite or negative
 /// (`"inf"`, `"nan"`, a malformed header) so the caller falls back to its
 /// own escalating backoff instead of feeding a bogus value to
-/// [`Throttle::hold_for`](crate::throttle::Throttle::hold_for) — which
+/// [`Hold::hold_for`](crate::throttle::Hold::hold_for) — which
 /// would otherwise be the last line of defense against a value that can't
 /// become a valid `Duration`. A huge-but-finite value is clamped to
 /// [`MAX_RETRY_AFTER_SECS`] rather than trusted outright.
@@ -900,6 +1125,127 @@ fn version_from_valorant_api_json(value: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn headers_with_retry_after(v: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(RETRY_AFTER, HeaderValue::from_str(v).unwrap());
+        h
+    }
+
+    #[test]
+    fn retry_after_is_honoured_in_full_up_to_120s() {
+        // R160: Riot's /mmr/ block is ~60 s; the old 30 s cap earned a second
+        // 429. Only a sanity ceiling remains.
+        for (raw, want) in [("60", 60.0), ("100", 100.0), ("120", 120.0), ("0.3", 0.3)] {
+            assert_eq!(
+                retry_after_seconds(&headers_with_retry_after(raw)),
+                Some(want),
+                "{raw}"
+            );
+        }
+        assert_eq!(
+            retry_after_seconds(&headers_with_retry_after("86400")),
+            Some(120.0),
+            "garbage is capped at the ceiling"
+        );
+        for bad in ["inf", "nan", "-3", "soon"] {
+            assert_eq!(
+                retry_after_seconds(&headers_with_retry_after(bad)),
+                None,
+                "{bad}"
+            );
+        }
+    }
+
+    /// A session on a mock client: the lockfile, `ShooterGame.log` and token
+    /// answer `connect` needs, and `GET /ok` on the "remote" side. (The
+    /// integration tests' support code is out of reach of a unit test, which
+    /// needs the private `auth` lock.)
+    async fn mock_session(dir: &Path, server: &wiremock::MockServer) -> RiotSession {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        let config = dir.join("Riot Games").join("Riot Client").join("Config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(
+            config.join("lockfile"),
+            format!("Riot Client:1:{}:pw:http", server.address().port()),
+        )
+        .unwrap();
+        let logs = dir.join("VALORANT").join("Saved").join("Logs");
+        std::fs::create_dir_all(&logs).unwrap();
+        std::fs::write(
+            logs.join("ShooterGame.log"),
+            "https://pd.eu.a.pvp.net/account-xp/v1/players/x\nhttps://glz-eu-1.eu.a.pvp.net/x\n",
+        )
+        .unwrap();
+        Mock::given(method("GET"))
+            .and(path("/entitlements/v1/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "accessToken": "a", "entitlements": [], "issuer": "i",
+                "subject": "puuid-1", "token": "t"
+            })))
+            .mount(server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/ok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"fine": true})))
+            .mount(server)
+            .await;
+        let base = server.uri();
+        RiotSession::connect_with_overrides(
+            dir,
+            ConnectOverrides {
+                pd_base: Some(base.clone()),
+                glz_base: Some(base.clone()),
+                valorant_api_base: Some(base),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("connect to the mock client")
+    }
+
+    #[tokio::test]
+    async fn an_auth_lock_poisoned_by_a_panicking_caller_does_not_stop_later_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        let session = mock_session(dir.path(), &server).await;
+
+        std::thread::scope(|s| {
+            let _ = s
+                .spawn(|| {
+                    let _held = session.auth.lock().unwrap();
+                    panic!("a caller panicked while it held the auth lock");
+                })
+                .join();
+        });
+        assert!(session.auth.is_poisoned());
+
+        // The readers, the writer and a throttled remote call (which reads the
+        // headers under the lock) all still work.
+        let before = session.client_version();
+        let _ = session.client_version_source();
+        assert!(!session.note_presence_version("not base64 at all"));
+        assert_eq!(session.client_version(), before);
+        let answer: Value = session.pd("/ok").await.expect("the call still goes out");
+        assert_eq!(answer, json!({"fine": true}));
+    }
+
+    #[test]
+    fn a_held_error_prints_the_family_and_the_seconds_left() {
+        let e = RiotError::Held(Duration::from_millis(59_200));
+        assert_eq!(
+            e.to_string(),
+            "not sent: requests are on hold for 60s more (Riot rate limit)"
+        );
+    }
+
+    #[test]
+    fn the_content_host_follows_the_pd_shard() {
+        assert_eq!(shared_base_url("eu"), "https://shared.eu.a.pvp.net");
+        assert_eq!(shared_base_url("na"), "https://shared.na.a.pvp.net");
+    }
 
     #[test]
     fn version_from_presence_value_reads_top_level_field() {

@@ -3,8 +3,8 @@
   Encounters on the left, Top 3 Teammates and Loadout on the right. It scrolls vertically inside App's one scroll
   container. The data is `invoke('player_details')`, kept in the `openDetails` slot (boot.ts) so a `details` event for
   the same player replaces it in place (spec §2.4), keeping `more` and the scroll position; an event always wins over
-  an answer still in flight, and leaving for Live forgets the payload. A rejected call is retried once after 1s; when
-  that fails too the page settles on its empty state (`settledDetails`: `—` values, no text) and stops being busy.
+  an answer still in flight, and leaving for Live forgets the payload. A call with no answer after 15s counts as rejected, and a rejected call (not an `invalid …` one) is retried once after
+  1s; when that fails too the page settles on its empty state (`settledDetails`: `—` values, no text) and stops being busy.
   Leaving the page tells Rust (`close_details`, R145).
 -->
 <script lang="ts">
@@ -16,7 +16,7 @@
   import TopTeammates from "../components/details/TopTeammates.svelte";
   import { get } from "svelte/store";
   import { closeDetails, getPlayerDetails } from "../lib/api";
-  import { DETAILS_RETRY_MS } from "../lib/boot";
+  import { DETAILS_RETRY_MS, DETAILS_TIMEOUT_MS } from "../lib/boot";
   import { recentShown, settledDetails, type MatchFrom } from "../lib/details";
   import { go } from "../lib/router.svelte";
   import { live, openDetails } from "../lib/stores";
@@ -33,6 +33,7 @@
     openDetails
       .open(puuid, getPlayerDetails, {
         retryMs: DETAILS_RETRY_MS,
+        timeoutMs: DETAILS_TIMEOUT_MS,
         // The hero keeps what the live card knew at that moment (read then, so this effect never depends on `live`).
         settle: (p) => settledDetails(p, get(live)?.players.find((c) => c.puuid === p)),
       })
@@ -41,9 +42,11 @@
 
   // Leaving the page (Back, the Live tab, a match row, Agent Select's switch to Live) unmounts it: Rust forgets the open
   // Details, so nothing is rebuilt or emitted for a page nobody sees. No dependency, so this runs on unmount only; a
-  // player change on the same page never closes (the next `player_details` replaces the open Details itself).
+  // player change on the same page never closes (the next `player_details` replaces the open Details itself). The
+  // close carries the player on screen at that moment (read in the teardown, so it is no dependency), R163: Rust
+  // ignores a close for anyone else and voids an open of this player still being built.
   $effect(() => () => {
-    closeDetails().catch((err: unknown) => console.error("close_details failed", err));
+    closeDetails(puuid).catch((err: unknown) => console.error("close_details failed", err));
   });
 
   const openMatch = (from: MatchFrom) => (matchId: string) =>

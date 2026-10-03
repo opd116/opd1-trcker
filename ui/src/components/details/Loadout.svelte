@@ -6,6 +6,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { retryImg } from "../../lib/imgRetry";
   import { CONTENT_TIERS, weaponState } from "../../lib/details";
   import { rgba } from "../../lib/theme";
   import { loadoutTip } from "../../lib/tips";
@@ -46,8 +47,8 @@
         <div class="wtext"><span class="wname">{w.label}</span><span class="wskin dash">—</span></div>
       {:else}
         <div class="well" style={wellStyle(st.tierId)} use:tip={loadoutTip(st.tierId)}>
-          {#if st.tierId}<img class="wtier" src={assetUrl("contentTier", st.tierId)} alt="" />{/if}
-          <img class="wimg" src={assetUrl("chroma", st.chromaId)} alt="" />
+          {#if st.tierId}<img {@attach retryImg} class="wtier" src={assetUrl("contentTier", st.tierId)} alt="" />{/if}
+          <img {@attach retryImg} class="wimg" src={assetUrl("chroma", st.chromaId)} alt="" />
         </div>
         <div class="wtext">
           <span class="wname">{w.label}</span>

@@ -35,30 +35,34 @@ export async function getPlayerDetails(puuid: string): Promise<PlayerDetails> {
 }
 
 /**
- * `invoke('close_details')` (R145): the Player Details page was left, so Rust forgets it and never rebuilds or emits
- * for it. In the DEV browser there is no Rust: the demo module only counts the call.
+ * `invoke('close_details', { puuid })` (R145): the Player Details page was left, so Rust forgets it and never rebuilds
+ * or emits for it. The puuid (R163) lets Rust ignore a close for a player that is no longer the open one and void an
+ * open still being built for this one; without it, whatever is open closes. In the DEV browser there is no Rust: the
+ * demo module only counts the call.
  */
-export async function closeDetails(): Promise<void> {
+export async function closeDetails(puuid?: string): Promise<void> {
   if (import.meta.env.DEV && !isTauri()) {
     const { noteDetailsClosed } = await import("./demo/scenes");
     noteDetailsClosed();
     return;
   }
-  await invoke("close_details");
+  await (puuid === undefined ? invoke("close_details") : invoke("close_details", { puuid }));
 }
 
 /**
- * `invoke('close_match')` (R150): the Match Details page was left, so Rust forgets the open match and never rebuilds or
- * emits it. No arguments, idempotent. A page that replaces it (another match) sends its `match_details` after this
- * call, and that call opens the new match again. In the DEV browser there is no Rust: the demo module only counts it.
+ * `invoke('close_match', { matchId })` (R150): the Match Details page was left, so Rust forgets the open match and never
+ * rebuilds or emits it. Idempotent. The match id (R163) lets Rust ignore a close for a match that is no longer the open
+ * one and void an open still being built for this one; without it, whatever is open closes. A page that replaces it
+ * (another match) sends its `match_details` after this call, and that call opens the new match again. In the DEV
+ * browser there is no Rust: the demo module only counts it.
  */
-export async function closeMatch(): Promise<void> {
+export async function closeMatch(matchId?: string): Promise<void> {
   if (import.meta.env.DEV && !isTauri()) {
     const { noteMatchClosed } = await import("./demo/scenes");
     noteMatchClosed();
     return;
   }
-  await invoke("close_match");
+  await (matchId === undefined ? invoke("close_match") : invoke("close_match", { matchId }));
 }
 
 /** `invoke('match_details', { matchId, focusPuuid })`. */

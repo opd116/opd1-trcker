@@ -93,6 +93,7 @@ fn base_input(identity: Identity) -> BuildCardInput<'static> {
         party: None,
         encounters: None,
         stored_tier: None,
+        live_tier: None,
     }
 }
 
@@ -287,6 +288,39 @@ fn card_resolves_rank_peak_prev_act_tier_and_winrate_from_mmr() {
     }
     match card.peak {
         Field::Value(peak) => assert_eq!(peak.tier, 15),
+        other => panic!("expected peak to be present, got {other:?}"),
+    }
+}
+
+#[test]
+fn card_peak_is_never_below_the_current_rank_r164() {
+    use opd1_core::stats::SeasonInfo;
+    use std::collections::HashMap;
+
+    // Promoted to tier 15 this act, with every win recorded at tier 14.
+    let mut seasons = HashMap::new();
+    seasons.insert(
+        CURRENT_ACT_ID.to_string(),
+        SeasonInfo {
+            competitive_tier: 15,
+            wins_by_tier: HashMap::from([(14, 4)]),
+            number_of_wins: 4,
+            number_of_games: 6,
+        },
+    );
+    let mut input = base_input(identity());
+    input.mmr = Field::Value(MmrInput {
+        seasons,
+        current_rank: Some(CurrentRank { tier: 15, rr: 3 }),
+    });
+
+    let card = build_card(input);
+
+    match card.peak {
+        Field::Value(peak) => {
+            assert_eq!(peak.tier, 15);
+            assert_eq!(peak.since_act_end_ms, None, "the current act: This Act");
+        }
         other => panic!("expected peak to be present, got {other:?}"),
     }
 }
@@ -1238,5 +1272,119 @@ fn the_rank_rr_is_always_on_the_wire_number_or_null() {
     assert_eq!(
         unknown["rank"],
         serde_json::json!({ "tier": 14, "rr": null })
+    );
+}
+
+// ---------------------------------------------------------------------
+// R161: the live tier from the roster answer (pregame / party)
+// ---------------------------------------------------------------------
+
+/// A card of a player with no MMR snapshot, no stored rows and the live tier
+/// the roster answer carried.
+fn live(mmr: Field<MmrInput>, tier: Option<u8>) -> BuildCardInput<'static> {
+    let mut input = no_snapshot(mmr, vec![]);
+    input.live_tier = tier;
+    input
+}
+
+#[test]
+fn live_tier_shows_at_once_with_no_rr_while_everything_else_loads() {
+    // Before any remote rank call returned: mmr is still loading.
+    let card = build_card(live(Field::Loading, Some(22)));
+    assert_eq!(card.rank, rank(22, None));
+    assert_eq!(card.prev_act_tier, Field::Loading);
+    assert_eq!(card.peak, Field::Loading);
+    assert_eq!(card.act_winrate, Field::Loading);
+    assert_eq!(card.act_wins, Field::Loading);
+    assert_eq!(card.act_games, Field::Loading);
+    // The mmr call failed: the same.
+    assert_eq!(
+        build_card(live(Field::Missing, Some(22))).rank,
+        rank(22, None)
+    );
+}
+
+#[test]
+fn live_tier_unranked_or_absent_is_no_rank() {
+    // Tier 0 is Unranked, 1 and 2 are unused: none is a rank.
+    for tier in [None, Some(0), Some(1), Some(2)] {
+        assert_eq!(
+            build_card(live(Field::Missing, tier)).rank,
+            Field::Missing,
+            "tier {tier:?}"
+        );
+        assert_eq!(
+            build_card(live(Field::Loading, tier)).rank,
+            Field::Loading,
+            "tier {tier:?} while loading"
+        );
+    }
+    assert_eq!(
+        build_card(live(Field::Missing, Some(3))).rank,
+        rank(3, None)
+    );
+}
+
+#[test]
+fn live_tier_is_below_a_snapshot_and_below_a_current_act_rr_row() {
+    // The MMR snapshot is the authority, "no rank this act" included.
+    let mmr = Field::Value(MmrInput {
+        seasons: std::collections::HashMap::new(),
+        current_rank: Some(CurrentRank { tier: 15, rr: 42 }),
+    });
+    assert_eq!(build_card(live(mmr, Some(22))).rank, rank(15, Some(42)));
+    let unranked = Field::Value(MmrInput {
+        seasons: std::collections::HashMap::new(),
+        current_rank: None,
+    });
+    assert_eq!(build_card(live(unranked, Some(22))).rank, Field::Missing);
+
+    // A current-act comp_updates row has the exact RR and wins.
+    let mut input = no_snapshot(
+        Field::Missing,
+        vec![update("m", CURRENT_ACT_ID, 2_400, 15, 42)],
+    );
+    input.live_tier = Some(22);
+    assert_eq!(build_card(input).rank, rank(15, Some(42)));
+}
+
+#[test]
+fn live_tier_is_above_a_stored_match_tier() {
+    let mut input = live(Field::Missing, Some(22));
+    input.stored_tier = Some(StoredTier {
+        start_ms: 2_400,
+        tier: 17,
+    });
+    assert_eq!(build_card(input).rank, rank(22, None));
+}
+
+#[test]
+fn live_tier_beats_a_previous_act_row_and_needs_no_act_tables() {
+    // Last act's row says nothing about now; the live tier does.
+    let mut input = no_snapshot(
+        Field::Missing,
+        vec![update("old", PREV_ACT_ID, 1_500, 20, 5)],
+    );
+    input.live_tier = Some(22);
+    assert_eq!(build_card(input).rank, rank(22, None));
+
+    // The act tables did not resolve: the live tier is still current.
+    let mut input = live(Field::Loading, Some(22));
+    input.current_act_id = "";
+    assert_eq!(build_card(input).rank, rank(22, None));
+}
+
+#[test]
+fn live_tier_shows_for_a_hidden_player_too() {
+    // Rank is not part of the hidden name.
+    let mut hidden = identity();
+    hidden.incognito = true;
+    let mut input = base_input(hidden);
+    input.live_tier = Some(22);
+    let card = build_card(input);
+    assert_eq!(card.rank, rank(22, None));
+    assert_eq!(
+        serde_json::to_value(&card).unwrap()["rank"],
+        serde_json::json!({ "tier": 22, "rr": null })
     );
 }

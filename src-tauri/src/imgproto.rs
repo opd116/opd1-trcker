@@ -43,6 +43,13 @@ pub fn parse_path(path: &str) -> Option<(AssetKind, &str)> {
     Some((kind, id))
 }
 
+/// The part of a request URI the handler reads: the path only. The UI adds
+/// `?r=n` to a retried image URL (R163) to get past the webview's cache; the
+/// query never reaches [`parse_path`], so a retry is the same asset.
+pub fn request_path(uri: &tauri::http::Uri) -> String {
+    uri.path().to_string()
+}
+
 fn empty(status: StatusCode) -> Response<Vec<u8>> {
     Response::builder()
         .status(status)
@@ -129,5 +136,32 @@ mod tests {
         }
         let long = format!("/agent/{}", "a".repeat(65));
         assert_eq!(parse_path(&long), None);
+    }
+
+    #[test]
+    fn a_retry_query_is_ignored() {
+        // R163: the UI retries a failed image as `<url>?r=n`, on both schemes.
+        for (uri, want) in [
+            (
+                format!("img://localhost/agent/{UUID}?r=1"),
+                format!("/agent/{UUID}"),
+            ),
+            (
+                format!("http://img.localhost/agent/{UUID}?r=3"),
+                format!("/agent/{UUID}"),
+            ),
+            (
+                "img://localhost/tier/21?r=2".to_string(),
+                "/tier/21".to_string(),
+            ),
+        ] {
+            let uri: tauri::http::Uri = uri.parse().unwrap();
+            let path = request_path(&uri);
+            assert_eq!(path, want);
+            assert!(
+                parse_path(&path).is_some(),
+                "{path} is served like the plain URL"
+            );
+        }
     }
 }

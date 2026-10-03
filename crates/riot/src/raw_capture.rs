@@ -30,6 +30,8 @@ use std::sync::Mutex;
 
 use serde_json::Value;
 
+use crate::locks::locked;
+
 /// A captured body larger than this is stored as a small truncation
 /// marker instead (see [`RawCaptures::record`]) rather than the body
 /// itself. Real match-details bodies can run several hundred KB to
@@ -265,7 +267,7 @@ fn is_uuid_bytes(b: &[u8]) -> bool {
 /// Every full uuid in `s` (a puuid, a match id) shortened to its first 8
 /// characters — the way the log writes ids (`logbuf::short`). A uuid glued to
 /// more hex digits is left alone: it is not one.
-fn shorten_uuids(s: &str) -> String {
+pub(crate) fn shorten_uuids(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -386,7 +388,7 @@ impl RawCaptures {
         } else {
             body.to_vec()
         };
-        self.inner.lock().unwrap().insert(key, stored);
+        locked(&self.inner).insert(key, stored);
     }
 
     /// R158: records a non-2xx answer (`status`, `body`) as the latest error
@@ -406,10 +408,7 @@ impl RawCaptures {
             shorten_uuids(&redact_bytes(body))
         };
         let (text, cut) = cut_bytes(redacted, MAX_ERROR_CAPTURE_BYTES);
-        self.errors
-            .lock()
-            .unwrap()
-            .insert(key, ErrorCapture { status, text, cut });
+        locked(&self.errors).insert(key, ErrorCapture { status, text, cut });
     }
 
     /// Every endpoint's last error as a file: JSON bodies as
@@ -417,7 +416,7 @@ impl RawCaptures {
     /// body, a body cut mid-JSON) as text whose first line is `HTTP N`. Sorted
     /// by endpoint key.
     pub(crate) fn error_snapshot(&self) -> Vec<ErrorDump> {
-        let guard = self.errors.lock().unwrap();
+        let guard = locked(&self.errors);
         let mut out: Vec<ErrorDump> = guard
             .iter()
             .map(|(key, e)| {
@@ -453,7 +452,7 @@ impl RawCaptures {
     /// Every captured endpoint's last body, redacted, sorted by endpoint
     /// name for deterministic output.
     pub(crate) fn snapshot(&self) -> Vec<(String, String)> {
-        let guard = self.inner.lock().unwrap();
+        let guard = locked(&self.inner);
         let mut out: Vec<(String, String)> = guard
             .iter()
             .map(|(k, v)| (k.clone(), redact_bytes(v)))

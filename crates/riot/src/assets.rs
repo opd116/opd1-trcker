@@ -69,7 +69,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -79,6 +79,7 @@ use serde_json::Value;
 use opd1_core::model::WeaponSkin;
 use opd1_core::stats::Act;
 
+use crate::locks::{locked, read_lock, write_lock};
 use crate::to_core::{self, SeasonEntry};
 
 /// How long to wait for the TCP+TLS handshake alone — short regardless of
@@ -501,6 +502,9 @@ pub struct AssetCache {
     /// Per-skin async locks, so concurrent [`AssetCache::weapon_skin`]
     /// calls for one skin make one request.
     skin_locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Set when a newer table set failed to download and the old disk copy
+    /// stands in ([`AssetCache::tables_stale`]).
+    stale: AtomicBool,
 }
 
 impl AssetCache {
@@ -547,6 +551,7 @@ impl AssetCache {
             image_locks: Mutex::new(HashMap::new()),
             skins: RwLock::new(HashMap::new()),
             skin_locks: Mutex::new(HashMap::new()),
+            stale: AtomicBool::new(false),
         }
     }
 
@@ -576,7 +581,7 @@ impl AssetCache {
                         move || load_tables_from_disk_sync(&dir)
                     })
                     .await?;
-                    *self.tables.write().unwrap() = tables;
+                    *write_lock(&self.tables) = tables;
                     Ok(false)
                 } else {
                     Err(network_err)
@@ -587,12 +592,13 @@ impl AssetCache {
 
     async fn refresh_with_known_version(&self, version: String) -> Result<bool, AssetError> {
         if self.disk_cache_matches(&version) {
+            self.stale.store(false, Ordering::Relaxed);
             let tables = blocking({
                 let dir = self.dir.clone();
                 move || load_tables_from_disk_sync(&dir)
             })
             .await?;
-            *self.tables.write().unwrap() = tables;
+            *write_lock(&self.tables) = tables;
             return Ok(false);
         }
 
@@ -612,7 +618,7 @@ impl AssetCache {
                 Ok(content_tiers) => content_tiers,
                 Err(e) => {
                     log::warn!("content tiers fetch failed, keeping the cached tables: {e}");
-                    *self.tables.write().unwrap() = tables;
+                    *write_lock(&self.tables) = tables;
                     return Ok(false);
                 }
             };
@@ -623,15 +629,42 @@ impl AssetCache {
             })
             .await?;
             tables.content_tiers = content_tiers;
-            *self.tables.write().unwrap() = tables;
+            *write_lock(&self.tables) = tables;
             return Ok(true);
         }
 
-        let agents = self.fetch_agents().await?;
-        let maps = self.fetch_maps().await?;
-        let tiers = self.fetch_latest_tiers().await?;
-        let seasons = self.fetch_seasons().await?;
-        let content_tiers = self.fetch_content_tiers().await?;
+        let fetched = async {
+            Ok::<_, AssetError>((
+                self.fetch_agents().await?,
+                self.fetch_maps().await?,
+                self.fetch_latest_tiers().await?,
+                self.fetch_seasons().await?,
+                self.fetch_content_tiers().await?,
+            ))
+        }
+        .await;
+        let (agents, maps, tiers, seasons, content_tiers) = match fetched {
+            Ok(all) => all,
+            // The version answered but a table did not (a patch is also when
+            // a new act starts): the old tables on disk are better than
+            // none. The manifest keeps the old version, so the next
+            // `refresh_tables` fetches again.
+            Err(e) if self.tables_files_exist() => {
+                // Said once per stale period, not at every retry.
+                if !self.stale.swap(true, Ordering::Relaxed) {
+                    log::warn!("asset table fetch failed, keeping the cached tables: {e}");
+                }
+                let tables = blocking({
+                    let dir = self.dir.clone();
+                    move || load_tables_from_disk_sync(&dir)
+                })
+                .await?;
+                *write_lock(&self.tables) = tables;
+                return Ok(false);
+            }
+            Err(e) => return Err(e),
+        };
+        self.stale.store(false, Ordering::Relaxed);
 
         blocking({
             let dir = self.dir.clone();
@@ -653,7 +686,7 @@ impl AssetCache {
         })
         .await?;
 
-        *self.tables.write().unwrap() = Tables {
+        *write_lock(&self.tables) = Tables {
             agents,
             maps,
             tiers,
@@ -687,6 +720,13 @@ impl AssetCache {
             return false;
         };
         manifest.version == version && self.tables_files_exist()
+    }
+
+    /// Whether the loaded tables are an older disk copy because the current
+    /// version's download failed: the caller should call
+    /// [`refresh_tables`](Self::refresh_tables) again soon.
+    pub fn tables_stale(&self) -> bool {
+        self.stale.load(Ordering::Relaxed)
     }
 
     /// The tables every feature needs (names, maps, tiers, acts): enough to
@@ -799,7 +839,7 @@ impl AssetCache {
     // -- UI-facing lookups (require refresh_tables() to have run) ------
 
     fn tables_snapshot(&self) -> Result<Tables, AssetError> {
-        let tables = self.tables.read().unwrap();
+        let tables = read_lock(&self.tables);
         tables.ensure_loaded()?;
         Ok(tables.clone())
     }
@@ -858,7 +898,7 @@ impl AssetCache {
     /// runs once per remembered card on every publish, so it must not copy
     /// the whole [`Tables`] (unlike [`Self::tables_snapshot`]).
     pub fn map_uuid_for_path(&self, riot_map_path: &str) -> Result<Option<String>, AssetError> {
-        let tables = self.tables.read().unwrap();
+        let tables = read_lock(&self.tables);
         tables.ensure_loaded()?;
         Ok(tables
             .maps
@@ -914,7 +954,7 @@ impl AssetCache {
     /// download -> write" critical section, so concurrent callers for the
     /// same asset serialize instead of racing.
     fn lock_for(&self, kind: AssetKind, id: &str) -> Arc<tokio::sync::Mutex<()>> {
-        let mut locks = self.image_locks.lock().unwrap();
+        let mut locks = locked(&self.image_locks);
         locks
             .entry((kind, id.to_string()))
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
@@ -1093,7 +1133,7 @@ impl AssetCache {
         if !is_valid_uuid(skin_id) || !is_valid_uuid(chroma_id) {
             return None;
         }
-        let skins = self.skins.read().unwrap();
+        let skins = read_lock(&self.skins);
         skins
             .get(&skin_id.to_ascii_lowercase())
             .map(|skin| skin.weapon_skin(&chroma_id.to_ascii_lowercase()))
@@ -1151,14 +1191,12 @@ impl AssetCache {
             }
         };
         let found = entry.weapon_skin(&chroma);
-        self.skins.write().unwrap().insert(skin, entry);
+        write_lock(&self.skins).insert(skin, entry);
         Ok(found)
     }
 
     fn skin_lock(&self, skin: &str) -> Arc<tokio::sync::Mutex<()>> {
-        self.skin_locks
-            .lock()
-            .unwrap()
+        locked(&self.skin_locks)
             .entry(skin.to_string())
             .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
             .clone()

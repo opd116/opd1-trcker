@@ -370,8 +370,10 @@ describe("golden invariants the UI relies on", () => {
     expect(full!.rank.rr).not.toBeNull();
     expect(full!.rank.rrToNext).toBe(100 - full!.rank.rr!);
 
-    // R154-style unknowns, all null at once: no rank, no RR rows, no session, nothing to say.
-    expect(edge!.rank).toMatchObject({ tier: null, rr: null, rrToNext: null, netRr: null, avgWin: null, avgLoss: null, changes: [] });
+    // R167 fallback: no MMR snapshot and no RR rows, so a known tier with `rr` and `rrToNext` null (the card shows
+    // `— RR`); no session, nothing to say.
+    expect(edge!.rank.tier).not.toBeNull();
+    expect(edge!.rank).toMatchObject({ rr: null, rrToNext: null, netRr: null, avgWin: null, avgLoss: null, changes: [] });
     expect([edge!.rrSeries, edge!.session, edge!.insights]).toEqual([[], null, []]);
     expect(edge!.rank.wins).not.toBeNull(); // the matches themselves are stored
     expect(edge!.last5.some((r) => r.kills === null)).toBe(true); // a match with no stats row: the whole line null (R102)

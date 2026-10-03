@@ -13,6 +13,7 @@
 
 pub mod assets;
 pub mod endpoints;
+mod locks;
 pub mod raw_capture;
 pub mod session;
 pub mod throttle;

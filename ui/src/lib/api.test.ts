@@ -28,6 +28,12 @@ describe("closeDetails", () => {
     expect(invoke).toHaveBeenCalledWith("close_details");
   });
 
+  it("R163: with a puuid the close is keyed, so Rust ignores a late close of a page already replaced", async () => {
+    const { closeDetails } = await import("./api");
+    await closeDetails("p1");
+    expect(invoke).toHaveBeenCalledWith("close_details", { puuid: "p1" });
+  });
+
   it("a rejected close_details rejects (the caller logs it)", async () => {
     invoke.mockRejectedValueOnce(new Error("no state"));
     const { closeDetails } = await import("./api");
@@ -52,6 +58,12 @@ describe("closeMatch", () => {
     await closeMatch();
     expect(invoke).toHaveBeenCalledTimes(1);
     expect(invoke).toHaveBeenCalledWith("close_match");
+  });
+
+  it("R163: with a match id the close is keyed (Rust ignores a close for another match)", async () => {
+    const { closeMatch } = await import("./api");
+    await closeMatch("m1");
+    expect(invoke).toHaveBeenCalledWith("close_match", { matchId: "m1" });
   });
 
   it("a rejected close_match rejects (the caller logs it)", async () => {

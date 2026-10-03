@@ -26,10 +26,11 @@ async function bootInTauri(page: Page): Promise<void> {
     matches: { [A]: matchFor(A), [B]: matchFor(B) },
   };
   await page.addInitScript((d) => {
-    type Fake = Record<string, unknown> & { __calls: string[]; __emit: (event: string, payload: unknown) => void };
+    type Fake = Record<string, unknown> & { __calls: string[]; __closes: string[]; __emit: (event: string, payload: unknown) => void };
     const w = window as unknown as Fake;
     w.isTauri = true;
     w.__calls = [];
+    w.__closes = [];
     let n = 0;
     const cbs = new Map<number, (e: unknown) => void>();
     const listeners = new Map<string, number>();
@@ -47,6 +48,7 @@ async function bootInTauri(page: Page): Promise<void> {
           return ++n;
         }
         w.__calls.push(cmd === "match_details" ? `match_details:${args.matchId}` : cmd);
+        if (cmd.startsWith("close_")) w.__closes.push(`${cmd}:${JSON.stringify(args ?? null)}`);
         const table: Record<string, unknown> = {
           meta: d.meta,
           live_state: d.live,
@@ -74,6 +76,9 @@ async function openMatchA(page: Page): Promise<void> {
   expect(await calls(page)).toContain(`match_details:${A}`);
 }
 
+/** The `close_*` commands with their arguments, as sent (R163: each carries the key of the page it closes). */
+const closes = (page: Page): Promise<string[]> => page.evaluate(() => (window as unknown as { __closes: string[] }).__closes.slice());
+
 const count = (log: string[], cmd: string) => log.filter((c) => c === cmd).length;
 
 test.describe("close_match", () => {
@@ -97,6 +102,35 @@ test.describe("close_match", () => {
     expect(count(log, "close_match")).toBe(1);
     expect(log.indexOf("close_match")).toBeLessThan(log.indexOf("player_details"));
     expect(count(log, "close_details")).toBe(0);
+  });
+
+  test("R163: the closes carry the key of the page they close", async ({ page }) => {
+    await bootInTauri(page);
+    await openMatchA(page);
+    // Details → Match closed the details page: its puuid.
+    expect(await closes(page)).toEqual([`close_details:${JSON.stringify({ puuid: MARA })}`]);
+    await page.locator(".match .back").click();
+    await waitPage(page, "loaded");
+    // Back from Match closed the match: its id.
+    expect((await closes(page)).at(-1)).toBe(`close_match:${JSON.stringify({ matchId: A })}`);
+  });
+
+  test("R163: the Live tab sends the keys too: close_match(matchId) from Match, close_details(puuid) from Details", async ({ page }) => {
+    await bootInTauri(page);
+    await openMatchA(page);
+    await page.locator("header.bar .tab.on").click();
+    await expect(page.locator(".live")).toHaveCount(1);
+    await page.waitForTimeout(300);
+    expect((await closes(page)).at(-1)).toBe(`close_match:${JSON.stringify({ matchId: A })}`);
+
+    // And from Details straight to Live.
+    await page.locator(".live .card").filter({ hasText: "Mara" }).click({ position: { x: 20, y: 70 } });
+    await waitPage(page, "loaded");
+    await page.waitForTimeout(450);
+    await page.locator("header.bar .tab.on").click();
+    await expect(page.locator(".live")).toHaveCount(1);
+    await page.waitForTimeout(300);
+    expect((await closes(page)).at(-1)).toBe(`close_details:${JSON.stringify({ puuid: MARA })}`);
   });
 
   test("the Live tab from Match: close_match once", async ({ page }) => {

@@ -8,6 +8,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{json, Value};
 use wiremock::matchers::{method, path};
@@ -40,7 +41,7 @@ const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
 const STRANGER: &str = "dddddddd-0000-0000-0000-000000000004";
 /// OTHER's teammate in the party-mark tests.
 const MATE: &str = "eeeeeeee-0000-0000-0000-000000000005";
-const ACT: &str = "act-current";
+pub(crate) const ACT: &str = "act-current";
 /// valorant-api's Split: the map the remembered-name tests play on.
 const SPLIT_PATH: &str = "/Game/Maps/Bonsai/Bonsai";
 const SPLIT_UUID: &str = "d960549e-485c-e861-8d71-aa9d1aed12a2";
@@ -55,6 +56,10 @@ struct Recorder {
     live: Mutex<Vec<LiveState>>,
     details: Mutex<Vec<PlayerDetails>>,
     matches: Mutex<Vec<MatchDetailsView>>,
+    metas: Mutex<Vec<opd1_riot::assets::Meta>>,
+    my_stats: Mutex<Vec<opd1_core::model::MyStats>>,
+    /// The next `"mystats"` emission panics (once): a push task that dies.
+    panic_on_my_stats: std::sync::atomic::AtomicBool,
 }
 
 struct Sink(Arc<Recorder>);
@@ -68,6 +73,19 @@ impl EventSink for Sink {
     }
     fn match_view(&self, view: &MatchDetailsView) {
         self.0.matches.lock().unwrap().push(view.clone());
+    }
+    fn meta(&self, meta: &opd1_riot::assets::Meta) {
+        self.0.metas.lock().unwrap().push(meta.clone());
+    }
+    fn my_stats(&self, stats: &opd1_core::model::MyStats) {
+        if self
+            .0
+            .panic_on_my_stats
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            panic!("the sink panicked");
+        }
+        self.0.my_stats.lock().unwrap().push(stats.clone());
     }
 }
 
@@ -248,6 +266,27 @@ pub(crate) struct Harness {
     pub(crate) session: Arc<RiotSession>,
     pub(crate) st: Arc<AppState>,
     rec: Arc<Recorder>,
+}
+
+/// A second session on the harness's mock Riot client whose `other`-family
+/// in-call wait is `max` instead of 10 s (R160), so a hold the session
+/// refuses (`RiotError::Held`) can be short in a test.
+pub(crate) async fn session_with_other_wait(h: &Harness, max: Duration) -> Arc<RiotSession> {
+    Arc::new(
+        RiotSession::connect_with_overrides(
+            h._dir.path(),
+            ConnectOverrides {
+                pd_base: Some(h.server.uri()),
+                glz_base: Some(h.server.uri()),
+                valorant_api_base: Some(h.server.uri()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("connect to the mock client")
+        .with_global_rate(1_000.0)
+        .with_other_max_wait(max),
+    )
 }
 
 pub(crate) async fn harness() -> Harness {
@@ -482,6 +521,7 @@ pub(crate) fn roster(puuid: &str, incognito: bool) -> RosterPlayer {
         card_id: "card".into(),
         character_id: "agent".into(),
         selection_state: "locked".into(),
+        live_tier: None,
     }
 }
 
@@ -1201,7 +1241,49 @@ mod names_fill;
 #[cfg(test)]
 mod rank;
 
+/// R161's live-tier tests: the rank from the roster answers (their own file;
+/// same harness).
+#[cfg(test)]
+mod live_tier;
+
+/// B2's `"mystats"` push tests (their own file; same harness).
+#[cfg(test)]
+mod my_stats;
+
+/// B1's own competitive-updates backfill tests (their own file; same
+/// harness).
+#[cfg(test)]
+pub(crate) mod comp_backfill;
+
 /// R158's diagnostics tests: the failed-call warn line and `dump_raw` (their
 /// own file; same harness).
 #[cfg(test)]
 mod diagnostics;
+
+/// R162's current-act tests (Riot's content-service; their own file; same
+/// harness).
+#[cfg(test)]
+mod act;
+
+/// Waits until `cond()` holds, looking again every millisecond. The wait ends
+/// at the event, not at a count of scheduler turns or a guessed duration, so
+/// a slow or loaded machine only makes it longer; 30 s turns a condition that
+/// never comes into a failure instead of a hang.
+pub(crate) async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
+    let waited = tokio::time::timeout(Duration::from_secs(30), async {
+        while !cond() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await;
+    assert!(waited.is_ok(), "never happened: {what}");
+}
+
+/// R163's keyed close and late-open tests (their own file; same harness).
+#[cfg(test)]
+mod ui_open;
+
+/// R165's sync-order tests: rank first for the whole roster, the retries of
+/// names and partial syncs (their own file; same harness).
+#[cfg(test)]
+mod sync_order;

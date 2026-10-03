@@ -62,23 +62,28 @@ export const META_RETRY_MAX_MS = 30_000;
  * start, or a transient download failure). The first rejection sets `EMPTY_META` at once, so names render as
  * the loaded-miss "—" instead of a skeleton bar that never resolves (spec §5.8: null = pending, EMPTY_META =
  * loaded but empty); each retry that succeeds replaces it with the real tables. `onError` sees every failure
- * with its attempt number (0-based). Resolves after the first success; the caller does not await it at startup.
+ * with its attempt number (0-based). Resolves after the first success, or once `stopped()` says so after a wait (R163:
+ * a `meta` event delivered the tables); the caller does not await it at startup.
  */
 export async function loadMeta(
   b: Bridge,
   set: (m: Meta) => void,
   onError: (err: unknown, attempt: number) => void = () => {},
+  stopped: () => boolean = () => false,
 ): Promise<void> {
   let delay = META_RETRY_FIRST_MS;
   for (let attempt = 0; ; attempt++) {
     try {
-      set(await b.invoke<Meta>("meta"));
+      const m = await b.invoke<Meta>("meta");
+      // A `meta` event may have delivered the tables while this answer was in flight; the event is the newer one.
+      if (!stopped()) set(m);
       return;
     } catch (err) {
       onError(err, attempt);
       if (attempt === 0) set(EMPTY_META);
     }
     await new Promise<void>((resolve) => setTimeout(resolve, delay));
+    if (stopped()) return;
     delay = Math.min(delay * 2, META_RETRY_MAX_MS);
   }
 }
@@ -130,15 +135,44 @@ export async function runKeyAction(
 /** A rejected `player_details` / `match_details` is retried once after this long. */
 export const DETAILS_RETRY_MS = 1_000;
 
+/** R163 (M1): a `player_details` / `match_details` call that has not answered after this long counts as failed. */
+export const DETAILS_TIMEOUT_MS = 15_000;
+
+/**
+ * Rust refuses a malformed id with `invalid …` (`invalid player id`, `invalid match id`): the same call can never
+ * succeed, so it is not retried (R163, M5). Tauri rejects with the bare string; an `Error` carries it as `message`.
+ */
+export function isInvalidRejection(err: unknown): boolean {
+  return (err instanceof Error ? err.message : String(err)).startsWith("invalid ");
+}
+
+/** The rejection of a call that did not answer in time (`withTimeout`). */
+export class CallTimedOut extends Error {
+  constructor(ms: number) {
+    super(`timed out after ${ms}ms`);
+  }
+}
+
+/** `p`, or a `CallTimedOut` rejection once `ms` have passed; the timer never outlives `p`. */
+function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const late = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new CallTimedOut(ms)), ms);
+  });
+  return Promise.race([p, late]).finally(() => clearTimeout(timer));
+}
+
 /**
  * `call()`; when it rejects, one more `call()` after `delayMs`, whose result or rejection is the answer. `wanted` is
  * asked after the wait: when it says no (the user has moved on, and a repeated `player_details` would re-open the
- * page on the Rust side), the first error is thrown and nothing is repeated.
+ * page on the Rust side), the first error is thrown and nothing is repeated. An `invalid …` rejection is never
+ * repeated (R163).
  */
 export async function retryOnce<T>(call: () => Promise<T>, delayMs: number, wanted: () => boolean = () => true): Promise<T> {
   try {
     return await call();
   } catch (first) {
+    if (isInvalidRejection(first)) throw first;
     await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
     if (!wanted()) throw first;
     return call();
@@ -149,6 +183,8 @@ export async function retryOnce<T>(call: () => Promise<T>, delayMs: number, want
 export interface OpenOptions<T = PlayerDetails> {
   /** A rejected call is retried once after this many ms; skipped when anything wrote the slot during the wait. */
   retryMs?: number;
+  /** R163: each call that has not answered after this many ms is a rejection (feeds the retry, then `settle`). */
+  timeoutMs?: number;
   /**
    * When the call has failed for good (after the retry, if any) and the slot is still empty for this key: the
    * payload to settle on, so the skeleton ends. A later event still replaces it.
@@ -174,6 +210,12 @@ export interface Slot<T> extends Readable<T | null> {
   event(payload: T): void;
   /** The page was left: forget the payload, so a reopen starts from the skeleton (never a stale name). */
   close(): void;
+  /**
+   * R163 (M1): the next `live` event calls this. A page that settled on its empty state asks once more (a failure
+   * is transient more often than not, and Rust opens no page that failed, so no event would ever refresh it); the
+   * answer replaces the settled payload, a failure leaves it. Once per settle; nothing when the page was left.
+   */
+  retrySettled(): void;
 }
 
 export type DetailsSlot = Slot<PlayerDetails>;
@@ -192,36 +234,59 @@ function keyedSlot<T>(keyOf: (payload: T) => string): Slot<T> {
   let openKey: string | null = null;
   /** Bumped by every write an answer still in flight must not overwrite. */
   let version = 0;
+  /** The open page when it settled on its empty state, with what it takes to ask again (`retrySettled`). */
+  let settled: { key: string; fetch: (key: string) => Promise<T>; opts: OpenOptions<T>; retried: boolean } | null = null;
+
+  async function run(key: string, fetch: (key: string) => Promise<T>, opts: OpenOptions<T>, retried: boolean): Promise<void> {
+    if (!retried) settled = null;
+    const v = ++version;
+    const call = () => (opts.timeoutMs === undefined ? fetch(key) : withTimeout(fetch(key), opts.timeoutMs));
+    try {
+      const res = opts.retryMs === undefined ? await call() : await retryOnce(call, opts.retryMs, () => v === version);
+      if (v === version) {
+        put(res);
+        settled = null;
+      }
+    } catch (err) {
+      // A timeout nobody waits for any more (the page was left, replaced, or an event answered) is not an error
+      // worth logging (R163 review).
+      if (v !== version && err instanceof CallTimedOut) return;
+      // Failed for good: end the skeleton, unless something newer wrote the slot or this key's payload is
+      // already on screen (Back from Match keeps what it had; so does a failed `retrySettled`).
+      if (v === version && current === null && opts.settle) {
+        put(opts.settle(key));
+        settled = { key, fetch, opts, retried };
+      }
+      throw err;
+    }
+  }
+
   return {
     subscribe: store.subscribe,
-    async open(key, fetch, opts = {}) {
+    open(key, fetch, opts = {}) {
       if (openKey !== key) {
         openKey = key;
         put(null);
       }
-      const v = ++version;
-      try {
-        const res =
-          opts.retryMs === undefined
-            ? await fetch(key)
-            : await retryOnce(() => fetch(key), opts.retryMs, () => v === version);
-        if (v === version) put(res);
-      } catch (err) {
-        // Failed for good: end the skeleton, unless something newer wrote the slot or this key's payload is
-        // already on screen (Back from Match keeps what it had).
-        if (v === version && current === null && opts.settle) put(opts.settle(key));
-        throw err;
-      }
+      return run(key, fetch, opts, false);
     },
     event(payload) {
       if (keyOf(payload) !== openKey) return;
       version++;
+      settled = null;
       put(payload);
     },
     close() {
       openKey = null;
       version++;
+      settled = null;
       put(null);
+    },
+    retrySettled() {
+      const s = settled;
+      if (!s || s.retried || openKey !== s.key) return;
+      settled = { ...s, retried: true };
+      run(s.key, s.fetch, { ...s.opts, retryMs: undefined }, true).catch(() => {});
     },
   };
 }

@@ -5,7 +5,9 @@
 use std::collections::HashMap;
 
 use opd1_core::db::repo::{Match, MatchPlayer, MatchTeam, StoredMatch};
-use opd1_core::matchview::{build_match_view, needs_known_name, needs_seen_name, MatchViewInput};
+use opd1_core::matchview::{
+    build_match_view, lacks_stored_name, needs_known_name, needs_seen_name, MatchViewInput,
+};
 use opd1_core::model::{
     DisplayName, MatchDetailsView, MatchResultKind, Perspective, RememberedSource,
 };
@@ -151,6 +153,26 @@ fn visible(name: &str, tag: &str) -> DisplayName {
 }
 
 // ---------------------------------------------------------------------
+
+#[test]
+fn lacks_stored_name_is_true_for_any_row_without_a_full_name_and_tag() {
+    // R153: the names fill asks about a row whose match stored no full
+    // `(name, tag)`, whoever is hidden on the live screen. A half name, an
+    // empty half and a missing half all count as lacking.
+    assert!(!lacks_stored_name(&player("full", "Blue", "A")));
+    let mut no_tag = player("no-tag", "Red", "X");
+    no_tag.tag_line = None;
+    let mut empty_tag = player("empty-tag", "Red", "X");
+    empty_tag.tag_line = Some(String::new());
+    let mut no_name = player("no-name", "Red", "X");
+    no_name.game_name = None;
+    let mut empty_name = player("empty-name", "Red", "X");
+    empty_name.game_name = Some(String::new());
+    let blank = player("blank", "Red", "");
+    for p in [no_tag, empty_tag, no_name, empty_name, blank] {
+        assert!(lacks_stored_name(&p), "{}", p.puuid);
+    }
+}
 
 #[test]
 fn needs_known_name_is_exactly_the_rows_drawn_in_the_hidden_style() {

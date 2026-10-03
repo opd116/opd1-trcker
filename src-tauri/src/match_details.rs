@@ -32,6 +32,9 @@ pub async fn load(
     match_id: &str,
     focus_puuid: &str,
 ) -> Result<MatchDetailsView, String> {
+    // R163: the ticket is taken before the build, so a Back (or a newer open)
+    // that happens while it runs voids this open.
+    let ticket = st.begin_open_match(match_id);
     let found = match read(st, match_id, focus_puuid).await? {
         Some(found) => Some(found),
         None => match st.session() {
@@ -47,8 +50,11 @@ pub async fn load(
     let Some((view, asks)) = found else {
         return Err("unknown match".into());
     };
-    st.set_open_match(match_id, focus_puuid, &view);
-    st.queue_name_fill(asks);
+    // R163: an open that lost (the page was left, or a newer open took over)
+    // asks for no names: nobody sees this answer.
+    if st.set_open_match(ticket, match_id, focus_puuid, &view) {
+        st.queue_name_fill(asks);
+    }
     Ok(view)
 }
 

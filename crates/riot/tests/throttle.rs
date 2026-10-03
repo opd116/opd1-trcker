@@ -8,7 +8,7 @@
 
 use std::time::{Duration, Instant};
 
-use opd1_riot::throttle::Throttle;
+use opd1_riot::throttle::{Hold, Throttle};
 
 #[tokio::test]
 async fn throttle_limits_rate() {
@@ -152,4 +152,85 @@ fn new_with_negative_or_nan_burst_does_not_panic() {
     // regardless of how nonsensical the arguments are.
     let _ = Throttle::new(-5.0, 10.0);
     let _ = Throttle::new(f64::NAN, 10.0);
+}
+
+#[tokio::test]
+async fn take_unless_held_returns_the_remaining_hold_at_once_and_keeps_the_token() {
+    // R160: an mmr-family call must not sleep out a 60 s Riot block.
+    let throttle = Throttle::new(1.0, 1.0);
+    throttle.hold_for(60.0);
+
+    let start = Instant::now();
+    let left = throttle
+        .take_unless_held()
+        .await
+        .expect_err("a hold is active");
+    assert!(
+        start.elapsed() < Duration::from_millis(50),
+        "returns at once"
+    );
+    assert!(left > Duration::from_secs(59) && left <= Duration::from_secs(60));
+}
+
+#[tokio::test]
+async fn a_refused_take_unless_held_leaves_the_bucket_untouched() {
+    // Burst 1, 1 rps: if the refused call had taken the one token, the next
+    // take would have to wait about 0.85 s for it to refill.
+    let throttle = Throttle::new(1.0, 1.0);
+    throttle.hold_for(0.1);
+    assert!(throttle.take_unless_held().await.is_err());
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let start = Instant::now();
+    assert!(throttle.take_unless_held().await.is_ok());
+    assert!(
+        start.elapsed() < Duration::from_millis(300),
+        "the token was still there: {:?}",
+        start.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn take_unless_held_takes_a_token_when_nothing_is_held() {
+    let throttle = Throttle::new(2.0, 2.0);
+    assert!(throttle.take_unless_held().await.is_ok());
+    assert!(throttle.take_unless_held().await.is_ok());
+}
+
+#[tokio::test]
+async fn a_hold_waits_out_and_is_independent_of_other_holds() {
+    let mmr = Hold::new();
+    let other = Hold::new();
+    mmr.hold_for(60.0);
+    assert!(mmr.remaining().is_some());
+    assert!(other.remaining().is_none(), "families do not share a hold");
+
+    let start = Instant::now();
+    other.wait().await;
+    assert!(start.elapsed() < Duration::from_millis(50));
+
+    other.hold_for(0.1);
+    let start = Instant::now();
+    other.wait().await;
+    assert!(start.elapsed() >= Duration::from_millis(80));
+    assert!(other.remaining().is_none());
+}
+
+#[tokio::test]
+async fn wait_up_to_waits_for_a_short_hold_and_refuses_a_long_one_at_once() {
+    // R160: the `other` family waits only for a hold of at most the bound.
+    let hold = Hold::new();
+    hold.hold_for(0.1);
+    let start = Instant::now();
+    assert!(hold.wait_up_to(Duration::from_secs(1)).await.is_ok());
+    assert!(start.elapsed() >= Duration::from_millis(80));
+
+    hold.hold_for(60.0);
+    let start = Instant::now();
+    let left = hold
+        .wait_up_to(Duration::from_secs(10))
+        .await
+        .expect_err("60 s is over the bound");
+    assert!(start.elapsed() < Duration::from_millis(50), "at once");
+    assert!(left > Duration::from_secs(59));
 }

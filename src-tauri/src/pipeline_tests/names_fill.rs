@@ -16,7 +16,7 @@ use opd1_riot::endpoints::MatchDetailsResponse;
 
 use super::*;
 use crate::state::{Job, NAME_FILL_QUEUE_MAX};
-use crate::sync::{fill_names_step, store_details, NAME_BATCH_MAX};
+use crate::sync::{fill_names_step, store_details, sync_player, NAME_BATCH_MAX};
 
 /// A valid uuid for test player `i`.
 fn pid(i: u32) -> String {
@@ -99,13 +99,13 @@ async fn mount_name_book(server: &MockServer, book: NameBook) {
 /// The repo mutex held by a plain thread: whatever asks the DB next (a fill
 /// step's `names_to_ask`) waits until [`DbHold::release`]. Deterministic
 /// stand-in for "the step is between taking its asks and the request".
-struct DbHold {
+pub(super) struct DbHold {
     release: std::sync::mpsc::Sender<()>,
     thread: std::thread::JoinHandle<()>,
 }
 
 impl DbHold {
-    fn take(st: &Arc<AppState>) -> Self {
+    pub(super) fn take(st: &Arc<AppState>) -> Self {
         let (held_tx, held_rx) = std::sync::mpsc::channel::<()>();
         let (release, release_rx) = std::sync::mpsc::channel::<()>();
         let st = st.clone();
@@ -122,7 +122,7 @@ impl DbHold {
         Self { release, thread }
     }
 
-    fn release(self) {
+    pub(super) fn release(self) {
         self.release.send(()).unwrap();
         self.thread.join().unwrap();
     }
@@ -460,6 +460,228 @@ async fn a_player_hidden_in_the_match_that_just_ended_is_asked_and_remembered_ne
     }
 }
 
+/// How many `live` events the sink has been given so far.
+fn live_events(h: &Harness) -> usize {
+    h.rec.live.lock().unwrap().len()
+}
+
+#[tokio::test]
+async fn a_fill_that_names_hidden_roster_players_rebuilds_their_cards_in_one_publish() {
+    // R167 (A m4): HIDDEN and STRANGER are in the Lobby party, shown hidden.
+    // The fill learns both names (and one of a player who is not on screen):
+    // their cards show the remembered name at once — not at the next roster
+    // change — and the fill publishes once, not once per name.
+    let h = harness().await;
+    back_to_the_lobby(&h, Some(HIDDEN)).await;
+    {
+        let slot = slot_for(&h.st, STRANGER, true).await;
+        let mut live = lock(&h.st.live);
+        live.synced.insert(STRANGER.into());
+        live.slots.push(slot);
+        live.note_hidden();
+    }
+    mount_name_service(
+        &h.server,
+        &[
+            (HIDDEN.to_string(), "Real", "HID"),
+            (STRANGER.to_string(), "Other", "STR"),
+            (pid(1), "Away", "OFF"),
+        ],
+    )
+    .await;
+    h.st.publish();
+    for p in [HIDDEN, STRANGER] {
+        assert_eq!(card_json(&h.st, p)["name"]["kind"], "hiddenAgent", "{p}");
+    }
+
+    lock(&h.st.live).queue_name_fill([
+        ask(HIDDEN, Some(1)),
+        ask(STRANGER, Some(1)),
+        ask(&pid(1), Some(1)),
+    ]);
+    let before = live_events(&h);
+    run_fill(&h).await;
+
+    assert_eq!(puts(&h.server).await.len(), 1, "one request");
+    for (p, name, tag) in [(HIDDEN, "Real", "HID"), (STRANGER, "Other", "STR")] {
+        let shown = card_json(&h.st, p)["name"].clone();
+        assert_eq!(shown["kind"], "remembered", "{p}");
+        assert_eq!(
+            (shown["name"].as_str(), shown["tag"].as_str()),
+            (Some(name), Some(tag))
+        );
+        assert_eq!(shown["source"], "seen");
+    }
+    assert_eq!(
+        live_events(&h) - before,
+        1,
+        "one publish for the whole fill"
+    );
+
+    // A fill whose names are all of players off screen changes no card.
+    lock(&h.st.live).queue_name_fill([ask(&pid(2), Some(2))]);
+    mount_name_service(&h.server, &[(pid(2), "Gone", "OFF")]).await;
+    let before = live_events(&h);
+    run_fill(&h).await;
+    assert_eq!(live_events(&h), before, "nothing on screen changed");
+}
+
+/// Mounts what the sync of roster player `p` needs: no rank updates, a
+/// history of the given competitive matches (newest first) and the details of
+/// each, whose other players (`others`, `p` included) have blank names.
+async fn mount_player_history(h: &Harness, p: &str, matches: &[(&str, i64)], others: &[String]) {
+    let first = |body: Value, path: String| {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .with_priority(1)
+    };
+    first(
+        json!({"Subject": p, "Matches": []}),
+        format!("/mmr/v1/players/{p}/competitiveupdates"),
+    )
+    .mount(&h.server)
+    .await;
+    first(
+        json!({"Subject": p, "QueueSkills": {}}),
+        format!("/mmr/v1/players/{p}"),
+    )
+    .mount(&h.server)
+    .await;
+    first(
+        json!({"Subject": p, "History": matches.iter().map(|(id, start)| json!(
+            {"MatchID": id, "GameStartTime": start, "QueueID": "competitive"}
+        )).collect::<Vec<_>>()}),
+        format!("/match-history/v1/history/{p}"),
+    )
+    .mount(&h.server)
+    .await;
+    for (id, start) in matches {
+        mount_match(&h.server, id, "competitive", *start, others).await;
+    }
+}
+
+#[tokio::test]
+async fn a_roster_players_sync_that_stores_matches_queues_their_participants_for_the_fill() {
+    // R167 (A concern): the matches phase of a roster player stores matches
+    // the user never played; the players of those whose names match-details
+    // blanked are queued like the Details sync queues what its page lacks —
+    // and, like every ask, sent between matches only.
+    let h = harness().await;
+    let p = pid(7);
+    let others = vec![p.clone(), pid(1), pid(2)];
+    let (old, new) = (now_ms() - 5 * 86_400_000, now_ms() - 3 * 86_400_000);
+    mount_player_history(&h, &p, &[("mx-new", new), ("mx-old", old)], &others).await;
+    mount_name_service(&h.server, &[(pid(1), "One", "T1")]).await;
+    {
+        // Agent Select: a roster player is being synced during a match.
+        let slot = slot_for(&h.st, &p, false).await;
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Pregame;
+        live.in_match = true;
+        live.slots.push(slot);
+        // The live cards are done: the fill is the only work there is.
+        live.synced.insert(p.clone());
+        live.names_attempted.insert(p.clone());
+    }
+
+    sync_player(&h.st, &h.session, &p).await.unwrap();
+
+    let queued: Vec<(String, Option<i64>)> = {
+        let mut q: Vec<_> = lock(&h.st.live)
+            .name_fill
+            .iter()
+            .map(|a| (a.puuid.clone(), a.match_start_ms))
+            .collect();
+        q.sort();
+        q
+    };
+    // Each puuid once, with its newest stored match; never the user.
+    assert_eq!(
+        queued,
+        [
+            (pid(1), Some(new)),
+            (pid(2), Some(new)),
+            (p.clone(), Some(new)),
+        ]
+    );
+
+    // During the match nothing is sent, and nothing is lost.
+    fill_names_step(&h.st, &h.session).await.unwrap();
+    assert!(puts(&h.server).await.is_empty(), "no request in a match");
+    assert_eq!(lock(&h.st.live).name_fill.len(), 3);
+
+    // The match is over: one request for all three.
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Menus;
+        live.in_match = false;
+    }
+    run_fill(&h).await;
+    assert_eq!(puts(&h.server).await.len(), 1);
+    assert_eq!(
+        seen(&h.st, pid(1)).await,
+        Some(("One".to_string(), "T1".to_string()))
+    );
+
+    // Synced again with nothing new: nothing is queued (both matches are
+    // stored already, the fill's markers cover the rest).
+    sync_player(&h.st, &h.session, &p).await.unwrap();
+    assert!(
+        lock(&h.st.live).name_fill.is_empty(),
+        "no new match, no ask"
+    );
+}
+
+#[tokio::test]
+async fn a_roster_syncs_burst_of_asks_does_not_starve_the_match_that_just_ended() {
+    // R167 fix round 1: during a match the roster's matches phase fills the
+    // queue (low priority, soft cap) with strangers' histories. The match that
+    // ends afterwards keeps all its asks, and they are sent first.
+    let h = harness().await;
+    let p = pid(7);
+    let crowd: Vec<String> = (100..220).map(pid).collect();
+    let (hist_start, end_start) = (now_ms() - 3 * 86_400_000, now_ms() - 30 * 60_000);
+    mount_player_history(&h, &p, &[("mx-crowd", hist_start)], &crowd).await;
+    mount_name_service(&h.server, &[]).await;
+    {
+        let slot = slot_for(&h.st, &p, false).await;
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.in_match = true;
+        live.slots.push(slot);
+        live.synced.insert(p.clone());
+        live.names_attempted.insert(p.clone());
+    }
+    sync_player(&h.st, &h.session, &p).await.unwrap();
+    assert_eq!(
+        lock(&h.st.live).name_fill.len(),
+        crate::state::NAME_FILL_LOW_MAX,
+        "the roster's asks stop at the soft cap"
+    );
+
+    // The match ends; its details arrive and are stored.
+    let others: Vec<String> = (1..=9).map(pid).collect();
+    mount_match(&h.server, "m-end", "competitive", end_start, &others).await;
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Menus;
+        live.in_match = false;
+    }
+    match_ends_now(&h);
+    store_match(&h, "m-end").await;
+    assert_eq!(
+        lock(&h.st.live).name_fill.len(),
+        crate::state::NAME_FILL_LOW_MAX + 9,
+        "all nine kept, behind nothing"
+    );
+
+    run_fill(&h).await;
+    let sent = puts(&h.server).await;
+    assert_eq!(sent[0].len(), NAME_BATCH_MAX);
+    assert_eq!(sent[0][..9], others[..], "the match end goes first");
+}
+
 #[tokio::test]
 async fn the_user_and_an_empty_id_are_never_asked() {
     let h = harness().await;
@@ -601,16 +823,10 @@ async fn a_match_that_starts_between_taking_the_asks_and_the_request_sends_nothi
         let (st, session) = (h.st.clone(), h.session.clone());
         async move { fill_names_step(&st, &session).await }
     });
-    for _ in 0..1000 {
-        if lock(&h.st.live).name_fill.is_empty() {
-            break;
-        }
-        tokio::task::yield_now().await;
-    }
-    assert!(
-        lock(&h.st.live).name_fill.is_empty(),
-        "the step took the asks and is waiting for the DB"
-    );
+    wait_until("the step took the asks and is waiting for the DB", || {
+        lock(&h.st.live).name_fill.is_empty()
+    })
+    .await;
 
     // The match starts now, with HIDDEN on its roster shown hidden.
     {
@@ -643,6 +859,190 @@ async fn a_match_that_starts_between_taking_the_asks_and_the_request_sends_nothi
         seen(&h.st, HIDDEN.to_string()).await,
         Some(("Real".to_string(), "HID".to_string()))
     );
+}
+
+/// Answers `/chat/v4/presences` with the user's VALORANT presence in
+/// `state` (`MENUS`, `PREGAME`, `INGAME`): the first `times` requests only
+/// (`None`: every one), at `priority`.
+async fn mount_presence(h: &Harness, state: &str, times: Option<u64>, priority: u8) {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+    let private =
+        BASE64.encode(json!({"sessionLoopState": state, "queueId": "unrated"}).to_string());
+    let mock = Mock::given(method("GET"))
+        .and(path("/chat/v4/presences"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "presences": [{"puuid": ME, "product": "valorant", "private": private}]
+        })))
+        .with_priority(priority);
+    match times {
+        Some(n) => mock.up_to_n_times(n),
+        None => mock,
+    }
+    .mount(&h.server)
+    .await;
+}
+
+/// The presence requests the mock has seen (connecting reads one too, for
+/// the client version: tests take the count before the step they check).
+async fn presence_reads(h: &Harness) -> usize {
+    count(&h.server, "GET", "/chat/v4/presences").await
+}
+
+#[tokio::test]
+async fn a_fill_does_not_go_out_when_the_presence_already_says_a_match_began() {
+    // R165 finding 9, second half: the model still shows the Lobby (the poll
+    // loop has not ticked yet) but Riot's presence says Agent Select or In
+    // Game, where the players asked about may be hidden. Nothing is sent,
+    // nobody is marked, the asks stay queued as they were.
+    for state in ["PREGAME", "INGAME"] {
+        let h = harness().await;
+        let t1 = pid(1);
+        mount_name_service(&h.server, &[(t1.clone(), "Real", "ONE")]).await;
+        mount_presence(&h, state, None, 1).await;
+        lobby(&h);
+        lock(&h.st.live).queue_name_fill([ask(&t1, Some(5))]);
+        let before = presence_reads(&h).await;
+
+        fill_names_step(&h.st, &h.session).await.unwrap();
+
+        assert_eq!(presence_reads(&h).await, before + 1, "{state}: one read");
+        assert!(puts(&h.server).await.is_empty(), "{state}: nothing sent");
+        assert_eq!(
+            queue_of(&h),
+            vec![(t1.clone(), Some(5))],
+            "{state}: still queued"
+        );
+        assert_eq!(marker(&h.st, t1.clone()).await, None, "{state}: not marked");
+        assert_eq!(seen(&h.st, t1).await, None);
+        assert!(
+            !lock(&h.st.live).fill_ready(),
+            "{state}: the fill stands down for a moment"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_fills_stand_down_does_not_hold_the_live_rosters_names_step() {
+    // Review round 1: the stand-down is the fill's alone. A roster player
+    // whose name is still unknown is handed out for the live names step at
+    // once, exactly as Agent Select begins.
+    let h = harness().await;
+    let t1 = pid(1);
+    mount_name_service(&h.server, &[(t1.clone(), "Real", "ONE")]).await;
+    mount_presence(&h, "PREGAME", None, 1).await;
+    lobby(&h);
+    {
+        let mut live = lock(&h.st.live);
+        live.slots.push(Slot {
+            roster: roster(OTHER, false),
+            db: PlayerDb::default(),
+        });
+        live.queue_name_fill([ask(&t1, Some(5))]);
+        assert!(!live.names_needed().is_empty(), "OTHER's name is unknown");
+    }
+
+    fill_names_step(&h.st, &h.session).await.unwrap();
+
+    let mut live = lock(&h.st.live);
+    assert!(!live.fill_ready(), "the fill stands down");
+    assert!(
+        !live.names_needed().is_empty(),
+        "the live names step is not held"
+    );
+    let id = live.try_start_worker().expect("the names job is work");
+    assert!(
+        matches!(live.next_job(id), Some(Job::Names(_))),
+        "and it is the next job"
+    );
+}
+
+#[tokio::test]
+async fn a_fill_goes_out_when_the_presence_says_menus() {
+    let h = harness().await;
+    let t1 = pid(1);
+    mount_name_service(&h.server, &[(t1.clone(), "Real", "ONE")]).await;
+    mount_presence(&h, "MENUS", None, 1).await;
+    lobby(&h);
+    lock(&h.st.live).queue_name_fill([ask(&t1, Some(5))]);
+    let before = presence_reads(&h).await;
+
+    fill_names_step(&h.st, &h.session).await.unwrap();
+
+    assert_eq!(presence_reads(&h).await, before + 1);
+    assert_eq!(puts(&h.server).await, vec![vec![t1.clone()]]);
+    assert_eq!(seen(&h.st, t1).await, Some(("Real".into(), "ONE".into())));
+    assert!(queue_of(&h).is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_presence_read_does_not_hold_the_names_up() {
+    // The local client answers 500 (or nothing usable): today's behaviour,
+    // the request is sent.
+    let h = harness().await;
+    let t1 = pid(1);
+    mount_name_service(&h.server, &[(t1.clone(), "Real", "ONE")]).await;
+    Mock::given(method("GET"))
+        .and(path("/chat/v4/presences"))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    lobby(&h);
+    lock(&h.st.live).queue_name_fill([ask(&t1, Some(5))]);
+    let before = presence_reads(&h).await;
+
+    fill_names_step(&h.st, &h.session).await.unwrap();
+
+    assert_eq!(presence_reads(&h).await, before + 1);
+    assert_eq!(puts(&h.server).await, vec![vec![t1.clone()]]);
+    assert_eq!(seen(&h.st, t1).await, Some(("Real".into(), "ONE".into())));
+}
+
+#[tokio::test]
+async fn no_presence_is_read_when_no_request_is_about_to_go_out() {
+    // Nothing queued, and a queued ask that is already known: no request, so
+    // no local call either.
+    let h = harness().await;
+    mount_presence(&h, "MENUS", None, 1).await;
+    lobby(&h);
+    let before = presence_reads(&h).await;
+    fill_names_step(&h.st, &h.session).await.unwrap();
+    assert_eq!(presence_reads(&h).await, before);
+}
+
+#[tokio::test]
+async fn a_worker_that_finds_a_match_in_the_presence_does_not_spin_and_the_asks_go_out_after_it() {
+    // The fill is the only job (a Lobby with the user's card synced), so a
+    // step that returned without a deferral would be handed out again at
+    // once, reading the presence in a loop. The worker ends instead; once the
+    // presence says Menus again (a dodge) and the stand-down is over, the
+    // same asks go out.
+    let h = harness().await;
+    let t1 = pid(1);
+    mount_name_service(&h.server, &[(t1.clone(), "Real", "ONE")]).await;
+    // The first read says PREGAME, every later one MENUS.
+    mount_presence(&h, "PREGAME", Some(1), 1).await;
+    mount_presence(&h, "MENUS", None, 2).await;
+    lobby(&h);
+    lock(&h.st.live).queue_name_fill([ask(&t1, Some(5))]);
+    let before = presence_reads(&h).await;
+
+    tokio::time::timeout(Duration::from_secs(10), run_fill(&h))
+        .await
+        .expect("the worker ends");
+    assert_eq!(presence_reads(&h).await, before + 1, "one read, not a loop");
+    assert!(puts(&h.server).await.is_empty());
+    assert_eq!(queue_of(&h), vec![(t1.clone(), Some(5))]);
+
+    // Not before the stand-down is over …
+    assert!(lock(&h.st.live).try_start_worker().is_none());
+    lock(&h.st.live).advance_clock(Duration::from_secs(4));
+    // … and then the poll tick's wake-up starts the worker again.
+    assert!(lock(&h.st.live).names_wakeup_due());
+    run_fill(&h).await;
+    assert_eq!(puts(&h.server).await, vec![vec![t1.clone()]]);
+    assert_eq!(seen(&h.st, t1).await, Some(("Real".into(), "ONE".into())));
 }
 
 #[tokio::test]
@@ -826,7 +1226,9 @@ async fn a_failed_request_stores_no_marker_and_is_not_retried_in_a_loop() {
 
     run_fill(&h).await;
 
-    assert_eq!(puts(&h.server).await.len(), 1, "one attempt");
+    // R166: the call itself tries a 5xx twice (one pause, then one more), and
+    // that is all: the ask is not kept for the worker to loop on.
+    assert_eq!(puts(&h.server).await.len(), 2, "the call and its one retry");
     assert!(lock(&h.st.live).name_fill.is_empty(), "not kept for a loop");
     assert_eq!(
         marker(&h.st, pid(1)).await,
@@ -1263,15 +1665,10 @@ async fn top_3_teammates_a_details_sync_brings_in_are_asked_too() {
     assert!(queue_of(&h).is_empty(), "nothing to ask at the first build");
 
     // The sync's rebuild shows the teammate as Hidden Player; queued then.
-    let mut queued = false;
-    for _ in 0..500 {
-        if queue_of(&h).iter().any(|(p, _)| p == &pid(1)) {
-            queued = true;
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    assert!(queued, "the rebuilt page's unnamed teammate is queued");
+    wait_until("the rebuilt page's unnamed teammate is queued", || {
+        queue_of(&h).iter().any(|(p, _)| p == &pid(1))
+    })
+    .await;
     let queue = queue_of(&h);
     assert_eq!(
         queue.iter().filter(|(p, _)| p == &pid(1)).count(),
@@ -1597,4 +1994,84 @@ async fn the_match_end_fill_runs_before_the_backfill_goes_on() {
     let sent = puts(&h.server).await;
     assert_eq!(sent.len(), 4);
     assert!(sent.iter().all(|b| b.len() == 3));
+}
+
+#[tokio::test]
+async fn a_match_published_after_the_next_one_started_still_queues_the_match_end_fill() {
+    // R165: the poll loop clears the match-end marker the moment the next
+    // match starts (a quick queue: the end, then Agent Select within a minute
+    // or two). Riot publishes the match later, at +40 s or more: its players
+    // are still asked about, from the copy the model kept at the end.
+    let h = harness().await;
+    lobby(&h);
+    let others: Vec<String> = (1..=3).map(pid).collect();
+    let now = now_ms();
+    mount_match(
+        &h.server,
+        "m-late",
+        "competitive",
+        now - 20 * 60_000,
+        &others,
+    )
+    .await;
+
+    match_ends_now(&h);
+    // Any publish or worker job between the end and the next match sees it.
+    h.st.publish();
+    // The next match starts: `match_end_ms` is cleared.
+    lock(&h.st.live).match_end_ms = None;
+
+    store_match(&h, "m-late").await;
+    let queued: Vec<String> = queue_of(&h).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(queued, others, "the match that ended is still asked about");
+}
+
+#[tokio::test]
+async fn with_no_match_end_ever_seen_no_fill_is_queued() {
+    let h = harness().await;
+    lobby(&h);
+    let others: Vec<String> = (1..=2).map(pid).collect();
+    mount_match(&h.server, "m-x", "competitive", now_ms() - 60_000, &others).await;
+    h.st.publish();
+    store_match(&h, "m-x").await;
+    assert!(lock(&h.st.live).name_fill.is_empty());
+}
+
+#[tokio::test]
+async fn a_match_open_that_lost_queues_no_names() {
+    // R163: the page was left while the open was being built (the real
+    // `match_details::load` path); the answer is still returned, but its
+    // unnamed rows are not queued for a page nobody sees. The first open is
+    // the control: the same match, opened normally, does queue them.
+    let h = harness().await;
+    lobby(&h);
+    let others: Vec<String> = (1..=3).map(pid).collect();
+    mount_match(
+        &h.server,
+        "n-lost",
+        "competitive",
+        now_ms() - 30 * 60_000,
+        &others,
+    )
+    .await;
+    store_match(&h, "n-lost").await;
+    assert!(!h.st.take_worker_kick());
+
+    let control = crate::match_details::load(&h.st, "n-lost", &pid(1))
+        .await
+        .unwrap();
+    assert!(h.st.take_worker_kick(), "control: unnamed rows are queued");
+    crate::commands::close_match_for(&h.st);
+
+    // The DB is held, so the open takes its ticket and cannot finish; the
+    // close then voids it; only then does the read run.
+    let focus = pid(1);
+    let hold = super::ui_open::hold_db(&h.st);
+    let open = super::ui_open::parked(crate::match_details::load(&h.st, "n-lost", &focus)).await;
+    crate::commands::close_match_key_for(&h.st, Some("n-lost"));
+    drop(hold);
+    let view = open.await;
+    assert_eq!(view.unwrap(), control, "still answered");
+    assert_eq!(h.st.open_match_args(), None, "not open");
+    assert!(!h.st.take_worker_kick(), "no name ask for a closed page");
 }

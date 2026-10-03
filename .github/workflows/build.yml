@@ -27,7 +27,8 @@ jobs:
         run: npm ci
 
       - name: Install Chromium for Playwright
-        run: npx --prefix ui playwright install --with-deps chromium
+        working-directory: ui
+        run: npx playwright install --with-deps chromium
 
       - name: Build UI
         run: npm --prefix ui run build

@@ -211,6 +211,7 @@ fn card(identity: Identity, team: Team) -> BuildCardInput<'static> {
         party: None,
         encounters: None,
         stored_tier: None,
+        live_tier: None,
     }
 }
 
@@ -969,6 +970,8 @@ fn my_stats_full() -> Value {
             tier: tier as u8,
             rr: rr as u16,
         }),
+        has_mmr: true,
+        stored_tier: None,
         map_names: &names,
         now_ms: ms_at(30, 19, 0),
         utc_offset_ms: &utc,
@@ -987,7 +990,8 @@ fn my_stats_full() -> Value {
     serde_json::to_value(&stats).unwrap()
 }
 
-/// The edge case: no MMR snapshot (`tier`, `rr` and `rrToNext` null), no stored competitive update (empty
+/// The edge case: no MMR snapshot, so the R167 fallback gives the stored match's tier with `rr` and `rrToNext`
+/// null; no stored competitive update (empty
 /// `rrSeries`, null net RR and averages, no rank change), a match with no stats row (the whole stat line
 /// null, R102) on an unknown map with no agent, a draw, and nothing in the last 6h (`session` null) or enough
 /// to say anything (`insights` empty).
@@ -1034,12 +1038,20 @@ fn my_stats_edge() -> Value {
         matches: &matches,
         comp_updates: &[],
         current_rank: None,
+        // R167: no MMR snapshot and no RR row, so the rank card falls back to the newest stored ranked match's
+        // tier: a known tier with `rr` and `rrToNext` null.
+        has_mmr: false,
+        stored_tier: Some(StoredTier {
+            start_ms: ms_at(6, 22, 0),
+            tier: 14,
+        }),
         map_names: &names,
         now_ms: ms_at(40, 12, 0),
         utc_offset_ms: &utc,
     });
 
-    assert!(stats.rank.tier.is_none() && stats.rank.rr.is_none() && stats.rank.rr_to_next.is_none());
+    assert_eq!(stats.rank.tier, Some(14), "R167 fallback: the stored match's tier");
+    assert!(stats.rank.rr.is_none() && stats.rank.rr_to_next.is_none());
     assert!(stats.rank.net_rr.is_none() && stats.rank.avg_win.is_none() && stats.rank.avg_loss.is_none());
     assert!(stats.rr_series.is_empty() && stats.rank.changes.is_empty());
     assert!(stats.session.is_none() && stats.insights.is_empty());

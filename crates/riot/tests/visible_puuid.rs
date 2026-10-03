@@ -20,3 +20,14 @@ fn new_returns_none_for_an_incognito_player() {
     let hidden = VisiblePuuid::new("bbbbbbbb-0000-0000-0000-000000000001".to_string(), true);
     assert!(hidden.is_none());
 }
+
+#[test]
+fn between_matches_builds_one_for_a_non_empty_id_only() {
+    // R167: the names fill's door takes no flag; the shell builds it only
+    // between matches (`LiveModel::fill_visible`).
+    let id = "cccccccc-0000-0000-0000-000000000001".to_string();
+    let visible = VisiblePuuid::between_matches(id.clone()).unwrap();
+    assert_eq!(visible.as_str(), id);
+    assert_eq!(visible, VisiblePuuid::new(id, false).unwrap());
+    assert!(VisiblePuuid::between_matches(String::new()).is_none());
+}

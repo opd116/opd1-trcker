@@ -412,3 +412,74 @@ export async function liveChecks(page: Page, scene: string, family: string): Pro
     ...(await checkHiddenIntegrity(page, hiddenRealNames(scene))).map((p) => `9: ${p}`),
   ];
 }
+
+/**
+ * My Stats, no overlap and no crowding (spec §9.7, the page's version of check 6): inside each row-like group of the
+ * page, the direct children that are on screen do not overlap, and two on the same line keep at least 8px between them
+ * (the grids use 12px; a number that widened its column would eat into it). Text that overflows its own box is check 5.
+ */
+export async function checkMyStatsLayout(page: Page): Promise<string[]> {
+  return page.evaluate(() => {
+    const out: string[] = [];
+    const groups = [
+      ".rank .head",
+      ".rank .name",
+      ".rank .cells",
+      ".rank .cell",
+      ".rank .crow",
+      ".session .cell",
+      ".last5 .rhead",
+      ".last5 .rrow",
+      ".last5 .rmap",
+      ".last5 .rscore",
+      ".maps .thead",
+      ".maps .trow",
+      ".agents .thead",
+      ".agents .trow",
+      ".weekday .cell",
+      ".daypart .cell",
+      ".insights .irow",
+    ];
+    // Cells that sit edge to edge by design (the K / D / A grid, the session's padded cells, the columns of the two cell
+    // panels) only must not overlap: their padding keeps the content apart.
+    const butting = [".last5 .kda", ".session .sess", ".weekday .cells", ".daypart .cells"];
+    const label = (el: Element) => `${el.tagName.toLowerCase()}.${[...el.classList].filter((c) => !/^s(velte)?-/.test(c)).join(".")}`;
+    for (const sel of [...groups, ...butting]) {
+      const gap = !butting.includes(sel);
+      document.querySelectorAll(sel).forEach((group, gi) => {
+        const kids = [...group.children]
+          .map((el) => [el, el.getBoundingClientRect()] as const)
+          .filter(([, r]) => r.width > 0 && r.height > 0);
+        for (let i = 0; i < kids.length; i++) {
+          for (let j = i + 1; j < kids.length; j++) {
+            const [a, ra] = kids[i]!;
+            const [b, rb] = kids[j]!;
+            const x = Math.min(ra.right, rb.right) - Math.max(ra.left, rb.left); // > 0: they overlap horizontally
+            const y = Math.min(ra.bottom, rb.bottom) - Math.max(ra.top, rb.top);
+            if (x > 0.5 && y > 0.5) out.push(`${sel}[${gi}]: ${label(a)} overlaps ${label(b)}`);
+            else if (gap && y > 0.5 && x <= 0 && -x < 7.5) out.push(`${sel}[${gi}]: ${label(a)} is ${(-x).toFixed(1)}px from ${label(b)}`);
+          }
+        }
+      });
+    }
+    return out;
+  });
+}
+
+/** Checks 1, 3, 4, 5, 7, 8 and the My Stats layout check (9, spec §9.7). */
+export async function myStatsChecks(page: Page, family: string): Promise<string[]> {
+  const scroller = page.locator("#app .scroll");
+  const top = await scroller.evaluate((el) => el.scrollTop);
+  const out = [
+    ...(await checkAppBox(page)).map((p) => `1: ${p}`),
+    ...(await checkScrollX(page)).map((p) => `3: ${p}`),
+    ...(await checkFontFloor(page)).map((p) => `4: ${p}`),
+    ...(await checkClipping(page)).map((p) => `5: ${p}`),
+    ...(await checkNoStatusText(page)).map((p) => `7: ${p}`),
+    ...(await checkFont(page, family)).map((p) => `8: ${p}`),
+    ...(await checkMyStatsLayout(page)).map((p) => `9: ${p}`),
+  ];
+  // The decoration probe scrolls its target into view; leave the page where it was.
+  await scroller.evaluate((el, t) => (el.scrollTop = t), top);
+  return out;
+}

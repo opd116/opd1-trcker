@@ -88,14 +88,40 @@ test("the Live tab's layout and indicator did not move for the ring's room", asy
   const off = await page.locator(".tab.off").boundingBox();
   const ind = await page.locator(".tab.on .ind").boundingBox();
   // The button box is the text box plus 4px of padding a side (taken back by -4px margins), so the text of Live
-  // still starts 30px after the wordmark (the bar's gap) and My Stats 24px after the end of Live's text.
+  // still starts 30px after the wordmark (the bar's gap) and My Stats (a button too) 24px after the end of Live's text.
   const textLeft = tab!.x + 4;
   const textRight = tab!.x + tab!.width - 4;
   expect(Math.abs(textLeft - (word!.x + word!.width + 30))).toBeLessThanOrEqual(0.5);
-  expect(Math.abs(off!.x - (textRight + 24))).toBeLessThanOrEqual(0.5);
+  expect(Math.abs(off!.x + 4 - (textRight + 24))).toBeLessThanOrEqual(0.5);
   // The accent indicator spans the text, not the padding.
   expect(Math.abs(ind!.x - textLeft)).toBeLessThanOrEqual(0.5);
   expect(Math.abs(ind!.x + ind!.width - textRight)).toBeLessThanOrEqual(0.5);
+});
+
+test("the My Stats tab's ring is inset and whole too (Tab, Tab)", async ({ page }) => {
+  await openScene(page, "ingame");
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Tab");
+  const tab = page.locator(".tab.off");
+  await expect(tab).toBeFocused();
+  await expect(tab).toHaveText("My Stats");
+  expect(await focusVisible(tab)).toBe(true);
+  expect(await outline(tab)).toEqual({ style: "solid", width: "1px", offset: "-2px" });
+  expect((await tab.boundingBox())!.y).toBeLessThanOrEqual(0.5);
+  expectFullRing(await ringSides(page, tab), "My Stats tab");
+});
+
+test("My Stats rows (Recent Matches): an inset, whole ring on the first and the last row", async ({ page }) => {
+  await openScene(page, "mystats");
+  const rows = page.locator(".mystats .last5 .rrow");
+  await expect(rows).toHaveCount(5);
+  for (const [name, row] of [["first", rows.first()], ["last", rows.last()]] as const) {
+    await row.scrollIntoViewIfNeeded();
+    await row.focus();
+    expect(await focusVisible(row), name).toBe(true);
+    expect((await outline(row)).offset, name).toBe("-2px");
+    expectFullRing(await ringSides(page, row), `my stats ${name} row`);
+  }
 });
 
 test("a mouse click leaves no ring on the tab (keyboard only)", async ({ page }) => {

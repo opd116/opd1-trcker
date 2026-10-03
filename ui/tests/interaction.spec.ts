@@ -64,12 +64,15 @@ test("clicking a skeleton card leaves the route unchanged", async ({ page }) => 
   await onLive(page);
 });
 
-test("clicking the My Stats tab leaves the route unchanged", async ({ page }) => {
+test("clicking the My Stats tab opens My Stats (it is a tab like Live, not inert any more)", async ({ page }) => {
   await openScene(page, "ingame");
   const tab = page.locator("header.bar .tabs").getByText("My Stats", { exact: true });
-  expect(await cursor(tab)).toBe("default");
+  expect(await cursor(tab)).toBe("pointer");
   await tab.click();
-  await onLive(page);
+  await waitPage(page, "loaded");
+  await expect(page.locator(".live")).toHaveCount(0);
+  await expect(page.locator(".mystats")).toHaveCount(1);
+  expect(await fromApp<unknown>(page, `import("/src/lib/router.svelte.ts").then(({ router }) => JSON.parse(JSON.stringify(router.route)))`)).toEqual({ name: "mystats" });
 });
 
 test("a click while a tip is open hides it", async ({ page }) => {
@@ -160,3 +163,52 @@ test("Details: Enter on a focused recent row opens its match (keyboard)", async 
   await waitPage(page, "loaded");
   expect(await routeOf(page)).toMatchObject({ name: "match", from: "recent" });
 });
+
+// ── My Stats (spec §9.1, §9.4, §9.6) ─────────────────────────────────────────────────────────────────────────────────────
+test("My Stats: Recent Matches rows change background on hover with a pointer cursor", async ({ page }) => {
+  await openScene(page, "mystats");
+  const row = page.locator(".mystats .last5 .rrow").first();
+  await row.scrollIntoViewIfNeeded();
+  await page.mouse.move(5, 5);
+  expect(await bg(row), "at rest").toBe(TRANSPARENT);
+  expect(await hoverBg(page, row), "hovered").toBe(await varRgb(page, "--hover-row"));
+  expect(await cursor(row)).toBe("pointer");
+});
+
+test("My Stats: the tables, cells, chart, insights and the rank card are not clickable and do not change on hover", async ({ page }) => {
+  await openScene(page, "mystats");
+  const before = await routeOf(page);
+  for (const [what, l] of [
+    ["Maps row", page.locator(".mystats .maps .trow").first()],
+    ["Agents row", page.locator(".mystats .agents .trow").first()],
+    ["insight row", page.locator(".mystats .insights .irow").first()],
+    ["weekday cell", page.locator(".mystats .weekday .cell").first()],
+    ["rank card", page.locator(".mystats .rank .panel")],
+    ["session", page.locator(".mystats .session .panel")],
+  ] as const) {
+    await l.scrollIntoViewIfNeeded();
+    expect(await cursor(l), `${what} cursor`).not.toBe("pointer");
+    await page.mouse.move(5, 5);
+    const rest = await bg(l);
+    expect(await hoverBg(page, l), `${what} hover`).toBe(rest);
+    await l.click({ position: { x: 4, y: 4 } });
+    expect(await routeOf(page), what).toEqual(before);
+  }
+  const chart = page.locator(".mystats .rrchart .hit").nth(10);
+  await chart.click();
+  expect(await routeOf(page), "chart").toEqual(before);
+});
+
+test("My Stats: without the user's own id (no live card) the Recent Matches rows are plain: no pointer, no click", async ({ page }) => {
+  await openScene(page, "mystats");
+  await page.evaluate(
+    `import("/src/lib/stores.ts").then(({ applyLive }) => applyLive({ stage: "closed", mapId: null, players: [] }))`,
+  );
+  const row = page.locator(".mystats .last5 .rrow").first();
+  await expect(row).not.toHaveAttribute("role", "button");
+  expect(await cursor(row)).toBe("default");
+  const before = await routeOf(page);
+  await row.click({ position: { x: 20, y: 20 } });
+  expect(await routeOf(page)).toEqual(before);
+});
+

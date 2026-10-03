@@ -129,18 +129,20 @@ export async function openScene(
   else await page.clock.setFixedTime(NOW);
   await page.goto(sceneUrl(scene, params));
   await page.waitForFunction(() => document.documentElement.dataset.feed === "demo-feed");
-  const route = params.route ?? (scene.startsWith("details") ? "details" : scene.startsWith("match") ? "match" : "live");
-  if (route === "details" || route === "match") await waitPage(page, scene.endsWith("-loading") ? "loading" : "loaded");
+  const route =
+    params.route ??
+    (scene.startsWith("details") ? "details" : scene.startsWith("match") ? "match" : scene.startsWith("mystats") ? "mystats" : "live");
+  if (route === "details" || route === "match" || route === "mystats") await waitPage(page, scene.endsWith("-loading") ? "loading" : "loaded");
   await settle(page);
   if (opts.clock === "manual") await pauseHere(page);
 }
 
 /**
- * Details and Match fetch their data after the route opens: wait until the page shows it (`aria-busy="false"`), or
- * for a `-loading` scene until its skeleton is up (`aria-busy="true"`, the answer never comes).
+ * Details, Match and My Stats get their data after the route opens: wait until the page shows it (`aria-busy="false"`),
+ * or for a `-loading` scene until its skeleton is up (`aria-busy="true"`, the answer never comes).
  */
 export async function waitPage(page: Page, state: "loaded" | "loading"): Promise<void> {
-  await page.locator(`#app :is(.details, .match)[aria-busy="${state === "loading"}"]`).waitFor();
+  await page.locator(`#app :is(.details, .match, .mystats)[aria-busy="${state === "loading"}"]`).waitFor();
 }
 
 /**

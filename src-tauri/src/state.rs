@@ -497,6 +497,12 @@ pub struct LiveModel {
     /// B1: the own competitive-updates backfill run in progress, if any.
     /// Cleared like [`Self::backfill`] (account switch, session drop).
     pub comp_backfill: Option<CompBackfillRun>,
+    /// Review round 1: the user's newest competitive updates as the last
+    /// `comp_updates(0..N)` of their own sync stored them (`(puuid, [(match
+    /// id, start ms)])`, newest first): the competitive-updates backfill skips
+    /// its first page when they hold its anchor. Read only for the account it
+    /// names.
+    pub own_comp_head: Option<(String, Vec<(String, i64)>)>,
     /// R150: the asks waiting for the names fill (`Job::FillNames`), oldest
     /// first, one per puuid. In memory only: a restart loses them, and the
     /// next match end, Details open or backfill asks again.
@@ -574,6 +580,7 @@ impl LiveModel {
             next_worker_id: 0,
             backfill: None,
             comp_backfill: None,
+            own_comp_head: None,
             name_fill: VecDeque::new(),
             name_fill_low: HashSet::new(),
             match_end_ms: None,

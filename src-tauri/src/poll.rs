@@ -2265,7 +2265,7 @@ mod tests {
         // B1: "after each match end like the backfill": In Game -> Menus.
         let h = harness().await;
         mount_feed(&h.server, Feed::new(1)).await;
-        mount_comp_feed(&h.server, 30, None).await;
+        mount_comp_feed(&h.server, 7, None).await;
         let presence = switchable_presence(&h, "INGAME", "unrated").await;
         let mut poller = Poller::new(h.st.clone());
         poller.stage = Stage::Ingame;
@@ -2301,7 +2301,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_paused_competitive_updates_run_gets_a_worker_at_the_tick_once_its_hold_is_over() {
+    async fn a_paused_competitive_updates_run_gets_a_worker_at_the_tick_once_its_pause_is_over() {
         let h = harness().await;
         mount_comp_feed(&h.server, 30, None).await;
         let mut poller = Poller::new(h.st.clone());
@@ -2310,14 +2310,38 @@ mod tests {
         synced_lobby(&h);
         crate::sync::start_comp_backfill_run(&h.st).await;
         lock(&h.st.live).pause_comp_backfill(Duration::from_secs(10));
+        let comp_pages = || async {
+            requests(&h.server)
+                .await
+                .iter()
+                .filter(|r| r.url.path() == format!("/mmr/v1/players/{ME}/competitiveupdates"))
+                .count()
+        };
 
         // Inside the pause: the tick starts nothing.
         poller.connected_tick(&h.session).await.unwrap();
         assert!(!lock(&h.st.live).worker_running());
-        assert_eq!(stored_comp_anchor(&h.st).await, None);
+        assert_eq!(comp_pages().await, 0);
 
-        // The pause is over: the tick wakes a worker, which pages the run.
+        // The pause is over: the tick wakes a worker, which asks for one page.
         lock(&h.st.live).advance_clock(Duration::from_secs(11));
+        poller.connected_tick(&h.session).await.unwrap();
+        for _ in 0..250 {
+            if comp_pages().await >= 1 && !lock(&h.st.live).worker_running() {
+                break;
+            }
+            sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(comp_pages().await, 1, "one page a job");
+        assert_eq!(stored_comp_anchor(&h.st).await, None, "the run is not over");
+
+        // The gap between pages: a tick inside it starts nothing, the first
+        // one after it wakes the worker for the last page.
+        lock(&h.st.live).advance_clock(Duration::from_millis(500));
+        poller.connected_tick(&h.session).await.unwrap();
+        assert!(!lock(&h.st.live).worker_running());
+        assert_eq!(comp_pages().await, 1);
+        lock(&h.st.live).advance_clock(Duration::from_secs(3));
         poller.connected_tick(&h.session).await.unwrap();
         for _ in 0..250 {
             if stored_comp_anchor(&h.st).await.is_some() {
@@ -2325,6 +2349,7 @@ mod tests {
             }
             sleep(Duration::from_millis(20)).await;
         }
+        assert_eq!(comp_pages().await, 2);
         assert_eq!(
             stored_comp_anchor(&h.st).await.map(|a| a.0),
             Some(row_id(0))

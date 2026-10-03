@@ -138,6 +138,13 @@ pub const COMP_BACKFILL_PAGE: u32 = 20;
 /// sooner).
 pub const COMP_BACKFILL_MAX_PAGES: u32 = 10;
 
+/// Review round 1: the least time between two pages of one run (the job
+/// never sleeps: the run is not ready until then, `LiveModel::pause_comp_backfill`,
+/// and the poll tick wakes a worker). A first run would otherwise take 10 of
+/// the mmr bucket's 24 burst tokens back to back, in front of a roster's rank
+/// phase if a match starts soon.
+pub const COMP_BACKFILL_PAGE_GAP: Duration = Duration::from_millis(2_500);
+
 /// The `app_state` key prefix of the competitive-updates backfill anchors.
 const COMP_ANCHOR_KEY_PREFIX: &str = "self_comp_anchor";
 
@@ -377,11 +384,21 @@ async fn comp_updates_call(
         RankCall::Ok(resp) => {
             let rows = comp_update_rows_from_response(&resp);
             let (p, r) = (puuid.to_string(), rows.clone());
-            st.db(move |repo| {
-                repo.upsert_comp_updates(&p, &r)?;
-                repo.index_history(&p, &comp_history_entries(&r))
-            })
-            .await;
+            let stored = st
+                .db(move |repo| {
+                    repo.upsert_comp_updates(&p, &r)?;
+                    repo.index_history(&p, &comp_history_entries(&r))
+                })
+                .await;
+            // The user's newest rows, now stored: the competitive-updates
+            // backfill's first page is skipped when they hold its anchor.
+            if stored.is_some() && puuid == session.self_puuid() {
+                let head = rows
+                    .iter()
+                    .map(|r| (r.match_id.clone(), r.start_ms))
+                    .collect();
+                lock(&st.live).own_comp_head = Some((puuid.to_string(), head));
+            }
             Ok(RankCall::Ok(rows))
         }
         RankCall::Held(left) => Ok(RankCall::Held(left)),
@@ -1186,7 +1203,10 @@ fn end_comp_run(st: &AppState, me: &str) {
 /// - it is short or empty (the history ended: Riot has no `Total` here);
 /// - it holds the anchor's match, or a row older than the anchor's start (the
 ///   anchor row may have left the history): everything newer is in;
-/// - its oldest row is before the current act's start (`act_start_ms`);
+/// - it holds a row older than the current act's start minus
+///   [`ACT_EDGE_MS`](opd1_core::mystats::ACT_EDGE_MS): My Stats decides act
+///   membership by each row's Riot season and accepts rows up to a day before
+///   valorant-api's start (the rollout's hours), so the run reaches that far;
 /// - it is the [`COMP_BACKFILL_MAX_PAGES`]-th.
 pub fn comp_backfill_done(
     rows: &[CompUpdateRow],
@@ -1199,7 +1219,10 @@ pub fn comp_backfill_done(
             rows.iter()
                 .any(|r| r.match_id == *id || r.start_ms < *start)
         })
-        || act_start_ms.is_some_and(|act| rows.iter().any(|r| r.start_ms < act))
+        || act_start_ms.is_some_and(|act| {
+            let edge = act.saturating_sub(opd1_core::mystats::ACT_EDGE_MS);
+            rows.iter().any(|r| r.start_ms < edge)
+        })
         || pages >= COMP_BACKFILL_MAX_PAGES
 }
 
@@ -1235,9 +1258,35 @@ pub async fn comp_backfill_step(
             return Ok(());
         }
     }
-    let Some(index) = with_comp_run(st, me, |run| run.next_index) else {
+    let Some((index, anchor)) = with_comp_run(st, me, |run| (run.next_index, run.anchor.clone()))
+    else {
         return Ok(());
     };
+    // The first page is what the user's own rank sync just fetched when its
+    // newest rows (`comp_updates(0..5)`, stored by then) hold the anchor's
+    // match: everything newer than the anchor is among them, so the call would
+    // bring nothing new. The run ends with its anchor at the newest of those
+    // rows; a match that ended since is read by the next run, which pages back
+    // from the newest to that anchor.
+    if index == 0 {
+        let head_newest = anchor.as_ref().and_then(|(id, _)| {
+            let live = lock(&st.live);
+            live.own_comp_head
+                .as_ref()
+                .filter(|(owner, head)| {
+                    owner == me && head.iter().any(|(head_id, _)| head_id == id)
+                })
+                .and_then(|(_, head)| head.first().cloned())
+        });
+        if let Some(newest) = head_newest {
+            log::debug!(
+                "own competitive updates: page 0 skipped, the rank sync's rows hold the anchor"
+            );
+            with_comp_run(st, me, |run| run.newest = Some(newest));
+            finish_comp_backfill(st, me).await;
+            return Ok(());
+        }
+    }
     let answer = session
         .comp_updates(me, Some(index), Some(index + COMP_BACKFILL_PAGE))
         .await;
@@ -1300,8 +1349,13 @@ pub async fn comp_backfill_step(
     if !rows.is_empty() {
         crate::my_stats::notify(st);
     }
-    if applied == Some(true) && done {
-        finish_comp_backfill(st, me).await;
+    if applied == Some(true) {
+        if done {
+            finish_comp_backfill(st, me).await;
+        } else {
+            // The next page waits (the worker does not): see the gap's doc.
+            lock(&st.live).pause_comp_backfill(COMP_BACKFILL_PAGE_GAP);
+        }
     }
     Ok(())
 }
@@ -2384,18 +2438,20 @@ mod tests {
     }
 
     #[test]
-    fn comp_backfill_done_when_a_row_is_before_the_act_start() {
+    fn comp_backfill_done_only_past_the_act_edge() {
         let page = comp_rows(0, 20);
-        // The act starts between rows 7 and 8.
-        let act_start = BASE - 7 * 60_000 - 30_000;
+        let edge = opd1_core::mystats::ACT_EDGE_MS;
+        // The act starts a day (My Stats' edge) after the point between rows 7
+        // and 8: rows 8 and older are before `start - edge`.
+        let act_start = BASE - 7 * 60_000 - 30_000 + edge;
         assert!(comp_backfill_done(&page, None, Some(act_start), 1));
+        // Rows before the act's start but within the edge still count for My
+        // Stats (Riot's rollout is hours off valorant-api's date): keep paging.
+        let act_start = BASE - 7 * 60_000 - 30_000;
+        assert!(!comp_backfill_done(&page, None, Some(act_start), 1));
         // Every row of the page is inside the act: keep paging.
-        assert!(!comp_backfill_done(
-            &page,
-            None,
-            Some(BASE - 25 * 60_000),
-            1
-        ));
+        let act_start = BASE - 25 * 60_000;
+        assert!(!comp_backfill_done(&page, None, Some(act_start), 1));
         // No act known: only the other bounds apply.
         assert!(!comp_backfill_done(&page, None, None, 1));
     }

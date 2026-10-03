@@ -1,6 +1,6 @@
 # Decisions
 
-Every ruling made while building OPD1 TRCKER, in number order (R1 to R168). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
+Every ruling made while building OPD1 TRCKER, in number order (R1 to R174). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.
 - Rulings come from the working ledger (R1 to R73 and R87 to R164) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
@@ -509,7 +509,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R168). Each
 - **What:** The current-act backfill (My Stats undercounts because sync keeps only the last 5/20 competitive updates) is deferred to the My Stats UI phase.
 - **Why:** My Stats is not in the 2026-09-29 build scope.
 - **Cost:** None now, because My Stats is not shown yet.
-- **Status:** active (deferred to the My Stats phase)
+- **Status:** done by R173 (2026-10-03)
 
 ### R73 — Task 9a fix round
 
@@ -1181,6 +1181,48 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R168). Each
 - **What:** User decision 2026-10-03. Asked for a plan of fixes, development and improvements, then a new version to use. Answers: the new version is fixes plus the My Stats page (v0.3.0); the 2026-10-01 build (`44ae56d`) was tested and works; the release goes to `main` as before. The plan: robustness fixes (poll-loop supervisor, poison-tolerant locks in `opd1-riot`, Player Details retry after a failed match-details download, the names fill re-checks presence before it sends), the own competitive-updates backfill (R72), a `"mystats"` push event, the My Stats page, a Playwright CI job (R149's parked item), then the v0.3.0 release.
 - **Why:** The user's words (`docs/requirements-raw.md`, 2026-10-03).
 - **Cost:** None recorded.
+- **Status:** active
+
+### R169 — The poll loop restarts after a panic
+
+- **What:** Claude's call (v0.3.0 plan, A1). `poll::start` runs the poller under a generic supervisor (`supervise(make, pacing, on_panic)`, `tokio::spawn`). A panic is logged at error level, the worker claim is revoked, the backfill runs and the session are dropped, and a fresh `Poller` starts after 1 s, then 5 s, then every 30 s while it keeps panicking; a poller that ran at least 60 s starts the backoff over. A poller that returns normally is not restarted.
+- **Why:** The backend sweep of 2026-10-03: the loop was spawned once with nothing watching it, so one panic in the loop (or in core/riot code it calls directly) stopped polling for the session while the UI kept showing old data.
+- **Cost:** A crash loop costs one reconnect every 30 s at most.
+- **Status:** active
+
+### R170 — `opd1-riot` takes its locks poison-tolerantly
+
+- **What:** Claude's call (A2). Every std `Mutex`/`RwLock` in `opd1-riot` (session, throttle, assets, raw capture) is taken through `crates/riot/src/locks.rs` (`locked`, `read_lock`, `write_lock`: `unwrap_or_else(PoisonError::into_inner)`), as `src-tauri` already did (`state.rs` `lock()`).
+- **Why:** With `.lock().unwrap()`, one panic while a session or throttle lock was held made every later Riot call panic, which reached the poll loop.
+- **Cost:** None.
+- **Status:** active
+
+### R171 — Player Details retries after a failed match-details download
+
+- **What:** Claude's call (A3, the leftover of R165 finding 8). `sync_details` reads `DetailsFetch.incomplete`: a match-details download that failed for real makes the Details sync `Failed`, so the page gives its 120 s claim back and the existing retry runs. A hold stays `Held`; a failure outranks a hold. `fetch_missing_details_checked` is gone.
+- **Why:** The helper dropped the flag, so a failed download reported `Done` and the page kept its claim with matches missing.
+- **Cost:** None beyond the existing retry's requests.
+- **Status:** active
+
+### R172 — The names fill re-reads the presence before it sends; finding 9 closed
+
+- **What:** Claude's call (A4, R165 finding 9). Right before a names fill request goes out, the user's own local presence is read again (one local call, only when a request is about to be sent; the lookup is shared with the poll loop as `roster::own_valorant_private`). If it says Agent Select, In Game or a free-for-all match, nothing is sent: the asks stay queued as high priority, nobody is marked asked, and the fill stands down for 3 s through the names deferral so the worker does not spin. A failed presence read keeps the old behaviour (send). The other half of finding 9 (skip a puuid hidden on the current Lobby roster) is closed with no change: asking a party member still hidden after the match is R153, the user's decision, and the Lobby is between matches.
+- **Why:** The fill could go out in the ~2 s between a match starting and the poll loop seeing it.
+- **Cost:** One local call per fill request.
+- **Status:** active (closes R165's open finding 9)
+
+### R173 — The user's own competitive updates are backfilled for the act
+
+- **What:** Claude's call (B1), building what R72 deferred. A lowest-priority worker job for the user's own account pages `competitiveupdates` (`queue=competitive`, 20 per page, newest first) and stores every row of each page in `comp_updates` (no schema change; the primary key dedups). A run stops at the first of: a page with a row older than the current act's start (R162), a page holding the anchor's match id or a row older than the anchor's start, a short or empty page (the endpoint has no total), or 10 pages (Claude's lightness bound). The anchor is `self_comp_anchor:<puuid>` in `app_state`, the match backfill's JSON shape, written only by a run that finished. It is triggered with the match backfill on connect and after each match end (`sync::start_own_backfills`), runs one page per worker turn, never during Agent Select, In Game or a free-for-all match, and pauses on an `mmr` hold (`Held`, nothing sent); a real failure, a sent 429 included (R160), ends the run until the next trigger.
+- **Why:** My Stats' RR chart, net RR and rank changes only saw the last 5/20 competitive updates the live sync fetches.
+- **Cost:** At most 10 `mmr`-family requests on the first run of an act, usually one page afterwards, all behind the live cards.
+- **Status:** active (R72 done)
+
+### R174 — A `"mystats"` event pushes My Stats when the user's data changes
+
+- **What:** Claude's call (B2). Rust emits `"mystats"` (payload: the `MyStats` the `my_stats` command returns, never null) after the user's own rank or matches step, a match-backfill pass that stored matches, a competitive-updates page that stored rows, the user's own Details sync, an act change, and when the asset tables load. Recomputes are coalesced to one task at a time, run off the presence tick, and are emitted only when the serialized bytes differ from the last emission. The UI attaches the listener before its first `my_stats` call. `self_puuid` is read from the DB at startup (`build_state`), so My Stats is available while VALORANT is closed. The current session expires after 6 h by time alone and refreshes at the next data change.
+- **Why:** Rust pushes, the UI never polls (CLAUDE.md stack rule).
+- **Cost:** One DB-only recompute per trigger, a few per match.
 - **Status:** active
 
 ## User decisions index

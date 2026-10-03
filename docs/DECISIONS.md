@@ -1,6 +1,6 @@
 # Decisions
 
-Every ruling made while building OPD1 TRCKER, in number order (R1 to R167). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
+Every ruling made while building OPD1 TRCKER, in number order (R1 to R168). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.
 - Rulings come from the working ledger (R1 to R73 and R87 to R164) and from Phase 2 planning (R74 to R86, the gap-fills of `docs/design-spec.md`, which carry the tags [C] and [bound] there).
@@ -621,7 +621,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R167). Each
 - **What:** Fold the `comp_matches` per-row-subquery fix into Task 15 (LIMIT the player's rows first, then join). Re-defer the `current_act()` rollover explicitly (user 2026-09-29: act-start handling later). `current_act()` picks the act by valorant-api date, so around an act change the live card can show `—` for rank and Win% until Riot rolls over.
 - **Why:** Task 15 rewrites that query anyway, and the user said act-start handling comes later.
 - **Cost:** A few hours of `—` around an act change.
-- **Status:** active
+- **Status:** active for the `comp_matches` fix; the rollover half is superseded by R162 (the current act comes from Riot's content-service)
 
 ### R89 — Migration 2, migration 1 frozen, no self-heal
 
@@ -1175,6 +1175,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R167). Each
 - **Why:** The first (A m4) and second (A concern) left a hidden player's name missing on screen, or never asked for, after a stored match; the third (B minor) left My Stats' rank card blank for a user whose `mmr` call failed while the live card showed the rank; the fourth (A m2) was a false claim in the code: `new(_, false)` on the fill's door said "visible" for players who were hidden.
 - **Cost:** One DB read per roster player named by a fill, and one more publish per such fill. Queued asks: the low ones are capped at 100 and the whole queue at 300; the fill stays one request per 100. A dropped fill step puts its asks back as high priority. My Stats' rank card shows `rr: null` for the tier-only fallback; **the My Stats screen is not built yet, so its UI must render `—` for a null RR (the live card already does)**.
 - **Status:** active (amends R153's "shown at the next sighting" and R154, which now also covers My Stats; supersedes the `(puuid, false)` wording of R16's later notes)
+
+### R168 — v0.3.0 scope: fixes plus the My Stats page, released on `main`
+
+- **What:** User decision 2026-10-03. Asked for a plan of fixes, development and improvements, then a new version to use. Answers: the new version is fixes plus the My Stats page (v0.3.0); the 2026-10-01 build (`44ae56d`) was tested and works; the release goes to `main` as before. The plan: robustness fixes (poll-loop supervisor, poison-tolerant locks in `opd1-riot`, Player Details retry after a failed match-details download, the names fill re-checks presence before it sends), the own competitive-updates backfill (R72), a `"mystats"` push event, the My Stats page, a Playwright CI job (R149's parked item), then the v0.3.0 release.
+- **Why:** The user's words (`docs/requirements-raw.md`, 2026-10-03).
+- **Cost:** None recorded.
+- **Status:** active
 
 ## User decisions index
 

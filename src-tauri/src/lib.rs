@@ -8,6 +8,7 @@
 //! - `store` — DB helpers over `opd1_core::db::repo::Repo`
 //! - `details` — Player Details assembly
 //! - `match_details` — Match Details scoreboard (DB read + fetch-once)
+//! - `my_stats` — My Stats' DB-only computation and its `"mystats"` push
 //! - `imgproto` — the `img` URI scheme
 //! - `commands` — IPC commands
 
@@ -16,6 +17,7 @@ mod details;
 mod imgproto;
 mod logbuf;
 mod match_details;
+mod my_stats;
 #[cfg(test)]
 mod pipeline_tests;
 mod poll;
@@ -25,7 +27,7 @@ mod state;
 mod store;
 mod sync;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tauri::Manager;
@@ -34,7 +36,7 @@ use opd1_core::db::open_db;
 use opd1_core::db::repo::Repo;
 use opd1_riot::assets::AssetCache;
 
-use crate::state::{lock, AppState};
+use crate::state::{lock, AppState, EventSink};
 use crate::store::{load_player_db, SELF_PUUID_KEY};
 
 /// Opens the DB at `app_data_dir/data/opd1.sqlite` (the installer keeps
@@ -43,6 +45,18 @@ use crate::store::{load_player_db, SELF_PUUID_KEY};
 fn init_state(app: &tauri::App) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
     let data_dir = app.path().app_data_dir()?;
     let cache_dir = app.path().app_cache_dir()?;
+    build_state(Box::new(app.handle().clone()), &data_dir, &cache_dir)
+}
+
+/// [`init_state`] without the Tauri app: where the events go and the two
+/// directories are arguments (the startup tests build a state from a DB left
+/// by an earlier run). The user's puuid is read back from the DB here, so a
+/// start with VALORANT closed already knows whose card and stats to show.
+fn build_state(
+    sink: Box<dyn EventSink>,
+    data_dir: &Path,
+    cache_dir: &Path,
+) -> Result<Arc<AppState>, Box<dyn std::error::Error>> {
     let db_dir: PathBuf = data_dir.join("data");
     std::fs::create_dir_all(&db_dir)?;
     let conn = open_db(&db_dir.join("opd1.sqlite"))?;
@@ -51,7 +65,7 @@ fn init_state(app: &tauri::App) -> Result<Arc<AppState>, Box<dyn std::error::Err
 
     let assets = AssetCache::new(cache_dir.join("assets"));
     let st = Arc::new(AppState::new(
-        Box::new(app.handle().clone()),
+        sink,
         repo,
         assets,
         data_dir.join("debug"),
@@ -116,6 +130,9 @@ pub fn run() {
             tauri::async_runtime::spawn(async move {
                 if tables_st.ensure_tables(false).await.is_ok() {
                     tables_st.publish();
+                    // B2: the acts are known now: My Stats, if the DB has the
+                    // user's puuid, becomes computable (once, at startup).
+                    my_stats::notify(&tables_st);
                 }
             });
             poll::start(st);
@@ -123,4 +140,90 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+    use crate::pipeline_tests::{ACT, ME};
+    use crate::state::{now_ms, EventSink};
+    use crate::store::{save_player, PlayerUpdate};
+    use opd1_core::model::{LiveState, MatchDetailsView, PlayerDetails};
+    use opd1_core::stats::Act;
+
+    struct Quiet;
+
+    impl EventSink for Quiet {
+        fn live(&self, _: &LiveState) {}
+        fn details(&self, _: &PlayerDetails) {}
+        fn match_view(&self, _: &MatchDetailsView) {}
+    }
+
+    /// A data dir as an earlier run left it: the DB with the user's puuid and
+    /// their `players` row.
+    fn earlier_run(dir: &Path, puuid: Option<&str>) {
+        let db_dir = dir.join("data");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let repo = Repo::new(open_db(&db_dir.join("opd1.sqlite")).unwrap());
+        if let Some(puuid) = puuid {
+            repo.set_state(SELF_PUUID_KEY, puuid).unwrap();
+            save_player(
+                repo.conn(),
+                &PlayerUpdate {
+                    puuid: puuid.into(),
+                    name: Some(("Me".into(), "OPD1".into())),
+                    account_level: 87,
+                    card_id: "card".into(),
+                },
+                now_ms(),
+            )
+            .unwrap();
+        }
+    }
+
+    fn the_act() -> Vec<Act> {
+        vec![Act {
+            id: ACT.into(),
+            name: "ACT V".into(),
+            episode_name: "V26".into(),
+            start_ms: now_ms() - 30 * 86_400_000,
+            end_ms: now_ms() + 30 * 86_400_000,
+        }]
+    }
+
+    #[tokio::test]
+    async fn a_start_with_valorant_closed_knows_the_user_from_the_db() {
+        // The Closed stage shows the user's own card and My Stats is
+        // computable, with no Riot client around: the puuid comes back from
+        // the DB at startup.
+        let dir = tempfile::tempdir().unwrap();
+        earlier_run(dir.path(), Some(ME));
+
+        let st = build_state(Box::new(Quiet), dir.path(), &dir.path().join("cache")).unwrap();
+
+        assert_eq!(lock(&st.live).self_puuid.as_deref(), Some(ME));
+        let live = st.live_state();
+        assert_eq!(live.players.len(), 1, "the user's own card, from the DB");
+        assert_eq!(live.players[0].puuid, ME);
+        // The act comes from the asset tables (loaded after startup).
+        assert!(
+            my_stats::compute(&st).await.unwrap().is_none(),
+            "no act yet"
+        );
+        st.set_acts_for_test(the_act());
+        assert!(my_stats::compute(&st).await.unwrap().is_some());
+    }
+
+    #[tokio::test]
+    async fn a_first_start_has_no_user_and_no_my_stats() {
+        let dir = tempfile::tempdir().unwrap();
+        earlier_run(dir.path(), None);
+
+        let st = build_state(Box::new(Quiet), dir.path(), &dir.path().join("cache")).unwrap();
+        st.set_acts_for_test(the_act());
+
+        assert_eq!(lock(&st.live).self_puuid, None);
+        assert!(st.live_state().players.is_empty());
+        assert!(my_stats::compute(&st).await.unwrap().is_none());
+    }
 }

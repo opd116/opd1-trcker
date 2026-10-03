@@ -1258,6 +1258,10 @@ pub async fn comp_backfill_step(
         run.resume_at = None;
         true
     });
+    // B2: rows were stored; the chart and the rank changes read them.
+    if !rows.is_empty() {
+        crate::my_stats::notify(st);
+    }
     if applied == Some(true) && done {
         finish_comp_backfill(st, me).await;
     }
@@ -1378,6 +1382,22 @@ async fn record_details_failure(st: &Arc<AppState>, me: &str, id: &str) -> Optio
 /// `Err(Gone)`: the client went away, or `session` belongs to an account
 /// that is no longer the current one.
 pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Result<(), Gone> {
+    let mut stored = false;
+    let result = backfill_pass(st, session, &mut stored).await;
+    // B2: a pass that stored matches, however it ended (a failure or a yield
+    // included), changed what My Stats can show.
+    if stored {
+        crate::my_stats::notify(st);
+    }
+    result
+}
+
+/// [`backfill_step`]'s work; `stored` says whether it stored a match.
+async fn backfill_pass(
+    st: &Arc<AppState>,
+    session: &Arc<RiotSession>,
+    stored: &mut bool,
+) -> Result<(), Gone> {
     let me = session.self_puuid();
     {
         let live = lock(&st.live);
@@ -1445,6 +1465,7 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
                     end_run(st, me);
                     return Ok(());
                 };
+                *stored = true;
                 with_run(st, me, |run| run.add_participants(start_ms, others));
                 pop(st);
             }
@@ -1576,6 +1597,8 @@ pub(crate) async fn rank_step(
         }
     })
     .await;
+    // B2: the user's own rank card, RR rows and snapshot may have changed.
+    crate::my_stats::notify_if_own(st, session.self_puuid(), puuid);
     log::debug!("rank synced {}", short(puuid));
     Ok(outcome)
 }
@@ -1608,6 +1631,8 @@ pub(crate) async fn matches_step(
         }
     })
     .await;
+    // B2: …and so may the user's own matches.
+    crate::my_stats::notify_if_own(st, session.self_puuid(), puuid);
     log::debug!("synced {}", short(puuid));
     Ok(outcome)
 }

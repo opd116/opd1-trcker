@@ -22,7 +22,6 @@
 //! - `dump_raw()` — redacted raw responses (the last 2xx and the last error
 //!   of each endpoint) and the log to `app_data/debug/`.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -36,7 +35,7 @@ use opd1_riot::RiotSession;
 
 use crate::logbuf::short;
 use crate::rank_retry::HOLD_SLACK;
-use crate::state::{lock, now_ms, AppState};
+use crate::state::AppState;
 use crate::sync::DetailsSync;
 
 type AppStateRef<'a> = State<'a, Arc<AppState>>;
@@ -171,8 +170,10 @@ pub(crate) async fn details_sync_job(
             st.release_details_sync(&puuid);
             return;
         };
-        // The card on screen may have gained matches too.
+        // The card on screen may have gained matches too — and, for the
+        // user's own page, My Stats (B2).
         st.reload_slot(&puuid).await;
+        crate::my_stats::notify_if_own(&st, session.self_puuid(), &puuid);
         crate::details::refresh(&st, &puuid).await;
         // R153: the sync may have stored matches that put new
         // teammates into the Top 3; the ones now shown unnamed are
@@ -318,42 +319,12 @@ pub async fn my_stats(state: AppStateRef<'_>) -> Result<Option<MyStats>, String>
 /// uses too — a no-op once the asset tables are loaded; at startup it
 /// waits for the first load instead of racing it (the acts and map names
 /// come from those tables). `None` until the user's puuid is known (first
-/// run) or while no act is current.
+/// run) or while no act is current. The computation itself is
+/// [`crate::my_stats::compute`], which the `"mystats"` push shares (B2).
 pub async fn build_my_stats(st: &Arc<AppState>) -> Result<Option<MyStats>, String> {
     // Tables unavailable just means no act yet (-> `None` below).
     let _ = st.ensure_tables(false).await;
-    let Some(me) = lock(&st.live).self_puuid.clone() else {
-        return Ok(None);
-    };
-    let Some(act) = st.current_act() else {
-        return Ok(None);
-    };
-    let map_names: HashMap<String, String> = st
-        .assets
-        .meta()
-        .map(|meta| meta.maps.into_iter().map(|(id, m)| (id, m.name)).collect())
-        .unwrap_or_default();
-    let assets = st.assets.clone();
-    let now = now_ms();
-    st.db(move |repo| {
-        let lookup = |path: &str| {
-            crate::roster::map_uuid(path, |p| assets.map_uuid_for_path(p).ok().flatten())
-        };
-        crate::store::load_my_stats(repo, &me, &act, now, &lookup, &map_names, &local_offset_ms)
-    })
-    .await
-    .map(Some)
-    .ok_or_else(|| "database unavailable".to_string())
-}
-
-/// The machine's UTC offset (ms) at `utc_ms` — per instant, so a match
-/// on the other side of a DST change lands in the right hour.
-fn local_offset_ms(utc_ms: i64) -> i64 {
-    use chrono::{Local, Offset, TimeZone};
-    Local
-        .timestamp_millis_opt(utc_ms)
-        .single()
-        .map_or(0, |t| i64::from(t.offset().fix().local_minus_utc()) * 1000)
+    crate::my_stats::compute(st).await
 }
 
 #[tauri::command]
@@ -482,7 +453,8 @@ mod tests {
     use opd1_riot::assets::AssetCache;
     use serde_json::Value;
 
-    use crate::state::EventSink;
+    use crate::my_stats::local_offset_ms;
+    use crate::state::{now_ms, EventSink};
 
     const ME: &str = "aaaaaaaa-0000-0000-0000-000000000001";
     const DAY: i64 = 86_400_000;

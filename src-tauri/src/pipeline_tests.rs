@@ -41,7 +41,7 @@ const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
 const STRANGER: &str = "dddddddd-0000-0000-0000-000000000004";
 /// OTHER's teammate in the party-mark tests.
 const MATE: &str = "eeeeeeee-0000-0000-0000-000000000005";
-const ACT: &str = "act-current";
+pub(crate) const ACT: &str = "act-current";
 /// valorant-api's Split: the map the remembered-name tests play on.
 const SPLIT_PATH: &str = "/Game/Maps/Bonsai/Bonsai";
 const SPLIT_UUID: &str = "d960549e-485c-e861-8d71-aa9d1aed12a2";
@@ -57,6 +57,7 @@ struct Recorder {
     details: Mutex<Vec<PlayerDetails>>,
     matches: Mutex<Vec<MatchDetailsView>>,
     metas: Mutex<Vec<opd1_riot::assets::Meta>>,
+    my_stats: Mutex<Vec<opd1_core::model::MyStats>>,
 }
 
 struct Sink(Arc<Recorder>);
@@ -73,6 +74,9 @@ impl EventSink for Sink {
     }
     fn meta(&self, meta: &opd1_riot::assets::Meta) {
         self.0.metas.lock().unwrap().push(meta.clone());
+    }
+    fn my_stats(&self, stats: &opd1_core::model::MyStats) {
+        self.0.my_stats.lock().unwrap().push(stats.clone());
     }
 }
 
@@ -1232,6 +1236,10 @@ mod rank;
 /// same harness).
 #[cfg(test)]
 mod live_tier;
+
+/// B2's `"mystats"` push tests (their own file; same harness).
+#[cfg(test)]
+mod my_stats;
 
 /// B1's own competitive-updates backfill tests (their own file; same
 /// harness).

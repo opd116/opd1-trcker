@@ -436,6 +436,9 @@ impl Poller {
         tauri::async_runtime::spawn(async move {
             if st.ensure_tables(true).await.is_ok() {
                 st.publish();
+                // B2: with the user's puuid known (just above), the tables
+                // may be what makes My Stats computable.
+                crate::my_stats::notify(&st);
             }
         });
         // The user's own card, from the DB, while the first presence

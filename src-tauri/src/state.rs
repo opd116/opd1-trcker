@@ -18,7 +18,7 @@ use tauri::{AppHandle, Emitter};
 use opd1_core::db::repo::{Match, MatchPlayer, NameAsk, Repo};
 use opd1_core::model::{
     build_card, shown_agent, BuildCardInput, Field, Identity, LiveState, MatchDetailsView,
-    MmrInput, PartyMark, PlayerCard, PlayerDetails, Team,
+    MmrInput, MyStats, PartyMark, PlayerCard, PlayerDetails, Team,
 };
 use opd1_core::party::detect_parties;
 use opd1_core::presence::Stage;
@@ -30,6 +30,7 @@ use opd1_riot::RiotSession;
 use opd1_riot::VisiblePuuid;
 
 use crate::logbuf::short;
+use crate::my_stats::MyStatsPush;
 use crate::rank_retry::{RankRetries, RANK_RETRY_DELAYS};
 use crate::roster::{current_act, resolve_acts, RawLoadout, RosterPlayer};
 use crate::store::{PlayerDb, StoredPlayer, SELF_LOADOUT_KEY};
@@ -1506,6 +1507,9 @@ pub trait EventSink: Send + Sync {
     /// R163: the asset tables (names, colours) loaded or were refreshed.
     /// Default: nothing (test sinks that do not record it).
     fn meta(&self, _meta: &Meta) {}
+    /// B2: the user's My Stats changed (`"mystats"`; the same JSON the
+    /// `my_stats` command returns). Default: nothing.
+    fn my_stats(&self, _stats: &MyStats) {}
 }
 
 impl EventSink for AppHandle {
@@ -1530,6 +1534,12 @@ impl EventSink for AppHandle {
     fn meta(&self, meta: &Meta) {
         if let Err(e) = self.emit("meta", meta) {
             log::warn!("emit meta failed: {e}");
+        }
+    }
+
+    fn my_stats(&self, stats: &MyStats) {
+        if let Err(e) = self.emit("mystats", stats) {
+            log::warn!("emit mystats failed: {e}");
         }
     }
 }
@@ -1655,6 +1665,9 @@ pub struct AppState {
     /// ([`OpenGate`]). Lock order: a gate, then its open slot.
     details_gate: Mutex<OpenGate>,
     match_gate: Mutex<OpenGate>,
+    /// B2: the `"mystats"` push's state (`my_stats::notify`): the last emitted
+    /// bytes and the one-task-at-a-time flags.
+    pub(crate) my_stats_push: Mutex<MyStatsPush>,
     /// R150: set when names-fill asks are queued (`queue_name_fill`), taken
     /// by the poll loop (`take_worker_kick`), which owns the worker's handle:
     /// a command can't start a worker itself.
@@ -1713,9 +1726,16 @@ impl AppState {
             open_match: Mutex::new(None),
             details_gate: Mutex::new(OpenGate::default()),
             match_gate: Mutex::new(OpenGate::default()),
+            my_stats_push: Mutex::new(MyStatsPush::default()),
             worker_kick: AtomicBool::new(false),
             debug_dir,
         }
+    }
+
+    /// B2: hands a freshly computed My Stats to the UI (`my_stats::notify`
+    /// decides whether it changed).
+    pub fn emit_my_stats(&self, stats: &MyStats) {
+        self.sink.my_stats(stats);
     }
 
     pub fn session(&self) -> Option<Arc<RiotSession>> {
@@ -1918,10 +1938,10 @@ impl AppState {
             c.logged = Some(key);
         }
         if current.map(|a| a.id) != before {
-            // The live cards and an open Player Details read the act. (My
-            // Stats has no push path: it takes the new act at its next
-            // `my_stats` call.)
+            // The live cards, an open Player Details and My Stats (B2) read
+            // the act.
             self.publish();
+            crate::my_stats::notify(self);
             crate::details::refresh_open(self).await;
         }
     }

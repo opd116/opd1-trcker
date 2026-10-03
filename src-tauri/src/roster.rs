@@ -34,9 +34,22 @@ use opd1_core::stats::Act;
 use opd1_riot::endpoints::{
     ContentAct, ContentActs, CoreGameLoadoutsResponse, CoreGameMatchResponse, PartyResponse,
     PlayerIdentity, PlayerLoadoutResponse, PregameLoadoutsResponse, PregameMatchResponse,
+    PresencesResponse,
 };
 
 use crate::store::PlayerUpdate;
+
+/// The `private` blob (base64) of the user's own VALORANT presence in a
+/// `/chat/v4/presences` answer: what the poll loop reads the stage from, and
+/// what the names fill re-reads right before a request goes out. `None` while
+/// VALORANT shows no presence (or one without a blob).
+pub fn own_valorant_private(presences: &PresencesResponse, me: &str) -> Option<String> {
+    presences
+        .presences
+        .iter()
+        .find(|p| p.puuid == me && p.product == "valorant")
+        .and_then(|p| p.private.clone())
+}
 
 /// One player in the current live roster: everything that arrives with the
 /// roster fetch itself (no per-player call needed).

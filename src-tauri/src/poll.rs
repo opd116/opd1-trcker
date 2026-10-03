@@ -43,9 +43,9 @@ use opd1_riot::{RiotError, RiotSession};
 use crate::logbuf::short;
 use crate::roster::{
     connect_retry_delay, extract_loadouts, extract_pregame_loadouts, fill_tiers, from_coregame,
-    from_party, from_pregame, is_ffa_roster, order_players, party_key, plan_transition,
-    pregame_tiers, view_stage, want_pregame_loadouts, GameVerdict, GameWatch, PartyKey,
-    RosterFetch, RosterPlayer,
+    from_party, from_pregame, is_ffa_roster, order_players, own_valorant_private, party_key,
+    plan_transition, pregame_tiers, view_stage, want_pregame_loadouts, GameVerdict, GameWatch,
+    PartyKey, RosterFetch, RosterPlayer,
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
 use crate::store::{
@@ -574,11 +574,7 @@ impl Poller {
             }
         };
         let me = session.self_puuid();
-        let private = presences
-            .presences
-            .iter()
-            .find(|p| p.puuid == me && p.product == "valorant")
-            .and_then(|p| p.private.clone());
+        let private = own_valorant_private(&presences, me);
         let decoded = private.as_deref().and_then(decode_presence);
 
         match self.game.on_presence(decoded.is_some()) {

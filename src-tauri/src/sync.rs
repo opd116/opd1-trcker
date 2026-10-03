@@ -66,13 +66,14 @@ use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 
 use opd1_core::db::repo::{CompUpdateRow, HistoryEntry, MmrSnapshot, NameAsk};
+use opd1_core::presence::{decode_presence, Stage};
 use opd1_riot::endpoints::{MatchDetailsResponse, MatchHistoryResponse};
 use opd1_riot::to_core::{comp_update_rows_from_response, match_from_details};
 use opd1_riot::{RiotError, RiotSession, VisiblePuuid};
 
 use crate::logbuf::short;
 use crate::rank_retry::HOLD_SLACK;
-use crate::roster::{extract_loadouts, extract_player_loadout};
+use crate::roster::{extract_loadouts, extract_player_loadout, own_valorant_private};
 use crate::state::{
     lock, now_ms, unnamed_others, wait_for_details_fetch, AppState, BackfillRun, DetailsClaim,
     DetailsFetchGuard, Job,
@@ -1570,6 +1571,9 @@ pub const NAME_BATCH_MAX: usize = 100;
 /// the request is built: a match that starts in between sends nothing and the
 /// asks go back to the queue, to go out after it. A worker the poll loop
 /// aborts on the stage change ends a request still waiting in the throttle.
+/// The model's stage can lag Riot's by a poll tick, so the user's own presence
+/// is read once more right before the request (a match that began in that lag
+/// sends nothing either; see the comment at the read).
 ///
 /// The request goes through the session's throttle like every pd call. A
 /// failed request stores nothing: an error is not an answer, and the asks
@@ -1617,6 +1621,24 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
         live.fill_visible(&held.asks)
     };
     if visible.is_empty() {
+        return Ok(());
+    }
+
+    // R165 finding 9 (second half): the model only learns of Agent Select at
+    // the poll loop's next presence tick, up to 2 s after Riot changed it, and
+    // those players may be hidden there (a party member hidden in the Lobby is
+    // asked on purpose, R153). One local read, only now that a request is
+    // about to go out: when the user's own presence already says a match
+    // began, nothing is sent and the asks stay (`held` puts them back, nobody
+    // marked), and the fill stands down until the poll loop has seen the stage.
+    // A read that fails changes nothing: names are not held up by a local
+    // hiccup.
+    if matches!(
+        own_stage_now(session).await,
+        Some(Stage::Pregame | Stage::Ingame)
+    ) {
+        log::debug!("names fill not sent: the presence says a match has started");
+        lock(&st.live).defer_names(FILL_RACE_STAND_DOWN);
         return Ok(());
     }
 
@@ -1673,6 +1695,21 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
         crate::match_details::refresh_open(st).await;
     }
     Ok(())
+}
+
+/// How long the names fill stands down when the user's own presence says a
+/// match has started before the poll loop has seen it ([`fill_names_step`]):
+/// a little over the poll tick (2 s), so by the time the fill may run again
+/// the stage is applied (`LiveModel::in_match`), or the presence was only a
+/// blip and the asks go out.
+const FILL_RACE_STAND_DOWN: Duration = Duration::from_secs(3);
+
+/// The user's own stage from one local presence read; `None` when the read
+/// fails or VALORANT shows no presence.
+async fn own_stage_now(session: &RiotSession) -> Option<Stage> {
+    let presences = session.presences().await.ok()?;
+    let private = own_valorant_private(&presences, session.self_puuid())?;
+    decode_presence(&private).map(|p| p.stage)
 }
 
 /// The asks a names-fill step has taken off the queue and had no answer for

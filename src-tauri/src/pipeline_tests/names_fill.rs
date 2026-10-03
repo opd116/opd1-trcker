@@ -861,6 +861,155 @@ async fn a_match_that_starts_between_taking_the_asks_and_the_request_sends_nothi
     );
 }
 
+/// Answers `/chat/v4/presences` with the user's VALORANT presence in
+/// `state` (`MENUS`, `PREGAME`, `INGAME`): the first `times` requests only
+/// (`None`: every one), at `priority`.
+async fn mount_presence(h: &Harness, state: &str, times: Option<u64>, priority: u8) {
+    use base64::engine::general_purpose::STANDARD as BASE64;
+    use base64::Engine as _;
+    let private =
+        BASE64.encode(json!({"sessionLoopState": state, "queueId": "unrated"}).to_string());
+    let mock = Mock::given(method("GET"))
+        .and(path("/chat/v4/presences"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "presences": [{"puuid": ME, "product": "valorant", "private": private}]
+        })))
+        .with_priority(priority);
+    match times {
+        Some(n) => mock.up_to_n_times(n),
+        None => mock,
+    }
+    .mount(&h.server)
+    .await;
+}
+
+/// The presence requests the mock has seen (connecting reads one too, for
+/// the client version: tests take the count before the step they check).
+async fn presence_reads(h: &Harness) -> usize {
+    count(&h.server, "GET", "/chat/v4/presences").await
+}
+
+#[tokio::test]
+async fn a_fill_does_not_go_out_when_the_presence_already_says_a_match_began() {
+    // R165 finding 9, second half: the model still shows the Lobby (the poll
+    // loop has not ticked yet) but Riot's presence says Agent Select or In
+    // Game, where the players asked about may be hidden. Nothing is sent,
+    // nobody is marked, the asks stay queued as they were.
+    for state in ["PREGAME", "INGAME"] {
+        let h = harness().await;
+        let t1 = pid(1);
+        mount_name_service(&h.server, &[(t1.clone(), "Real", "ONE")]).await;
+        mount_presence(&h, state, None, 1).await;
+        lobby(&h);
+        lock(&h.st.live).queue_name_fill([ask(&t1, Some(5))]);
+        let before = presence_reads(&h).await;
+
+        fill_names_step(&h.st, &h.session).await.unwrap();
+
+        assert_eq!(presence_reads(&h).await, before + 1, "{state}: one read");
+        assert!(puts(&h.server).await.is_empty(), "{state}: nothing sent");
+        assert_eq!(
+            queue_of(&h),
+            vec![(t1.clone(), Some(5))],
+            "{state}: still queued"
+        );
+        assert_eq!(marker(&h.st, t1.clone()).await, None, "{state}: not marked");
+        assert_eq!(seen(&h.st, t1).await, None);
+        assert!(
+            !lock(&h.st.live).fill_ready(),
+            "{state}: the fill stands down for a moment"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_fill_goes_out_when_the_presence_says_menus() {
+    let h = harness().await;
+    let t1 = pid(1);
+    mount_name_service(&h.server, &[(t1.clone(), "Real", "ONE")]).await;
+    mount_presence(&h, "MENUS", None, 1).await;
+    lobby(&h);
+    lock(&h.st.live).queue_name_fill([ask(&t1, Some(5))]);
+    let before = presence_reads(&h).await;
+
+    fill_names_step(&h.st, &h.session).await.unwrap();
+
+    assert_eq!(presence_reads(&h).await, before + 1);
+    assert_eq!(puts(&h.server).await, vec![vec![t1.clone()]]);
+    assert_eq!(seen(&h.st, t1).await, Some(("Real".into(), "ONE".into())));
+    assert!(queue_of(&h).is_empty());
+}
+
+#[tokio::test]
+async fn a_failed_presence_read_does_not_hold_the_names_up() {
+    // The local client answers 500 (or nothing usable): today's behaviour,
+    // the request is sent.
+    let h = harness().await;
+    let t1 = pid(1);
+    mount_name_service(&h.server, &[(t1.clone(), "Real", "ONE")]).await;
+    Mock::given(method("GET"))
+        .and(path("/chat/v4/presences"))
+        .respond_with(ResponseTemplate::new(500))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    lobby(&h);
+    lock(&h.st.live).queue_name_fill([ask(&t1, Some(5))]);
+    let before = presence_reads(&h).await;
+
+    fill_names_step(&h.st, &h.session).await.unwrap();
+
+    assert_eq!(presence_reads(&h).await, before + 1);
+    assert_eq!(puts(&h.server).await, vec![vec![t1.clone()]]);
+    assert_eq!(seen(&h.st, t1).await, Some(("Real".into(), "ONE".into())));
+}
+
+#[tokio::test]
+async fn no_presence_is_read_when_no_request_is_about_to_go_out() {
+    // Nothing queued, and a queued ask that is already known: no request, so
+    // no local call either.
+    let h = harness().await;
+    mount_presence(&h, "MENUS", None, 1).await;
+    lobby(&h);
+    let before = presence_reads(&h).await;
+    fill_names_step(&h.st, &h.session).await.unwrap();
+    assert_eq!(presence_reads(&h).await, before);
+}
+
+#[tokio::test]
+async fn a_worker_that_finds_a_match_in_the_presence_does_not_spin_and_the_asks_go_out_after_it() {
+    // The fill is the only job (a Lobby with the user's card synced), so a
+    // step that returned without a deferral would be handed out again at
+    // once, reading the presence in a loop. The worker ends instead; once the
+    // presence says Menus again (a dodge) and the stand-down is over, the
+    // same asks go out.
+    let h = harness().await;
+    let t1 = pid(1);
+    mount_name_service(&h.server, &[(t1.clone(), "Real", "ONE")]).await;
+    // The first read says PREGAME, every later one MENUS.
+    mount_presence(&h, "PREGAME", Some(1), 1).await;
+    mount_presence(&h, "MENUS", None, 2).await;
+    lobby(&h);
+    lock(&h.st.live).queue_name_fill([ask(&t1, Some(5))]);
+    let before = presence_reads(&h).await;
+
+    tokio::time::timeout(Duration::from_secs(10), run_fill(&h))
+        .await
+        .expect("the worker ends");
+    assert_eq!(presence_reads(&h).await, before + 1, "one read, not a loop");
+    assert!(puts(&h.server).await.is_empty());
+    assert_eq!(queue_of(&h), vec![(t1.clone(), Some(5))]);
+
+    // Not before the stand-down is over …
+    assert!(lock(&h.st.live).try_start_worker().is_none());
+    lock(&h.st.live).advance_clock(Duration::from_secs(4));
+    // … and then the poll tick's wake-up starts the worker again.
+    assert!(lock(&h.st.live).names_wakeup_due());
+    run_fill(&h).await;
+    assert_eq!(puts(&h.server).await, vec![vec![t1.clone()]]);
+    assert_eq!(seen(&h.st, t1).await, Some(("Real".into(), "ONE".into())));
+}
+
 #[tokio::test]
 async fn a_step_that_is_dropped_before_the_send_keeps_its_asks() {
     // The poll loop aborts the worker on a stage change, which drops the step

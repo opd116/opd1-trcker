@@ -4,7 +4,7 @@
 // recent rows of the user (Fahad), so a row opens the same Match page as the Details page does.
 // Nothing here ships: it is reached only through the DEV-guarded scene registry.
 import type { Insight, MatchSummary, MyStats, RankChange, StatRow, StreakMark, WinCell } from "../types";
-import { AG, DEMO_NOW, detailsFor, MAPS } from "./cdv8";
+import { AG, DEMO_NOW, detailsFor, MAPS, PUUID } from "./cdv8";
 
 const MIN = 60_000;
 const HOUR = 3_600_000;
@@ -282,6 +282,7 @@ function build(sims: Sim[], mapNames: NameTable, rank: { tier: number; rr: numbe
   const recent = userRecent();
   const maps = table(sims, (s) => s.map);
   return {
+    puuid: PUUID.fahad!,
     rank: {
       tier: rank.tier,
       rr: rank.rr,
@@ -378,6 +379,7 @@ export function myStatsUnranked(): MyStats {
   const wins = recent.reduce((a, m) => a + isWin(m), 0);
   const losses = recent.reduce((a, m) => a + isLoss(m), 0);
   return {
+    puuid: PUUID.fahad!,
     rank: { tier: null, rr: null, wins, losses, rrToNext: null, netRr: null, avgWin: null, avgLoss: null, changes: [] },
     rrSeries: [],
     session: {

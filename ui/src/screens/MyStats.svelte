@@ -4,7 +4,8 @@
   time of day; Insights. It scrolls vertically inside App's one scroll container (like Details), never sideways.
   The data is the `mystats` store (the `my_stats` answer at startup, then Rust's `mystats` events): `undefined` until
   something answered = every section draws its skeleton; `null` = Rust does not know the user or the act yet = the
-  frames with `—`. A row of Recent Matches opens its Match Details with Back returning here.
+  frames with `—`. A row of Recent Matches opens its Match Details (the user as focus player, `MyStats.puuid`) with
+  Back returning here.
 -->
 <script lang="ts">
   import Insights from "../components/mystats/Insights.svelte";
@@ -15,16 +16,17 @@
   import StatTable from "../components/mystats/StatTable.svelte";
   import WinCells from "../components/mystats/WinCells.svelte";
   import { go } from "../lib/router.svelte";
-  import { live, mystats, refreshMyStats } from "../lib/stores";
+  import { mystats, refreshMyStats } from "../lib/stores";
 
   const s = $derived($mystats);
   /** Every section's value: undefined while loading, null when Rust knows nothing, else the data. */
   const pick = <T,>(f: (m: NonNullable<typeof s>) => T): T | null | undefined => (s === undefined ? undefined : s === null ? null : f(s));
 
-  /** The user's id comes from their own live card (the backend publishes it whenever it knows the user). */
-  const me = $derived($live?.players.find((c) => c.isSelf)?.puuid);
+  /** The user's id is part of the stats (`MyStats.puuid`): a row opens its Match Details whenever the page has data. */
   const open = $derived(
-    me ? (matchId: string) => go({ name: "match", matchId, focusPuuid: me, from: "recent", back: "mystats" }) : undefined,
+    s
+      ? (matchId: string) => go({ name: "match", matchId, focusPuuid: s.puuid, from: "recent", back: "mystats" })
+      : undefined,
   );
 
   // Nothing to show yet (the first answer was null, or never came): ask again now the page is open.

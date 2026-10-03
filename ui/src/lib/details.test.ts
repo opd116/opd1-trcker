@@ -106,6 +106,7 @@ describe("liveTeammate (spec §6.7)", () => {
   });
   const live: LiveState = {
     stage: "ingame",
+    settled: true,
     mapId: null,
     players: [
       card("vis", { kind: "visible", name: "Kilo", tag: "2210" }),

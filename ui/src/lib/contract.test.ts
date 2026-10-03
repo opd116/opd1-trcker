@@ -132,10 +132,12 @@ function selfPartyProblems(c: Card): string[] {
  * 7 and 4 long, a bucket has a win rate exactly when it has games, the RR series runs oldest first and the rank
  * changes newest first (at most 5), the Recent Matches come newest first (at most 5) with a stat line that is null as a
  * whole (R102), the tables come most played first, the next tier is the RR still needed (none from Immortal up or
- * without a tier), and the session's W and L are its streak's.
+ * without a tier), the session's W and L are its streak's, and the user's own puuid is there.
  */
 function myStatsProblems(m: MyStats): string[] {
   const out: string[] = [];
+  // The page opens Match Details with this id as the focus player: a row is clickable whenever My Stats exists.
+  if (m.puuid === "") out.push("puuid is empty");
   if (m.byWeekday.length !== 7) out.push(`byWeekday has ${m.byWeekday.length} cells`);
   if (m.byDaypart.length !== 4) out.push(`byDaypart has ${m.byDaypart.length} cells`);
   for (const c of [...m.byWeekday, ...m.byDaypart]) {

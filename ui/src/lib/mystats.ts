@@ -9,11 +9,15 @@ export function minusSigns(text: string): string {
   return text.replace(/(^|[\s(])-(?=\d)/g, "$1−");
 }
 
-/** The colour a signed number takes: gains `win`, losses `loss`, zero and unknown `flat` (the text colour). */
-export type Tone = "win" | "loss" | "flat";
+/**
+ * The colour a signed number takes: gains `win`, losses `loss`, zero `flat` (the text colour), and an unknown value
+ * (`—`) `dim`: the one quiet tone every unknown on My Stats takes (`--text2`), never green, red or full text.
+ */
+export type Tone = "win" | "loss" | "flat" | "dim";
 
 export function signTone(n: number | null | undefined): Tone {
-  if (typeof n !== "number" || !Number.isFinite(n) || Math.round(n) === 0) return "flat";
+  if (typeof n !== "number" || !Number.isFinite(n)) return "dim";
+  if (Math.round(n) === 0) return "flat";
   return n > 0 ? "win" : "loss";
 }
 
@@ -105,6 +109,37 @@ export function tierOfAbsolute(abs: number): number {
   return abs >= IMMORTAL_FLOOR ? IMMORTAL_TIER : Math.max(0, Math.floor(abs / 100));
 }
 
+/**
+ * The RR a point stands at: within its tier below Immortal (`abs % 100`, the 0–99 the rank card shows), and counted
+ * from Immortal 1's floor from 2400 up (`abs − 2400`, which has no ceiling).
+ */
+export function rrInTier(abs: number): number {
+  return abs >= IMMORTAL_FLOOR ? abs - IMMORTAL_FLOOR : Math.max(0, abs % 100);
+}
+
+/** The round steps the gridlines above Immortal 1's floor may take, smallest first. */
+const RR_STEPS = [5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, 2000, 5000];
+/** At most this many RR gridlines above the floor (3 or 4 read as a scale; more is a ruler). */
+const MAX_RR_LINES = 4;
+/** Two RR gridlines are at least this far apart, so their 12px labels never touch. */
+const MIN_RR_LINE_PX = 24;
+
+/**
+ * The round-number gridlines (absolute values) strictly inside `(max(lo, 2400), hi)`: the smallest round step that
+ * gives at most 4 lines at least 24px apart. None when the range is entirely below the floor.
+ */
+export function rrLines(lo: number, hi: number, pxPerRr: number): number[] {
+  const from = Math.max(lo, IMMORTAL_FLOOR);
+  if (hi <= from) return [];
+  for (const step of RR_STEPS) {
+    if (step * pxPerRr < MIN_RR_LINE_PX) continue;
+    const lines: number[] = [];
+    for (let v = IMMORTAL_FLOOR + (Math.floor((from - IMMORTAL_FLOOR) / step) + 1) * step; v < hi; v += step) lines.push(v);
+    if (lines.length <= MAX_RR_LINES) return lines;
+  }
+  return [];
+}
+
 export interface ChartBox {
   w: number;
   h: number;
@@ -121,6 +156,8 @@ export interface ChartPoint {
   point: RrPoint;
   /** RR gained or lost by that match: this point's `absoluteRr` less the one before; null for the first point. */
   delta: number | null;
+  /** The RR it stands at: within its tier, or counted from Immortal 1's floor (`rrInTier`). */
+  rr: number;
 }
 
 /** A tier band's visible part: `tier` ≥ 24 stands for "Immortal and up". `labelY` is its vertical middle, or null when too thin to label. */
@@ -136,8 +173,11 @@ export interface ChartModel {
   /** The polyline's path, and the same closed down to the baseline (the area wash). */
   line: string;
   area: string;
-  /** Tier boundaries (every 100 RR, up to Immortal 1's floor) inside the range. */
-  grid: Array<{ y: number; abs: number }>;
+  /**
+   * Gridlines inside the range: the tier boundaries (every 100 RR, up to Immortal 1's floor; no `label`, the bands
+   * name the tiers) and, above the floor, 3–4 round-number lines labelled `N RR` (counted from the floor).
+   */
+  grid: Array<{ y: number; abs: number; label: string | null }>;
   bands: ChartBand[];
   plot: { x0: number; x1: number; y0: number; y1: number };
 }
@@ -173,6 +213,7 @@ export function chartModel(series: readonly RrPoint[], box: ChartBox): ChartMode
     y: y(p.absoluteRr),
     point: p,
     delta: i === 0 ? null : p.absoluteRr - series[i - 1]!.absoluteRr,
+    rr: rrInTier(p.absoluteRr),
   }));
   const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${fix(p.x)} ${fix(p.y)}`).join(" ");
   const area = `${line} L${fix(points[points.length - 1]!.x)} ${fix(plot.y1)} L${fix(plot.x0)} ${fix(plot.y1)} Z`;
@@ -180,7 +221,12 @@ export function chartModel(series: readonly RrPoint[], box: ChartBox): ChartMode
   // Boundaries strictly inside the range (one on the plot's own edge would only double that edge).
   const marks: number[] = [];
   for (let v = Math.floor(lo / 100) * 100 + 100; v < hi && v <= IMMORTAL_FLOOR; v += 100) marks.push(v);
-  const grid = marks.map((abs) => ({ y: y(abs), abs }));
+  // Above Immortal 1's floor there are no tiers to draw, so the scale is RR itself: a few round-number lines.
+  const rrMarks = rrLines(lo, hi, pxPerRr);
+  const grid = [
+    ...marks.map((abs) => ({ y: y(abs), abs, label: null as string | null })),
+    ...rrMarks.map((abs) => ({ y: y(abs), abs, label: `${abs - IMMORTAL_FLOOR} RR` as string | null })),
+  ];
 
   const edges = [lo, ...marks, hi];
   const bands: ChartBand[] = [];
@@ -188,12 +234,17 @@ export function chartModel(series: readonly RrPoint[], box: ChartBox): ChartMode
     const [a, b] = [edges[i]!, edges[i + 1]!];
     const top = y(b);
     const bottom = y(a);
-    bands.push({
-      tier: tierOfAbsolute(a),
-      y0: top,
-      y1: bottom,
-      labelY: (b - a) * pxPerRr >= MIN_BAND_LABEL_PX ? (top + bottom) / 2 : null,
-    });
+    let labelY: number | null = (b - a) * pxPerRr >= MIN_BAND_LABEL_PX ? (top + bottom) / 2 : null;
+    if (tierOfAbsolute(a) >= IMMORTAL_TIER && rrMarks.length > 0) {
+      // The RR lines carry their own labels in the same gutter: the band's name goes in the widest gap between them
+      // (lowest first), and only where it clears both neighbours' labels.
+      const cuts = [a, ...rrMarks, b];
+      let best = 0;
+      for (let k = 1; k + 1 < cuts.length; k++) if (cuts[k + 1]! - cuts[k]! > cuts[best + 1]! - cuts[best]!) best = k;
+      const [ga, gb] = [cuts[best]!, cuts[best + 1]!];
+      labelY = (gb - ga) * pxPerRr >= 2 * MIN_BAND_LABEL_PX ? y((ga + gb) / 2) : null;
+    }
+    bands.push({ tier: tierOfAbsolute(a), y0: top, y1: bottom, labelY });
   }
   return { points, line, area, grid, bands, plot };
 }

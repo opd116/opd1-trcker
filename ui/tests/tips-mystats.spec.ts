@@ -2,9 +2,9 @@
 // right text after 450ms, inside #app, centred on its trigger and flipped above it near the bottom; the places that have
 // none show none. Playwright's fake clock is paused once the page has settled, so the delay is stepped with clock.runFor.
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { myStatsFull, myStatsRrNull, myStatsUnranked } from "../src/lib/demo/mystats";
+import { myStatsFull, myStatsImmortal, myStatsRrNull, myStatsUnranked } from "../src/lib/demo/mystats";
 import { dateLong, dateShort, rrDelta, time12 } from "../src/lib/format";
-import { DAYPARTS, WEEKDAYS_LONG } from "../src/lib/mystats";
+import { chartModel, DAYPARTS, rrInTier, WEEKDAYS_LONG } from "../src/lib/mystats";
 import { NOW, openScene, pointerAway, TIER_LABELS } from "./harness";
 
 // The expected strings are written in the browser's zone (UTC, spec §8.1): make this process's the same.
@@ -22,6 +22,11 @@ async function hoverTip(page: Page, trigger: Locator): Promise<string | null> {
   await trigger.scrollIntoViewIfNeeded();
   await page.waitForTimeout(60);
   await trigger.hover();
+  return readTip(page, trigger);
+}
+
+/** Step the clock past the delay and read the tip (null = none), checking its placement against `trigger`'s box. */
+async function readTip(page: Page, trigger: Locator): Promise<string | null> {
   await page.clock.runFor(460);
   if ((await tip(page).count()) === 0) return null;
   const t = tip(page);
@@ -95,32 +100,109 @@ test("tips: mystats, rank card", async ({ page }) => {
   ]);
 });
 
-test("tips: mystats, the chart: each point says its change, tier and day; the first has no change", async ({ page }) => {
+/** The chart's points in the page's own coordinates: the layer over the plot takes the pointer, so a point is a spot. */
+async function chartPoints(page: Page, series: ReturnType<typeof myStatsFull>["rrSeries"]) {
+  const chart = sec(page, "rrchart");
+  await chart.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(60);
+  const svg = (await chart.locator("svg").boundingBox())!;
+  const model = chartModel(series, { w: svg.width, h: svg.height, padL: 96, padR: 18, padT: 16, padB: 30 })!;
+  const spot = (i: number, dx = 0, dy = 0) => ({ x: svg.x + model.points[i]!.x + dx, y: svg.y + model.points[i]!.y + dy });
+  return { svg, model, spot, anchor: chart.locator(".anchor") };
+}
+
+test("tips: mystats, the chart: each point says its change, tier, RR and day; the first has no change", async ({ page }) => {
   const m = myStatsFull();
   await openScene(page, "mystats", {}, { clock: "manual" });
-  const hit = (p: Page, i: number) => sec(p, "rrchart").locator(".hit").nth(i);
+  const { spot, anchor } = await chartPoints(page, m.rrSeries);
   const point = (i: number) => {
     const p = m.rrSeries[i]!;
     const delta = i === 0 ? null : p.absoluteRr - m.rrSeries[i - 1]!.absoluteRr;
-    return [delta === null ? null : `${rrDelta(delta)} RR`, tierName(p.absoluteRr), dateShort(p.startMs, now)].filter(Boolean).join(" · ");
+    return [delta === null ? null : `${rrDelta(delta)} RR`, tierName(p.absoluteRr), `${rrInTier(p.absoluteRr)} RR`, dateShort(p.startMs, now)]
+      .filter(Boolean)
+      .join(" · ");
   };
   const last = m.rrSeries.length - 1;
-  const items: Item[] = [0, 1, 17, 30, last - 1, last].map((i) => ({ what: `chart point ${i}`, trigger: (p: Page) => hit(p, i), text: point(i) }));
-  await runItems(page, items);
-  expect(point(0)).toMatch(/^Diamond \d · Aug 26$/);
-  expect(point(last)).toMatch(/^[+−0][\d]* RR · Ascendant 1 · Sep 29$/);
+  for (const i of [0, 1, 17, 30, last - 1, last]) {
+    await page.mouse.move(spot(i).x, spot(i).y);
+    expect(await readTip(page, anchor), `chart point ${i}`).toBe(point(i));
+    await pointerAway(page);
+    await expect(tip(page), `chart point ${i}: cleared`).toHaveCount(0);
+  }
+  expect(point(0)).toMatch(/^Diamond \d · \d+ RR · Aug 26$/);
+  expect(point(last)).toMatch(/^[+−0][\d]* RR · Ascendant 1 · 21 RR · Sep 29$/);
 });
 
-test("tips: mystats, a hovered point shows its crosshair and dot; no other point does", async ({ page }) => {
+test("tips: mystats, the chart: a pointer anywhere over the plot picks the point nearest by x; moving on restarts the tip", async ({ page }) => {
+  const m = myStatsFull();
   await openScene(page, "mystats", {}, { clock: "manual" });
-  const pts = sec(page, "rrchart").locator(".pt");
-  const op = (i: number, cls: string) => pts.nth(i).locator(cls).evaluate((el) => getComputedStyle(el).opacity);
-  expect(await op(10, ".xh")).toBe("0");
-  await pts.nth(10).locator(".hit").hover();
-  expect(await op(10, ".xh")).toBe("1");
-  expect(await op(10, ".hot")).toBe("1");
-  expect(await op(11, ".xh")).toBe("0");
-  expect(await op(9, ".hot")).toBe("0");
+  const { svg, model, spot, anchor } = await chartPoints(page, m.rrSeries);
+  const step = (model.plot.x1 - model.plot.x0) / (model.points.length - 1);
+  const tipAt = async (x: number, y: number) => {
+    await page.mouse.move(x, y);
+    return readTip(page, anchor);
+  };
+  const text = (i: number) => {
+    const p = m.rrSeries[i]!;
+    return `${rrDelta(p.absoluteRr - m.rrSeries[i - 1]!.absoluteRr)} RR · ${tierName(p.absoluteRr)} · ${rrInTier(p.absoluteRr)} RR · ${dateShort(p.startMs, now)}`;
+  };
+  // A hair left of the midpoint between points 10 and 11 is point 10, a hair right of it is 11 — at any height on the plot.
+  const mid = spot(10, step / 2);
+  const top = svg.y + model.plot.y0 + 4;
+  const bottom = svg.y + model.plot.y1 - 4;
+  expect(await tipAt(mid.x - 2, top), "left of the midpoint, top").toBe(text(10));
+  expect(await tipAt(mid.x + 2, bottom), "right of the midpoint, bottom").toBe(text(11));
+  expect(await tipAt(mid.x + 2, spot(11).y), "same point again: still there").toBe(text(11));
+  // Moving to another point takes the bubble away at once and shows the new one after the delay, like any trigger.
+  await page.mouse.move(spot(14).x, spot(14).y);
+  await expect(tip(page), "the old bubble is gone before the delay").toHaveCount(0);
+  expect(await readTip(page, anchor)).toBe(text(14));
+  // Staying on the same point (a wiggle inside its slice) keeps the bubble.
+  await page.mouse.move(spot(14, 2).x, spot(14).y + 3);
+  await page.clock.runFor(100);
+  await expect(tip(page)).toHaveCount(1);
+  // Off the plot: the gutter has no tip.
+  await page.mouse.move(svg.x + 20, spot(14).y);
+  await expect(tip(page)).toHaveCount(0);
+  await page.clock.runFor(600);
+  await expect(tip(page)).toHaveCount(0);
+});
+
+test("tips: mystats-immortal, a point above the floor says its RR counted from Immortal 1", async ({ page }) => {
+  const m = myStatsImmortal();
+  await openScene(page, "mystats-immortal", {}, { clock: "manual" });
+  const { spot, anchor } = await chartPoints(page, m.rrSeries);
+  const last = m.rrSeries.length - 1;
+  const p = m.rrSeries[last]!;
+  expect(p.absoluteRr).toBeGreaterThanOrEqual(2400);
+  await page.mouse.move(spot(last).x, spot(last).y);
+  const delta = p.absoluteRr - m.rrSeries[last - 1]!.absoluteRr;
+  expect(await readTip(page, anchor)).toBe(`${rrDelta(delta)} RR · Immortal · ${p.absoluteRr - 2400} RR · ${dateShort(p.startMs, now)}`);
+});
+
+test("tips: mystats, a hovered point shows its crosshair and dot; none while the pointer is off the plot", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  const { svg, model, spot } = await chartPoints(page, m.rrSeries);
+  const chart = sec(page, "rrchart");
+  await expect(chart.locator(".xh")).toHaveCount(0);
+  await expect(chart.locator(".hot")).toHaveCount(0);
+  await page.mouse.move(spot(10).x, spot(10).y);
+  await expect(chart.locator(".xh")).toHaveCount(1);
+  await expect(chart.locator(".hot")).toHaveCount(1);
+  const x1 = async () => Number(await chart.locator(".xh").getAttribute("x1"));
+  expect(Math.abs((await x1()) - model.points[10]!.x)).toBeLessThan(0.1);
+  expect(Math.abs(Number(await chart.locator(".hot").getAttribute("cx")) - model.points[10]!.x)).toBeLessThan(0.1);
+  expect(Math.abs(Number(await chart.locator(".hot").getAttribute("cy")) - model.points[10]!.y)).toBeLessThan(0.1);
+  // The crosshair spans the plot's height; the next point takes it over (never two at once).
+  expect(Number(await chart.locator(".xh").getAttribute("y1"))).toBeCloseTo(model.plot.y0, 1);
+  expect(Number(await chart.locator(".xh").getAttribute("y2"))).toBeCloseTo(model.plot.y1, 1);
+  await page.mouse.move(spot(11).x, spot(11).y);
+  await expect(chart.locator(".xh")).toHaveCount(1);
+  expect(Math.abs((await x1()) - model.points[11]!.x)).toBeLessThan(0.1);
+  await page.mouse.move(svg.x + 10, svg.y + 10); // the gutter, off the plot
+  await expect(chart.locator(".xh")).toHaveCount(0);
+  await expect(chart.locator(".hot")).toHaveCount(0);
 });
 
 test("tips: mystats, session", async ({ page }) => {

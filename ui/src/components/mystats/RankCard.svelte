@@ -80,7 +80,9 @@
         <div class="wl" use:tip={ACT_SCOPE}>
           <span class="lab">W / L</span>
           <span class="val"
-            ><span class="w">{r.wins ?? DASH}</span><span class="sep">{" / "}</span><span class="l">{r.losses ?? DASH}</span></span
+            ><span class={r.wins === null ? "dim" : "w"}>{r.wins ?? DASH}</span><span class="sep">{" / "}</span><span
+              class={r.losses === null ? "dim" : "l"}>{r.losses ?? DASH}</span
+            ></span
           >
         </div>
       </div>
@@ -241,10 +243,10 @@
     background: var(--accent);
   }
 
+  /* Three figures apart by hairlines (the Details hero's and the Session's way), not boxes. */
   .cells {
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
   }
 
   .cell {
@@ -252,9 +254,13 @@
     flex-direction: column;
     gap: 2px;
     min-width: 0;
-    padding: 8px 10px 9px;
-    border: 1px solid var(--line);
-    border-radius: 6px;
+    padding: 2px 0 2px 14px;
+    border-left: 1px solid var(--line);
+  }
+
+  .cell:first-child {
+    padding-left: 0;
+    border-left: 0;
   }
 
   .cv {
@@ -277,6 +283,11 @@
 
   .cv.flat {
     color: var(--text);
+  }
+
+  .cv.dim,
+  .dim {
+    color: var(--text2);
   }
 
   .chg {

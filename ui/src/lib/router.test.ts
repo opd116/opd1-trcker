@@ -152,6 +152,130 @@ describe("go", () => {
     expect(container.scrollTop).toBe(50);
   });
 
+  describe("Back from a Match restores the scroll position of the page it came from", () => {
+    const fromStats: Route = { name: "match", matchId: "m1", focusPuuid: "p1", from: "recent", back: "mystats" };
+    const fromDetails = (more: boolean): Route => ({ name: "match", matchId: "m2", focusPuuid: "p1", from: "recent", back: { puuid: "p1", more } });
+    /** What App does: every page gets a fresh container, registered as it mounts. */
+    const mount = (current: { host: HTMLElement; action: { destroy(): void } } | null) => {
+      current?.action.destroy();
+      const host = { scrollTop: 0 } as HTMLElement;
+      return { host, action: scrollHost(host) };
+    };
+
+    it("My Stats: the position it was left at, not the top", () => {
+      go({ name: "mystats" });
+      let page = mount(null);
+      page.host.scrollTop = 420;
+      go(fromStats);
+      page = mount(page); // the Match page's container
+      expect(page.host.scrollTop).toBe(0);
+      back();
+      expect(router.route).toEqual({ name: "mystats" });
+      page = mount(page);
+      expect(page.host.scrollTop).toBe(420);
+      page.action.destroy();
+    });
+
+    it("Details: the position, with Show more kept", () => {
+      go(details("p1", true));
+      let page = mount(null);
+      page.host.scrollTop = 910;
+      go(fromDetails(true));
+      page = mount(page);
+      back();
+      expect(router.route).toEqual(details("p1", true));
+      page = mount(page);
+      expect(page.host.scrollTop).toBe(910);
+      page.action.destroy();
+    });
+
+    it("each page has its own position, and the latest visit wins", () => {
+      go({ name: "mystats" });
+      let page = mount(null);
+      page.host.scrollTop = 300;
+      go(fromStats);
+      page = mount(page);
+      back();
+      page = mount(page);
+      expect(page.host.scrollTop).toBe(300);
+      page.host.scrollTop = 700; // scrolled further, opened another match
+      go(fromStats);
+      page = mount(page);
+      back();
+      page = mount(page);
+      expect(page.host.scrollTop).toBe(700);
+      // Another player's Details never gets My Stats' position.
+      go(details("p9"));
+      page = mount(page);
+      expect(page.host.scrollTop).toBe(0);
+      page.action.destroy();
+    });
+
+    it("any other way to a page starts at the top: the tab, a card, Live and back again", () => {
+      go({ name: "mystats" });
+      let page = mount(null);
+      page.host.scrollTop = 500;
+      go(fromStats);
+      page = mount(page);
+      back();
+      page = mount(page);
+      expect(page.host.scrollTop).toBe(500);
+      go(LIVE); // the Live tab: no container
+      page = mount(page);
+      page.action.destroy();
+      go({ name: "mystats" }); // the My Stats tab: not Back
+      const again = mount(null);
+      expect(again.host.scrollTop).toBe(0);
+      again.action.destroy();
+    });
+
+    it("a Match left for Live and reopened from elsewhere does not inherit an old restore", () => {
+      go({ name: "mystats" });
+      let page = mount(null);
+      page.host.scrollTop = 250;
+      go(fromStats);
+      page = mount(page);
+      go(details("p3")); // not Back: Details starts at the top
+      page = mount(page);
+      expect(page.host.scrollTop).toBe(0);
+      page.action.destroy();
+    });
+
+    it("a position the new page is too short for yet is tried again on the next frame", () => {
+      const frames: Array<() => void> = [];
+      vi.stubGlobal("requestAnimationFrame", (cb: () => void) => frames.push(cb));
+      try {
+        go({ name: "mystats" });
+        let page = mount(null);
+        page.host.scrollTop = 600;
+        go(fromStats);
+        page = mount(page);
+        back();
+        // A container that clamps like a short page does, then grows (content that laid out a frame later).
+        let max = 100;
+        let top = 0;
+        const host = {
+          get scrollTop() {
+            return top;
+          },
+          set scrollTop(v: number) {
+            top = Math.min(v, max);
+          },
+        } as unknown as HTMLElement;
+        page.action.destroy();
+        const action = scrollHost(host);
+        expect(top).toBe(100);
+        expect(frames).toHaveLength(1);
+        max = 2000;
+        frames[0]!();
+        expect(top).toBe(600);
+        action.destroy();
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+  });
+
   it("go cancels a tip that is still pending", () => {
     const trigger = {
       getAttribute: (k: string) => (k === "data-tip" ? "A" : null),
@@ -194,25 +318,44 @@ describe("startPage (the first LiveState picks the start page)", () => {
   it("closed goes to My Stats; any other stage stays on Live", async () => {
     for (const stage of ["menus", "pregame", "ingame"] as const) {
       const r = await fresh();
-      r.startPage(stage);
+      r.startPage(stage, true);
       expect(r.router.route, stage).toEqual(LIVE);
     }
     const r = await fresh();
-    r.startPage("closed");
+    r.startPage("closed", true);
     expect(r.router.route).toEqual({ name: "mystats" });
+  });
+
+  it("an unsettled state decides nothing: not the stage, and not the 'once' either", async () => {
+    const r = await fresh();
+    r.startPage("closed", false);
+    expect(r.router.route).toEqual(LIVE);
+    r.startPage("closed", false);
+    expect(r.router.route).toEqual(LIVE);
+    // The first settled call is the decision.
+    r.startPage("closed", true);
+    expect(r.router.route).toEqual({ name: "mystats" });
+  });
+
+  it("settled on a stage is final: a later settled closed changes nothing", async () => {
+    const r = await fresh();
+    r.startPage("menus", false);
+    r.startPage("menus", true);
+    r.startPage("closed", true);
+    expect(r.router.route).toEqual(LIVE);
   });
 
   it("once: a second call changes nothing, whatever the stage", async () => {
     const r = await fresh();
-    r.startPage("menus");
-    r.startPage("closed");
+    r.startPage("menus", true);
+    r.startPage("closed", true);
     expect(r.router.route).toEqual(LIVE);
   });
 
   it("never moves a user who has already navigated", async () => {
     const r = await fresh();
     r.go(details("p1"));
-    r.startPage("closed");
+    r.startPage("closed", true);
     expect(r.router.route).toEqual(details("p1"));
   });
 });

@@ -424,7 +424,6 @@ export async function checkMyStatsLayout(page: Page): Promise<string[]> {
     const groups = [
       ".rank .head",
       ".rank .name",
-      ".rank .cells",
       ".rank .cell",
       ".rank .crow",
       ".session .cell",
@@ -440,9 +439,10 @@ export async function checkMyStatsLayout(page: Page): Promise<string[]> {
       ".daypart .cell",
       ".insights .irow",
     ];
-    // Cells that sit edge to edge by design (the K / D / A grid, the session's padded cells, the columns of the two cell
-    // panels) only must not overlap: their padding keeps the content apart.
-    const butting = [".last5 .kda", ".session .sess", ".weekday .cells", ".daypart .cells"];
+    // Cells that sit edge to edge by design (the K / D / A grid, the session's padded cells, the rank card's three
+    // figures apart by hairlines, the columns of the two cell panels) only must not overlap: their padding keeps the
+    // content apart.
+    const butting = [".last5 .kda", ".session .sess", ".rank .cells", ".weekday .cells", ".daypart .cells"];
     const label = (el: Element) => `${el.tagName.toLowerCase()}.${[...el.classList].filter((c) => !/^s(velte)?-/.test(c)).join(".")}`;
     for (const sel of [...groups, ...butting]) {
       const gap = !butting.includes(sel);

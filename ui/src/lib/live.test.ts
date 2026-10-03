@@ -8,7 +8,7 @@ import type { Last5Entry, LiveState, PlayerCard, Stage } from "./types";
 
 const c = (puuid: string, extra: Partial<PlayerCard> = {}): PlayerCard => mk({ puuid, cardId: "card", ...extra });
 const me = (extra: Partial<PlayerCard> = {}) => c("me", { isSelf: true, isSelfParty: true, ...extra });
-const st = (stage: Stage, players: PlayerCard[], mapId: string | null = null): LiveState => ({ stage, mapId, players });
+const st = (stage: Stage, players: PlayerCard[], mapId: string | null = null): LiveState => ({ stage, mapId, players, settled: true });
 /** A column as puuids for cards and the kind for everything else. */
 const col = (xs: SlotItem[]) => xs.map((x) => (x.kind === "card" ? x.card.puuid : x.kind));
 const NONE5 = ["none", "none", "none", "none", "none"];

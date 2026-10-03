@@ -19,7 +19,7 @@ const NAMES: SceneName[] = [
   "details-partial", "details-nostats",
   "match", "match-enc", "match-hidden", "match-dm", "match-loading", "match-longnames", "match-nostats",
   "mystats", "mystats-new", "mystats-loading", "mystats-unranked", "mystats-immortal", "mystats-rrnull",
-  "mystats-longnames", "mystats-closed",
+  "mystats-longnames", "mystats-closed", "closed-unsettled",
 ];
 
 const meta = demoMeta as Meta;
@@ -56,7 +56,7 @@ describe("registry", () => {
 
   it("boot has no LiveState yet, closed-empty has no players", () => {
     expect(SCENES.boot.live).toBeNull();
-    expect(SCENES["closed-empty"].live).toEqual({ stage: "closed", mapId: null, players: [] });
+    expect(SCENES["closed-empty"].live).toEqual({ stage: "closed", mapId: null, players: [], settled: true });
   });
 
   it("fixtures.ts exports no buildScene, isScene or scene list (one registry, R95)", () => {
@@ -313,7 +313,7 @@ describe("live scenes", () => {
   });
 
   it("ingame-loading and ingame-nometa", () => {
-    expect(SCENES["ingame-loading"].live).toEqual({ stage: "ingame", mapId: null, players: [] });
+    expect(SCENES["ingame-loading"].live).toEqual({ stage: "ingame", mapId: null, players: [], settled: true });
     expect(SCENES["ingame-nometa"].meta).toBe("pending");
     expect(players("ingame-nometa")).toEqual(players("ingame"));
     expect(SCENES.ingame.meta).toBeUndefined();
@@ -743,7 +743,7 @@ describe("feed", () => {
     feed.startDemo(
       (s) => {
         applied.push(s);
-        if (s) router.startPage(s.stage); // what applyLive does with the first LiveState
+        if (s) router.startPage(s.stage, s.settled); // what applyLive does with the first LiveState
       },
       writable<Meta | null>(null),
       store,
@@ -761,6 +761,25 @@ describe("feed", () => {
     let seen2: MyStats | null | undefined = null;
     s2.subscribe((v) => (seen2 = v))();
     expect(seen2).toBeUndefined();
+  });
+
+  it("closed-unsettled: the start page waits on Live, and every other scene is settled", async () => {
+    expect(SCENES["closed-unsettled"].live).toEqual({ stage: "closed", mapId: null, players: [], settled: false });
+    expect(SCENES["closed-unsettled"].autoRoute).toBe(true);
+    for (const n of NAMES) if (n !== "closed-unsettled" && n !== "boot") expect(SCENES[n].live?.settled, n).toBe(true);
+
+    vi.resetModules();
+    stubBrowser("?scene=closed-unsettled");
+    const feed = await import("./demo/feed");
+    const router = await import("./router.svelte");
+    feed.startDemo(
+      (s) => {
+        if (s) router.startPage(s.stage, s.settled);
+      },
+      writable<Meta | null>(null),
+      writable<MyStats | null | undefined>(undefined),
+    );
+    expect(router.router.route).toEqual({ name: "live" });
   });
 
   it("routeFromSearch: &route=mystats", async () => {

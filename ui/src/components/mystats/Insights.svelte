@@ -1,6 +1,6 @@
 <!--
-  Auto insights (spec §9.5): one row per insight the backend sends, in its order: a dot (green for good news, red for
-  a weak spot), the finished English text, and the size of the sample behind it as the tooltip (`From 16 matches`).
+  Auto insights (spec §9.5): one row per insight the backend sends, in its order: a dot (green for good news, a
+  neutral grey for a weak spot: a note, not an alarm), the finished English text, and the size of the sample behind it as the tooltip (`From 16 matches`).
   Nothing to say (an insight needs enough games) or nothing known: one `—` row. `insights: undefined` = the skeleton.
 -->
 <script lang="ts">
@@ -70,7 +70,7 @@
   }
 
   .dot.weak {
-    background: var(--loss);
+    background: var(--text2);
   }
 
   .text {

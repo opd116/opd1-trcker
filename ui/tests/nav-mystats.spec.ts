@@ -166,6 +166,73 @@ test("the start page: closed opens My Stats, any other stage opens Live", async 
   expect(await route(page)).toEqual({ name: "live" });
 });
 
+const applyLive = (page: Page, state: object) =>
+  fromApp<void>(page, `import("/src/lib/stores.ts").then(({ applyLive }) => applyLive(${JSON.stringify(state)}))`);
+
+test("the start page waits for Rust's first verdict: an unsettled closed state keeps Live, the first settled one decides", async ({ page }) => {
+  // VALORANT closed, verdict made: My Stats (the unsettled `closed` before it changed nothing).
+  await openScene(page, "closed-unsettled");
+  expect(await route(page)).toEqual({ name: "live" });
+  await expect(page.locator(".live")).toHaveCount(1);
+  await expect(page.locator(".mystats")).toHaveCount(0);
+  await applyLive(page, { stage: "closed", mapId: null, players: [], settled: false });
+  expect(await route(page), "still unsettled").toEqual({ name: "live" });
+  await applyLive(page, { stage: "closed", mapId: null, players: [], settled: true });
+  expect(await route(page)).toEqual({ name: "mystats" });
+  await expect(page.locator(".mystats")).toHaveCount(1);
+
+  // VALORANT already running: the unsettled closed state comes first, the Lobby is the verdict. Never My Stats.
+  await openScene(page, "closed-unsettled");
+  await applyLive(page, { stage: "menus", mapId: null, players: [], settled: true });
+  expect(await route(page)).toEqual({ name: "live" });
+  await applyLive(page, { stage: "closed", mapId: null, players: [], settled: true }); // the game quits later: once only
+  expect(await route(page)).toEqual({ name: "live" });
+  await expect(page.locator(".mystats")).toHaveCount(0);
+
+  // A user who went to My Stats before the verdict stays there whatever it says.
+  await openScene(page, "closed-unsettled");
+  await tab(page, "My Stats").click();
+  await applyLive(page, { stage: "menus", mapId: null, players: [], settled: true });
+  expect(await route(page)).toEqual({ name: "mystats" });
+});
+
+test("Back from a Match returns My Stats to the scroll position it was left at, and the Match starts at the top", async ({ page }) => {
+  await openScene(page, "mystats");
+  await page.locator("#app .scroll").evaluate((el) => (el.scrollTop = 300));
+  const row = page.locator(".mystats .last5 .rrow").nth(2);
+  await row.scrollIntoViewIfNeeded();
+  const y = await scrollTop(page);
+  expect(y, "the page was scrolled").toBeGreaterThan(100);
+  await row.click({ position: { x: 20, y: 20 } });
+  await waitPage(page, "loaded");
+  await expect(page.locator(".match")).toHaveCount(1);
+  expect(await scrollTop(page), "the Match starts at the top").toBe(0);
+  await page.locator(".match .back").click();
+  await expect(page.locator(".mystats")).toHaveCount(1);
+  expect(await scrollTop(page)).toBe(y);
+  // Leaving by the tab and coming back is a fresh visit: the top.
+  await tab(page, "Live").click();
+  await tab(page, "My Stats").click();
+  expect(await scrollTop(page)).toBe(0);
+});
+
+test("Back from a Match returns Player Details to its scroll position, Show more kept", async ({ page }) => {
+  await openScene(page, "details-more");
+  await page.locator("#app .scroll").evaluate((el) => (el.scrollTop = 200));
+  const row = page.locator(".details .recent .rrow").nth(5);
+  await row.scrollIntoViewIfNeeded();
+  const y = await scrollTop(page);
+  expect(y, "the page was scrolled").toBeGreaterThan(100);
+  await row.click({ position: { x: 20, y: 20 } });
+  await waitPage(page, "loaded");
+  expect(await scrollTop(page)).toBe(0);
+  await page.locator(".match .back").click();
+  await expect(page.locator(".details")).toHaveCount(1);
+  expect(await route(page)).toMatchObject({ name: "details", more: true });
+  await expect(page.locator(".details .recent .rrow")).toHaveCount(8);
+  expect(await scrollTop(page)).toBe(y);
+});
+
 test("new data replaces the page in place: the scroll position stays, no skeleton in between", async ({ page }) => {
   await openScene(page, "mystats");
   await page.locator("#app .scroll").evaluate((el) => (el.scrollTop = 420));

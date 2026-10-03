@@ -123,6 +123,37 @@ test("a page that throws while rendering shows a quiet empty page (top bar stays
   await expect(page.locator(".live")).toHaveCount(1);
 });
 
+// My Stats shows `mystats` data, not live data: only a My Stats update retries it (a live update says nothing new).
+test("a crashed My Stats page retries only on a My Stats update, not on every live update", async ({ page }) => {
+  const errors: string[] = [];
+  page.on("console", (m) => m.type() === "error" && errors.push(m.text()));
+  page.on("pageerror", (e) => errors.push(String(e)));
+  await openScene(page, "mystats");
+  await expect(page.locator(".mystats")).toHaveCount(1);
+  // A payload the Recent Matches table cannot render: a null where a match must be.
+  await page.evaluate(
+    `import("/src/lib/stores.ts").then(({ mystats }) => { let s; mystats.subscribe((v) => (s = v))(); mystats.set({ ...s, last5: [null] }); })`,
+  );
+  await expect(page.locator(".mystats")).toHaveCount(0);
+  await expect(page.locator(".blank")).toHaveCount(1);
+  await expect(page.locator("header.bar")).toBeVisible();
+  expect(errors.some((e) => e.includes("page crashed"))).toBe(true);
+  // Live updates come all the time: none of them re-runs the crash.
+  for (let i = 0; i < 3; i++) {
+    await page.evaluate(
+      `import("/src/lib/stores.ts").then(({ applyLive, live }) => { let s; live.subscribe((v) => (s = v))(); applyLive({ ...s }); })`,
+    );
+  }
+  await expect(page.locator(".blank")).toHaveCount(1);
+  expect(errors.filter((e) => e.includes("page crashed"))).toHaveLength(1);
+  // The next good My Stats answer brings the page back.
+  await page.evaluate(
+    `import("/src/lib/stores.ts").then(({ mystats }) => import("/src/lib/demo/mystats.ts").then(({ myStatsFull }) => mystats.set(myStatsFull())))`,
+  );
+  await expect(page.locator(".blank")).toHaveCount(0);
+  await expect(page.locator(".mystats")).toHaveCount(1);
+});
+
 test("an unknown stage renders an empty grid instead of crashing", async ({ page }) => {
   await openScene(page, "ingame");
   await page.evaluate(`import("/src/lib/stores.ts").then(({ live }) => live.set({ stage: "champselect", mapId: null, players: [] }))`);

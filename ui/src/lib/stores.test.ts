@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
 import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails } from "./types";
 
-const state = (stage: LiveState["stage"]): LiveState => ({ stage, mapId: null, players: [] });
+const state = (stage: LiveState["stage"], settled = true): LiveState => ({ stage, mapId: null, players: [], settled });
 
 // A fresh module graph per test: stores.ts keeps the previous stage in module state.
 async function load() {
@@ -88,6 +88,35 @@ describe("stores", () => {
       const { applyLive, router } = await load();
       applyLive(state("closed"));
       expect(router.route).toEqual({ name: "mystats" });
+    });
+
+    it("an unsettled closed state is no verdict: the app stays on Live until the first settled one", async () => {
+      // Rust publishes `closed` before its first look at the game: with VALORANT already running, that must not
+      // open My Stats (the Lobby follows a moment later).
+      const { applyLive, router } = await load();
+      applyLive(state("closed", false));
+      expect(router.route).toEqual({ name: "live" });
+      applyLive(state("closed", false));
+      expect(router.route).toEqual({ name: "live" });
+      applyLive(state("menus"));
+      expect(router.route, "settled on the Lobby").toEqual({ name: "live" });
+      applyLive(state("closed"));
+      expect(router.route, "the verdict was made, once").toEqual({ name: "live" });
+    });
+
+    it("a settled closed state after unsettled ones opens My Stats", async () => {
+      const { applyLive, router } = await load();
+      applyLive(state("closed", false));
+      applyLive(state("closed"));
+      expect(router.route).toEqual({ name: "mystats" });
+    });
+
+    it("a user who navigated while it was unsettled stays where they went", async () => {
+      const { applyLive, go, router } = await load();
+      applyLive(state("closed", false));
+      go({ name: "details", puuid: "p1", more: false });
+      applyLive(state("closed"));
+      expect(router.route).toEqual({ name: "details", puuid: "p1", more: false });
     });
 
     it("only once: a later closed state (the game quits) leaves the user where they are", async () => {

@@ -119,6 +119,7 @@ export const shapes = {
     stage: { kinds: ["string"], enum: "stage" },
     mapId: strOrNull,
     players: { kinds: ["array"], shape: "PlayerCard" },
+    settled: bool,
   } satisfies ShapeOf<LiveState>,
 
   MatchSummary: {
@@ -260,6 +261,7 @@ export const shapes = {
   } satisfies ShapeOf<Insight>,
 
   MyStats: {
+    puuid: str,
     rank: { kinds: ["object"], shape: "RankSummary" },
     rrSeries: { kinds: ["array"], shape: "RrPoint" },
     session: { kinds: ["object", "null"], shape: "SessionSummary" },

@@ -48,7 +48,7 @@ export type SceneName =
   | "details-nostats"
   | "match" | "match-enc" | "match-hidden" | "match-dm" | "match-loading" | "match-longnames" | "match-nostats"
   | "mystats" | "mystats-new" | "mystats-loading" | "mystats-unranked" | "mystats-immortal" | "mystats-rrnull"
-  | "mystats-longnames" | "mystats-closed";
+  | "mystats-longnames" | "mystats-closed" | "closed-unsettled";
 
 export type Scene = {
   /** null: no LiveState has arrived yet (`boot`). */
@@ -78,7 +78,8 @@ export type Scene = {
 // ── live states ─────────────────────────────────────────────────────────────────
 const LIVE_ROUTE: Route = { name: "live" };
 
-const state = (stage: Stage, mapId: string | null, players: PlayerCard[]): LiveState => ({ stage, mapId, players });
+/** `settled` is true in every scene unless it says otherwise: Rust's first verdict has long been made. */
+const state = (stage: Stage, mapId: string | null, players: PlayerCard[], settled = true): LiveState => ({ stage, mapId, players, settled });
 const ingame = (players: PlayerCard[] = roster()) => state("ingame", MAPS.Haven, players);
 
 /** Fahad alone, as when VALORANT is closed: values from the DB, no agent. */
@@ -467,6 +468,8 @@ export const SCENES: Record<SceneName, Scene> = {
   "mystats-longnames": { live: ingame(), route: MYSTATS_ROUTE, mystats: LONGNAMES, meta: longnamesMeta(LONGNAMES) },
   // VALORANT closed at startup: the app's own start-page rule opens My Stats (no route is set here).
   "mystats-closed": { live: closed(), route: LIVE_ROUTE, autoRoute: true, mystats: myStatsFull() },
+  // Rust has not made its first verdict yet (its `closed` is the starting value): the start page waits on Live.
+  "closed-unsettled": { live: state("closed", null, [], false), route: LIVE_ROUTE, autoRoute: true, mystats: myStatsFull() },
 };
 
 // ── the DEV `api.ts` answers ────────────────────────────────────────────────────

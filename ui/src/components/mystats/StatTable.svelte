@@ -52,10 +52,10 @@
         </div>
         <span class="r num">{r.games}</span>
         <span class="r num">{score(r.wins, r.losses)}</span>
-        <span class={["r num strong", rateTone(r.winrate)]} use:tip={winCellTip(r.wins, r.losses, r.games)}>{pct0(r.winrate)}</span>
+        <span class={["r num strong", r.winrate === null ? "dim" : rateTone(r.winrate)]} use:tip={winCellTip(r.wins, r.losses, r.games)}>{pct0(r.winrate)}</span>
         <span class={["r num strong", signTone(r.netRr)]}>{signedRr(r.netRr)}</span>
-        <span class="r num strong">{kd2(r.kd)}</span>
-        <span class="r num">{r.acs === null ? DASH : Math.round(r.acs)}</span>
+        <span class={["r num strong", r.kd === null && "dim"]}>{kd2(r.kd)}</span>
+        <span class={["r num", r.acs === null && "dim"]}>{r.acs === null ? DASH : Math.round(r.acs)}</span>
       </div>
     {/each}
   {/if}
@@ -137,5 +137,10 @@
 
   .loss {
     color: var(--loss);
+  }
+
+  /* An unknown value (—): the one quiet tone. */
+  .dim {
+    color: var(--text2);
   }
 </style>

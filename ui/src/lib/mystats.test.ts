@@ -8,6 +8,8 @@ import {
   DAYPARTS,
   minusSigns,
   rateTone,
+  rrInTier,
+  rrLines,
   signedRr,
   signTone,
   tierOfAbsolute,
@@ -43,13 +45,14 @@ describe("minusSigns", () => {
 });
 
 describe("signTone and signedRr", () => {
-  it("gains win, losses lose, zero and unknown are flat", () => {
+  it("gains win, losses lose, zero is flat, and an unknown value is the one dim tone", () => {
     expect(signTone(18)).toBe("win");
     expect(signTone(-1)).toBe("loss");
     expect(signTone(0)).toBe("flat");
-    expect(signTone(null)).toBe("flat");
-    expect(signTone(undefined)).toBe("flat");
     expect(signTone(0.4)).toBe("flat"); // an average that rounds to 0 reads 0
+    expect(signTone(null)).toBe("dim");
+    expect(signTone(undefined)).toBe("dim");
+    expect(signTone(Number.NaN)).toBe("dim");
   });
 
   it("signedRr rounds whole and writes +, U+2212 and 0; unknown is the dash", () => {
@@ -106,6 +109,46 @@ describe("cellViews", () => {
     expect(WEEKDAYS_LONG).toHaveLength(7);
     expect(DAYPARTS.map((d) => d.label)).toEqual(["Morning", "Afternoon", "Evening", "Night"]);
     expect(DAYPARTS.map((d) => d.hours)).toEqual(["5 AM – 12 PM", "12 PM – 5 PM", "5 PM – 10 PM", "10 PM – 5 AM"]);
+  });
+});
+
+describe("rrInTier", () => {
+  it("within the tier below Immortal; counted from the 2400 floor from Immortal 1 up", () => {
+    expect(rrInTier(2147)).toBe(47);
+    expect(rrInTier(2100)).toBe(0);
+    expect(rrInTier(2399)).toBe(99);
+    expect(rrInTier(2400)).toBe(0);
+    expect(rrInTier(2487)).toBe(87);
+    expect(rrInTier(2755)).toBe(355); // Immortal's RR has no ceiling
+  });
+});
+
+describe("rrLines", () => {
+  it("none while the range is entirely below the 2400 floor", () => {
+    expect(rrLines(2100, 2399, 2)).toEqual([]);
+    expect(rrLines(2300, 2400, 2)).toEqual([]);
+  });
+
+  it("3 or 4 round-number lines above the floor, the smallest round step that fits", () => {
+    // 187 RR above the floor at ~1.07 px per RR: 50 is the step that gives 3 lines.
+    expect(rrLines(2400, 2587, 1.07)).toEqual([2450, 2500, 2550]);
+    // From inside the range upward: lines are multiples of the step counted from 2400, strictly inside.
+    expect(rrLines(2432, 2618, 1.07)).toEqual([2450, 2500, 2550, 2600]);
+    // A short range takes a small step; a long one a big step.
+    expect(rrLines(2395, 2445, 4.3)).toEqual([2410, 2420, 2430, 2440]);
+    expect(rrLines(2400, 3000, 0.35)).toEqual([2600, 2800]);
+  });
+
+  it("never more than 4 lines, and never closer than 24px", () => {
+    for (const [lo, hi, px] of [[2400, 2480, 3], [2400, 2900, 0.5], [2600, 2650, 5], [2380, 2640, 0.8]] as const) {
+      const lines = rrLines(lo, hi, px);
+      expect(lines.length).toBeLessThanOrEqual(4);
+      for (let i = 1; i < lines.length; i++) expect((lines[i]! - lines[i - 1]!) * px).toBeGreaterThanOrEqual(24);
+      for (const v of lines) {
+        expect(v).toBeGreaterThan(Math.max(lo, 2400));
+        expect(v).toBeLessThan(hi);
+      }
+    }
   });
 });
 
@@ -204,12 +247,53 @@ describe("chartModel", () => {
     for (const b of m.bands) if (b.labelY !== null) expect(b.y1 - b.y0).toBeGreaterThanOrEqual(16);
   });
 
-  it("from Immortal 1 up there are no more tier lines: the 2400 floor is the last", () => {
+  it("from Immortal 1 up there are no more tier lines: the 2400 floor is the last, then RR lines", () => {
     const m = chartModel(series([2350, 2450, 2600, 2700]), box)!;
-    expect(m.grid.map((g) => g.abs)).toEqual([2400]);
+    const tiers = m.grid.filter((g) => g.label === null);
+    expect(tiers.map((g) => g.abs)).toEqual([2400]);
     expect(m.bands.map((b) => b.tier)).toEqual([23, 24]);
     const above = chartModel(series([2450, 2520, 2480]), box)!;
-    expect(above.grid).toEqual([]); // the 2400 floor is below the range
+    expect(above.grid.filter((g) => g.label === null)).toEqual([]); // the 2400 floor is below the range
     expect(above.bands.map((b) => b.tier)).toEqual([24]);
+  });
+
+  it("above the floor 3–4 round-number lines are labelled `N RR`, counted from the floor, each at its own height", () => {
+    for (const abs of [[2450, 2520, 2480], [2350, 2450, 2600, 2700], [2410, 2430, 2420], [2500, 2790, 2650]]) {
+      const m = chartModel(series(abs), box)!;
+      const marks = m.grid.filter((g) => g.label !== null);
+      expect(marks.length, abs.join()).toBeGreaterThanOrEqual(3);
+      expect(marks.length, abs.join()).toBeLessThanOrEqual(4);
+      for (const g of marks) {
+        expect(g.label).toBe(`${g.abs - 2400} RR`);
+        expect((g.abs - 2400) % 5).toBe(0);
+        expect(g.y).toBeGreaterThan(m.plot.y0);
+        expect(g.y).toBeLessThan(m.plot.y1);
+      }
+      // Higher RR, higher up; spaced so the 12px labels never touch.
+      for (let i = 1; i < marks.length; i++) {
+        expect(marks[i]!.y).toBeLessThan(marks[i - 1]!.y);
+        expect(marks[i - 1]!.y - marks[i]!.y).toBeGreaterThanOrEqual(24);
+      }
+    }
+    // Below the floor nothing is labelled: the bands name the tiers.
+    expect(chartModel(series([2050, 2130, 2260]), box)!.grid.every((g) => g.label === null)).toBe(true);
+  });
+
+  it("the Immortal+ name sits in the widest gap between the RR labels and clears them", () => {
+    const m = chartModel(series([2450, 2520, 2480]), box)!;
+    const band = m.bands.find((b) => b.tier === 24)!;
+    expect(band.labelY).not.toBeNull();
+    for (const g of m.grid.filter((x) => x.label !== null)) expect(Math.abs(g.y - band.labelY!)).toBeGreaterThanOrEqual(16);
+    // A short chart: whatever name is drawn still clears every RR label.
+    const short = chartModel(series([2450, 2520, 2480]), { ...box, h: 110 })!;
+    for (const b of short.bands) {
+      if (b.tier !== 24 || b.labelY === null) continue;
+      for (const g of short.grid.filter((x) => x.label !== null)) expect(Math.abs(g.y - b.labelY)).toBeGreaterThanOrEqual(16);
+    }
+  });
+
+  it("each point carries the RR it stands at", () => {
+    const m = chartModel(series([2147, 2165, 2399, 2400, 2455]), box)!;
+    expect(m.points.map((p) => p.rr)).toEqual([47, 65, 99, 0, 55]);
   });
 });

@@ -30,9 +30,31 @@ export const router = $state<{ route: Route }>({ route: { name: "live" } });
 /** The Details/Match/My Stats scroll container (registered by App.svelte). Live has none. */
 let scroller: HTMLElement | null = null;
 
-/** `use:scrollHost` on the scroll container, so `go` can send it back to the top. */
+/** How far the page Back returns to was scrolled when the user left it for a Match (My Stats, or one player's Details). */
+const savedScroll = new Map<string, number>();
+/** What the next scroll container to mount is scrolled to (Back sets it; every other navigation starts at the top). */
+let restoreTo = 0;
+
+/** The pages whose scroll position Back restores. */
+const pageId = (r: Route): string | null => (r.name === "mystats" ? "mystats" : r.name === "details" ? `details:${r.puuid}` : null);
+
+/**
+ * `use:scrollHost` on the scroll container, so `go` can send it back to the top, and Back can put it where the page was
+ * left. The container is new for every page (App keys it), so the restore happens when it mounts: its children are in
+ * place by then, and a position the content is too short for yet is tried once more on the next frame.
+ */
 export function scrollHost(node: HTMLElement): { destroy(): void } {
   scroller = node;
+  const y = restoreTo;
+  restoreTo = 0;
+  if (y > 0) {
+    node.scrollTop = y;
+    if (node.scrollTop !== y && typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => {
+        if (scroller === node) node.scrollTop = y;
+      });
+    }
+  }
   return {
     destroy() {
       if (scroller === node) scroller = null;
@@ -42,20 +64,27 @@ export function scrollHost(node: HTMLElement): { destroy(): void } {
 
 /**
  * Navigate: clears the tooltip and resets the scroll container. Going to Live also forgets the open Player Details
- * (a Match page and Back keep them): a reopen then starts from the skeleton, never from an older answer.
+ * (a Match page and Back keep them): a reopen then starts from the skeleton, never from an older answer. Leaving My
+ * Stats or Details for a Match remembers how far the page was scrolled; `restore` (Back) puts it back.
  */
-export function go(r: Route): void {
+export function go(r: Route, restore = false): void {
   hideTip();
-  if (scroller) scroller.scrollTop = 0;
+  if (scroller) {
+    const from = pageId(router.route);
+    if (r.name === "match" && from !== null) savedScroll.set(from, scroller.scrollTop);
+    scroller.scrollTop = 0;
+  }
+  const to = pageId(r);
+  restoreTo = restore && to !== null ? (savedScroll.get(to) ?? 0) : 0;
   if (r.name === "live") openDetails.close();
   router.route = r;
 }
 
-/** Back: Match → the page it was opened from (Details with "Show more" kept, or My Stats); Details → Live. */
+/** Back: Match → the page it was opened from (Details with "Show more" kept, or My Stats) at its old scroll position; Details → Live. */
 export function back(): void {
   const r = router.route;
   if (r.name === "match") {
-    go(r.back === "mystats" ? { name: "mystats" } : { name: "details", puuid: r.back.puuid, more: r.back.more });
+    go(r.back === "mystats" ? { name: "mystats" } : { name: "details", puuid: r.back.puuid, more: r.back.more }, true);
   } else if (r.name === "details") go({ name: "live" });
 }
 
@@ -68,11 +97,13 @@ export function showMore(): void {
 let started = false;
 
 /**
- * The first live state ever applied picks the start page, once: VALORANT closed → My Stats (the saved data is all
- * there is to show); anything else → Live. It moves only a user who has not navigated yet.
+ * The first live state with `settled: true` picks the start page, once: VALORANT closed → My Stats (the saved data is
+ * all there is to show); anything else → Live. Rust publishes `closed` before it has looked at the game (the model's
+ * starting value), so an unsettled state is no verdict: the app waits on Live until the first settled one. It moves
+ * only a user who has not navigated yet.
  */
-export function startPage(stage: Stage): void {
-  if (started) return;
+export function startPage(stage: Stage, settled: boolean): void {
+  if (started || !settled) return;
   started = true;
   if (stage === "closed" && router.route.name === "live") go({ name: "mystats" });
 }

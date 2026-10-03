@@ -140,11 +140,20 @@ export function rrToNextTip(n: number | null | undefined): string {
 export const whenTip = (ms: number): string => `${dateLong(ms)} · ${time12(ms)}`;
 
 /**
- * One RR chart point: `+18 RR · Ascendant 2 · Sep 29`. The first point has no change to show, so it is the tier and
- * the date. A part that is unknown (meta pending or a tier the table lacks) is dropped (spec §5.8).
+ * One RR chart point: `+18 RR · Ascendant 2 · 47 RR · Sep 29` — the change the match made (signed), the tier the
+ * point stands in with the RR it stands at (`rr`: within the tier, or counted from Immortal 1's floor), and the day.
+ * The first point has no change to show. A part that is unknown (meta pending or a tier the table lacks) is dropped
+ * (spec §5.8), and the RR goes with its tier (it is the tier's RR).
  */
-export function rrPointTip(delta: number | null, tierName: string | null | undefined, startMs: number, nowMs: number): string {
-  const parts = [delta === null ? null : `${rrDelta(delta)} RR`, tierName, dateShort(startMs, nowMs)];
+export function rrPointTip(
+  delta: number | null,
+  tierName: string | null | undefined,
+  rr: number,
+  startMs: number,
+  nowMs: number,
+): string {
+  const known = typeof tierName === "string" && tierName !== "";
+  const parts = [delta === null ? null : `${rrDelta(delta)} RR`, known ? tierName : null, known ? `${rr} RR` : null, dateShort(startMs, nowMs)];
   return parts.filter((p): p is string => typeof p === "string" && p !== "").join(" · ");
 }
 

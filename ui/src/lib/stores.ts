@@ -53,12 +53,12 @@ export const now = readable(Date.now(), (set) => {
 let prevStage: Stage | null = null;
 
 /**
- * Every LiveState goes through here: the first one picks the start page (VALORANT closed → My Stats), and entering
- * Agent Select switches the route to Live.
+ * Every LiveState goes through here: the first settled one picks the start page (VALORANT closed → My Stats), and
+ * entering Agent Select switches the route to Live.
  */
 export function applyLive(s: LiveState | null): void {
   if (s) {
-    startPage(s.stage);
+    startPage(s.stage, s.settled);
     onStage(prevStage, s.stage);
     prevStage = s.stage;
     // R163 (M1): a Details or Match page that settled empty gets its one retry on the next live event.

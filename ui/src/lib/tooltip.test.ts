@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { hideTip, parseWl, tip, tipOver, tipPosition, tipState, wlRow } from "./tooltip.svelte";
+import { attachTooltips, hideTip, parseWl, retip, tip, tipOver, tipPosition, tipState, wlRow } from "./tooltip.svelte";
 import {
   ACS_TIP,
   ACT_SCOPE,
@@ -238,6 +238,71 @@ describe("tooltip engine (delegated mouseover, 450 ms)", () => {
     over(trigger({ "data-tip": "Hidden name", "data-tip-cut": "X#Y" }, rect(100, 100, 100, 20)));
     vi.advanceTimersByTime(450);
     expect(tipState.tip?.text).toBe("Hidden name");
+  });
+
+  describe("retip: one hover surface, the tip follows its target (the RR chart)", () => {
+    const fakeRoot = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      getBoundingClientRect: () => rect(0, 0, 1000, 800),
+    } as unknown as HTMLElement;
+    /** A trigger that finds itself for `closest`, as the real element does. */
+    const self = (attrs: Record<string, string>, box: { r: DOMRectReadOnly }) => {
+      const el: Record<string, unknown> = {
+        getAttribute: (k: string) => attrs[k] ?? null,
+        getBoundingClientRect: () => box.r,
+        querySelector: () => null,
+      };
+      el.closest = () => el;
+      return el as unknown as Element;
+    };
+
+    it("restarts the delay for the same trigger: the old bubble goes, the new text shows after 450 ms, placed by its new box", () => {
+      const detach = attachTooltips(fakeRoot);
+      const attrs = { "data-tip": "+18 RR · Ascendant 2 · 47 RR · Sep 28" };
+      const box = { r: rect(300, 100, 20, 28) };
+      const el = self(attrs, box);
+      tipOver(el, fakeRoot);
+      vi.advanceTimersByTime(450);
+      expect(tipState.tip?.text).toBe("+18 RR · Ascendant 2 · 47 RR · Sep 28");
+
+      // The pointer moved to the next point: the trigger's text and box changed, no mouseover came.
+      attrs["data-tip"] = "−15 RR · Ascendant 2 · 32 RR · Sep 29";
+      box.r = rect(500, 120, 20, 28);
+      retip(el);
+      expect(tipState.tip, "the old bubble is gone at once").toBeNull();
+      vi.advanceTimersByTime(449);
+      expect(tipState.tip).toBeNull();
+      vi.advanceTimersByTime(1);
+      expect(tipState.tip).toEqual({ text: "−15 RR · Ascendant 2 · 32 RR · Sep 29", x: 510, top: 156, transform: "translate(-50%,0)" });
+      detach();
+    });
+
+    it("a trigger with an empty tip shows nothing, and a plain mouseover on it afterwards still works", () => {
+      const detach = attachTooltips(fakeRoot);
+      const attrs = { "data-tip": "" };
+      const el = self(attrs, { r: rect(300, 100, 20, 28) });
+      retip(el);
+      vi.advanceTimersByTime(1000);
+      expect(tipState.tip).toBeNull();
+      attrs["data-tip"] = "A";
+      tipOver(el, fakeRoot);
+      vi.advanceTimersByTime(450);
+      expect(tipState.tip?.text).toBe("A");
+      detach();
+    });
+
+    it("before the engine is attached, or after it is detached, there is no root to place a bubble in: nothing happens", () => {
+      const el = self({ "data-tip": "A" }, { r: rect(300, 100, 20, 28) });
+      retip(el);
+      vi.advanceTimersByTime(1000);
+      expect(tipState.tip).toBeNull();
+      const detach = attachTooltips(fakeRoot);
+      detach();
+      retip(el);
+      vi.advanceTimersByTime(1000);
+      expect(tipState.tip).toBeNull();
+    });
   });
 
   it("a text starting with wl: that does not parse shows nothing", () => {
@@ -505,20 +570,21 @@ describe("My Stats tips (spec §9.6)", () => {
     expect(whenTip(Date.UTC(2026, 8, 29, 21, 14))).toBe("Sep 29, 2026 · 9:14 PM");
   });
 
-  it("an RR chart point: `+18 RR · Ascendant 2 · Sep 29`; the first point has no change", () => {
+  it("an RR chart point: `+18 RR · Ascendant 2 · 47 RR · Sep 29`; the first point has no change", () => {
     const ms = Date.UTC(2026, 8, 29, 16, 40);
-    expect(rrPointTip(18, "Ascendant 2", ms, NOW)).toBe("+18 RR · Ascendant 2 · Sep 29");
-    expect(rrPointTip(-15, "Immortal", ms, NOW)).toBe("−15 RR · Immortal · Sep 29");
-    expect(rrPointTip(0, "Ascendant 2", ms, NOW)).toBe("0 RR · Ascendant 2 · Sep 29");
-    expect(rrPointTip(null, "Ascendant 2", ms, NOW)).toBe("Ascendant 2 · Sep 29");
-    expect(rrPointTip(18, "Ascendant 2", Date.UTC(2025, 11, 30), NOW)).toBe("+18 RR · Ascendant 2 · Dec 30, 2025");
+    expect(rrPointTip(18, "Ascendant 2", 47, ms, NOW)).toBe("+18 RR · Ascendant 2 · 47 RR · Sep 29");
+    expect(rrPointTip(-15, "Immortal", 87, ms, NOW)).toBe("−15 RR · Immortal · 87 RR · Sep 29");
+    expect(rrPointTip(0, "Ascendant 2", 0, ms, NOW)).toBe("0 RR · Ascendant 2 · 0 RR · Sep 29");
+    expect(rrPointTip(null, "Ascendant 2", 47, ms, NOW)).toBe("Ascendant 2 · 47 RR · Sep 29");
+    expect(rrPointTip(18, "Ascendant 2", 47, Date.UTC(2025, 11, 30), NOW)).toBe("+18 RR · Ascendant 2 · 47 RR · Dec 30, 2025");
   });
 
   it("an RR chart point drops a part it does not know (meta pending or a missing tier), never printing undefined or null", () => {
     const ms = Date.UTC(2026, 8, 29);
-    expect(rrPointTip(18, undefined, ms, NOW)).toBe("+18 RR · Sep 29");
-    expect(rrPointTip(18, null, ms, NOW)).toBe("+18 RR · Sep 29");
-    expect(rrPointTip(null, null, ms, NOW)).toBe("Sep 29");
+    // The RR goes with its tier: it is the tier's RR.
+    expect(rrPointTip(18, undefined, 47, ms, NOW)).toBe("+18 RR · Sep 29");
+    expect(rrPointTip(18, null, 47, ms, NOW)).toBe("+18 RR · Sep 29");
+    expect(rrPointTip(null, null, 47, ms, NOW)).toBe("Sep 29");
   });
 
   it("an insight: the sample behind it", () => {

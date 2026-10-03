@@ -106,6 +106,12 @@ export interface LiveState {
   stage: Stage;
   mapId: string | null;
   players: PlayerCard[];
+  /**
+   * Rust has reached its first verdict on whether VALORANT is running: false while the very first presence check is
+   * still pending (the `closed` state published before it is the model's starting value, not a verdict). Once true it
+   * stays true for the app's lifetime. The start page decides on the first state with `settled: true`.
+   */
+  settled: boolean;
 }
 
 /** One row of `PlayerDetails.recent`, and of `MyStats.last5` (the same Rust struct). */
@@ -320,6 +326,8 @@ export interface Insight {
 type Tuple<T, N extends number, A extends T[] = []> = A["length"] extends N ? A : Tuple<T, N, [...A, T]>;
 
 export interface MyStats {
+  /** The user's own PUUID: the page opens Match Details with it as the focus player (a row is clickable whenever My Stats exists). */
+  puuid: string;
   rank: RankSummary;
   /** The RR chart, oldest first. */
   rrSeries: RrPoint[];

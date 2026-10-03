@@ -20,6 +20,8 @@ const DELAY_MS = 450;
 let timer: ReturnType<typeof setTimeout> | undefined;
 /** The trigger the pointer is on, whether or not its tip will show (so a re-entry inside it is a no-op). */
 let current: Element | null = null;
+/** The element the engine is attached to (`attachTooltips`): where a `retip` places its bubble. */
+let appRoot: Element | null = null;
 
 /** Clear the tip now and cancel a pending one. */
 export function hideTip(): void {
@@ -82,10 +84,22 @@ export function tipOver(target: Element | null, root: Element): void {
 }
 
 /**
+ * One surface with many targets (the RR chart: a single hover layer, the tip belongs to the point nearest the
+ * pointer): the pointer moved to another target without leaving the surface, so no `mouseover` came. Restarts the tip
+ * for `trigger` as one would — the old bubble goes, the new text shows after the delay, placed by `trigger`'s box.
+ */
+export function retip(trigger: Element): void {
+  if (!appRoot) return;
+  hideTip();
+  tipOver(trigger, appRoot);
+}
+
+/**
  * Wire the engine to #app. Leaving the app, a click, or scrolling a Details/Match container hides the tip
  * (scroll does not bubble, so it is caught in the capture phase). Returns the cleanup.
  */
 export function attachTooltips(root: HTMLElement): () => void {
+  appRoot = root;
   const over = (e: MouseEvent) => tipOver(e.target as Element | null, root);
   root.addEventListener("mouseover", over);
   root.addEventListener("mouseleave", hideTip);
@@ -96,6 +110,7 @@ export function attachTooltips(root: HTMLElement): () => void {
     root.removeEventListener("mouseleave", hideTip);
     root.removeEventListener("click", hideTip);
     root.removeEventListener("scroll", hideTip, true);
+    if (appRoot === root) appRoot = null;
     hideTip();
   };
 }

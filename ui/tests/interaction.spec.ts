@@ -1,5 +1,6 @@
 // Hover and click (spec §8.5 "Hover and click"): the Live part, then the Details and Match part (Task 18).
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { myStatsFull } from "../src/lib/demo/mystats";
 import { openScene, varRgb, waitPage } from "./harness";
 
 const onLive = async (page: Page) => {
@@ -194,21 +195,25 @@ test("My Stats: the tables, cells, chart, insights and the rank card are not cli
     await l.click({ position: { x: 4, y: 4 } });
     expect(await routeOf(page), what).toEqual(before);
   }
-  const chart = page.locator(".mystats .rrchart .hit").nth(10);
+  const chart = page.locator(".mystats .rrchart .hit");
+  await chart.scrollIntoViewIfNeeded();
+  expect(await cursor(chart), "chart cursor").not.toBe("pointer");
   await chart.click();
   expect(await routeOf(page), "chart").toEqual(before);
 });
 
-test("My Stats: without the user's own id (no live card) the Recent Matches rows are plain: no pointer, no click", async ({ page }) => {
+test("My Stats: the Recent Matches rows open their match whenever the page has data, with no live card of the user (MyStats.puuid)", async ({ page }) => {
   await openScene(page, "mystats");
+  // The live feed knows nothing of the user (a closed game, nothing on screen): the rows still work, the id is in the stats.
   await page.evaluate(
-    `import("/src/lib/stores.ts").then(({ applyLive }) => applyLive({ stage: "closed", mapId: null, players: [] }))`,
+    `import("/src/lib/stores.ts").then(({ applyLive }) => applyLive({ stage: "closed", mapId: null, players: [], settled: true }))`,
   );
-  const row = page.locator(".mystats .last5 .rrow").first();
-  await expect(row).not.toHaveAttribute("role", "button");
-  expect(await cursor(row)).toBe("default");
-  const before = await routeOf(page);
-  await row.click({ position: { x: 20, y: 20 } });
-  expect(await routeOf(page)).toEqual(before);
+  const m = myStatsFull();
+  const rows = page.locator(".mystats .last5 .rrow");
+  await expect(rows.first()).toHaveAttribute("role", "button");
+  expect(await cursor(rows.first())).toBe("pointer");
+  await expect(rows.locator("svg[viewBox='0 0 7 10']")).toHaveCount(5); // every clickable row has its chevron
+  await rows.first().click({ position: { x: 20, y: 20 } });
+  expect(await routeOf(page)).toMatchObject({ name: "match", matchId: m.last5[0]!.matchId, focusPuuid: m.puuid, back: "mystats" });
 });
 

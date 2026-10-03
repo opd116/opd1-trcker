@@ -657,13 +657,16 @@ test("scroll container resets on navigation", async ({ page }) => {
   await openScene(page, "details-more");
   const sc = scroller(page);
   await sc.evaluate((el) => (el.scrollTop = el.scrollHeight));
-  expect(await sc.evaluate((el) => el.scrollTop)).toBeGreaterThan(200);
+  const left = await sc.evaluate((el) => el.scrollTop);
+  expect(left).toBeGreaterThan(200);
   await page.locator(".details .encs .erow").last().click();
   await waitPage(page, "loaded");
   expect(await sc.evaluate((el) => el.scrollTop)).toBe(0);
+  // Back from the Match is the one navigation that does not reset: the page is where it was left (nav-mystats.spec.ts
+  // covers it for My Stats and with a mid-page row).
   await page.locator(".match .back").click();
   await waitPage(page, "loaded");
-  expect(await sc.evaluate((el) => el.scrollTop)).toBe(0);
+  expect(await sc.evaluate((el) => el.scrollTop)).toBe(left);
   // Show more keeps the place (it is not a navigation). Mara's collapsed page fits the window, so it is given room to
   // scroll for this check.
   await openScene(page, "details");

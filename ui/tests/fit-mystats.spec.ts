@@ -136,6 +136,18 @@ test("mystats: the rank card reads the data", async ({ page }) => {
   expect(await texts(r.locator(".cells .cv"))).toEqual([rr(m.rank.netRr), rr(m.rank.avgWin), rr(m.rank.avgLoss)]);
   const tone = ["--win", "--win", "--loss"];
   for (let i = 0; i < 3; i++) expect(await css(r.locator(".cells .cv").nth(i), "color")).toBe(await varRgb(page, tone[i]!));
+  // The three figures are apart by hairlines (the Details hero's and the Session's way), not bordered tiles.
+  const line = await varRgb(page, "--line");
+  for (let i = 0; i < 3; i++) {
+    const cell = r.locator(".cells .cell").nth(i);
+    for (const side of ["top", "right", "bottom"]) {
+      expect(await css(cell, `border-${side}-width`), `cell ${i} ${side}`).toBe("0px");
+    }
+    expect(await css(cell, "border-radius"), `cell ${i} radius`).toBe("0px");
+    expect(await css(cell, "border-left-width"), `cell ${i} divider`).toBe(i === 0 ? "0px" : "1px");
+    if (i > 0) expect(await css(cell, "border-left-color"), `cell ${i} divider colour`).toBe(line);
+  }
+  expect(await css(r.locator(".cells .cell").nth(0), "padding-left")).toBe("0px");
   // The latest changes, newest first, at most 4.
   const rows = r.locator(".crow");
   await expect(rows).toHaveCount(Math.min(4, m.rank.changes.length));
@@ -156,19 +168,26 @@ test("mystats: the chart is an SVG line over the act with tier lines, tier names
   const c = page.locator(".mystats .rrchart");
   await expect(c.locator("svg")).toHaveCount(1);
   await expect(c.locator("canvas, img")).toHaveCount(0); // no chart library, no bitmap
-  await expect(c.locator("svg .hit")).toHaveCount(m.rrSeries.length);
+  // One hover layer over the plot (and the tip's anchor box): no hit rect per point.
+  await expect(c.locator("svg .hit")).toHaveCount(1);
+  await expect(c.locator("svg rect")).toHaveCount(2);
+  expect(m.rrSeries.length).toBeGreaterThan(10);
   expect(await css(c.locator(".line"), "stroke")).toBe(await varRgb(page, "--accent"));
   expect(await css(c.locator(".line"), "stroke-width")).toBe("2px");
   expect(await css(c.locator(".end"), "fill")).toBe(await varRgb(page, "--accent"));
-  // Grid: hairlines in --line, one per tier boundary inside the range; labels in --text3, 12px.
+  // Grid: hairlines in --line, one per tier boundary inside the range; labels in --text2, 12px.
   const grid = c.locator(".grid");
   expect(await grid.count()).toBeGreaterThan(0);
   expect(await css(grid.first(), "stroke")).toBe(await varRgb(page, "--line"));
   const labels = c.locator(".band");
   expect(await labels.count()).toBeGreaterThan(0);
   for (const l of await labels.all()) {
-    expect(await css(l, "fill")).toBe(await varRgb(page, "--text3"));
+    expect(await css(l, "fill")).toBe(await varRgb(page, "--text2"));
     expect(await css(l, "font-size")).toBe("12px");
+  }
+  for (const d of await c.locator(".date").all()) {
+    expect(await css(d, "fill")).toBe(await varRgb(page, "--text2"));
+    expect(await css(d, "font-size")).toBe("12px");
   }
   expect(await svgTexts(labels)).toContain("Ascendant 1");
   expect(await svgTexts(c.locator(".date"))).toEqual(["Aug 26", "Sep 29"]);
@@ -223,6 +242,40 @@ test("mystats: Recent Matches are the Details rows with ACS and RR, newest first
   // The Details row: 52px, plus the 1px separator on every row but the first.
   for (let i = 0; i < 5; i++) near((await box(rows.nth(i))).height, i === 0 ? 52 : 53, `row ${i} height`);
   for (const r of await rows.all()) expect(await css(r, "cursor")).toBe("pointer");
+});
+
+test("mystats: Recent Matches rows share the Details rows' inset, map column and agent-icon column exactly", async ({ page }) => {
+  /** Offsets inside the panel: where the row's content starts, the agent icon, the chevron's right edge, the header's first label. */
+  const measure = async (scene: string, panel: string) => {
+    await openScene(page, scene);
+    const p = page.locator(panel);
+    await p.scrollIntoViewIfNeeded();
+    const pb = await box(p);
+    const row = p.locator(".rrow").first();
+    const rb = await box(row);
+    const agent = await box(row.locator(".ragent"));
+    const map = await box(row.locator(".mimg"));
+    const chevron = await box(row.locator("svg").last());
+    const head = await box(p.locator(".rhead > span").first());
+    return {
+      padL: await css(row, "padding-left"),
+      padR: await css(row, "padding-right"),
+      headPadL: await css(p.locator(".rhead"), "padding-left"),
+      rowLeft: rb.x - pb.x,
+      rowRight: pb.x + pb.width - (rb.x + rb.width),
+      map: map.x - pb.x,
+      agent: agent.x - pb.x,
+      agentSize: [agent.width, agent.height],
+      chevronRight: pb.x + pb.width - (chevron.x + chevron.width),
+      head: head.x - pb.x,
+      rowHeight: rb.height,
+    };
+  };
+  const stats = await measure("mystats", ".mystats .last5 .panel");
+  const details = await measure("details", ".details .recent .panel");
+  expect(stats, "My Stats rows against Details rows").toEqual(details);
+  expect(stats.padL).toBe("8px");
+  expect(stats.agentSize).toEqual([28, 28]);
 });
 
 for (const kind of ["maps", "agents"] as const) {
@@ -287,15 +340,18 @@ test("mystats: weekday (Mon … Sun) and time-of-day cells: win rate, a bar of t
   expect(Math.abs(wd - dp), `cell widths ${wd} and ${dp}`).toBeLessThanOrEqual(4);
 });
 
-test("mystats: insights: a dot (good green, weak red), the finished text with real minus signs", async ({ page }) => {
+test("mystats: insights: a dot (good green, a weak spot neutral grey, never red), the finished text with real minus signs", async ({ page }) => {
   const m = myStatsFull();
   await openScene(page, "mystats");
   const rows = page.locator(".mystats .insights .irow");
   await expect(rows).toHaveCount(m.insights.length);
   expect(await texts(rows.locator(".text"))).toEqual(m.insights.map((i) => i.text.replace(/(^|[\s(])-(?=\d)/g, "$1−")));
   for (let i = 0; i < m.insights.length; i++) {
-    expect(await css(rows.nth(i).locator(".dot"), "background-color")).toBe(await varRgb(page, m.insights[i]!.positive ? "--win" : "--loss"));
+    expect(await css(rows.nth(i).locator(".dot"), "background-color")).toBe(await varRgb(page, m.insights[i]!.positive ? "--win" : "--text2"));
   }
+  expect(m.insights.some((i) => !i.positive), "the demo has a weak spot to check").toBe(true);
+  const loss = await varRgb(page, "--loss");
+  for (const d of await rows.locator(".dot").all()) expect(await css(d, "background-color")).not.toBe(loss);
   expect(await texts(rows.locator(".text"))).toContainEqual(expect.stringMatching(/−\d+ RR on losses/));
   expect((await texts(rows.locator(".text"))).join("\n")).not.toMatch(/(^|\s)-\d/);
 });
@@ -314,6 +370,13 @@ test("mystats-new: Rust knows nothing yet: every frame stays, with —, no skele
   expect(await text(p.locator(".rank .wl .val"))).toBe("— / —");
   expect(await text(p.locator(".rrchart .none"))).toBe("—");
   expect(await texts(p.locator(".session .val, .session .big"))).toEqual(["—", "—", "—"]);
+  // Every unknown value is the one dim tone: not the text colour, and not the win / loss colours.
+  const dim = await varRgb(page, "--text2");
+  for (const el of await p.locator(".rank .cells .cv, .rank .wl .w, .rank .wl .l, .rank .wl .dim, .session .val, .session .big").all()) {
+    expect(await css(el, "color")).toBe(dim);
+  }
+  expect(await p.locator(".rank .wl .val .dim").count()).toBe(2);
+  await expect(p.locator(".rank .wl .w, .rank .wl .l")).toHaveCount(0);
   expect(await text(p.locator(".last5 .rrow"))).toBe("—");
   expect(await text(p.locator(".maps .trow"))).toBe("—");
   expect(await text(p.locator(".agents .trow"))).toBe("—");
@@ -374,6 +437,13 @@ test("mystats-unranked: no rank (—), nothing to chart, no RR anywhere, no insi
   await expect(p.locator(".rrchart svg")).toHaveCount(0);
   expect(await text(p.locator(".session .big"))).toBe("—"); // a session with no RR change stored
   expect(await texts(p.locator(".last5 .rrr"))).toEqual(["—", "—", "—"]);
+  // The unknown RR of a match, the session's net RR and the table's Net RR are the one dim tone.
+  const dim = await varRgb(page, "--text2");
+  expect(await css(p.locator(".session .big"), "color")).toBe(dim);
+  for (const el of await p.locator(".last5 .rrr").all()) expect(await css(el, "color")).toBe(dim);
+  for (const el of await p.locator(".maps .trow .num:nth-child(5), .agents .trow .num:nth-child(5)").all()) {
+    expect(await css(el, "color")).toBe(dim);
+  }
   expect((await texts(p.locator(".maps .trow")))).toHaveLength(m.maps.length);
   for (const t of await texts(p.locator(".maps .trow .num:nth-child(5), .agents .trow .num:nth-child(5)"))) expect(t).toBe("—");
   expect(await text(p.locator(".insights .irow"))).toBe("—");
@@ -387,6 +457,28 @@ test("mystats-immortal: no progress bar and the chart climbs from the 2400 floor
   expect(await text(p.locator(".rank .rr"))).toBe(`${imm.rank.rr} RR`);
   await expect(p.locator(".rank .bar")).toHaveCount(0);
   expect(await svgTexts(p.locator(".rrchart .band"))).toEqual(["Immortal+"]);
+  // Above the floor there are no tiers: 3–4 round-number lines, labelled `N RR` (counted from Immortal 1's floor), apart
+  // from the band name and from each other, in the gutter, in the frame's quiet colour.
+  const marks = p.locator(".rrchart .rrmark");
+  const labels = await svgTexts(marks);
+  expect(labels.length).toBeGreaterThanOrEqual(3);
+  expect(labels.length).toBeLessThanOrEqual(4);
+  for (const l of labels) expect(l).toMatch(/^[1-9]\d* RR$/);
+  const values = labels.map((l) => parseInt(l, 10));
+  for (let i = 1; i < values.length; i++) expect(values[i]!).toBeGreaterThan(values[i - 1]!); // lowest line first
+  for (const v of values) expect(v % 5).toBe(0);
+  const svgBox = await box(p.locator(".rrchart svg"));
+  const all = [...(await marks.all()), ...(await p.locator(".rrchart .band").all())];
+  const boxes: Box[] = [];
+  for (const l of all) {
+    expect(await css(l, "fill")).toBe(await varRgb(page, "--text2"));
+    expect(await css(l, "font-size")).toBe("12px");
+    const b = await box(l);
+    expect(b.x + b.width, "label ends before the plot").toBeLessThanOrEqual(svgBox.x + 96 + 0.5);
+    boxes.push(b);
+  }
+  for (let i = 0; i < boxes.length; i++) for (let j = i + 1; j < boxes.length; j++) expect(hit(boxes[i]!, boxes[j]!), `labels ${i} and ${j}`).toBe(false);
+  expect(await p.locator(".rrchart .grid").count()).toBe(labels.length); // above the floor every line is an RR line
   expect(await text(p.locator(".rank .crow"))).toBe("—"); // all of it is above 2400 (Immortal 1): no tier change to list
 
   await openScene(page, "mystats");

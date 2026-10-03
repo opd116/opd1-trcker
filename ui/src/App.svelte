@@ -1,6 +1,7 @@
 <script lang="ts">
   import { isTauri } from "@tauri-apps/api/core";
   import type { Attachment } from "svelte/attachments";
+  import type { Readable } from "svelte/store";
   import Tooltip from "./components/Tooltip.svelte";
   import TopBar from "./components/TopBar.svelte";
   import { tauriBridge } from "./lib/api";
@@ -43,26 +44,19 @@
   );
 
   /**
-   * A crashed page tries again on the next live update or the next My Stats update (the likeliest cause is one bad
-   * payload).
+   * A crashed page tries again on the next update of the data it shows (the likeliest cause is one bad payload): My
+   * Stats on the next My Stats update, any other page on the next live update. A live update says nothing new about My
+   * Stats, so it never re-runs a My Stats crash.
    */
   const retryOnNextUpdate =
-    (reset: () => void): Attachment =>
+    (reset: () => void, source: Readable<unknown>): Attachment =>
     () => {
       /** The subscription's own first call is the state that crashed; only a later one is an update. */
-      const onUpdate = () => {
-        let first = true;
-        return () => {
-          if (first) first = false;
-          else reset();
-        };
-      };
-      const offLive = live.subscribe(onUpdate());
-      const offStats = mystats.subscribe(onUpdate());
-      return () => {
-        offLive();
-        offStats();
-      };
+      let first = true;
+      return source.subscribe(() => {
+        if (first) first = false;
+        else reset();
+      });
     };
 </script>
 
@@ -87,7 +81,7 @@
     {/if}
     <!-- A quiet empty page: no text, no status. The top bar (and its Live tab) stay. -->
     {#snippet failed(_error, reset)}
-      <div class="blank" {@attach retryOnNextUpdate(reset)}></div>
+      <div class="blank" {@attach retryOnNextUpdate(reset, router.route.name === "mystats" ? mystats : live)}></div>
     {/snippet}
   </svelte:boundary>
 {/key}

@@ -20,7 +20,7 @@ import {
 import { EMPTY_META } from "./meta";
 import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails } from "./types";
 
-const live = (stage: LiveState["stage"]): LiveState => ({ stage, mapId: null, players: [] });
+const live = (stage: LiveState["stage"]): LiveState => ({ stage, mapId: null, players: [], settled: true });
 
 function fake() {
   const calls: string[] = [];

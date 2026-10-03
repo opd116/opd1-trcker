@@ -226,10 +226,10 @@ Rule for the added colours:
 - Card click → `details(card.puuid)`, and `more=false`.
 - Recent or encounter row click → `match(…)`.
 - Match `Back` → `details` (same puuid, keeps `more`), or `mystats` when the match was opened from My Stats. Details `Back` → `live`. My Stats has no Back (it is a tab).
-- Every navigation clears the tooltip and resets the scroll container to top.
+- Every navigation clears the tooltip and resets the scroll container to top, **except Back from a Match**: leaving My Stats or a player's Details for a Match remembers how far that page was scrolled, and Back puts it there (the Match page itself starts at the top; every other way to a page, the tab or a card, starts at the top). The container is new for every page, so the position is set as it mounts, and tried once more on the next frame when the content is not tall enough yet. `go(route, restore)` / `back()` in `router.svelte.ts`.
 - Auto-switch: when `live.stage` changes from anything to `pregame`, set the route to `live`.
 - Startup:
-  - Route `live`, until the first LiveState: `stage === 'closed'` → `mystats` once (§5.3, §9.1; this ends R71); any other stage keeps `live`. A user who already navigated is not moved.
+  - Route `live`, until the first LiveState **with `settled: true`** (§7.1: Rust has made its first verdict on whether VALORANT is running; the `closed` it publishes before that is the model's starting value, not a verdict, so a user whose game is already running is never sent to My Stats by it): `stage === 'closed'` → `mystats` once (§5.3, §9.1; this ends R71); any other stage keeps `live`. A user who already navigated is not moved.
   - `listen('mystats')` is attached before `invoke('my_stats')` (§9.1).
   - `await listen('live')`, then `invoke('live_state')`. Apply the invoke result only if no event has arrived.
   - `invoke('meta')`, retried with a backoff while it fails. `listen('meta')` (R163; `Meta`, sent when the asset tables first load or are refreshed): replace the `meta` store, and stop the invoke retries.
@@ -507,7 +507,7 @@ Shown only when `card.party && !card.isSelf && !card.isSelfParty`. `col = --part
 
 ### 5.3 Closed (`stage: 'closed'`)
 
-- The route opens on **`mystats`** (the saved data is all there is to show; this replaces R71's "start on Live until My Stats exists"). The `Live` tab then shows what follows. Any other first stage opens `live` (§9.1).
+- The route opens on **`mystats`** when the **settled** `closed` arrives (the saved data is all there is to show; this replaces R71's "start on Live until My Stats exists"). An unsettled `closed` (`settled: false`, the state Rust publishes before its first look at the game) changes nothing: the app waits on `live`. The `Live` tab then shows what follows. Any other first settled stage opens `live` (§9.1).
 - Only the user's own card, in slot 1 of the left column. Its values come from the DB; unknown values show `—`. It has the self outline.
 - The top-bar right side is empty. Nothing else is on screen.
 - **(R127)** The user's card keeps the empty 40×40 `--raised` agent box, as in Agent Select before a lock and in the Lobby (§3.3, §5.2): no agent exists while VALORANT is closed.
@@ -809,7 +809,10 @@ type DisplayName =
   | { kind: 'hiddenPlayer' }
   | { kind: 'hiddenAgent'; agentId: string };
 
-interface LiveState { stage: Stage; mapId: string | null; players: PlayerCard[] }
+interface LiveState {
+  stage: Stage; mapId: string | null; players: PlayerCard[];
+  settled: boolean;   // Rust has made its first verdict on whether VALORANT is running; once true, true for the app's life
+}
 
 interface PlayerCard {
   puuid: string;
@@ -936,6 +939,8 @@ interface Meta { agents: Record<string,{name:string}>; maps: Record<string,{name
    - Parse `matchInfo.gameLengthMillis`, `players[].competitiveTier`, `roundResults[].winningTeam`/`roundNum`.
 9. New command `match_details(matchId, focusPuuid) -> MatchDetailsView` (perspective, sorting, hidden-name rule, no-team modes).
 10. Migration 3 (R150): `players.name_asked_ms INTEGER`, the names fill's blank-answer marker (no UI reads it). The `match` event (payload `MatchDetailsView`) and the command `close_match()` (no arguments) that ends it for a page that was left; both are described in §2.4 and §6.10.
+11. My Stats (§9): the `my_stats` command and the `mystats` event (payload `MyStats`, deduped by its bytes); `MyStats.puuid`, the user's own id, so the Recent Matches rows open Match Details whenever the page has data. Rust recomputes on every change of the user's own data and, as a slow tick, every 15 minutes (never on the presence tick; the byte dedup makes an unchanged tick free), and waits a short moment (about 750 ms) before each read so a backfill that stores many matches is a few payloads, not one per match; an account switch does not wait.
+12. `LiveState.settled` (§2.4, §7.1): false until the poll loop's first verdict on whether VALORANT is running (the lockfile missing at the first check, a failed connect attempt, a presence that shows a stage, or VALORANT absent for two presence checks in a row), then true for the app's lifetime, a restart of the poll loop included. The start page decides on the first settled state.
 
 ### 7.4 Contract test descriptors (`ui/src/lib/contract.shape.ts`, Task 16b; test-only)
 
@@ -1109,11 +1114,12 @@ The design file has no My Stats screen. **Every size, state and string in this s
 - **Data** (`mystats` store, `ui/src/lib/stores.ts`): tri-state like the card fields (R23).
   - `undefined`: nothing has answered yet. Every section draws its **skeleton** (below); the page root has `aria-busy="true"`.
   - `null`: Rust answered "unknown" (the user's PUUID or the current act is not known yet; the `my_stats` command returns `null`). Every section keeps its **frame with `—`** (below). Never an empty page, never a skeleton that cannot end.
-  - `MyStats`: the page.
+  - `MyStats`: the page. It carries the user's own `puuid` (the first field), which Recent Matches uses as the Match Details focus player: a row is clickable whenever My Stats exists, with or without a live card of the user.
   - Fed by `listen('mystats')` (payload: a `MyStats`, never null) attached **before** the first `invoke('my_stats')` at startup (Rust dedups the event by its bytes and never re-sends an identical one), then by every later event. The invoke answer counts only when no event came first. A failed `my_stats` settles the page on `null` (logged); a later event still fills it. When the page opens with nothing to show (`undefined` or `null`) it asks once more (`refreshMyStats`: a local DB read, never Riot) and never overwrites an event or answer that landed meanwhile.
   - No timer: the session (§9.3) expires by time alone in Rust, with no push; the page shows what it was last given, and the `Started` label's age ticks with the 30s clock the Live cards use (`now`).
   - New data replaces the page **in place**: the scroll position stays, nothing flashes (§6.9's rule for a `details` event).
-- **Start page** (ends R71): the first LiveState ever applied picks it once. `stage === 'closed'` → `My Stats`; any other stage → `Live`. A user who already navigated is not moved; a later `closed` (the game quits) changes nothing. Entering Agent Select still forces `Live` from anywhere (§2.4), My Stats and a Match opened from it included.
+- **Start page** (ends R71): the first LiveState with `settled: true` picks it, once. `stage === 'closed'` → `My Stats`; any other stage → `Live`. Until a settled state arrives the app stays on `Live` (Rust publishes `closed` before its first look at the game, and that must not open My Stats for a user whose game is already running). A user who already navigated is not moved; a later `closed` (the game quits) changes nothing. Entering Agent Select still forces `Live` from anywhere (§2.4), My Stats and a Match opened from it included.
+- **Crash**: a page that throws while rendering leaves the top bar and a quiet empty page (`svelte:boundary`, `App.svelte`). It tries again on the next update **of the data it shows**: My Stats on the next `mystats` update, any other page on the next live update. A live update never re-runs a My Stats crash.
 - **Skeleton** (`undefined`), no text but the section headers and the column labels, which are labels, not status text:
   - Rank: a 48 circle and 90×13 + 48×10 bars, the 3 cells (44×10 over 44×20 bars), `Rank changes` as a 64×10 bar and 4 rows of a 120×10 bar. The card is **as tall as the loaded one** (same fixed label and value lines), so nothing below it moves.
   - Chart: one `--skel` block, `inset:16px 18px`, radius 6.
@@ -1123,13 +1129,13 @@ The design file has no My Stats screen. **Every size, state and string in this s
   - Weekday and time of day: per cell a 32×14 bar, a 24×60 box (radius 4) and a 28×12 bar.
   - Insights: 3 rows of an 8 circle and a 320×13 bar.
 - **Frames with `—`** (`null`, or a section with nothing): `—` in the value's own font, size and colour slot (§5.5).
-  - Rank: the empty 48 box, `—` 18px/600 `--text2`; Net RR / Avg win / Avg loss `—`; W / L `— / —` in `--win` / `--text3` / `--loss` (the hero's); `Rank changes` and one `—` row.
+  - Rank: the empty 48 box, `—` 18px/600 `--text2`; Net RR / Avg win / Avg loss `—`; W / L `— / —` with both dashes in `--text2` (not the hero's green and red: an unknown count is not a win or a loss); `Rank changes` and one `—` row.
   - Chart: `—` centred, 14px/500 `--text2`, in the panel (min-height 260).
   - Session: `—` under each of `Net RR`, `W / L`, `Started` (no streak).
   - Recent Matches, Maps, Agents: the header row and one `—` row (`14px/500 --text2`; 52px in Recent Matches like Details' empty row, 44px in the tables).
   - Weekday / time of day: `—` over an empty bar in every cell.
   - Insights: one 52px `—` row.
-- Unknown values inside a loaded page are `null` and show `—` in the same slot: `rank.rr` (§9.2), `netRr`, `avgWin`, `avgLoss`, a table row's `netRr` and `acs`, a match's stat line (R102), a session with no stored RR change.
+- Unknown values inside a loaded page are `null` and show `—` in the same slot: `rank.rr` (§9.2), `netRr`, `avgWin`, `avgLoss`, a table row's `netRr` and `acs`, a match's stat line (R102), a session with no stored RR change. **Every `—` of a value on this page is one dim tone, `--text2`** (the rank cells, the W / L counts, the session's Net RR, a match's stats and RR, a table's Net RR, K/D and ACS): never the text colour, never green or red (`signTone` returns `dim` for an unknown number).
 - Images go through `assetUrl` (`tier`, `mapList`, `agent`); a missing agent id is the empty `--raised` 28 box, a missing map id the empty 64×36 box (as Details, §6.4).
 
 ### 9.2 Rank card and RR chart
@@ -1142,19 +1148,20 @@ The design file has no My Stats screen. **Every size, state and string in this s
   - W / L block `flex:none`, right-aligned: label `W / L` 12px/14px 500 `--text2`; value 18px/24px 600 tab: `<W in --win> / <L in --loss>` with ` / ` in `--text3` weight 500 (the hero's, §6.2); `—` for an unknown count. Tooltip `This act`.
   - **Unranked** (`tier` null or < 3): the empty 48 box, then `—` 18px/600 `--text2` and no RR line; the W / L block still shows what is known.
 - **Progress bar**: a 16px-tall row (`margin:-6px 0`, so it takes 4px in the column's rhythm) holding a 4px track (`background:var(--line2); border-radius:2px`) with a fill `background:var(--accent)`, `width = (100 − rrToNext)%`. The row is the bar's hover target (tooltip `{n} RR to next tier`). **No bar** when `rrToNext` is null (Immortal 1 and up, unranked, unknown RR): the row keeps its height, so the card is the size it is with one.
-- **Cells**: `display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px`. Each: `border:1px solid var(--line); border-radius:6px; padding:8px 10px 9px`; label 12px/14px 500 `--text2` (`Net RR`, `Avg win`, `Avg loss`), value 20px/24px 600 tab, signed (`rrDelta`: `+305`, `−17`, `0`, `—`): `--win` above 0, `--loss` below 0, `--text` for 0 or unknown. Averages are shown rounded (the insight text rounds the same way). Tooltip `This act` on each cell.
+- **Cells**: `display:grid; grid-template-columns:repeat(3,minmax(0,1fr))`, the three figures **apart by hairlines, not bordered tiles** (the Details hero's and the Session's way): each `padding:2px 0 2px 14px; border-left:1px solid var(--line)`, the first without padding-left and border; label 12px/14px 500 `--text2` (`Net RR`, `Avg win`, `Avg loss`), value 20px/24px 600 tab, signed (`rrDelta`: `+305`, `−17`, `0`, `—`): `--win` above 0, `--loss` below 0, `--text` for 0, `--text2` for unknown. Averages are shown rounded (the insight text rounds the same way). Tooltip `This act` on each cell.
 - **Rank changes**: `border-top:1px solid var(--line); padding-top:12px`. Label `Rank changes` 12px/14px 500 `--text2`. Then at most **4** rows (Rust sends up to 5), newest first, each `display:flex; align-items:center; gap:8px; height:28px`: a 12×12 chevron (up in `--win`, down in `--loss`, stroke 1.6), the **tier reached** 14px/500 (`Ascendant 1`), then `ago` 12px/500 `--text2` at the right (`10h ago`) with the full date as its tooltip. No changes: one `—` row (14px/500 `--text2`). A tier name that is pending (meta) is a 60×10 bar; one the table lacks is `—` (§5.8).
 
 **RR chart** (`mystats/RrChart.svelte`, `lib/mystats.ts` `chartModel`): one inline **SVG**, no chart library, no canvas, no image. It is sized to its panel (`bind:clientWidth/Height`, the SVG out of flow so the row's height is the rank card's).
 
 - **Plot**: `padL 96, padR 18, padT 16, padB 30`. Points are evenly spaced by match, oldest left, so a quiet week costs no width.
 - **y range**: the data's min and max with air `max(10, 12% of the span)`, never narrower than **50 RR** (a flat stretch does not fill the chart). `y(v)` is linear, higher RR higher up. The values are `absoluteRr`: `tier × 100 + rr` below Immortal, `2400 + rr` from Immortal 1 up.
-- **Tier lines**: a hairline (`stroke:var(--line); stroke-width:1`, solid) at every multiple of 100 strictly inside the range, up to **2400** (Immortal 1's floor); none above it (Immortal RR is cumulative: no fixed steps).
-- **Tier names** (left gutter): each band between two lines (or an edge) is named at its vertical middle, right-aligned at `x0 − 12`, 12px/500 `--text3` (`Diamond 3`, `Ascendant 1`). A band shorter than **16px** goes unnamed. From Immortal 1 up the band is `Immortal+` (the cumulative RR no longer says Immortal 1, 2 or 3). Names come from meta; pending meta draws none.
+- **Tier lines**: a hairline (`stroke:var(--line); stroke-width:1`, solid) at every multiple of 100 strictly inside the range, up to **2400** (Immortal 1's floor); no tier lines above it (Immortal RR is cumulative: no fixed steps).
+- **RR lines (above the floor)**: where the range reaches above 2400 there are **3–4 round-number hairlines** (the same stroke) labelled `N RR`, N counted from the floor (`50 RR`, `100 RR`, `150 RR`, `200 RR`): the smallest step of 5, 10, 20, 25, 50, 100, 200, 250, 500, 1000, … that gives at most 4 lines at least **24px** apart, at the multiples of the step above 2400 strictly inside the range (`rrLines`). The label is 12px/500 `--text2`, right-aligned at `x0 − 12`, centred on its line (class `rrmark`). The range is not changed by them.
+- **Tier names** (left gutter): each band between two lines (or an edge) is named at its vertical middle, right-aligned at `x0 − 12`, 12px/500 **`--text2`** (`Diamond 3`, `Ascendant 1`; `--text3` is too dim for 12px labels on the card colour). A band shorter than **16px** goes unnamed. From Immortal 1 up the band is `Immortal+` (the cumulative RR no longer says Immortal 1, 2 or 3); where RR lines share that gutter its name goes in the **widest gap between them** (the lowest on a tie), only if the gap is at least 32px (so it clears both neighbours' labels), else it is left out. Names come from meta; pending meta draws none.
 - **Line**: `stroke:var(--accent); stroke-width:2; stroke-linejoin:round; stroke-linecap:round`. **Area**: the same path closed to the baseline, `fill:var(--accent); fill-opacity:0.09`.
 - **Newest point**: an 8px dot (`r=4`) `fill:var(--accent)` with a 2px ring in `--card` (`stroke`), never taking the pointer.
-- **End dates**: the first and the last point's day (`Aug 26`, `Sep 29`; `dateShort`) under the plot at `y = h − 10`, 12px/500 `--text3`, left- and right-aligned to the plot.
-- **Hover**: each point has a transparent hit area, one line-slice wide (`plot width / (n − 1)`) and 28px tall, centred on the point. Under the pointer a hairline crosshair (`--line2`) and the point's dot (`r=4`, accent, `--card` ring) appear (pure CSS `:hover`); the tooltip is §9.6. The newest point's dot does not block the pointer.
+- **End dates**: the first and the last point's day (`Aug 26`, `Sep 29`; `dateShort`) under the plot at `y = h − 10`, 12px/500 `--text2`, left- and right-aligned to the plot.
+- **Hover**: **one** transparent layer over the plot (`.hit`, from half a slice left of the first point to half a slice right of the last, plot height) with a single `pointermove` that picks the point **nearest by x** (`round((x − x0) / slice)`, clamped), at any height; `pointerleave` clears it. The picked point shows a hairline crosshair (`--line2`, plot height) and its dot (`r=4`, accent, `--card` ring); neither takes the pointer. The tooltip (§9.6) is placed by a second, pointer-less transparent box (`.anchor`, one slice wide and 28px tall, centred on the picked point) that carries the `use:tip` text: when the picked point changes, the engine's `retip(anchor)` hides the old bubble at once and shows the new one after the 450 ms delay, as a move onto another trigger would. No per-point rects, no per-point tooltips.
 - **Fewer than 2 points** (or a box too small for a plot): the empty frame with `—`.
 - Tier colours from the card (`tierColor`) are **not** used: one accent line, one look.
 
@@ -1162,7 +1169,7 @@ The design file has no My Stats screen. **Every size, state and string in this s
 
 **Session** (`mystats/SessionPanel.svelte`): the hero's stat strip (§6.2). `display:flex; flex-wrap:wrap; align-items:center; gap:12px 0; padding:14px 18px`. Cells `display:flex; flex-direction:column; justify-content:center; gap:2px; padding:0 22px; min-height:56px; border-left:1px solid var(--line)`, the first without padding-left and border:
 
-1. **Net RR**: label 12px/14px 500 `--text2`; value **28px/32px 600** tab, signed (`rrDelta`) in `--win` / `--loss` / `--text`; `—` when no match of the session has a stored RR change. Tooltip `Current session`.
+1. **Net RR**: label 12px/14px 500 `--text2`; value **28px/32px 600** tab, signed (`rrDelta`) in `--win` / `--loss` / `--text`; `—` in `--text2` when no match of the session has a stored RR change. Tooltip `Current session`.
 2. **W / L**: label `W / L`; value 22px/27px 600 tab `<W> / <L>` as the hero's. Tooltip `Current session`.
 3. **Started**: label `Started`; value `<span 22px/27px 600 tab>{span(now − startedMs)}</span> <span 14px/500 --text2>ago</span>` (`14h ago`). Tooltip `{Mon D, YYYY} · {h:mm AM/PM}`.
 4. **Streak** (`flex:1; min-width:260px`): every result of the session as the **plain 20×20 result chips** of §1.5 (`ResultChip`, `W` / `L` / `D`), `gap:6px`, oldest → newest left to right, **wrapping** onto more lines when the session is long (30 results take 2). Not the newest-tile variant: this is a list, not a last-5 row. No tooltip.
@@ -1170,10 +1177,10 @@ The design file has no My Stats screen. **Every size, state and string in this s
 A `session` that is `null` (no competitive match in the last 6 hours, or none): the frame with `—` in the first three cells and no streak.
 
 **Recent Matches** (`mystats/LastMatches.svelte`): Details' Recent Competitive Matches (§6.4), same row look, header row and chevron, for the user's newest **5** competitive matches, newest first.
-- Grid `220px 28px 90px minmax(0,1fr) 56px 56px 56px 64px 10px`, `column-gap:12px`, `padding:0 14px 0 8px`: `Map` | agent | `Score` | `K / D / A` (centred) | `K/D` | `ACS` | `HS%` | `RR` | chevron. The numeric headers are right-aligned. **The rank icon column is dropped** (the page is about the user, whose rank is the rank card's); ACS and RR are added.
-- Header row 30px, rows **52px**, `cursor:pointer`, hover `--hover-row`, the R106 inset focus ring, Enter / Space opens, as §6.4. Cells as §6.4: map picture 64×36 + name 14px/600 (the allowed ellipsis, §0) + `ago` 12px/500 with the `h:mm AM/PM` tooltip; agent 28×28; chip 20×20 + `score` 14px/600; K / D / A inner grid `24 14 18 14 24`; `K/D` 14px/600 `kd2`; `ACS` 14px/500 whole number; `HS%` 14px/500 `pct0`; **RR** 14px/600 tab right-aligned, signed, `--win` above 0, `--loss` below 0, `--text` for 0, `—` unknown.
+- Grid `176px 28px 84px minmax(0,1fr) 56px 56px 56px 64px 10px`, `column-gap:12px`, `padding:0 14px 0 8px`: `Map` | agent | `Score` | `K / D / A` (centred) | `K/D` | `ACS` | `HS%` | `RR` | chevron. The numeric headers are right-aligned. **The rank icon column is dropped** (the page is about the user, whose rank is the rank card's); ACS and RR are added. The inset (8px / 14px), the **176px map column and the 28px agent column are Details' own** (§6.4), so the map picture, the agent icon and the chevron stand where the Details rows' do (a Playwright test compares the two pages' offsets exactly).
+- Header row 30px, rows **52px**, `cursor:pointer`, hover `--hover-row`, the R106 inset focus ring, Enter / Space opens, as §6.4. Cells as §6.4: map picture 64×36 + name 14px/600 (the allowed ellipsis, §0) + `ago` 12px/500 with the `h:mm AM/PM` tooltip; agent 28×28; chip 20×20 + `score` 14px/600; K / D / A inner grid `24 14 18 14 24`; `K/D` 14px/600 `kd2`; `ACS` 14px/500 whole number; `HS%` 14px/500 `pct0`; **RR** 14px/600 tab right-aligned, signed, `--win` above 0, `--loss` below 0, `--text` for 0, `—` in `--text2` when unknown (so is every other unknown stat of the row).
 - A match with no stats row shows `—` in its stat cells (R102).
-- **Click → `match(matchId, userPuuid, 'recent')` with `back: 'mystats'`**: Match Details with the user as the focus player (their team first, `Your team`, the self frame); Back returns to My Stats (the route's `back` is `'mystats'` instead of a `{ puuid, more }`; the page is reset to its top like every navigation, §2.4). The user's id is the live card with `isSelf` (the backend publishes it whenever it knows the user). **Without it the rows are plain**: no `role`, no pointer, no click.
+- **Click → `match(matchId, userPuuid, 'recent')` with `back: 'mystats'`**: Match Details with the user as the focus player (their team first, `Your team`, the self frame); Back returns to My Stats at the scroll position it was left at (the route's `back` is `'mystats'` instead of a `{ puuid, more }`; the Match page itself starts at its top, §2.4). The user's id is `MyStats.puuid` (§9.1), so **a row is clickable whenever My Stats exists**, whether or not a live card of the user is on screen. A row that has no way to open (the component given no `onopen`) is **plain**: no `role`, no pointer, no click, **and no chevron** (its last grid column stays empty).
 - Empty / unknown: one 52px `—` row.
 
 ### 9.4 Maps and Agents
@@ -1182,7 +1189,7 @@ A `session` that is `null` (no competitive match in the last 6 hours, or none): 
 - Header row: 30px, 12px/500 `--text2`, `border-bottom:1px solid var(--line)`, `nowrap`: `Map` or `Agent` | `Games` | `W–L` | `Win%` | `Net RR` | `K/D` | `ACS`, the numeric ones right-aligned. The `ACS` header carries `Average combat score`.
 - Rows: **44px**, separators as §6.3, **no hover and no pointer** (they are not clickable). Name cell: an agent row has its head icon 28×28 (`border-radius:5px; background:var(--raised)`, an empty box without an id) then the name; a map row is the name alone. Name 14px/600 `nowrap`; pending meta is a 60×10 bar, a missing id `—` (§5.8).
 - Numbers 14px tab right-aligned: `Games` 500; `W–L` 500 (`score(wins, losses)`, `13–8`); `Win%` 600 `pct0`; `Net RR` 600 signed; `K/D` 600 `kd2`; `ACS` 500 whole number, `—` when null.
-- **Win%** is `--win` above 50%, `--loss` below, `--text` at exactly the shown 50%. **Net RR** is `--win` above 0, `--loss` below, `--text` at 0 or unknown (`—`). The Win% cell's tooltip is the structured W·L·games tip (§9.6).
+- **Win%** is `--win` above 50%, `--loss` below, `--text` at exactly the shown 50%. **Net RR** is `--win` above 0, `--loss` below, `--text` at 0, `--text2` when unknown (`—`; so are an unknown Win%, K/D and ACS). The Win% cell's tooltip is the structured W·L·games tip (§9.6).
 
 ### 9.5 Weekday, time of day and Insights
 
@@ -1193,11 +1200,11 @@ A `session` that is `null` (no competitive match in the last 6 hours, or none): 
 
 The cell is the tooltip trigger (§9.6). The two panels have equal heights and end on one line.
 
-**Insights** (`mystats/Insights.svelte`): the backend sends finished English `text` per insight (best map, weakest map, time of day, weekday vs weekend, RR economy, last 7 days; an insight without enough data is left out). One row each, in its order: `display:flex; align-items:flex-start; gap:12px; padding:12px 18px; min-height:44px`, separators as §6.3. An 8px dot (`--win` when `positive`, `--loss` otherwise; `margin-top:6px`) and the text 14px/20px 500 `--text`, wrapping when long. The hyphen the backend writes before a number (`-15 RR`) is shown as U+2212 (`−15 RR`, §0). Tooltip `From N matches`. No insights: one 52px `—` row.
+**Insights** (`mystats/Insights.svelte`): the backend sends finished English `text` per insight (best map, weakest map, time of day, weekday vs weekend, RR economy, last 7 days; an insight without enough data is left out). One row each, in its order: `display:flex; align-items:flex-start; gap:12px; padding:12px 18px; min-height:44px`, separators as §6.3. An 8px dot (`--win` when `positive`, a neutral `--text2` otherwise: a weak spot is a note, not an alarm, so never red; `margin-top:6px`) and the text 14px/20px 500 `--text`, wrapping when long. The hyphen the backend writes before a number (`-15 RR`) is shown as U+2212 (`−15 RR`, §0). Tooltip `From N matches`. No insights: one 52px `—` row.
 
 ### 9.6 Tooltips (My Stats)
 
-All through the §4.1 engine (`use:tip`), including the SVG hit areas (`tip` takes any `Element`). The structured W·L·games tip (§4.1) gains an optional slice after `|` in its data (`wl:5:3:8|This act · Monday`): when present it is the text of the second row instead of `This act`.
+All through the §4.1 engine (`use:tip`), including the chart's SVG anchor box (`tip` takes any `Element`; `retip(el)` restarts the tip for a trigger whose target changed without a `mouseover`, §9.2). The structured W·L·games tip (§4.1) gains an optional slice after `|` in its data (`wl:5:3:8|This act · Monday`): when present it is the text of the second row instead of `This act`.
 
 | Trigger | Text |
 |---|---|
@@ -1209,7 +1216,7 @@ All through the §4.1 engine (`use:tip`), including the SVG hit areas (`tip` tak
 | Rank progress bar | `{n} RR to next tier`; none without a bar |
 | Rank-change row time | `{Mon D, YYYY} · {h:mm AM/PM}`, e.g. `Sep 29, 2026 · 9:14 PM` |
 | Tier name, RR line, rank icon | none |
-| RR chart point | `{rrDelta} RR · {Tier} · {Mon D}`, e.g. `+18 RR · Ascendant 2 · Sep 29` (`, YYYY` after the day when not the current year); the first point has no change: `Ascendant 2 · Sep 29`; from Immortal 1 up the tier is `Immortal`. A part that is unknown is dropped (§5.8). |
+| RR chart point (the point nearest the pointer, §9.2) | `{rrDelta} RR · {Tier} · {rr} RR · {Mon D}`, e.g. `+18 RR · Ascendant 2 · 47 RR · Sep 29` (`, YYYY` after the day when not the current year): the change the match made, the tier the point stands in with the RR it stands at (`absoluteRr % 100` below Immortal; `absoluteRr − 2400` from Immortal 1 up, where the tier reads `Immortal`: `−15 RR · Immortal · 87 RR · Sep 29`), and the day. The first point has no change: `Ascendant 2 · 47 RR · Sep 29`. A part that is unknown is dropped (§5.8); the RR goes with its tier. |
 | Session `Started` | `{Mon D, YYYY} · {h:mm AM/PM}` |
 | Session streak chip | none |
 | Recent Matches `ago` | `{h:mm AM/PM}` (§4.2) |
@@ -1233,11 +1240,13 @@ DEV scenes (`?scene=`; `route: { name: 'mystats' }` unless noted; the live stage
 | `mystats-immortal` | Immortal 1, 87 RR, no `rrToNext` (no bar), the chart above the 2400 floor (`Immortal+`) |
 | `mystats-rrnull` | tier known, `rr` null: `— RR`, no bar |
 | `mystats-longnames` | the longest real names (`Basic Training`, `Corrode`, `Brimstone`, `Deadlock`), 3-digit games, net RR in the hundreds, ACS 312, a session of 30 (the streak wraps), a long insight |
-| `mystats-closed` | stage `closed` at startup, **no route set**: the app's own start page opens My Stats (R71 ended) |
+| `mystats-closed` | stage `closed` (settled) at startup, **no route set**: the app's own start page opens My Stats (R71 ended) |
+| `closed-unsettled` | stage `closed` with `settled: false`, no route set: Rust has not made its first verdict, so the app stays on Live (the Closed card); a settled state then decides (a Live scene, with the full My Stats data behind the tab) |
 
 Playwright (`ui/tests/`, 1000×800, DPR 1 and 1.5, all three fonts):
 - `fit-mystats.spec.ts`: §8.3 checks 1, 3, 4, 5, 7, 8 on every scene in every font, plus **check 9**, the layout check (`checkMyStatsLayout`): inside every row-like group the on-screen children do not overlap and, on one line, keep ≥ 8px between them (the K / D / A grid, the session's padded cells and the two cell panels only must not overlap); the option matrix (tones, result palettes, fill, accents); per-section assertions on the data (every figure, colour, order, count), the null, loading, unranked, Immortal, `— RR` and long-name states; loading → loaded does not move the sections above the tables; a full-height shot and a 1000×800 shot per scene in `ui/tests/shots/`.
 - `tips-mystats.spec.ts`: every tooltip of §9.6 with its text and the engine's placement rules, and the places that have none.
-- `nav-mystats.spec.ts`: Live ⇄ My Stats; a Recent Matches row → Match (user as focus, tab stays My Stats) → Back to My Stats, `close_match` sent; Agent Select forces Live from My Stats and from a Match opened there; the start page (closed → My Stats, anything else → Live); new data replaces the page in place (the scroll stays).
+- `nav-mystats.spec.ts`: Live ⇄ My Stats; a Recent Matches row → Match (user as focus, tab stays My Stats) → Back to My Stats, `close_match` sent; Agent Select forces Live from My Stats and from a Match opened there; the start page (a settled closed → My Stats, anything else → Live; an unsettled closed changes nothing, a user who navigated first is not moved); Back from a Match returns My Stats and Details to their scroll position (and the Match starts at the top); new data replaces the page in place (the scroll stays).
+- `polish.spec.ts`: a crashed My Stats page retries only on a `mystats` update, never on a live one.
 - `interaction.spec.ts`, `focus-ring.spec.ts`, `fit-dpr.spec.ts`: hover, pointer, keyboard ring and DPR 1.5 for the new tab and rows; the tables, cells, chart and insights are not clickable.
-- Vitest: `mystats.test.ts` (signs, tones, cell views, tier of an absolute RR, band names, chart geometry), the new tips and the `|` slice in `tooltip.test.ts`, `startMyStats` in `boot.test.ts`, the store, the refresh and the start page in `stores.test.ts` / `router.test.ts`, the scenes in `scenes.test.ts`, and the contract: `contract.test.ts` walks `crates/core/tests/fixtures/contract/my_stats.json` (a full and an edge case, pinned by `my_stats_matches_golden`) and every demo My Stats with the descriptors in `contract.shape.ts`, tied to `types.ts` by `contract.test-d.ts`.
+- Vitest: `mystats.test.ts` (signs, tones incl. the dim unknown, cell views, tier and RR of an absolute RR, band names, chart geometry, the RR lines above the floor), the new tips and the `|` slice in `tooltip.test.ts`, `startMyStats` in `boot.test.ts`, the store, the refresh and the start page (settled / unsettled, both sides) in `stores.test.ts` / `router.test.ts`, the scroll restore on Back in `router.test.ts`, `retip` in `tooltip.test.ts`, the Recent Matches rows (chevron, plain rows, dim unknowns) in `LastMatches.test.ts`, the scenes in `scenes.test.ts`, and the contract: `contract.test.ts` walks `crates/core/tests/fixtures/contract/my_stats.json` (a full and an edge case, pinned by `my_stats_matches_golden`) and every demo My Stats with the descriptors in `contract.shape.ts`, tied to `types.ts` by `contract.test-d.ts`.

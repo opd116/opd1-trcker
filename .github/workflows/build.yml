@@ -11,6 +11,8 @@ jobs:
   # file (visual-live, visual-details) skip themselves here: `.superpowers/` is not in the repo.
   ui-e2e:
     runs-on: ubuntu-latest
+    # A hung browser must not hold the runner for the default 6 hours.
+    timeout-minutes: 30
 
     steps:
       - name: Checkout
@@ -26,6 +28,24 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # The browser download (a few hundred MB) is cached per lockfile; `install --with-deps` below still adds the OS
+      # libraries and skips the download when the browser is already there.
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+          restore-keys: playwright-${{ runner.os }}-
+
+      # The specs fetch the valorant-api images once and keep them here (ui/tests/.cache/media); a cold cache only costs
+      # the first run those downloads. Keyed by the demo data that names the images.
+      - name: Cache test images
+        uses: actions/cache@v4
+        with:
+          path: ui/tests/.cache/media
+          key: ui-test-media-${{ hashFiles('ui/src/lib/demo/*.ts', 'ui/src/lib/demo/meta.json') }}
+          restore-keys: ui-test-media-
+
       - name: Install Chromium for Playwright
         working-directory: ui
         run: npx playwright install --with-deps chromium
@@ -36,6 +56,17 @@ jobs:
       - name: Playwright
         working-directory: ui
         run: npx playwright test
+
+      # What a failing spec leaves behind: Playwright's traces and diffs, and the screenshots of every scene.
+      - name: Upload Playwright results
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: playwright-results
+          path: |
+            ui/test-results
+            ui/tests/shots
+          if-no-files-found: ignore
 
   build:
     runs-on: windows-latest

@@ -75,7 +75,7 @@ Tauri 2 (system WebView2) · Rust core (all Riot and valorant-api HTTP, polling,
 
 ## Status and roadmap
 
-The scope of v0.3.0: the Live page (Lobby, Agent Select, In Game), Player Details, Match Details and My Stats, with the design options at their defaults. Later, when asked: the Match History page and a Settings page.
+The scope of v0.3.1: the Live page (Lobby, Agent Select, In Game), Player Details, Match Details and My Stats, with the design options at their defaults. Next (picked by the user for v0.4.0): a History tab, a Settings tab, private player notes, a hide hotkey and a richer encounter tooltip; see `docs/next-session-prompt.md`.
 
 ## Privacy
 

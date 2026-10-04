@@ -6,6 +6,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-04
+
+Filled from `git log` (`493d4f9..da61be2`). The five features picked for v0.4.0 and the act-change work are not in this release (see `docs/next-session-prompt.md`).
+
+### Added
+
+- Each chip of your current Session on My Stats shows the map, the RR change and how long ago on hover, and clicking it opens that match (`f974b75`).
+- The RR chart and the Session chips work from the keyboard: Tab to the chart, then the arrow keys move along it; Tab to a chip shows its tooltip and Enter opens the match (`1be4fcc`).
+- If a page crashes or something fails in the window, a line about it goes into the app's log, so Ctrl+Shift+L and Ctrl+Shift+D now show it (`598b5d0`, `6a03275`).
+- The copied log and the debug dump start with one line naming the app version, Windows version, stage, server region, game client version and current act (`6a03275`).
+- Releases: each version is published on the repo's GitHub Releases page with its installer, named `OPD1-TRCKER-<version>-setup.exe` (`cb48d22`).
+
+### Changed
+
+- When Riot asks the app to slow down, that pause now also holds after a reconnect or an internal restart, so the app never asks again too early (`7093684`).
+- Player cards and Player Details read faster from a large history: a stranger's encounter lookup went from about 8 ms to 0.1 ms (`fa435a3`).
+- Map pictures are stored smaller (two maps' pictures were 3840×2160), which saves memory with no visible change (`73d1db0`).
+- Every change is now checked automatically (format, lint, all tests and screenshot comparisons) before it reaches `main` (`40aaa0d`, `5742ba5`, `cb48d22`).
+
+### Fixed
+
+- My Stats can no longer show the previous account's numbers for a moment after switching accounts (`7093684`).
+- My Stats pictures retry after a failed load, like the other pages (`1be4fcc`).
+- Two tests that failed at random under load (`5ba6f2f`, `80f10f9`).
+
 ## [0.3.0] - 2026-10-03
 
 Filled from `git log` (`a1e3315..44ae56d`, then the v0.3.0 round `44ae56d..6ebdf5c`).

@@ -498,14 +498,15 @@ async fn ensure_image_downscales_map_splash_to_1000_wide_preserving_aspect() {
     assert_eq!(h, 562); // 1080 * 1000 / 1920, rounded down
 }
 
-#[tokio::test]
-async fn ensure_image_does_not_downscale_map_list_icon() {
+/// Fetches the map list image for [`MAP_UUID`] from a mock server serving a
+/// `width`x`height` PNG, and returns the stored file's dimensions.
+async fn stored_map_list_dimensions(width: u32, height: u32) -> (u32, u32) {
     let dir = tempdir();
     let server = MockServer::start().await;
     mount_all_tables(&server, "v1").await;
     Mock::given(method("GET"))
         .and(path("/img/map-list.png"))
-        .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(456, 100)))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(width, height)))
         .mount(&server)
         .await;
 
@@ -516,8 +517,54 @@ async fn ensure_image_does_not_downscale_map_list_icon() {
         .ensure_image(AssetKind::MapList, MAP_UUID)
         .await
         .unwrap();
-    let (w, h) = png_dimensions(&std::fs::read(&path).unwrap());
-    assert_eq!((w, h), (456, 100));
+    png_dimensions(&std::fs::read(&path).unwrap())
+}
+
+#[tokio::test]
+async fn ensure_image_downscales_map_list_icon_to_384_wide_preserving_aspect() {
+    // The real listViewIcon of 25 maps (valorant-api, measured): 456x100.
+    // 100 * 384 / 456 = 84.2, rounded down: 84 device px high, the 56 css px
+    // of the match header's 150x56 cover box at 150% Windows scaling.
+    assert_eq!(stored_map_list_dimensions(456, 100).await, (384, 84));
+}
+
+#[tokio::test]
+async fn ensure_image_downscales_the_huge_map_list_icons_of_the_range_and_basic_training() {
+    // Those two maps' listViewIcon is 3840x2160 (33MB decoded as it is).
+    assert_eq!(stored_map_list_dimensions(3840, 2160).await, (384, 216));
+}
+
+#[tokio::test]
+async fn ensure_image_keeps_a_map_list_icon_that_is_not_wider_than_the_target() {
+    assert_eq!(stored_map_list_dimensions(300, 66).await, (300, 66));
+    assert_eq!(stored_map_list_dimensions(384, 84).await, (384, 84));
+}
+
+#[tokio::test]
+async fn ensure_image_serves_a_map_list_icon_cached_at_its_original_size_untouched() {
+    // A file an older version cached as-is (456x100): found on disk, served
+    // as it is, no table lookup and no request. The target applies to a
+    // download only.
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    let cached = dir
+        .path()
+        .join("images")
+        .join("mapList")
+        .join(format!("{MAP_UUID}.png"));
+    std::fs::create_dir_all(cached.parent().unwrap()).unwrap();
+    let original = png_bytes(456, 100);
+    std::fs::write(&cached, &original).unwrap();
+
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    let path = cache
+        .ensure_image(AssetKind::MapList, MAP_UUID)
+        .await
+        .unwrap();
+
+    assert_eq!(path, cached);
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+    assert!(requested_paths(&server).await.is_empty());
 }
 
 #[tokio::test]

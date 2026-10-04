@@ -1267,6 +1267,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** A release builds the installer once more on Windows (about 10 minutes, Windows minutes count double in a private repo). The rebuilt v0.2.0 and v0.3.0 installers come from the same commits but are not the original files.
 - **Status:** active
 
+### R181 — The map list picture is stored at 384 px wide
+
+- **What:** Claude's call (brief B9). The map `listViewIcon` (`AssetKind::MapList`, the row and top-bar map picture) is downscaled to 384 px wide on its first download, aspect kept; CSS still cover-crops it. A file already in the image cache is served as it is (the installer wipes that cache on an upgrade). Every kind's target is pinned by a test: agent 128, tier 128, `largeArt` 160, splash 1000, skin render 256, content tier 32, map list 384; `smallArt`, `wideArt` and `splash` are not shown anywhere and are left alone.
+- **Why:** A decoded image costs width × height × 4 bytes of WebView RAM, whatever its file size. The real `listViewIcon` is 456×100 for most maps and 3840×2160 (33 MB decoded) for Basic Training and The Range. Its tallest use, the Match Details header's 150×56 box, needs 84 device px of height at 150% Windows scaling, which 384 px wide keeps exactly, so nothing looks different.
+- **Cost:** One resize per map on first download. Savings: about 53 KB per map picture on the Live page, about 0.4 MB on a Details page with 8 maps, and about 33 MB for each of the two oversized maps. The Live In Game page's decoded images total about 5.2 MB, almost half of it the ten card arts (160 px wide, needed at that size by the Details hero).
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

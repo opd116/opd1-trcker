@@ -177,6 +177,23 @@ async function checkHorizontal(page: Page): Promise<string[]> {
 }
 
 /**
+ * Make the next frame a full re-raster of the viewport, so a screenshot shows what a first paint draws and never a
+ * tile patched up from the previous state. A change of the root's background invalidates the whole viewport; it is
+ * set and put back in one task (no frame in between, so no timer or animation frame is needed, which also keeps it
+ * safe under the fake clock), and the dirty flag it leaves is what the next frame paints from.
+ */
+async function repaintFully(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const root = document.documentElement;
+    const before = root.style.getPropertyValue("background-color");
+    root.style.setProperty("background-color", "rgb(1, 2, 3)");
+    void root.offsetHeight;
+    if (before) root.style.setProperty("background-color", before);
+    else root.style.removeProperty("background-color");
+  });
+}
+
+/**
  * Ink probe for a text decoration that hangs below its text (fix round 1, F7; check 5 runs it on every decorated
  * element). Ink outside an `overflow:hidden` box never shows up in `scrollHeight` or in any DOM rect, so a clipped
  * underline passes every box measurement. For the first match of `sel` this screenshots the box plus a 10px band under it twice, with and
@@ -185,12 +202,19 @@ async function checkHorizontal(page: Page): Promise<string[]> {
  * text-overflow ellipsis, so the decoration's extent is the same in both), so `ink < unclipped` means the clip is
  * eating part of the decoration (a font that puts the underline half inside the box still shows some ink, which
  * is why a plain "some ink" floor is not enough). The caller keeps the pointer away so no tooltip is in the crop.
+ *
+ * Every screenshot is taken from a from-scratch raster (`repaintFully`). Turning the decoration off and the clip
+ * margin up on the live element only repaints what Chromium's incremental paint invalidation marks dirty, and that
+ * rect can stop one pixel short of the underline's antialiased bottom row: the old row then stays in the tile,
+ * "without decoration" still shows a row of it, and `unclipped` comes out 10-30 pixels low (so `ink > unclipped`, or
+ * a bogus "the clip eats ..."). Which frames the compositor produced between the style edits decides whether that
+ * happens, so it came and went with CPU load (1 run in 400 in a parallel suite, and a stale row stays for the life
+ * of the page once it is in). Waiting for frames does not help; a full repaint does.
  */
 export async function decorationInk(page: Page, sel: string): Promise<{ ink: number; unclipped: number; width: number }> {
   const loc = page.locator(sel).first();
   // Details and Match scroll: bring the element (and the 10px band under it) into the viewport first, since a
-  // screenshot clip can't reach past it. Only when it is outside: a Live page never scrolls, and Playwright's own
-  // scrollIntoViewIfNeeded made this probe flaky there (under 8 workers: 1 failure in 24 runs; with this guard 0 in 72).
+  // screenshot clip can't reach past it. Only when it is outside: a Live page never scrolls.
   await loc.evaluate((el) => {
     const r = el.getBoundingClientRect();
     if (r.top < 0 || r.bottom + 12 > window.innerHeight) el.scrollIntoView({ block: "center" });
@@ -200,8 +224,10 @@ export async function decorationInk(page: Page, sel: string): Promise<{ ink: num
   const clip = { x: Math.floor(r.x) - 1, y: Math.floor(r.y) - 2, width: Math.ceil(r.width) + 2, height: Math.ceil(r.height) + 12 };
   const count = async (extra: string): Promise<number> => {
     const base = await page.addStyleTag({ content: extra || "/* as rendered */" });
+    await repaintFully(page);
     const withDeco = await page.screenshot({ clip });
     const off = await page.addStyleTag({ content: `${sel}{text-decoration:none!important}` });
+    await repaintFully(page);
     const without = await page.screenshot({ clip });
     await off.evaluate((el) => (el as Element).remove());
     await base.evaluate((el) => (el as Element).remove());

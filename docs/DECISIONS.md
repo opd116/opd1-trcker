@@ -1288,6 +1288,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** A few bytes per session match in the `mystats` payload. A long session adds one tab stop per match.
 - **Status:** active
 
+### R184 — Tooltips reach the keyboard; the RR chart is one keyboard stop
+
+- **What:** Claude's design call (brief B11). The tooltip engine also shows a trigger's tip when the trigger itself gets keyboard focus (`:focus-visible`, the same 450 ms delay and placement as a hover; a mouse click's focus shows nothing), hides it on focus out, and `Escape` hides any tip and does nothing else; the focused trigger carries `aria-describedby` while its tip shows. A scroll cancels a keyboard tip only once its bubble is up (focusing a trigger below the fold scrolls it into view first). The RR chart is one tab stop (`role="slider"` with `aria-valuetext` = the picked point's tip): focus picks the newest point, ←/→ move, Home/End jump, the pick follows its match when a `mystats` push inserts older points; ↑/↓ and PageUp/PageDown are left to page scrolling. The Session chips (R183) are the other focusable triggers, so the My Stats tab order is the tabs, the chart, the chips, then the Recent Matches rows. The cells that only carry a scope tip are not made focusable (about 70 tab stops otherwise). Every My Stats image now retries a failed load like Details' images; the skeleton and `—` states were checked against Details and match.
+- **Why:** The brief asked for keyboard access to the tooltips, and the chart's tip was the only way to read the RR history.
+- **Cost:** None at runtime beyond two document listeners. The Live cards' indicator tips (party, encounters, hidden name) stay mouse-only, as the cards themselves are the focusable controls there.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

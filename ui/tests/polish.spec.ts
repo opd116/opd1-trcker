@@ -116,11 +116,56 @@ test("a page that throws while rendering shows a quiet empty page (top bar stays
   expect(await page.locator(".blank").innerText()).toBe("");
   await expect(page.locator("header.bar")).toBeVisible();
   await expect(page.locator(".tab.on")).toHaveText("Live");
-  expect(errors.some((e) => e.includes("page crashed"))).toBe(true);
+  expect(errors.some((e) => e.startsWith("page "))).toBe(true);
   // The next good live state brings the page back.
   await page.evaluate(`import("/src/lib/stores.ts").then(({ live }) => live.set({ stage: "closed", mapId: null, players: [] }))`);
   await expect(page.locator(".blank")).toHaveCount(0);
   await expect(page.locator(".live")).toHaveCount(1);
+});
+
+// Under Tauri the UI's own failures reach the app log (`ui_log`, Ctrl+Shift+L / Ctrl+Shift+D). The DEV browser has no
+// Rust, so the Tauri side is faked after the page loaded: `isTauri()` reads `globalThis.isTauri` when it is called, and
+// `invoke` is `window.__TAURI_INTERNALS__.invoke(cmd, args, options)` (@tauri-apps/api/core).
+test("under Tauri a crashed page, an uncaught error and an unhandled rejection each reach ui_log", async ({ page }) => {
+  await openScene(page, "ingame");
+  await expect(page.locator(".live .card")).toHaveCount(10);
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      isTauri?: boolean;
+      __calls?: Array<[string, Record<string, unknown>]>;
+      __TAURI_INTERNALS__?: { invoke: (cmd: string, args: Record<string, unknown>, options?: unknown) => Promise<void> };
+    };
+    w.isTauri = true;
+    w.__calls = [];
+    w.__TAURI_INTERNALS__ = { invoke: (cmd, args) => (w.__calls!.push([cmd, args]), Promise.resolve()) };
+  });
+  const logged = () =>
+    page.evaluate(() =>
+      (window as unknown as { __calls: Array<[string, { level: string; message: string }]> }).__calls
+        .filter(([cmd]) => cmd === "ui_log")
+        .map(([, args]) => args),
+    );
+
+  // A page that crashes while rendering: the boundary's `page` line, with the error's name.
+  await page.evaluate(`import("/src/lib/stores.ts").then(({ live }) => live.set({ stage: "ingame", mapId: null, players: [null] }))`);
+  await expect(page.locator(".blank")).toHaveCount(1);
+  await expect.poll(async () => (await logged()).map((a) => a.message)).toContainEqual(expect.stringMatching(/^page: TypeError/));
+
+  // An uncaught error (the `window` listener) and a promise rejected with no handler (`promise`).
+  await page.evaluate(() => {
+    window.dispatchEvent(new ErrorEvent("error", { error: new Error("x"), message: "x" }));
+  });
+  await page.evaluate(() => {
+    void Promise.reject(new Error("y"));
+  });
+  await expect.poll(async () => (await logged()).map((a) => a.message)).toContainEqual(expect.stringMatching(/^window: Error: x/));
+  await expect.poll(async () => (await logged()).map((a) => a.message)).toContainEqual(expect.stringMatching(/^promise: Error: y/));
+
+  const all = await logged();
+  expect(all.every((a) => a.level === "error")).toBe(true);
+  expect(all.every((a) => a.message.length <= 500 && !/\n/.test(a.message))).toBe(true);
+  // Each line once, however often the page re-rendered meanwhile (the dedupe).
+  expect(new Set(all.map((a) => a.message)).size).toBe(all.length);
 });
 
 // My Stats shows `mystats` data, not live data: only a My Stats update retries it (a live update says nothing new).
@@ -137,7 +182,7 @@ test("a crashed My Stats page retries only on a My Stats update, not on every li
   await expect(page.locator(".mystats")).toHaveCount(0);
   await expect(page.locator(".blank")).toHaveCount(1);
   await expect(page.locator("header.bar")).toBeVisible();
-  expect(errors.some((e) => e.includes("page crashed"))).toBe(true);
+  expect(errors.some((e) => e.startsWith("page "))).toBe(true);
   // Live updates come all the time: none of them re-runs the crash.
   for (let i = 0; i < 3; i++) {
     await page.evaluate(
@@ -145,7 +190,7 @@ test("a crashed My Stats page retries only on a My Stats update, not on every li
     );
   }
   await expect(page.locator(".blank")).toHaveCount(1);
-  expect(errors.filter((e) => e.includes("page crashed"))).toHaveLength(1);
+  expect(errors.filter((e) => e.startsWith("page "))).toHaveLength(1);
   // The next good My Stats answer brings the page back.
   await page.evaluate(
     `import("/src/lib/stores.ts").then(({ mystats }) => import("/src/lib/demo/mystats.ts").then(({ myStatsFull }) => mystats.set(myStatsFull())))`,

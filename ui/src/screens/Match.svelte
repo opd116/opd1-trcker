@@ -19,6 +19,7 @@
   import { DETAILS_RETRY_MS, DETAILS_TIMEOUT_MS } from "../lib/boot";
   import { emptyMatch, type MatchFrom } from "../lib/details";
   import { openMatch } from "../lib/stores";
+  import { reportError } from "../lib/uilog";
 
   // `from` (recent row or encounter row) is part of the route. The backend decides the perspective; the page only
   // hands `from` to the header, whose date reads differently for an encounter row (R140).
@@ -31,7 +32,7 @@
   $effect(() => {
     openMatch
       .open(matchId, (id) => getMatchDetails(id, focusPuuid), { retryMs: DETAILS_RETRY_MS, timeoutMs: DETAILS_TIMEOUT_MS, settle: emptyMatch })
-      .catch((err: unknown) => console.error("match_details failed", err));
+      .catch((err: unknown) => reportError("match", err));
   });
 
   // Leaving the page (Back, the Live tab, Agent Select's switch to Live) unmounts it: the slot forgets the view, so a
@@ -40,7 +41,7 @@
   // so its `close_match` goes out before the new `match_details` (which opens the new match on the Rust side).
   $effect(() => () => {
     openMatch.close();
-    closeMatch(matchId).catch((err: unknown) => console.error("close_match failed", err));
+    closeMatch(matchId).catch((err: unknown) => reportError("match close", err));
   });
 </script>
 

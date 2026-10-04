@@ -1,3 +1,5 @@
+// Very first: the error listeners are on the window before anything else evaluates (see uilog-install.ts).
+import "./lib/uilog-install";
 import "./app.css";
 // First, so the theme variables exist before anything paints.
 import "./lib/themeStore.svelte";

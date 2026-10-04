@@ -148,6 +148,7 @@ describe("stores", () => {
     afterEach(() => {
       vi.useRealTimers();
       vi.restoreAllMocks(); // the console.error spy from `underTauri`
+      vi.unstubAllEnvs();
       vi.doUnmock("@tauri-apps/api/core");
       vi.doUnmock("./api");
     });
@@ -155,9 +156,10 @@ describe("stores", () => {
     /** Stores wired to a fake Tauri bridge whose `meta` command rejects `failures` times before it resolves. */
     async function underTauri(failures: number, myStatsAnswer: () => Promise<MyStats | null> = async () => null) {
       let metaCalls = 0;
-      const invoke = vi.fn(async (cmd: string) => {
+      const invoke = vi.fn(async (cmd: string, _args?: unknown) => {
         if (cmd === "live_state") return state("closed");
         if (cmd === "my_stats") return myStatsAnswer();
+        if (cmd === "ui_log") return undefined;
         if (cmd === "meta") {
           if (metaCalls++ < failures) throw new Error("asset tables unavailable");
           return good;
@@ -169,8 +171,9 @@ describe("stores", () => {
         handlers.set(ev, cb);
         return () => {};
       });
-      vi.doMock("@tauri-apps/api/core", () => ({ isTauri: () => true }));
+      vi.doMock("@tauri-apps/api/core", () => ({ isTauri: () => true, invoke }));
       vi.doMock("./api", () => ({ tauriBridge: { invoke, listen }, myStats: () => invoke("my_stats") }));
+      vi.stubEnv("DEV", true); // the console sink of the reporter is a development-build feature: pinned, not inherited
       vi.spyOn(console, "error").mockImplementation(() => {});
       const emit = (ev: string, payload: unknown) => handlers.get(ev)!({ payload });
       return { ...(await load()), invoke, emit, metaCalls: () => metaCalls };
@@ -239,9 +242,19 @@ describe("stores", () => {
       });
       await startFeeds();
       expect(get(mystats)).toBeNull();
-      expect(console.error).toHaveBeenCalledWith("my_stats failed", expect.any(Error));
+      expect(console.error).toHaveBeenCalledWith("mystats", expect.any(Error));
       emit("mystats", stats("event"));
       expect(get(mystats)).toEqual(stats("event"));
+    });
+
+    it("a failed my_stats() reaches the app log: one ui_log line, tagged with the site", async () => {
+      const { startFeeds, invoke } = await underTauri(0, async () => {
+        throw new Error("db busy");
+      });
+      await startFeeds();
+      const sent = invoke.mock.calls.filter(([cmd]) => cmd === "ui_log");
+      expect(sent).toHaveLength(1);
+      expect(sent[0][1]).toEqual({ level: "error", message: expect.stringMatching(/^mystats: Error: db busy/) });
     });
 
     it("refreshMyStats asks again only while the page has nothing, and never overwrites what landed meanwhile", async () => {
@@ -303,6 +316,10 @@ describe("stores", () => {
       expect(get(meta)).toEqual({ agents: {}, maps: {}, tiers: {} }); // loaded-miss "—", never a skeleton forever
       expect(get(meta)).not.toBeNull();
       expect(console.error).toHaveBeenCalledTimes(1);
+      // Only the first failure is reported, to the app log as well: one ui_log line for the `meta` site.
+      const sent = invoke.mock.calls.filter(([cmd]) => cmd === "ui_log");
+      expect(sent).toHaveLength(1);
+      expect(sent[0][1]).toEqual({ level: "error", message: expect.stringMatching(/^meta: Error: asset tables unavailable/) });
 
       await vi.advanceTimersByTimeAsync(2_000);
       expect(get(meta)).toEqual(good);
@@ -311,13 +328,14 @@ describe("stores", () => {
 
     it("a healthy meta() is set once with no retry", async () => {
       vi.useFakeTimers();
-      const { startFeeds, meta, metaCalls } = await underTauri(0);
+      const { startFeeds, meta, metaCalls, invoke } = await underTauri(0);
       await startFeeds();
       await vi.advanceTimersByTimeAsync(0);
       expect(get(meta)).toEqual(good);
       await vi.advanceTimersByTimeAsync(120_000);
       expect(metaCalls()).toBe(1);
       expect(console.error).not.toHaveBeenCalled();
+      expect(invoke.mock.calls.filter(([cmd]) => cmd === "ui_log")).toHaveLength(0); // nothing failed: nothing in the app log
     });
   });
 });

@@ -9,6 +9,7 @@
   import { cardOpenGuard } from "./lib/clickGuard";
   import { router, scrollHost } from "./lib/router.svelte";
   import { live, mystats } from "./lib/stores";
+  import { reportError } from "./lib/uilog";
   import Details from "./screens/Details.svelte";
   import Live from "./screens/Live.svelte";
   import Match from "./screens/Match.svelte";
@@ -20,7 +21,7 @@
     if (!action || !isTauri()) return;
     e.preventDefault();
     runKeyAction(action, tauriBridge, (text) => navigator.clipboard.writeText(text)).catch((err) =>
-      console.error(`${action} failed`, err),
+      reportError(`key:${action}`, err),
     );
   }
 
@@ -64,7 +65,7 @@
 
 <TopBar route={router.route} live={$live} />
 {#key pageKey}
-  <svelte:boundary onerror={(err) => console.error("page crashed", err)}>
+  <svelte:boundary onerror={(err) => reportError("page", err)}>
     {#if router.route.name === "live"}
       <Live live={$live} />
     {:else}

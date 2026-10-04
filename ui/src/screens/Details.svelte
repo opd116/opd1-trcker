@@ -20,6 +20,7 @@
   import { recentShown, settledDetails, type MatchFrom } from "../lib/details";
   import { go } from "../lib/router.svelte";
   import { live, openDetails } from "../lib/stores";
+  import { reportError } from "../lib/uilog";
 
   let { puuid, more }: { puuid: string; more: boolean } = $props();
 
@@ -37,7 +38,7 @@
         // The hero keeps what the live card knew at that moment (read then, so this effect never depends on `live`).
         settle: (p) => settledDetails(p, get(live)?.players.find((c) => c.puuid === p)),
       })
-      .catch((err: unknown) => console.error("player_details failed", err));
+      .catch((err: unknown) => reportError("details", err));
   });
 
   // Leaving the page (Back, the Live tab, a match row, Agent Select's switch to Live) unmounts it: Rust forgets the open
@@ -46,7 +47,7 @@
   // close carries the player on screen at that moment (read in the teardown, so it is no dependency), R163: Rust
   // ignores a close for anyone else and voids an open of this player still being built.
   $effect(() => () => {
-    closeDetails(puuid).catch((err: unknown) => console.error("close_details failed", err));
+    closeDetails(puuid).catch((err: unknown) => reportError("details close", err));
   });
 
   const openMatch = (from: MatchFrom) => (matchId: string) =>

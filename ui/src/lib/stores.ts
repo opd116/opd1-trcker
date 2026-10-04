@@ -4,6 +4,7 @@ import { myStats, tauriBridge } from "./api";
 import { loadMeta, openDetails, openMatch, startLive, startMyStats } from "./boot";
 import { onStage, startPage } from "./router.svelte";
 import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails, Stage } from "./types";
+import { reportError } from "./uilog";
 
 /** Live stage + roster. Pushed by Rust (`emit("live")`); the UI never polls Riot. null = nothing received yet. */
 export const live = writable<LiveState | null>(null);
@@ -26,7 +27,7 @@ export async function refreshMyStats(): Promise<void> {
     const s = await myStats();
     if (!get(mystats)) mystats.set(s);
   } catch (err) {
-    console.error("my_stats failed", err);
+    reportError("mystats", err);
   }
 }
 
@@ -84,7 +85,7 @@ export async function startFeeds(): Promise<void> {
     return;
   }
 
-  const failed = (what: string) => (err: unknown) => console.error(`${what} failed`, err);
+  const failed = (what: string) => (err: unknown) => reportError(what, err);
   // Not awaited: while the asset tables are unavailable it keeps retrying (see loadMeta), and the other feeds
   // must not wait for it. Only the first failure is logged, so an offline session doesn't repeat itself.
   // R163: Rust also pushes a `meta` event whenever the tables first load or are refreshed (a table that loaded by
@@ -94,7 +95,7 @@ export async function startFeeds(): Promise<void> {
     tauriBridge,
     (m) => meta.set(m),
     (err, attempt) => {
-      if (attempt === 0) failed("meta()")(err);
+      if (attempt === 0) failed("meta")(err);
     },
     () => metaPushed,
   );
@@ -104,16 +105,16 @@ export async function startFeeds(): Promise<void> {
         metaPushed = true;
         meta.set(e.payload);
       })
-      .catch(failed("meta listener")),
-    startLive(tauriBridge, applyLive).catch(failed("live feed")),
+      .catch(failed("meta event")),
+    startLive(tauriBridge, applyLive).catch(failed("live")),
     // Never rejects: a failed `my_stats()` settles the page on its `—` frames (see startMyStats).
-    startMyStats(tauriBridge, (s) => mystats.set(s), failed("my_stats")),
+    startMyStats(tauriBridge, (s) => mystats.set(s), failed("mystats")),
     tauriBridge
       .listen<PlayerDetails>("details", (e) => openDetails.event(e.payload))
-      .catch(failed("details listener")),
+      .catch(failed("details event")),
     // R150: Rust emits the open match again when names arrived for it (`MatchDetailsView`, same shape as `match_details`).
     tauriBridge
       .listen<MatchDetailsView>("match", (e) => openMatch.event(e.payload))
-      .catch(failed("match listener")),
+      .catch(failed("match event")),
   ]);
 }

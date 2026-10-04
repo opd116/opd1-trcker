@@ -1267,6 +1267,27 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** A release builds the installer once more on Windows (about 10 minutes, Windows minutes count double in a private repo). The rebuilt v0.2.0 and v0.3.0 installers come from the same commits but are not the original files.
 - **Status:** active
 
+### R181 — The map list picture is stored at 384 px wide
+
+- **What:** Claude's call (brief B9). The map `listViewIcon` (`AssetKind::MapList`, the row and top-bar map picture) is downscaled to 384 px wide on its first download, aspect kept; CSS still cover-crops it. A file already in the image cache is served as it is (the installer wipes that cache on an upgrade). Every kind's target is pinned by a test: agent 128, tier 128, `largeArt` 160, splash 1000, skin render 256, content tier 32, map list 384; `smallArt`, `wideArt` and `splash` are not shown anywhere and are left alone.
+- **Why:** A decoded image costs width × height × 4 bytes of WebView RAM, whatever its file size. The real `listViewIcon` is 456×100 for most maps and 3840×2160 (33 MB decoded) for Basic Training and The Range. Its tallest use, the Match Details header's 150×56 box, needs 84 device px of height at 150% Windows scaling, which 384 px wide keeps exactly, so nothing looks different.
+- **Cost:** One resize per map on first download. Savings: about 53 KB per map picture on the Live page, about 0.4 MB on a Details page with 8 maps, and about 33 MB for each of the two oversized maps. The Live In Game page's decoded images total about 5.2 MB, almost half of it the ten card arts (160 px wide, needed at that size by the Details hero).
+- **Status:** active
+
+### R182 — UI failures reach the log; the log starts with a header line
+
+- **What:** Claude's call (brief B1, B2). (1) A crashed page, a `window` error and an unhandled promise rejection are reported by `ui/src/lib/uilog.ts` (installed before any other module) through a new command `ui_log(level, message)`: one line `kind: Name: message @ path:line:col`, at most 500 characters, never an object's field values (an object becomes its `message` or `[object Object] [key names]`), a repeat within 10 s dropped, at most 20 sends per 10 s, only inside Tauri, never throwing; the console sinks are dev-only and compiled out. Rust logs the line under the `ui` module (target `opd1_trcker::ui`), after `raw_capture::log_excerpt` (secret keys and JWTs redacted, one line, every full uuid shortened to 8 characters, 500 characters at most) and a process-wide limiter of 20 ring lines per rolling minute (the `N lines dropped` notice included). The command takes no app state, so an error before `setup()` is logged too. (2) `copy_log` (Ctrl+Shift+L, now run off the UI thread) and the dump's `log.txt` start with one line: `OPD1 TRCKER <version> · Windows <major.minor.build> · stage <s> · settled <b> · shard <pd>/<glz region>/<glz shard> · client <version> (<source>) · act <first 8 of the id> <label> (<riot|valorant-api>)`, `—` for an unknown part. `RiotSession` keeps the parsed shards; the client version and its source are read together; `AppState::act_source()` says which source chose the act; the Windows build comes from `windows-version` (already in the dependency tree; Windows builds only).
+- **Why:** UI failures were invisible in a release build. The header answers the first questions about a user's log (which build, which Windows, which stage, which shard and act) without a round trip.
+- **Cost:** No request. One IPC call per reported UI failure, bounded on both sides. Rust cannot recognise a player's name in free text; the UI is that barrier.
+- **Status:** active
+
+### R183 — Each Session chip has a tooltip and opens its match
+
+- **What:** Claude's design call (brief B5; amends §9.3 and §9.6 of the build spec, where the chips had no tooltip). `SessionSummary.streak` (results only) became `matches`: per match its id, map (a valorant-api uuid, or `null`, never `""` or a Riot path), RR change (`null` when no competitive update is stored, never 0) and start, oldest first. Each chip keeps its plain 20×20 look and gets the card's last-5 tooltip with the map in front, `Ascent · +18 RR · 2h` (the map dropped while unknown; `Win` / `Loss` / `Draw` in place of an unknown RR). It opens Match Details exactly as a Recent Matches row does (the user as focus player, Back returns to My Stats at its scroll position): `role="button"`, Enter / Space, the global focus ring at its 2px outside offset (R106), an `aria-label` with the result word in front of the tip, no hover colour. The golden contract carries a draw chip with no map and no RR.
+- **Why:** The v0.3.0 review left the chips as the only My Stats figures with nothing behind them; the data was already in the DB.
+- **Cost:** A few bytes per session match in the `mystats` payload. A long session adds one tab stop per match.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

@@ -21,8 +21,8 @@ use std::collections::HashMap;
 use crate::db::repo::{CompMatchRow, CompUpdateRow, StoredTier};
 use crate::model::{
     match_result, match_summary, rank_without_mmr, CurrentRank, Insight, InsightKind,
-    MatchResultKind, MyStats, RankChange, RankInfo, RankSummary, RrPoint, SessionSummary, StatRow,
-    StreakMark, WinCell,
+    MatchResultKind, MyStats, RankChange, RankInfo, RankSummary, RrPoint, SessionMatch,
+    SessionSummary, StatRow, StreakMark, WinCell,
 };
 use crate::stats::{self, Act, DEFAULT_SESSION_GAP_MS};
 
@@ -428,15 +428,26 @@ fn current_session(played: &[Played], now_ms: i64) -> Option<SessionSummary> {
         wins: tally.wins,
         losses: tally.losses,
         started_ms: games[0].row.start_ms,
-        streak: games
-            .iter()
-            .map(|p| match p.result {
-                MatchResultKind::Win => StreakMark::Win,
-                MatchResultKind::Loss => StreakMark::Loss,
-                MatchResultKind::Draw => StreakMark::Draw,
-            })
-            .collect(),
+        matches: games.iter().map(session_match).collect(),
     })
+}
+
+/// One chip of the session: the result, plus the map, the RR change and
+/// the start the chip's tooltip shows and the match id its click opens.
+/// `row.map_id` is already a valorant-api uuid (`""` when unknown, sent as
+/// `None`).
+fn session_match(p: &Played) -> SessionMatch {
+    SessionMatch {
+        match_id: p.row.match_id.clone(),
+        map_id: (!p.row.map_id.is_empty()).then(|| p.row.map_id.clone()),
+        rr_earned: p.row.rr_earned.map(|rr| rr as i32),
+        start_ms: p.row.start_ms,
+        result: match p.result {
+            MatchResultKind::Win => StreakMark::Win,
+            MatchResultKind::Loss => StreakMark::Loss,
+            MatchResultKind::Draw => StreakMark::Draw,
+        },
+    }
 }
 
 // ---------------------------------------------------------------------

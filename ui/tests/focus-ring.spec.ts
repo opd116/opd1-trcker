@@ -7,8 +7,11 @@ import { openScene } from "./harness";
 
 type Sides = { top: number; right: number; bottom: number; left: number; w: number; h: number };
 
-/** How many pixels the ring paints in a 4px band inside each edge of `el`'s border box (which must be on screen). */
-async function ringSides(page: Page, el: Locator): Promise<Sides> {
+/**
+ * How many pixels the ring paints in a 4px band inside each edge of `el`'s border box (which must be on screen), or
+ * with `outer` in the 4px band just outside each edge, over the straight part only (the corners are rounded).
+ */
+async function ringSides(page: Page, el: Locator, outer = false): Promise<Sides> {
   const r = await el.boundingBox();
   if (!r) throw new Error("no box");
   const x0 = Math.round(r.x);
@@ -36,23 +39,26 @@ async function ringSides(page: Page, el: Locator): Promise<Sides> {
         const i = (y * A.bw + x) * 4;
         return Math.abs(A.d[i]! - B.d[i]!) + Math.abs(A.d[i + 1]! - B.d[i + 1]!) + Math.abs(A.d[i + 2]! - B.d[i + 2]!) > 24;
       };
-      const { x, y, w, h } = box as { x: number; y: number; w: number; h: number };
+      const { x, y, w, h, outer } = box as { x: number; y: number; w: number; h: number; outer: boolean };
       const out = { top: 0, right: 0, bottom: 0, left: 0, w, h };
-      for (let dx = 0; dx < w; dx++) for (let k = 0; k < 4; k++) {
-        if (diff(x + dx, y + k)) { out.top++; break; }
-      }
-      for (let dx = 0; dx < w; dx++) for (let k = 0; k < 4; k++) {
-        if (diff(x + dx, y + h - 1 - k)) { out.bottom++; break; }
-      }
-      for (let dy = 0; dy < h; dy++) for (let k = 0; k < 4; k++) {
-        if (diff(x + k, y + dy)) { out.left++; break; }
-      }
-      for (let dy = 0; dy < h; dy++) for (let k = 0; k < 4; k++) {
-        if (diff(x + w - 1 - k, y + dy)) { out.right++; break; }
+      // The band: inside, the 4 pixels in from the edge; outside, the 4 pixels beyond it. `c` skips the rounded corners.
+      const at = (edge: "top" | "right" | "bottom" | "left", along: number, k: number): [number, number] => {
+        const d = outer ? -1 - k : k;
+        return edge === "top" ? [x + along, y + d] : edge === "bottom" ? [x + along, y + h - 1 - d] : edge === "left" ? [x + d, y + along] : [x + w - 1 - d, y + along];
+      };
+      const c = outer ? 4 : 0;
+      for (const edge of ["top", "bottom", "left", "right"] as const) {
+        const len = edge === "top" || edge === "bottom" ? w : h;
+        for (let along = c; along < len - c; along++) {
+          for (let k = 0; k < 4; k++) {
+            const [px, py] = at(edge, along, k);
+            if (diff(px, py)) { out[edge]++; break; }
+          }
+        }
       }
       return out;
     },
-    [withRing.toString("base64"), without.toString("base64"), inner] as const,
+    [withRing.toString("base64"), without.toString("base64"), { ...inner, outer }] as const,
   );
 }
 
@@ -60,6 +66,12 @@ async function ringSides(page: Page, el: Locator): Promise<Sides> {
 function expectFullRing(s: Sides, what: string) {
   for (const side of ["top", "bottom"] as const) expect(s[side], `${what}: ${side} edge`).toBeGreaterThanOrEqual(Math.floor((s.w - 20) * 0.8));
   for (const side of ["left", "right"] as const) expect(s[side], `${what}: ${side} edge`).toBeGreaterThanOrEqual(Math.floor((s.h - 20) * 0.8));
+}
+
+/** A ring drawn outside a small box: every side's straight part (the box less its 4px rounded corners) carries it. */
+function expectWholeOuterRing(s: Sides, what: string) {
+  for (const side of ["top", "bottom"] as const) expect(s[side], `${what}: ${side} edge`).toBeGreaterThanOrEqual(s.w - 8 - 1);
+  for (const side of ["left", "right"] as const) expect(s[side], `${what}: ${side} edge`).toBeGreaterThanOrEqual(s.h - 8 - 1);
 }
 
 const focusVisible = (l: Locator) => l.evaluate((el) => el.matches(":focus-visible"));
@@ -143,6 +155,34 @@ test("a mouse click on the chart leaves no ring", async ({ page }) => {
   await expect(stop).toBeFocused();
   expect(await focusVisible(stop)).toBe(false);
   expect((await outline(stop)).style).toBe("none");
+});
+
+test("My Stats Session chips: a whole 2px-offset ring on the first and the last chip, inside the panel (it clips)", async ({ page }) => {
+  for (const scene of ["mystats", "mystats-longnames"]) {
+    await openScene(page, scene); // the longest-names session wraps onto lines: the last chip is on the panel's bottom line
+    const chips = page.locator(".mystats .session .mc");
+    const panel = page.locator(".mystats .session .panel");
+    for (const [name, chip] of [["first", chips.first()], ["last", chips.last()]] as const) {
+      await chip.scrollIntoViewIfNeeded();
+      await chip.focus();
+      expect(await focusVisible(chip), `${scene} ${name}`).toBe(true);
+      expect(await outline(chip), `${scene} ${name}`).toEqual({ style: "solid", width: "1px", offset: "2px" });
+      const [b, p] = [(await chip.boundingBox())!, (await panel.boundingBox())!];
+      expect([b.width, b.height]).toEqual([20, 20]);
+      // The ring's outer edge is 3px out: the panel's padding holds it, so its overflow clips nothing.
+      for (const edge of [b.x - 3 - p.x, b.y - 3 - p.y, p.x + p.width - (b.x + b.width + 3), p.y + p.height - (b.y + b.height + 3)]) expect(edge, `${scene} ${name}`).toBeGreaterThanOrEqual(0);
+      expectWholeOuterRing(await ringSides(page, chip, true), `${scene} session ${name} chip`);
+    }
+  }
+});
+
+test("a Session chip's mouse look: a pointer, no ring on click", async ({ page }) => {
+  await openScene(page, "mystats");
+  const chip = page.locator(".mystats .session .mc").nth(2);
+  await chip.scrollIntoViewIfNeeded();
+  expect(await chip.evaluate((el) => getComputedStyle(el).cursor)).toBe("pointer");
+  await chip.hover();
+  expect(await focusVisible(chip)).toBe(false);
 });
 
 test("a mouse click leaves no ring on the tab (keyboard only)", async ({ page }) => {

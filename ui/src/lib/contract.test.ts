@@ -132,7 +132,9 @@ function selfPartyProblems(c: Card): string[] {
  * 7 and 4 long, a bucket has a win rate exactly when it has games, the RR series runs oldest first and the rank
  * changes newest first (at most 5), the Recent Matches come newest first (at most 5) with a stat line that is null as a
  * whole (R102), the tables come most played first, the next tier is the RR still needed (none from Immortal up or
- * without a tier), the session's W and L are its streak's, and the user's own puuid is there.
+ * without a tier), the session's W and L are its matches', the session's matches run oldest first from `startedMs`
+ * (the chips' order, a map id never `""`) and its Net RR is the sum of their known RR changes, and the user's own puuid
+ * is there.
  */
 function myStatsProblems(m: MyStats): string[] {
   const out: string[] = [];
@@ -163,8 +165,20 @@ function myStatsProblems(m: MyStats): string[] {
   if (tier !== null && tier >= 24 && rrToNext !== null) out.push("rrToNext from Immortal up");
   if (tier !== null && tier < 24 && rr !== null && rrToNext !== 100 - rr) out.push(`rrToNext ${rrToNext} for ${rr} RR`);
   if (m.session) {
-    const count = (mark: string) => m.session!.streak.filter((x) => x === mark).length;
-    if (count("W") !== m.session.wins || count("L") !== m.session.losses) out.push("session wins and losses are not its streak's");
+    const { matches, wins, losses, netRr, startedMs } = m.session;
+    const count = (mark: string) => matches.filter((x) => x.result === mark).length;
+    if (count("W") !== wins || count("L") !== losses) out.push("session wins and losses are not its matches'");
+    if (matches.length === 0) out.push("a session with no match");
+    if (!desc(matches.map((x) => -x.startMs))) out.push("session matches are not oldest first");
+    if (matches[0] && matches[0].startMs !== startedMs) out.push(`session startedMs ${startedMs} is not its first match's ${matches[0].startMs}`);
+    if (new Set(matches.map((x) => x.matchId)).size !== matches.length) out.push("a session match appears twice");
+    for (const x of matches) {
+      if (x.matchId === "") out.push("a session match with no id");
+      if (x.mapId !== null && !UUID.test(x.mapId)) out.push(`session match ${x.matchId}: map id ${JSON.stringify(x.mapId)} is not a valorant-api uuid`);
+    }
+    const known = matches.map((x) => x.rrEarned).filter((x): x is number => x !== null);
+    const sum = known.length === 0 ? null : known.reduce((a, b) => a + b, 0);
+    if (netRr !== sum) out.push(`session netRr ${netRr} is not the sum of its matches' RR changes (${sum})`);
   }
   if (new Set(m.insights.map((i) => i.kind)).size !== m.insights.length) out.push("an insight kind appears twice");
   return out;
@@ -249,11 +263,43 @@ describe("the walker can fail (a check that cannot fail proves nothing)", () => 
     ]);
   });
 
-  it("an enum on an array checks every element (the session streak is W, L or D)", () => {
-    const session = { netRr: 5, wins: 1, losses: 1, startedMs: 1, streak: ["W", "L"] };
+  it("a nested array checks every element with its descriptor (a session match's result is W, L or D; map and RR may be null)", () => {
+    const match = { matchId: "m1", mapId: "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319", rrEarned: 12, startMs: 1, result: "W" };
+    const session = { netRr: 12, wins: 1, losses: 0, startedMs: 1, matches: [match] };
     expect(problems(session, "SessionSummary", "s")).toEqual([]);
-    expect(problems({ ...session, streak: ["W", "X"] }, "SessionSummary", "s")).toEqual(['s.streak[1]: "X" is not one of W|L|D']);
-    expect(problems({ ...session, streak: ["win"] }, "SessionSummary", "s")).toEqual(['s.streak[0]: "win" is not one of W|L|D']);
+    expect(problems({ ...session, matches: [{ ...match, mapId: null, rrEarned: null }] }, "SessionSummary", "s")).toEqual([]);
+    expect(problems({ ...session, matches: [{ ...match, result: "X" }] }, "SessionSummary", "s")).toEqual(['s.matches[0].result: "X" is not one of W|L|D']);
+    expect(problems({ ...session, matches: [{ ...match, result: "win" }] }, "SessionSummary", "s")).toEqual(['s.matches[0].result: "win" is not one of W|L|D']);
+    expect(problems({ ...session, matches: [{ ...match, matchId: null }] }, "SessionSummary", "s")).toEqual(["s.matches[0].matchId: null is not one of string"]);
+    expect(problems({ ...session, matches: [{ matchId: "m1" }] }, "SessionSummary", "s")).toEqual([
+      "s.matches[0].mapId: required key of SessionMatch is missing",
+      "s.matches[0].rrEarned: required key of SessionMatch is missing",
+      "s.matches[0].startMs: required key of SessionMatch is missing",
+      "s.matches[0].result: required key of SessionMatch is missing",
+    ]);
+    expect(problems({ ...session, streak: ["W"] }, "SessionSummary", "s")).toEqual(["s.streak: not a key of SessionSummary"]);
+  });
+
+  it("the My Stats session invariants can fail: counts, order, start, duplicates, map ids and Net RR", () => {
+    const [full] = MY_STATS as unknown as MyStats[];
+    const session = full!.session!;
+    const base = (s: typeof session): MyStats => ({ ...full!, session: s });
+    expect(myStatsProblems(base(session))).toEqual([]);
+    const [a, b] = session.matches;
+    expect(myStatsProblems(base({ ...session, wins: session.wins + 1 }))).toEqual(["session wins and losses are not its matches'"]);
+    expect(myStatsProblems(base({ ...session, matches: [b!, a!, ...session.matches.slice(2)], startedMs: b!.startMs }))).toEqual(["session matches are not oldest first"]);
+    expect(myStatsProblems(base({ ...session, startedMs: session.startedMs + 1 }))).toEqual([
+      `session startedMs ${session.startedMs + 1} is not its first match's ${session.startedMs}`,
+    ]);
+    expect(myStatsProblems(base({ ...session, matches: [{ ...a!, mapId: "" }, ...session.matches.slice(1)] }))).toEqual([
+      `session match ${a!.matchId}: map id "" is not a valorant-api uuid`,
+    ]);
+    expect(myStatsProblems(base({ ...session, netRr: 0 }))).toEqual([`session netRr 0 is not the sum of its matches' RR changes (${session.netRr})`]);
+    const unknown = session.matches.map((x) => ({ ...x, rrEarned: null }));
+    expect(myStatsProblems(base({ ...session, matches: unknown, netRr: null }))).toEqual([]);
+    expect(myStatsProblems(base({ ...session, matches: unknown }))).toEqual([
+      `session netRr ${session.netRr} is not the sum of its matches' RR changes (null)`,
+    ]);
   });
 
   it("every `shape` a descriptor names exists", () => {
@@ -367,6 +413,13 @@ describe("golden invariants the UI relies on", () => {
     expect(full!.insights.map((i) => i.kind).sort()).toEqual(["bestMap", "last7Days", "rrEconomy", "timeOfDay", "weekdayWeekend", "worstMap"]);
     expect(full!.insights.some((i) => i.positive) && full!.insights.some((i) => !i.positive)).toBe(true);
     expect(full!.session).not.toBeNull();
+    // The session's chips exercise every kind a chip's fields take: all three results, and a chip with neither RR row
+    // nor known map (both null on the wire, never 0 and never "") next to chips that have both.
+    const chips = full!.session!.matches;
+    expect(new Set(chips.map((c) => c.result))).toEqual(new Set(["W", "L", "D"]));
+    expect(chips.some((c) => c.mapId === null && c.rrEarned === null)).toBe(true);
+    expect(chips.some((c) => c.mapId !== null && c.rrEarned !== null)).toBe(true);
+    expect(chips.every((c) => c.mapId !== "")).toBe(true);
     expect(full!.rank.changes.some((c) => c.up) && full!.rank.changes.some((c) => !c.up)).toBe(true);
     expect([...full!.byWeekday, ...full!.byDaypart].some((c) => c.games === 0)).toBe(true);
     expect(full!.rank.rr).not.toBeNull();

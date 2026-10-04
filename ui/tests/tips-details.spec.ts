@@ -190,8 +190,8 @@ test("scrolling the Details container hides an open tip", async ({ page }) => {
 });
 
 // ── keyboard focus on a real focusable (spec §4.1) ───────────────────────────────────────────────
-// No control in the app is both focusable and a tip trigger yet (the My Stats chart's tip belongs to its inner anchor box),
-// so the engine is run on real ones here by giving them a `data-tip`, the one attribute the `tip` action sets.
+// Only the My Stats Session chips are both focusable and a tip trigger (tests/tips-mystats.spec.ts covers them), so on Details
+// the engine is run on real controls by giving them a `data-tip`, the one attribute the `tip` action sets.
 
 test("keyboard: a focusable trigger shows its tip on Tab (same delay and placement), and Tab away, Escape and a click hide it", async ({ page }) => {
   await openScene(page, "details", {}, { clock: "manual" });

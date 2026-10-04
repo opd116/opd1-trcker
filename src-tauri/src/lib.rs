@@ -1,6 +1,7 @@
 //! Tauri shell for OPD1 TRCKER: setup and wiring only.
 //!
-//! - `logbuf` — the 500-line in-memory log (`copy_log`)
+//! - `logbuf` — the 500-line in-memory log (`copy_log`; the UI's own lines
+//!   arrive through `ui_log`)
 //! - `state` — shared state, the live model, `"live"` emission
 //! - `poll` — the live poll loop (stage machine)
 //! - `sync` — per-player cached-first sync + the roster worker
@@ -116,6 +117,7 @@ pub fn run() {
             commands::close_match,
             commands::my_stats,
             commands::copy_log,
+            commands::ui_log,
             commands::dump_raw,
         ])
         .setup(|app| {

@@ -36,13 +36,15 @@ import {
   rrPointTip,
   rrToNextTip,
   SESSION_SCOPE,
+  sessionChipLabel,
+  sessionChipTip,
   whenTip,
   winCellTip,
   rankTip,
   recentTimeTip,
   winTip,
 } from "./tips";
-import type { Meta, Peak, PlayerCard } from "./types";
+import type { Meta, Peak, PlayerCard, SessionMatch } from "./types";
 
 const rect = (left: number, top: number, width: number, height: number): DOMRectReadOnly =>
   ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top }) as DOMRectReadOnly;
@@ -826,6 +828,58 @@ describe("last5Tip", () => {
     expect(last5Tip({ result: "win", rrEarned: null, startMs: at(2 * 3_600_000) }, NOW)).toBe("Win · 2h");
     expect(last5Tip({ result: "loss", rrEarned: null, startMs: at(3 * 86_400_000) }, NOW)).toBe("Loss · 3d");
     expect(last5Tip({ result: "draw", rrEarned: null, startMs: at(90 * 60_000) }, NOW)).toBe("Draw · 1h");
+  });
+});
+
+describe("sessionChipTip (spec §9.6)", () => {
+  const at = (msAgo: number) => NOW - msAgo;
+  const m = (over: Partial<SessionMatch>): SessionMatch => ({
+    matchId: "m1",
+    mapId: HAVEN,
+    rrEarned: 18,
+    startMs: at(2 * 3_600_000),
+    result: "W",
+    ...over,
+  });
+
+  it("`{map} · {rr} RR · {span}`: the last-5 words with the map in front", () => {
+    expect(sessionChipTip(m({}), meta, NOW)).toBe("Haven · +18 RR · 2h");
+    expect(sessionChipTip(m({ result: "L", rrEarned: -15, startMs: at(45 * 60_000), mapId: SPLIT }), meta, NOW)).toBe("Split · −15 RR · 45m");
+    expect(sessionChipTip(m({ result: "D", rrEarned: 0 }), meta, NOW)).toBe("Haven · 0 RR · 2h");
+  });
+
+  it("Win / Loss / Draw stands in for an RR change Riot did not record", () => {
+    expect(sessionChipTip(m({ rrEarned: null }), meta, NOW)).toBe("Haven · Win · 2h");
+    expect(sessionChipTip(m({ rrEarned: null, result: "L" }), meta, NOW)).toBe("Haven · Loss · 2h");
+    expect(sessionChipTip(m({ rrEarned: null, result: "D", startMs: at(90 * 60_000) }), meta, NOW)).toBe("Haven · Draw · 1h");
+  });
+
+  it("the map is dropped while meta is pending, for a map the table lacks and for no map (spec §5.8)", () => {
+    expect(sessionChipTip(m({}), null, NOW)).toBe("+18 RR · 2h");
+    expect(sessionChipTip(m({ mapId: "not-in-meta" }), meta, NOW)).toBe("+18 RR · 2h");
+    expect(sessionChipTip(m({ mapId: null }), meta, NOW)).toBe("+18 RR · 2h");
+    expect(sessionChipTip(m({ mapId: null, rrEarned: null }), null, NOW)).toBe("Win · 2h");
+  });
+
+  it("the age is the span since the match started, on the shared clock", () => {
+    expect(sessionChipTip(m({ startMs: at(30_000) }), meta, NOW)).toBe("Haven · +18 RR · 1m");
+    expect(sessionChipTip(m({ startMs: at(26 * 3_600_000) }), meta, NOW)).toBe("Haven · +18 RR · 1d");
+  });
+});
+
+describe("sessionChipLabel (the openable chip's accessible name)", () => {
+  const m = (over: Partial<SessionMatch>): SessionMatch => ({ matchId: "m1", mapId: HAVEN, rrEarned: 18, startMs: NOW - 2 * 3_600_000, result: "W", ...over });
+
+  it("the result word, then the tip: `Win · Haven · +18 RR · 2h`", () => {
+    expect(sessionChipLabel(m({}), meta, NOW)).toBe("Win · Haven · +18 RR · 2h");
+    expect(sessionChipLabel(m({ result: "L", rrEarned: -15 }), meta, NOW)).toBe("Loss · Haven · −15 RR · 2h");
+    expect(sessionChipLabel(m({ result: "D", rrEarned: 0 }), meta, NOW)).toBe("Draw · Haven · 0 RR · 2h");
+  });
+
+  it("without a stored RR change the tip already names the result, so it is not said twice; no map, no map part", () => {
+    expect(sessionChipLabel(m({ rrEarned: null }), meta, NOW)).toBe("Haven · Win · 2h");
+    expect(sessionChipLabel(m({ rrEarned: null, result: "D", mapId: null }), meta, NOW)).toBe("Draw · 2h");
+    expect(sessionChipLabel(m({ result: "L", rrEarned: -15 }), null, NOW)).toBe("Loss · −15 RR · 2h");
   });
 });
 

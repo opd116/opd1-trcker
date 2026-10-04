@@ -30,6 +30,7 @@ import type {
   RankSummary,
   RrPoint,
   ScoreRow,
+  SessionMatch,
   SessionSummary,
   StatRow,
   TeammateSummary,
@@ -232,12 +233,20 @@ export const shapes = {
 
   RrPoint: { startMs: num, absoluteRr: num } satisfies ShapeOf<RrPoint>,
 
+  SessionMatch: {
+    matchId: str,
+    mapId: strOrNull,
+    rrEarned: numOrNull,
+    startMs: num,
+    result: { kinds: ["string"], enum: "streakMark" },
+  } satisfies ShapeOf<SessionMatch>,
+
   SessionSummary: {
     netRr: numOrNull,
     wins: num,
     losses: num,
     startedMs: num,
-    streak: { kinds: ["array"], enum: "streakMark" },
+    matches: { kinds: ["array"], shape: "SessionMatch" },
   } satisfies ShapeOf<SessionSummary>,
 
   StatRow: {

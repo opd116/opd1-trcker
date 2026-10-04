@@ -38,6 +38,12 @@ base64 = "0.22"
 # by tauri's `windows` crates).
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 
+# The Windows build number for the log header (`commands::log_header`, B2):
+# `RtlGetVersion`, no shim. Already in the tree via tauri's `windows` crates
+# (same 0.1.7 in Cargo.lock); Windows only, so nothing is compiled elsewhere.
+[target.'cfg(windows)'.dependencies]
+windows-version = "0.1"
+
 [dev-dependencies]
 # `test-support`: `RiotSession::with_global_rate` for the pipeline tests (a
 # 200-match backfill can't wait out the production 10 rps). A dev-dependency

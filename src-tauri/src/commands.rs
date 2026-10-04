@@ -18,7 +18,10 @@
 //!   close for another match than the open one is ignored (R163).
 //! - `my_stats()` — the user's My Stats for the current act, from the DB
 //!   only (no Riot call); `null` while the user or the act is unknown.
-//! - `copy_log()` — the last 500 log lines (R30; the UI copies them).
+//! - `copy_log()` — one header line (version, Windows, stage, shard, client,
+//!   act) and the last 500 log lines (R30; the UI copies them).
+//! - `ui_log(level, message)` — a UI failure into the same log (B1): never
+//!   fails, sanitised and rate-limited here.
 //! - `dump_raw()` — redacted raw responses (the last 2xx and the last error
 //!   of each endpoint) and the log to `app_data/debug/`.
 
@@ -30,6 +33,8 @@ use tauri::State;
 
 use opd1_core::db::repo::NameAsk;
 use opd1_core::model::{DisplayName, Field, LiveState, MatchDetailsView, MyStats, PlayerDetails};
+use opd1_core::presence::Stage;
+use opd1_core::stats::act_label;
 use opd1_riot::assets::Meta;
 use opd1_riot::RiotSession;
 
@@ -327,9 +332,180 @@ pub async fn build_my_stats(st: &Arc<AppState>) -> Result<Option<MyStats>, Strin
     crate::my_stats::compute(st).await
 }
 
+/// `(async)`: runs on the async runtime, not on the UI thread, so the UI never
+/// waits on the app locks the header reads (the live state, the acts, the
+/// session).
+#[tauri::command(async)]
+pub fn copy_log(state: AppStateRef<'_>) -> String {
+    log_text(state.inner())
+}
+
+/// The text `copy_log` returns and `dump_raw` writes as `log.txt`: the header
+/// line, built fresh, then the last [`crate::logbuf::CAPACITY`] log lines.
+pub(crate) fn log_text(st: &AppState) -> String {
+    format!(
+        "{}\n{}",
+        format_header(&log_header(st)),
+        crate::logbuf::snapshot()
+    )
+}
+
+/// The parts of the log's first line. A part that is not known is `None` and
+/// prints as `—`. Nothing here is a secret or a name: the app and Windows
+/// versions, the stage, the region/shard, the game's release label and the
+/// act's id and label.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LogHeader {
+    /// `CARGO_PKG_VERSION`.
+    pub app_version: String,
+    /// `major.minor.build`; `None` off Windows.
+    pub windows: Option<String>,
+    /// The stage as the wire spells it (`menus`, `pregame`, `ingame`, `closed`).
+    pub stage: &'static str,
+    pub settled: bool,
+    /// The `pd` shard, the glz region and the glz shard; `None` with no session.
+    pub shards: Option<[String; 3]>,
+    /// The `X-Riot-ClientVersion` and where it came from; `None` with no session.
+    pub client: Option<(String, &'static str)>,
+    /// The current act; `None` until the asset tables are loaded.
+    pub act: Option<HeaderAct>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HeaderAct {
+    pub id: String,
+    /// The short label the cards use (`V26 A4`).
+    pub label: String,
+    /// `riot` or `valorant-api`.
+    pub source: &'static str,
+}
+
+/// How [`Stage`] is spelled on the wire (`LiveState`'s `stage`).
+fn stage_wire(stage: Stage) -> &'static str {
+    match stage {
+        Stage::Closed => "closed",
+        Stage::Menus => "menus",
+        Stage::Pregame => "pregame",
+        Stage::Ingame => "ingame",
+    }
+}
+
+/// `major.minor.build` of the running Windows (`RtlGetVersion`: the real
+/// number, not the compatibility shim's); `None` off Windows.
+#[cfg(windows)]
+fn windows_build() -> Option<String> {
+    let v = windows_version::OsVersion::current();
+    Some(format!("{}.{}.{}", v.major, v.minor, v.build))
+}
+
+#[cfg(not(windows))]
+fn windows_build() -> Option<String> {
+    None
+}
+
+/// Reads the header's parts from the live app, now.
+fn log_header(st: &AppState) -> LogHeader {
+    let live = st.live_state();
+    let session = st.session();
+    LogHeader {
+        app_version: env!("CARGO_PKG_VERSION").to_string(),
+        windows: windows_build(),
+        stage: stage_wire(live.stage),
+        settled: live.settled,
+        shards: session.as_ref().map(|s| {
+            let shards = s.shards();
+            [
+                shards.pd.clone(),
+                shards.glz_region.clone(),
+                shards.glz_shard.clone(),
+            ]
+        }),
+        client: session.as_ref().map(|s| {
+            let (version, source) = s.client_version_and_source();
+            (version, source.as_str())
+        }),
+        act: st.current_act().map(|a| HeaderAct {
+            label: act_label(&a),
+            id: a.id,
+            source: st.act_source(),
+        }),
+    }
+}
+
+/// How many characters of each free-text part the header keeps: it must stay
+/// one short line whatever a source hands over.
+const HEADER_PART_MAX: usize = 40;
+const HEADER_VERSION_MAX: usize = 64;
+
+/// `s` on one line (whitespace runs collapsed) and at most `max` characters,
+/// the closing `…` included; `—` when nothing is left.
+fn header_part(s: &str, max: usize) -> String {
+    let one_line = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() {
+        return "—".to_string();
+    }
+    if one_line.chars().count() <= max {
+        return one_line;
+    }
+    let kept: String = one_line.chars().take(max.saturating_sub(1)).collect();
+    format!("{kept}…")
+}
+
+/// The one header line:
+/// `OPD1 TRCKER <version> · Windows <major.minor.build> · stage <stage> ·
+/// settled <bool> · shard <pd>/<glz region>/<glz shard> · client <version>
+/// (<source>) · act <first 8 of the act id> <label> (<riot|valorant-api>)`,
+/// with `—` for every part that is unknown.
+pub(crate) fn format_header(h: &LogHeader) -> String {
+    let windows = h
+        .windows
+        .as_deref()
+        .map_or("—".to_string(), |w| header_part(w, HEADER_PART_MAX));
+    let shard = h.shards.as_ref().map_or("—".to_string(), |parts| {
+        parts
+            .iter()
+            .map(|p| header_part(p, HEADER_PART_MAX))
+            .collect::<Vec<_>>()
+            .join("/")
+    });
+    let client = h.client.as_ref().map_or("—".to_string(), |(v, source)| {
+        format!("{} ({source})", header_part(v, HEADER_VERSION_MAX))
+    });
+    let act = h.act.as_ref().map_or("—".to_string(), |a| {
+        let id: String = a.id.chars().take(8).collect();
+        format!(
+            "{} {} ({})",
+            header_part(&id, 8),
+            header_part(&a.label, HEADER_PART_MAX),
+            a.source
+        )
+    });
+    format!(
+        "OPD1 TRCKER {} · Windows {windows} · stage {} · settled {} · shard {shard} · client {client} · act {act}",
+        header_part(&h.app_version, HEADER_PART_MAX),
+        h.stage,
+        h.settled,
+    )
+}
+
+/// B1: the UI's failure lines (`uilog.ts`) into the app's log, under the `ui`
+/// module. Never fails and never panics: the page may be the thing that is
+/// broken, and a rejected promise there is a new failure to report. It takes
+/// no app state, so a UI error that arrives before `setup()` has managed the
+/// state is still logged.
+///
+/// What Rust does to the text: secret-named keys and JWT-shaped strings are
+/// redacted, whitespace is collapsed to one line, every full uuid is
+/// shortened to 8 characters, and it is cut to 500 characters. What it cannot
+/// do: it cannot recognise a player's name in a free text. The barrier for
+/// names is the UI (`ui/src/lib/uilog.ts` sends only an Error's name and
+/// message, a string, or an object's key names, never a card or roster
+/// value). More than 20 ring lines in a minute are dropped and counted (one
+/// `ui_log: N lines dropped` line, itself one of the 20, when the window
+/// opens again).
 #[tauri::command]
-pub fn copy_log() -> String {
-    crate::logbuf::snapshot()
+pub fn ui_log(level: String, message: String) {
+    crate::logbuf::log_ui(&level, &message);
 }
 
 #[derive(Debug, Serialize)]
@@ -363,8 +539,9 @@ fn file_stem(key: &str) -> String {
 /// - `<key>.json`: the last 2xx body of each endpoint, redacted;
 /// - `<key>.error.json` / `<key>.error.txt`: the last non-2xx answer of each
 ///   endpoint (status and Riot's `errorCode`), redacted and at most 4 KB;
-/// - `log.txt`: exactly the lines `copy_log` returns — written even with
-///   nothing captured, since the log is what explains why there is nothing.
+/// - `log.txt`: exactly the text `copy_log` returns (the header line, then
+///   the log lines) — written even with nothing captured, since the log is
+///   what explains why there is nothing.
 fn dump_files(
     captures: Vec<(String, String)>,
     errors: Vec<opd1_riot::raw_capture::ErrorDump>,
@@ -421,10 +598,11 @@ pub async fn dump_raw(state: AppStateRef<'_>) -> Result<DumpResult, String> {
 /// a connect that keeps failing) there are no captures, and the log is still
 /// written — it is the part that says why.
 pub(crate) async fn dump_raw_for(st: &Arc<AppState>) -> Result<DumpResult, String> {
-    dump_raw_with(st, crate::logbuf::snapshot()).await
+    dump_raw_with(st, log_text(st)).await
 }
 
-/// [`dump_raw_for`] with the log text given (what `copy_log` returns).
+/// [`dump_raw_for`] with the log text given (what `copy_log` returns:
+/// [`log_text`]).
 pub(crate) async fn dump_raw_with(st: &Arc<AppState>, log: String) -> Result<DumpResult, String> {
     // Already redacted by opd1-riot (tokens/JWTs/passwords).
     let (captures, errors) = match st.session() {
@@ -719,6 +897,232 @@ mod tests {
         let files = dump_files(Vec::new(), Vec::new(), "log".into());
         write_dump(&debug, &files).unwrap();
         assert!(!debug.join("match_details.error.txt").exists());
+    }
+
+    // -- B2: the log header ------------------------------------------------
+
+    fn known_header() -> LogHeader {
+        LogHeader {
+            app_version: "0.3.0".into(),
+            windows: Some("10.0.22631".into()),
+            stage: "pregame",
+            settled: true,
+            shards: Some(["eu".into(), "eu-1".into(), "eu".into()]),
+            client: Some(("release-09.00-shipping-27-2517190".into(), "presence")),
+            act: Some(HeaderAct {
+                id: "3f61c77f-4d1b-4c28-9b0b-8f5d5a1c9e21".into(),
+                label: "V26 A4".into(),
+                source: "riot",
+            }),
+        }
+    }
+
+    #[test]
+    fn the_header_with_every_part_known() {
+        let line = format_header(&known_header());
+        assert_eq!(
+            line,
+            "OPD1 TRCKER 0.3.0 · Windows 10.0.22631 · stage pregame · settled true · \
+             shard eu/eu-1/eu · client release-09.00-shipping-27-2517190 (presence) · \
+             act 3f61c77f V26 A4 (riot)"
+        );
+        println!("sample header: {line}");
+    }
+
+    #[test]
+    fn every_unknown_part_of_the_header_prints_a_dash() {
+        let line = format_header(&LogHeader {
+            app_version: "0.3.0".into(),
+            windows: None,
+            stage: "closed",
+            settled: false,
+            shards: None,
+            client: None,
+            act: None,
+        });
+        assert_eq!(
+            line,
+            "OPD1 TRCKER 0.3.0 · Windows — · stage closed · settled false · \
+             shard — · client — · act —"
+        );
+        // An act valorant-api and Riot both left unnamed, a blank version.
+        let line = format_header(&LogHeader {
+            windows: Some("  ".into()),
+            client: Some((String::new(), "fallback")),
+            act: Some(HeaderAct {
+                id: "x".into(),
+                label: "—".into(),
+                source: "valorant-api",
+            }),
+            ..known_header()
+        });
+        assert!(line.contains("Windows — ·"), "{line}");
+        assert!(line.contains("client — (fallback)"), "{line}");
+        assert!(line.ends_with("act x — (valorant-api)"), "{line}");
+    }
+
+    #[test]
+    fn a_long_act_label_or_version_cannot_break_the_one_line() {
+        let line = format_header(&LogHeader {
+            client: Some((format!("release-{}\n\tx", "9".repeat(300)), "log")),
+            act: Some(HeaderAct {
+                id: "3f61c77f-4d1b-4c28-9b0b-8f5d5a1c9e21".into(),
+                label: format!(
+                    "Riot named this act   {}\nsecond line",
+                    "very long ".repeat(50)
+                ),
+                source: "riot",
+            }),
+            ..known_header()
+        });
+        assert!(!line.contains('\n') && !line.contains('\t'), "one line");
+        assert!(
+            line.chars().count() < 300,
+            "{} chars: {line}",
+            line.chars().count()
+        );
+        // The label is cut to 40 characters with the ellipsis, the id to 8,
+        // and the source stays whole after it.
+        assert!(
+            line.contains(" act 3f61c77f Riot named this act very long very long… (riot)"),
+            "{line}"
+        );
+        assert!(
+            line.contains("(log) · act"),
+            "the client part is whole: {line}"
+        );
+    }
+
+    #[test]
+    fn the_stage_is_spelled_as_on_the_wire() {
+        for stage in [Stage::Closed, Stage::Menus, Stage::Pregame, Stage::Ingame] {
+            assert_eq!(
+                serde_json::to_value(stage).unwrap(),
+                Value::String(stage_wire(stage).into())
+            );
+        }
+        assert_eq!(stage_wire(Stage::Ingame), "ingame");
+    }
+
+    #[test]
+    fn windows_build_is_known_only_on_windows() {
+        let v = windows_build();
+        if cfg!(windows) {
+            let v = v.expect("Windows reports its version");
+            let parts: Vec<&str> = v.split('.').collect();
+            assert_eq!(parts.len(), 3, "{v}");
+            assert!(parts.iter().all(|p| p.parse::<u32>().is_ok()), "{v}");
+        } else {
+            assert_eq!(v, None);
+        }
+    }
+
+    #[test]
+    fn log_text_is_the_header_line_then_the_ring() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::logbuf::init();
+        let st = app(Some(ME), dir.path());
+        // No tables, no session: only the app and the stage are known.
+        let text = log_text(&st);
+        let (first, _rest) = text.split_once('\n').expect("a header line, then the ring");
+        assert_eq!(first, format_header(&log_header(&st)));
+        assert!(
+            first.starts_with(&format!(
+                "OPD1 TRCKER {} · Windows ",
+                env!("CARGO_PKG_VERSION")
+            )),
+            "{first}"
+        );
+        assert!(
+            first.ends_with(" · stage closed · settled false · shard — · client — · act —"),
+            "{first}"
+        );
+
+        // Tables loaded: the act, from valorant-api's dates.
+        let now = now_ms();
+        st.set_acts_for_test(vec![Act {
+            id: "3f61c77f-4d1b-4c28-9b0b-8f5d5a1c9e21".into(),
+            name: "ACT IV".into(),
+            episode_name: "V26".into(),
+            start_ms: now - DAY,
+            end_ms: now + DAY,
+        }]);
+        let text = log_text(&st);
+        let first = text.lines().next().unwrap();
+        assert!(
+            first.ends_with(" · act 3f61c77f V26 A4 (valorant-api)"),
+            "{first}"
+        );
+    }
+
+    // -- B1: ui_log ---------------------------------------------------------
+
+    /// The log lines that carry `marker`.
+    fn ring_lines(marker: &str) -> Vec<String> {
+        crate::logbuf::snapshot()
+            .lines()
+            .filter(|l| l.contains(marker))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn the_ui_log_command_needs_no_app_state() {
+        crate::logbuf::init();
+        // No `AppState` anywhere: a UI error before `setup()` is still logged
+        // (the limiter is the process-wide static, so only a few lines here).
+        ui_log("error".into(), "uilog-test-cmd: before setup".into());
+        ui_log("whatever".into(), "uilog-test-cmd: unknown level".into());
+        let lines = ring_lines("uilog-test-cmd");
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!(lines[0].contains(" ERROR ui: uilog-test-cmd: before setup"));
+        assert!(lines[1].contains(" INFO  ui: uilog-test-cmd: unknown level"));
+    }
+
+    #[test]
+    fn the_command_path_limits_to_20_a_minute_and_reports_the_drops_once() {
+        crate::logbuf::init();
+        let limiter = std::sync::Mutex::new(crate::logbuf::UiLogLimiter::new());
+        let log = |at: i64, text: &str| crate::logbuf::log_ui_with(&limiter, at, "info", text);
+        for i in 0..25 {
+            log(1_000 + i, &format!("uilog-test-limit {i}"));
+        }
+        assert_eq!(ring_lines("uilog-test-limit").len(), 20, "five dropped");
+
+        // A minute later the window is open: the drop count, then the line.
+        log(70_000, "uilog-test-limit after");
+        log(70_001, "uilog-test-limit again");
+        let lines = ring_lines("uilog-test-limit");
+        assert_eq!(lines.len(), 22, "{lines:?}");
+        let ring = crate::logbuf::snapshot();
+        let notice = ring
+            .find(" ui: ui_log: 5 lines dropped")
+            .expect("the drop notice");
+        let after = ring
+            .find("uilog-test-limit after")
+            .expect("the line itself");
+        assert!(notice < after, "the notice comes first");
+        assert_eq!(ring.matches("ui_log: 5 lines dropped").count(), 1, "once");
+    }
+
+    #[test]
+    fn the_command_path_never_panics_on_empty_or_huge_input() {
+        crate::logbuf::init();
+        let limiter = std::sync::Mutex::new(crate::logbuf::UiLogLimiter::new());
+        let huge = "é\u{1F600}\n".repeat(500_000);
+        crate::logbuf::log_ui_with(&limiter, 0, "", "");
+        crate::logbuf::log_ui_with(&limiter, 1, &huge, &huge);
+        crate::logbuf::log_ui_with(&limiter, 2, "error", &huge);
+        crate::logbuf::log_ui_with(&limiter, i64::MIN, "warn", "\0");
+        crate::logbuf::log_ui_with(&limiter, i64::MAX, "warn", "x");
+        // Whatever it took, the ring has no line longer than a UI line plus
+        // its prefix, and none broken in two.
+        for line in crate::logbuf::snapshot()
+            .lines()
+            .filter(|l| l.contains(" ui: "))
+        {
+            assert!(line.chars().count() < 600, "{} chars", line.chars().count());
+        }
     }
 
     #[test]

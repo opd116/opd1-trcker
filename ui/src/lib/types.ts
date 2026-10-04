@@ -278,6 +278,18 @@ export interface RrPoint {
   absoluteRr: number;
 }
 
+/** One match of the current session: a chip of section 3 (its result, its tooltip, and the Match Details it opens). */
+export interface SessionMatch {
+  /** What the chip opens in Match Details. */
+  matchId: string;
+  /** A valorant-api map uuid; null when the map is unknown (never `""`). */
+  mapId: string | null;
+  /** The RR change Riot recorded for the match; null when none is stored (an unknown change, not 0). */
+  rrEarned: number | null;
+  startMs: number;
+  result: StreakMark;
+}
+
 /** Section 3. */
 export interface SessionSummary {
   /** null when no match in the session has a stored RR change. */
@@ -285,8 +297,8 @@ export interface SessionSummary {
   wins: number;
   losses: number;
   startedMs: number;
-  /** Every result of the session, oldest first. */
-  streak: StreakMark[];
+  /** Every match of the session, oldest first. */
+  matches: SessionMatch[];
 }
 
 /** One row of the Maps or Agents table; `id` is a valorant-api map or agent uuid. */

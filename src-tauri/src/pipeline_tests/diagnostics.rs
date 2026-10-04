@@ -5,7 +5,7 @@
 //! Riot, in-memory DB) and helpers through `super::*`.
 
 use super::*;
-use crate::commands::{dump_raw_for, dump_raw_with};
+use crate::commands::{dump_raw_for, dump_raw_with, log_text};
 
 const JWT: &str = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQ";
 
@@ -119,4 +119,52 @@ async fn dump_raw_writes_the_log_even_without_a_session() {
     let result = dump_raw_for(&h.st).await.unwrap();
     assert_eq!(result.files, 1);
     assert!(dir.join("log.txt").exists());
+}
+
+/// B2: `log.txt` and `copy_log` start with the same freshly built header: the
+/// shard the session's `ShooterGame.log` named, the client version and where
+/// it came from, the act, and the stage.
+#[tokio::test]
+async fn the_dump_and_copy_log_start_with_the_same_header_line() {
+    crate::logbuf::init();
+    let h = harness().await;
+    h.st.set_session(Some(h.session.clone()));
+
+    let result = dump_raw_for(&h.st).await.unwrap();
+    let dir = std::path::PathBuf::from(&result.dir);
+    let written = std::fs::read_to_string(dir.join("log.txt")).unwrap();
+    let header = written.lines().next().unwrap();
+
+    let version = h.session.client_version();
+    let source = h.session.client_version_source().as_str();
+    let want_tail = format!(
+        " · stage closed · settled false · shard eu/eu-1/eu · client {version} ({source}) \
+         · act act-curr V26 A5 (valorant-api)"
+    );
+    assert!(
+        header.starts_with(&format!(
+            "OPD1 TRCKER {} · Windows ",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "{header}"
+    );
+    assert!(header.ends_with(&want_tail), "{header}");
+    println!("sample header: {header}");
+
+    // The same builder feeds `copy_log`; the header is rebuilt on each call
+    // (here: with no session, the session parts are dashes).
+    let first_again = log_text(&h.st).lines().next().unwrap().to_string();
+    assert_eq!(first_again, header);
+    h.st.set_session(None);
+    let without = log_text(&h.st);
+    assert!(
+        without
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with(" · shard — · client — · act act-curr V26 A5 (valorant-api)"),
+        "{without}"
+    );
+    // After the header come the log's own lines, and no secret anywhere.
+    assert!(!written.contains(JWT) && !written.contains("opaque-secret"));
 }

@@ -176,6 +176,25 @@ test("My Stats: Recent Matches rows change background on hover with a pointer cu
   expect(await cursor(row)).toBe("pointer");
 });
 
+test("My Stats: a Session chip is a pointer that keeps its look on hover; the chips are the panel's only clickable part", async ({ page }) => {
+  await openScene(page, "mystats");
+  const chip = page.locator(".mystats .session .mc").nth(3);
+  const face = chip.locator(".chip");
+  await chip.scrollIntoViewIfNeeded();
+  await page.mouse.move(5, 5);
+  const rest = await bg(face);
+  expect(await cursor(chip)).toBe("pointer");
+  await chip.hover();
+  expect(await bg(face), "hover keeps the chip's own colour").toBe(rest);
+  expect(await bg(chip), "the trigger box has no fill of its own").toBe(TRANSPARENT);
+  // The strip around the chips takes no click: only a chip opens a match.
+  const before = await routeOf(page);
+  await page.locator(".mystats .session .cell.streak").click({ position: { x: 2, y: 2 } });
+  expect(await routeOf(page)).toEqual(before);
+  await chip.click();
+  expect(await routeOf(page)).toMatchObject({ name: "match", matchId: myStatsFull().session!.matches[3]!.matchId, focusPuuid: myStatsFull().puuid, back: "mystats" });
+});
+
 test("My Stats: the tables, cells, chart, insights and the rank card are not clickable and do not change on hover", async ({ page }) => {
   await openScene(page, "mystats");
   const before = await routeOf(page);

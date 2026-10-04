@@ -2,9 +2,10 @@
 // right text after 450ms, inside #app, centred on its trigger and flipped above it near the bottom; the places that have
 // none show none. Playwright's fake clock is paused once the page has settled, so the delay is stepped with clock.runFor.
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { myStatsFull, myStatsImmortal, myStatsRrNull, myStatsUnranked } from "../src/lib/demo/mystats";
-import { dateLong, dateShort, rrDelta, time12 } from "../src/lib/format";
+import { MAP_NAMES, myStatsFull, myStatsImmortal, myStatsLongnames, myStatsRrNull, myStatsUnranked } from "../src/lib/demo/mystats";
+import { dateLong, dateShort, rrDelta, span, time12 } from "../src/lib/format";
 import { chartModel, DAYPARTS, rrInTier, WEEKDAYS_LONG } from "../src/lib/mystats";
+import type { SessionMatch } from "../src/lib/types";
 import { NOW, openScene, pointerAway, TIER_LABELS } from "./harness";
 
 // The expected strings are written in the browser's zone (UTC, spec §8.1): make this process's the same.
@@ -60,6 +61,8 @@ async function runItems(page: Page, items: Item[]): Promise<void> {
 const now = NOW.getTime();
 const when = (ms: number) => `${dateLong(ms)} · ${time12(ms)}`;
 const tierName = (abs: number) => (abs >= 2400 ? "Immortal" : TIER_LABELS[Math.floor(abs / 100) - 3]!);
+/** A Session chip's tip: `Ascent · +18 RR · 2h` (the demo's map names, the page's frozen clock). */
+const chipTip = (c: SessionMatch) => `${MAP_NAMES[c.mapId!]} · ${rrDelta(c.rrEarned)} RR · ${span(now - c.startMs)}`;
 const wlTip = (w: number, l: number, g: number, scope = "This act") => `${w}W · ${l}L · ${g} ${g === 1 ? "game" : "games"}\n${scope}`;
 
 /** The chart point `i`'s tip: `+18 RR · Ascendant 2 · 47 RR · Sep 29`; the first point has no change (spec §9.6). */
@@ -216,7 +219,40 @@ test("tips: mystats, session", async ({ page }) => {
     { what: "Net RR", trigger: (p) => c(p, 0), text: "Current session" },
     { what: "W / L", trigger: (p) => c(p, 1), text: "Current session" },
     { what: "Started: its full date and time", trigger: (p) => c(p, 2), text: when(m.session!.startedMs) },
-    { what: "a streak chip", trigger: (p) => sec(p, "session").locator(".chip").nth(3), text: null },
+    { what: "the first chip: its map, RR change and age", trigger: (p) => sec(p, "session").locator(".mc").first(), text: chipTip(m.session!.matches[0]!) },
+    { what: "a chip in the middle", trigger: (p) => sec(p, "session").locator(".mc").nth(7), text: chipTip(m.session!.matches[7]!) },
+    { what: "the newest chip", trigger: (p) => sec(p, "session").locator(".mc").last(), text: chipTip(m.session!.matches.at(-1)!) },
+  ]);
+  expect(chipTip(m.session!.matches[0]!)).toMatch(/^\w+ · [+−]\d+ RR · \d+h$/); // the shape the spec names: `Ascent · +18 RR · 2h`
+});
+
+test("tips: mystats-unranked, a session chip says Win / Loss without a stored RR change", async ({ page }) => {
+  const un = myStatsUnranked();
+  await openScene(page, "mystats-unranked", {}, { clock: "manual" });
+  const chips = sec(page, "session").locator(".mc");
+  await expect(chips).toHaveCount(un.session!.matches.length);
+  const word = { W: "Win", L: "Loss", D: "Draw" } as const;
+  await runItems(
+    page,
+    un.session!.matches.map((c, i) => ({
+      what: `placement chip ${i}`,
+      trigger: (p: Page) => sec(p, "session").locator(".mc").nth(i),
+      text: `${MAP_NAMES[c.mapId!]} · ${word[c.result]} · ${span(now - c.startMs)}`,
+    })),
+  );
+});
+
+test("tips: mystats-longnames, a session chip on the longest map name keeps its tip whole", async ({ page }) => {
+  const ln = myStatsLongnames();
+  await openScene(page, "mystats-longnames", {}, { clock: "manual" });
+  const i = ln.session!.matches.findIndex((c) => c.mapId === ln.maps[0]!.id);
+  expect(i).toBeGreaterThanOrEqual(0);
+  await runItems(page, [
+    {
+      what: "a chip on the longest map name",
+      trigger: (p) => sec(p, "session").locator(".mc").nth(i),
+      text: `Basic Training · ${rrDelta(ln.session!.matches[i]!.rrEarned)} RR · ${span(now - ln.session!.matches[i]!.startMs)}`,
+    },
   ]);
 });
 
@@ -456,13 +492,14 @@ test("keyboard: leaving the chart (Tab, Shift+Tab) clears the pick, its crosshai
   await page.keyboard.press("ArrowLeft");
   expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last - 1));
   await page.keyboard.press("Tab");
-  await expect(sec(page, "last5").locator(".rrow").first()).toBeFocused();
-  await expect(tip(page)).toHaveCount(0);
+  await expect(sec(page, "session").locator(".mc").first()).toBeFocused(); // the next stop is the first Session chip
+  await expect(tip(page)).toHaveCount(0); // the chart's tip went with its focus
   expect(await crossX(page)).toBeNull();
   await expect(stop).not.toHaveAttribute("aria-describedby", /.+/);
   await expect(stop).toHaveAttribute("aria-valuenow", String(last)); // unpicked: the newest
   await page.clock.runFor(1000);
-  await expect(tip(page)).toHaveCount(0);
+  await expect(tip(page)).not.toHaveText(pointTip(m.rrSeries, last - 1)); // the chart's tip does not come back; the chip's own shows
+  await expect(tip(page)).toHaveText(chipTip(m.session!.matches[0]!));
   await page.keyboard.press("Shift+Tab");
   await expect(stop).toBeFocused();
   expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last));
@@ -608,10 +645,43 @@ test("keyboard: when the plot goes away the pick goes with it and the chart is n
   await expect(sec(page, "rrchart").locator(".stop")).toHaveAttribute("aria-valuenow", String(m.rrSeries.length - 1));
 });
 
-test("keyboard: Tab order on My Stats is DOM order: the two tabs, the chart, then the five Recent Matches rows (the cells are not stops)", async ({ page }) => {
+test("keyboard: a Session chip is a focusable trigger: Tab from the chart to the first chip shows its tip (map, RR change, age); Escape hides it, Enter opens the match", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  await chartPoints(page, m.rrSeries);
+  await tabToChart(page);
+  await page.keyboard.press("Tab");
+  const first = sec(page, "session").locator(".mc").first();
+  await expect(first).toBeFocused();
+  expect(await first.evaluate((el) => el.matches(":focus-visible"))).toBe(true);
+  await expect(tip(page)).toHaveCount(0); // not before the delay
+  const text = chipTip(m.session!.matches[0]!);
+  expect(text).toMatch(/^\w+ · [+−]\d+ RR · \d+h$/); // `Ascent · +18 RR · 2h`
+  expect(await readTip(page, first)).toBe(text); // the same text and placement a hover gives
+  await expect(first).toHaveAttribute("aria-describedby", "tooltip");
+  await expect(first).toHaveAttribute("aria-label", /.+/); // its accessible name stays: the tip describes it, it does not replace it
+  // Escape: the tip and its description go, the focus stays.
+  await page.keyboard.press("Escape");
+  await expect(tip(page)).toHaveCount(0);
+  await expect(first).not.toHaveAttribute("aria-describedby", /.+/);
+  await expect(first).toBeFocused();
+  // Moving on to the next chip swaps the tip.
+  await page.keyboard.press("Tab");
+  const second = sec(page, "session").locator(".mc").nth(1);
+  await expect(second).toBeFocused();
+  expect(await readTip(page, second)).toBe(chipTip(m.session!.matches[1]!));
+  // Enter opens the match (the click hides the tip with it).
+  await page.keyboard.press("Enter");
+  await expect(page.locator(".match")).toHaveCount(1);
+  await expect(tip(page)).toHaveCount(0);
+});
+
+test("keyboard: Tab order on My Stats is DOM order: the two tabs, the chart, the Session chips, then the five Recent Matches rows (the other cells are not stops)", async ({ page }) => {
+  const m = myStatsFull();
   await openScene(page, "mystats");
+  const chips = m.session!.matches.length;
   const seen: string[] = [];
-  for (let i = 0; i < 8; i++) {
+  for (let i = 0; i < 3 + chips + 5; i++) {
     await page.keyboard.press("Tab");
     seen.push(
       await page.evaluate(() => {
@@ -619,12 +689,13 @@ test("keyboard: Tab order on My Stats is DOM order: the two tabs, the chart, the
         if (!a) return "none";
         if (a.matches("header .tab")) return `tab:${a.textContent}`;
         if (a.matches(".rrchart .stop")) return "chart";
+        if (a.matches(".session .mc")) return "chip";
         if (a.matches(".last5 .rrow")) return "row";
         return `other:${a.tagName}.${a.className}`;
       }),
     );
   }
-  expect(seen).toEqual(["tab:Live", "tab:My Stats", "chart", "row", "row", "row", "row", "row"]);
+  expect(seen).toEqual(["tab:Live", "tab:My Stats", "chart", ...Array<string>(chips).fill("chip"), ...Array<string>(5).fill("row")]);
 });
 
 test("keyboard: with no plot to read (nothing to chart, no answer yet, loading) the chart is not a tab stop", async ({ page }) => {

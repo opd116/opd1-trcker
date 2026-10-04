@@ -39,8 +39,8 @@
         "wins": 3
       },
       {
-        "games": 0,
-        "winrate": null,
+        "games": 1,
+        "winrate": 0.0,
         "wins": 0
       }
     ],
@@ -61,8 +61,8 @@
         "wins": 1
       },
       {
-        "games": 0,
-        "winrate": null,
+        "games": 1,
+        "winrate": 0.0,
         "wins": 0
       },
       {
@@ -102,9 +102,9 @@
       },
       {
         "kind": "weekdayWeekend",
-        "matches": 16,
+        "matches": 17,
         "positive": true,
-        "text": "You win 63% of 8 weekend games, compared with 38% of 8 weekday games."
+        "text": "You win 63% of 8 weekend games, compared with 33% of 9 weekday games."
       },
       {
         "kind": "rrEconomy",
@@ -120,6 +120,23 @@
       }
     ],
     "last5": [
+      {
+        "acs": null,
+        "agentId": null,
+        "assists": null,
+        "deaths": null,
+        "hsPct": null,
+        "kd": null,
+        "kills": null,
+        "mapId": "",
+        "matchId": "ms-16",
+        "result": "draw",
+        "roundsLost": null,
+        "roundsWon": null,
+        "rrEarned": null,
+        "startMs": 1758153900000,
+        "tier": null
+      },
       {
         "acs": 200.0,
         "agentId": "agent-omen",
@@ -187,23 +204,6 @@
         "rrEarned": -14,
         "startMs": 1758114000000,
         "tier": 22
-      },
-      {
-        "acs": 200.0,
-        "agentId": "agent-omen",
-        "assists": 4,
-        "deaths": 8,
-        "hsPct": 0.25,
-        "kd": 2.5,
-        "kills": 20,
-        "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
-        "matchId": "ms-11",
-        "result": "win",
-        "roundsLost": 11,
-        "roundsWon": 13,
-        "rrEarned": 22,
-        "startMs": 1757881800000,
-        "tier": 21
       }
     ],
     "maps": [
@@ -334,14 +334,45 @@
     ],
     "session": {
       "losses": 3,
+      "matches": [
+        {
+          "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+          "matchId": "ms-12",
+          "result": "L",
+          "rrEarned": -14,
+          "startMs": 1758114000000
+        },
+        {
+          "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+          "matchId": "ms-13",
+          "result": "W",
+          "rrEarned": 19,
+          "startMs": 1758118200000
+        },
+        {
+          "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+          "matchId": "ms-14",
+          "result": "L",
+          "rrEarned": -16,
+          "startMs": 1758128400000
+        },
+        {
+          "mapId": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+          "matchId": "ms-15",
+          "result": "L",
+          "rrEarned": -14,
+          "startMs": 1758132600000
+        },
+        {
+          "mapId": null,
+          "matchId": "ms-16",
+          "result": "D",
+          "rrEarned": null,
+          "startMs": 1758153900000
+        }
+      ],
       "netRr": -25,
       "startedMs": 1758114000000,
-      "streak": [
-        "L",
-        "W",
-        "L",
-        "L"
-      ],
       "wins": 1
     }
   },

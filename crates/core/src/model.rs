@@ -664,8 +664,26 @@ pub struct SessionSummary {
     pub wins: u32,
     pub losses: u32,
     pub started_ms: i64,
-    /// Every result of the session, oldest first.
-    pub streak: Vec<StreakMark>,
+    /// Every match of the session, oldest first: the chips' results plus
+    /// what a chip's tooltip and its click (Match Details) need.
+    pub matches: Vec<SessionMatch>,
+}
+
+/// One match of the current session (a chip in section 3).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionMatch {
+    /// What the chip opens in Match Details.
+    pub match_id: String,
+    /// A valorant-api map uuid, like every other `map_id` sent to the UI in
+    /// this module — never Riot's `/Game/Maps/...` path. `None` when the
+    /// map is unknown (never `""`).
+    pub map_id: Option<String>,
+    /// The RR change Riot recorded for the match; `None` when no
+    /// competitive update is stored for it (an unknown change, not 0).
+    pub rr_earned: Option<i32>,
+    pub start_ms: i64,
+    pub result: StreakMark,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

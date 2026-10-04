@@ -31,16 +31,23 @@
 //!   fields this app uses), not the raw valorant-api JSON blob — the same
 //!   "compact rows, not raw JSON" philosophy CLAUDE.md applies to match
 //!   data.
-//! - [`ensure_image`](AssetCache::ensure_image) downscales the two kinds
-//!   whose real pixel size is far larger than the UI ever displays them
+//! - [`ensure_image`](AssetCache::ensure_image) downscales every kind
+//!   whose real pixel size is far larger than the UI ever displays it
 //!   (measured against a live `valorant-api.com` response — see
 //!   task-5a-report.md): agent `displayIcon` (1024x1024, shown as a ≤64px
 //!   head icon) and map `splash` (1920x1080, shown ≤1000px wide). Rank
 //!   tier icons (256x256) are downscaled too, for the same reason at a
 //!   smaller scale, and so are the player card's `largeArt` (160px wide), the
-//!   weapon-skin renders (256px wide, shown at most 108x38) and the
-//!   content-tier icons (32px, shown at 13x13). Every other kind is already
-//!   close to its display size and is cached as-is.
+//!   weapon-skin renders (256px wide, shown at most 108x38), the
+//!   content-tier icons (32px, shown at 13x13) and the map `listViewIcon`
+//!   (384px wide; B9). A decoded image costs width x height x 4 bytes
+//!   of WebView RAM whatever its file size, so a source bigger than its
+//!   display size is pure waste: `listViewIcon` is 456x100 for 25 maps but
+//!   3840x2160 (33MB decoded) for Basic Training and The Range. Every other
+//!   kind is already close to its display size, or is not shown anywhere
+//!   (`smallArt` 128x128, `wideArt` 452x128, `splash`), and is cached as-is.
+//!   A file already on disk is served as it is, whatever its size: the
+//!   target only applies to a download.
 //!
 //! **Fix-round 1 hardening** (see task-5a-report.md's fix-round section
 //! for the full findings this responds to):
@@ -189,8 +196,8 @@ pub enum AssetKind {
     /// typical inline-chat-badge use. `id` = the tier number as a decimal
     /// string (e.g. `"21"`).
     Tier,
-    /// `/v1/maps`' `listViewIcon` (the row-background image). `id` = map
-    /// uuid.
+    /// `/v1/maps`' `listViewIcon` (the row-background image), downscaled to
+    /// 384px wide, aspect kept. `id` = map uuid.
     MapList,
     /// `/v1/maps`' `splash`. `id` = map uuid.
     MapSplash,
@@ -229,7 +236,13 @@ impl AssetKind {
             AssetKind::MapSplash => Some(1000), // 1920px source, shown <=1000px wide
             AssetKind::Chroma => Some(256),     // wide render, shown <=108x38 (R79)
             AssetKind::ContentTier => Some(32), // 256px source, shown 13x13
-            AssetKind::CardSmall | AssetKind::CardWide | AssetKind::MapList => None,
+            // 456x100 source (two maps: 3840x2160), shown cover-cropped at
+            // 116x32 (top bar), 64x36 / 56x32 (rows) and 150x56 (match header).
+            // The 150x56 box binds on height: 56 css px x 1.5 DPR = 84 device
+            // px, and 384 wide keeps 84 high at the source's 4.56 aspect.
+            AssetKind::MapList => Some(384),
+            // Not shown anywhere (no `assetUrl` use): nothing to shrink.
+            AssetKind::CardSmall | AssetKind::CardWide => None,
         }
     }
 }
@@ -1439,6 +1452,37 @@ mod tests {
         ] {
             assert_eq!(chroma_variant_name(display).as_deref(), want, "{display:?}");
         }
+    }
+
+    /// Pins every kind's downscale target (B9): a change here changes WebView
+    /// RAM (width x height x 4 bytes per decoded image) and sharpness at 150%
+    /// Windows scaling, so it must be a deliberate edit.
+    #[test]
+    fn downscale_targets_are_pinned_per_kind() {
+        let table = [
+            (AssetKind::Agent, Some(128)),
+            (AssetKind::Tier, Some(128)),
+            (AssetKind::CardLarge, Some(160)),
+            (AssetKind::MapSplash, Some(1000)),
+            (AssetKind::Chroma, Some(256)),
+            (AssetKind::ContentTier, Some(32)),
+            (AssetKind::MapList, Some(384)),
+            (AssetKind::CardSmall, None),
+            (AssetKind::CardWide, None),
+        ];
+        for (kind, want) in table {
+            assert_eq!(kind.downscale_target_width(), want, "{kind:?}");
+        }
+    }
+
+    /// The map list image's target keeps the tallest use sharp at 1.5x DPR:
+    /// the match header's 150x56 box, cover-cropped, needs 56 x 1.5 = 84 device
+    /// px of height, and a 456x100 source scaled to the target keeps that.
+    #[test]
+    fn map_list_target_keeps_the_tallest_use_sharp_at_150_percent() {
+        let target = AssetKind::MapList.downscale_target_width().unwrap();
+        let scaled_height = 100 * target / 456;
+        assert!(scaled_height >= 84, "{scaled_height}");
     }
 
     #[test]

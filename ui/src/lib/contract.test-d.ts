@@ -26,6 +26,7 @@ import type {
   Result,
   RrPoint,
   ScoreRow,
+  SessionMatch,
   SessionSummary,
   Stage,
   StatRow,
@@ -95,6 +96,7 @@ test("every descriptor has exactly the keys of its TS type", () => {
   expectTypeOf<keyof typeof shapes.RankChange>().toEqualTypeOf<keyof RankChange>();
   expectTypeOf<keyof typeof shapes.RankSummary>().toEqualTypeOf<keyof RankSummary>();
   expectTypeOf<keyof typeof shapes.RrPoint>().toEqualTypeOf<keyof RrPoint>();
+  expectTypeOf<keyof typeof shapes.SessionMatch>().toEqualTypeOf<keyof SessionMatch>();
   expectTypeOf<keyof typeof shapes.SessionSummary>().toEqualTypeOf<keyof SessionSummary>();
   expectTypeOf<keyof typeof shapes.StatRow>().toEqualTypeOf<keyof StatRow>();
   expectTypeOf<keyof typeof shapes.WinCell>().toEqualTypeOf<keyof WinCell>();
@@ -130,6 +132,7 @@ test("nullable and optional agree per key (R23 tri-state, R102, R124)", () => {
   expectTypeOf<DescFlags<typeof shapes.RankChange>>().toEqualTypeOf<Flags<RankChange>>();
   expectTypeOf<DescFlags<typeof shapes.RankSummary>>().toEqualTypeOf<Flags<RankSummary>>();
   expectTypeOf<DescFlags<typeof shapes.RrPoint>>().toEqualTypeOf<Flags<RrPoint>>();
+  expectTypeOf<DescFlags<typeof shapes.SessionMatch>>().toEqualTypeOf<Flags<SessionMatch>>();
   expectTypeOf<DescFlags<typeof shapes.SessionSummary>>().toEqualTypeOf<Flags<SessionSummary>>();
   expectTypeOf<DescFlags<typeof shapes.StatRow>>().toEqualTypeOf<Flags<StatRow>>();
   expectTypeOf<DescFlags<typeof shapes.WinCell>>().toEqualTypeOf<Flags<WinCell>>();
@@ -161,6 +164,7 @@ test("the base kinds agree per key: a number field is a number on the wire, an a
   expectTypeOf<DescKinds<typeof shapes.RankChange>>().toEqualTypeOf<Kinds<RankChange>>();
   expectTypeOf<DescKinds<typeof shapes.RankSummary>>().toEqualTypeOf<Kinds<RankSummary>>();
   expectTypeOf<DescKinds<typeof shapes.RrPoint>>().toEqualTypeOf<Kinds<RrPoint>>();
+  expectTypeOf<DescKinds<typeof shapes.SessionMatch>>().toEqualTypeOf<Kinds<SessionMatch>>();
   expectTypeOf<DescKinds<typeof shapes.SessionSummary>>().toEqualTypeOf<Kinds<SessionSummary>>();
   expectTypeOf<DescKinds<typeof shapes.StatRow>>().toEqualTypeOf<Kinds<StatRow>>();
   expectTypeOf<DescKinds<typeof shapes.WinCell>>().toEqualTypeOf<Kinds<WinCell>>();

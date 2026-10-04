@@ -1165,6 +1165,54 @@ mod tests {
         assert_eq!(v["rrSeries"].as_array().unwrap().len(), 2);
     }
 
+    /// The session's chips (My Stats section 3) go over the same wire as the
+    /// rest of the page: the stored Riot map path becomes a valorant-api uuid
+    /// (`null` when no uuid is known, never the path), and a match with no
+    /// stored RR row has a `null` RR change.
+    #[test]
+    fn my_stats_session_chips_carry_map_uuids_and_rr() {
+        let r = repo();
+        let (day, hour) = (86_400_000, 3_600_000);
+        let act = Act {
+            id: "act-cur".into(),
+            name: "ACT V".into(),
+            episode_name: "V26".into(),
+            start_ms: 100 * day,
+            end_ms: 160 * day,
+        };
+        played(&r, "s-1", "competitive", 101 * day, true);
+        played(&r, "s-2", "competitive", 101 * day + hour, false);
+        // Only the first has an RR row.
+        r.upsert_comp_updates("me", &[rr_row("s-1", "act-cur", 101 * day, 21)])
+            .unwrap();
+        let names = HashMap::new();
+        let utc = |_: i64| 0;
+        let now = 101 * day + 2 * hour;
+
+        let known = |path: &str| (path == ASCENT).then(|| "uuid-ascent".to_string());
+        let stats = load_my_stats(&r, "me", &act, now, &known, &names, &utc).unwrap();
+        let v = serde_json::to_value(&stats).unwrap();
+        assert_camel_case(&v, "");
+        assert_eq!(
+            v["session"]["matches"],
+            json!([
+                {"matchId": "s-1", "mapId": "uuid-ascent", "rrEarned": 21,
+                 "startMs": 101 * day, "result": "W"},
+                {"matchId": "s-2", "mapId": "uuid-ascent", "rrEarned": null,
+                 "startMs": 101 * day + hour, "result": "L"},
+            ])
+        );
+        assert!(v["session"].get("streak").is_none());
+
+        // No uuid for the map: `null`, and the Riot path never reaches the wire.
+        let unknown = |_: &str| None;
+        let stats = load_my_stats(&r, "me", &act, now, &unknown, &names, &utc).unwrap();
+        let v = serde_json::to_value(&stats).unwrap();
+        assert_eq!(v["session"]["matches"][0]["mapId"], json!(null));
+        assert_eq!(v["session"]["matches"][1]["mapId"], json!(null));
+        assert!(!v.to_string().contains("/Game/"));
+    }
+
     /// 9a math review M2: act membership follows each RR row's Riot
     /// season, so the matches Riot counted for the act on either side of
     /// valorant-api's dates must reach `mystats::build`.

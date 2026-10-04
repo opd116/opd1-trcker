@@ -1890,6 +1890,24 @@ impl AppState {
         Some(act)
     }
 
+    /// Where the current act comes from, for the log header: `"riot"` when
+    /// Riot's content-service answer is folded in (R162), else `"valorant-api"`
+    /// (its date rule).
+    pub fn act_source(&self) -> &'static str {
+        // A due rebuild is applied first, so this agrees with `current_act()`.
+        let _ = self.acts_at(now_ms());
+        if self
+            .acts
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .from_riot
+        {
+            "riot"
+        } else {
+            "valorant-api"
+        }
+    }
+
     /// A failed or empty ask: an earlier answer whose act has not ended
     /// stays (a blip must not swap the act for valorant-api's dates);
     /// otherwise the date rule answers.

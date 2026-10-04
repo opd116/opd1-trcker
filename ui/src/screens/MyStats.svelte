@@ -4,8 +4,8 @@
   time of day; Insights. It scrolls vertically inside App's one scroll container (like Details), never sideways.
   The data is the `mystats` store (the `my_stats` answer at startup, then Rust's `mystats` events): `undefined` until
   something answered = every section draws its skeleton; `null` = Rust does not know the user or the act yet = the
-  frames with `—`. A row of Recent Matches opens its Match Details (the user as focus player, `MyStats.puuid`) with
-  Back returning here.
+  frames with `—`. A row of Recent Matches and a chip of the Session open their Match Details (the user as focus
+  player, `MyStats.puuid`) with Back returning here.
 -->
 <script lang="ts">
   import Insights from "../components/mystats/Insights.svelte";
@@ -22,7 +22,7 @@
   /** Every section's value: undefined while loading, null when Rust knows nothing, else the data. */
   const pick = <T,>(f: (m: NonNullable<typeof s>) => T): T | null | undefined => (s === undefined ? undefined : s === null ? null : f(s));
 
-  /** The user's id is part of the stats (`MyStats.puuid`): a row opens its Match Details whenever the page has data. */
+  /** The user's id is part of the stats (`MyStats.puuid`): a row or a session chip opens its Match Details whenever the page has data. */
   const open = $derived(
     s
       ? (matchId: string) => go({ name: "match", matchId, focusPuuid: s.puuid, from: "recent", back: "mystats" })
@@ -40,7 +40,7 @@
     <RankCard rank={pick((m) => m.rank)} />
     <RrChart series={s === undefined ? undefined : (s?.rrSeries ?? [])} />
   </div>
-  <SessionPanel session={pick((m) => m.session)} />
+  <SessionPanel session={pick((m) => m.session)} onopen={open} />
   <LastMatches rows={pick((m) => m.last5)} onopen={open} />
   <StatTable kind="map" rows={pick((m) => m.maps)} />
   <StatTable kind="agent" rows={pick((m) => m.agents)} />

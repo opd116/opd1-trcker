@@ -527,3 +527,26 @@ test("scenes with no data of their own still have a My Stats page (the full demo
   await openScene(page, "ingame", { route: "mystats" });
   await expect(page.locator(".mystats .rank .tier")).toHaveText("Ascendant 1");
 });
+
+// B11: every image of the page asks again after a failed load (R163, `retryImg`), as Details' do. A failed `img://` load
+// fires `error`; the attachment sets the same URL plus `?r=1` after 2 s. Nothing on screen changes but the picture.
+test("mystats: every image retries a failed load: the tier icon, the map pictures, the agent icons (Recent and Agents)", async ({ page }) => {
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  const kinds: [string, Locator][] = [
+    ["rank tier icon", page.locator(".mystats .rank .head img.icon")],
+    ["recent map picture", page.locator(".mystats .last5 .rrow img.mimg").first()],
+    ["recent agent icon", page.locator(".mystats .last5 .rrow img.ragent").first()],
+    ["agents table icon", page.locator(".mystats .agents .trow img.ticon").first()],
+  ];
+  for (const [what, img] of kinds) {
+    await expect(img, what).toHaveCount(1);
+    // Loaded for real first: the synthetic `error` below then stands for a failure after the fact, not for a load still going.
+    expect(await img.evaluate((el) => (el as HTMLImageElement).complete && (el as HTMLImageElement).naturalWidth > 0), `${what}: loaded`).toBe(true);
+    await img.evaluate((el) => el.dispatchEvent(new Event("error")));
+    expect(await img.getAttribute("src"), `${what}: not yet`).not.toMatch(/[?&]r=\d+$/);
+    await page.clock.runFor(1900);
+    expect(await img.getAttribute("src"), `${what}: 1.9 s`).not.toMatch(/[?&]r=\d+$/);
+    await page.clock.runFor(200);
+    expect(await img.getAttribute("src"), `${what}: after 2 s`).toMatch(/[?&]r=1$/);
+  }
+});

@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { retryImg } from "../../lib/imgRetry";
   import { ago, DASH, rr as rrText } from "../../lib/format";
   import { isRankedTier, tierLabel } from "../../lib/meta";
   import { signedRr, signTone } from "../../lib/mystats";
@@ -68,7 +69,7 @@
     <div class="rc">
       <div class="head">
         {#if tier !== null}
-          <img class="icon" src={assetUrl("tier", tier)} alt="" />
+          <img {@attach retryImg} class="icon" src={assetUrl("tier", tier)} alt="" />
           <div class="name">
             <span class="tier">{#if tierName === undefined}<Skel w={90} h={13} />{:else}{tierName ?? DASH}{/if}</span>
             <span class="rr"><span class="v">{rrText(r.rr)}</span> RR</span>

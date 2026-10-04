@@ -8,6 +8,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { retryImg } from "../../lib/imgRetry";
   import { ago, kd2, pct0, score } from "../../lib/format";
   import { rowKeydown } from "../../lib/details";
   import { mapName } from "../../lib/meta";
@@ -35,7 +36,7 @@
 {#snippet cells(m: MatchSummary)}
   {@const map = mapName($meta, m.mapId)}
   <div class="rmap">
-    {#if m.mapId}<img class="mimg" src={assetUrl("mapList", m.mapId)} alt="" />{:else}<div class="mimg mbox"></div>{/if}
+    {#if m.mapId}<img {@attach retryImg} class="mimg" src={assetUrl("mapList", m.mapId)} alt="" />{:else}<div class="mimg mbox"></div>{/if}
     <div class="mcol">
       <span class="mname" data-ellipsis
         >{#if map === undefined}<Skel w={60} h={10} />{:else}{map ?? "—"}{/if}</span
@@ -43,7 +44,7 @@
       <span class="ago" use:tip={recentTimeTip(m.startMs)}>{ago(m.startMs, $now)}</span>
     </div>
   </div>
-  {#if m.agentId}<img class="ragent" src={assetUrl("agent", m.agentId)} alt="" />{:else}<div class="ragent"></div>{/if}
+  {#if m.agentId}<img {@attach retryImg} class="ragent" src={assetUrl("agent", m.agentId)} alt="" />{:else}<div class="ragent"></div>{/if}
   <div class="rscore"><ResultChip result={m.result} size={20} /><span class={["sc", (m.roundsWon === null || m.roundsLost === null) && "dim"]}>{score(m.roundsWon, m.roundsLost)}</span></div>
   <div class="kda">
     <span class={["r", m.kills === null && "dim"]}>{num(m.kills)}</span><span class="sl">/</span><span class={["c", m.deaths === null && "dim"]}>{num(m.deaths)}</span><span

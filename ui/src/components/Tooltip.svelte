@@ -5,14 +5,14 @@
   Only the tip text's own `\n` may break a line. Do not let a formatter re-wrap it.
 -->
 <script lang="ts">
-  import { parseWl, tipState, wlRow } from "../lib/tooltip.svelte";
+  import { parseWl, TIP_ID, tipState, wlRow } from "../lib/tooltip.svelte";
 
   const view = $derived(tipState.tip);
   const wl = $derived(view ? parseWl(view.text) : null);
 </script>
 
 {#if view}
-  <div class="tip" role="tooltip" style:left="{view.x}px" style:top="{view.top}px" style:transform={view.transform}>{#if wl}{@const [w, d1, l, d2, g] = wlRow(wl)}<span class="wl"><span class="w">{w}</span><span class="dot">{d1}</span><span class="l">{l}</span><span class="dot">{d2}</span><span>{g}</span></span><div class="scope">{wl.scope ?? "This act"}</div>{:else}{view.text}{/if}</div>
+  <div class="tip" id={TIP_ID} role="tooltip" style:left="{view.x}px" style:top="{view.top}px" style:transform={view.transform}>{#if wl}{@const [w, d1, l, d2, g] = wlRow(wl)}<span class="wl"><span class="w">{w}</span><span class="dot">{d1}</span><span class="l">{l}</span><span class="dot">{d2}</span><span>{g}</span></span><div class="scope">{wl.scope ?? "This act"}</div>{:else}{view.text}{/if}</div>
 {/if}
 
 <style>

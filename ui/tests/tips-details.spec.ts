@@ -17,6 +17,11 @@ async function hoverTip(page: Page, trigger: Locator): Promise<string | null> {
   await trigger.scrollIntoViewIfNeeded();
   await page.waitForTimeout(60);
   await trigger.hover();
+  return readTip(page, trigger);
+}
+
+/** Step the clock past the delay and read the tip (null = none), checking its placement against `trigger`'s box. */
+async function readTip(page: Page, trigger: Locator): Promise<string | null> {
   await page.clock.runFor(460);
   if ((await tip(page).count()) === 0) return null;
   const t = tip(page);
@@ -181,5 +186,95 @@ test("scrolling the Details container hides an open tip", async ({ page }) => {
   await page.clock.runFor(460);
   await expect(tip(page)).toHaveText("9:14 PM");
   await page.locator("#app .scroll").evaluate((el) => (el.scrollTop += 40));
+  await expect(tip(page)).toHaveCount(0);
+});
+
+// ── keyboard focus on a real focusable (spec §4.1) ───────────────────────────────────────────────
+// No control in the app is both focusable and a tip trigger yet (the My Stats chart's tip belongs to its inner anchor box),
+// so the engine is run on real ones here by giving them a `data-tip`, the one attribute the `tip` action sets.
+
+test("keyboard: a focusable trigger shows its tip on Tab (same delay and placement), and Tab away, Escape and a click hide it", async ({ page }) => {
+  await openScene(page, "details", {}, { clock: "manual" });
+  const back = page.locator(".details .back");
+  await back.evaluate((el) => el.setAttribute("data-tip", "Back to the grid"));
+  await page.keyboard.press("Tab"); // the Live tab
+  await page.keyboard.press("Tab"); // My Stats
+  await page.keyboard.press("Tab"); // Back
+  await expect(back).toBeFocused();
+  await page.clock.runFor(440);
+  await expect(tip(page)).toHaveCount(0); // not before 450 ms
+  await page.clock.runFor(20);
+  await expect(tip(page)).toHaveText("Back to the grid");
+  await expect(tip(page)).toHaveAttribute("id", "tooltip");
+  await expect(back).toHaveAttribute("aria-describedby", "tooltip");
+  expect(await readTip(page, back)).toBe("Back to the grid"); // placed like a hover's: centred under the trigger
+
+  // Escape: gone, with its description, and nothing else happens (still on the page, still focused).
+  await page.keyboard.press("Escape");
+  await expect(tip(page)).toHaveCount(0);
+  await expect(back).not.toHaveAttribute("aria-describedby", /.+/);
+  await expect(back).toBeFocused();
+  await expect(page.locator(".details")).toBeVisible();
+
+  // Tab away and back: it shows again; moving on hides it at once.
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Shift+Tab");
+  await expect(back).toBeFocused();
+  expect(await readTip(page, back)).toBe("Back to the grid");
+  await page.keyboard.press("Tab");
+  await expect(back).not.toBeFocused();
+  await expect(tip(page)).toHaveCount(0);
+  await expect(back).not.toHaveAttribute("aria-describedby", /.+/);
+
+  // Enter on it clicks it (Back): the tip goes with the click.
+  await page.keyboard.press("Shift+Tab");
+  await expect(back).toBeFocused();
+  await page.clock.runFor(460);
+  await expect(tip(page)).toHaveCount(1);
+  await page.keyboard.press("Enter");
+  await expect(tip(page)).toHaveCount(0);
+});
+
+test("keyboard: a mouse-focused element opens no tip through its focus, and has no :focus-visible", async ({ page }) => {
+  await openScene(page, "details", {}, { clock: "manual" });
+  const hero = page.locator(".details .hero");
+  await hero.evaluate((el) => {
+    el.setAttribute("data-tip", "Hero");
+    el.setAttribute("tabindex", "-1");
+  });
+  // Press on it (focus), then move off before the delay ends: the hover's tip is cancelled by the move, the focus owes none.
+  const box = (await hero.boundingBox())!;
+  await page.mouse.move(box.x + box.width - 20, box.y + 8);
+  await page.mouse.down();
+  await expect(hero).toBeFocused();
+  expect(await hero.evaluate((el) => el.matches(":focus-visible"))).toBe(false);
+  await page.mouse.up();
+  await page.mouse.move(5, 5);
+  await page.clock.runFor(1000);
+  await expect(tip(page)).toHaveCount(0);
+  await expect(hero).not.toHaveAttribute("aria-describedby", /.+/);
+});
+
+test("keyboard: focusing a trigger below the fold scrolls it into view, and that scroll does not cancel its tip", async ({ page }) => {
+  await openScene(page, "details-more", {}, { clock: "manual" });
+  await page.keyboard.press("Tab"); // keyboard modality: the script focus below is a :focus-visible one
+  const last = page.locator(".details .encs .erow").last(); // the Encounters section starts below the fold
+  await last.evaluate((el) => el.setAttribute("data-tip", "Oldest encounter"));
+  const scroller = page.locator("#app .scroll");
+  expect(await scroller.evaluate((el) => el.scrollTop)).toBe(0);
+  // The browser delivers the scroll event a frame after the focus. Listen first (this call has returned before the
+  // focus is sent) and wait for the event, so the clock only moves once "the scroll came first" is a fact, not a race.
+  await scroller.evaluate((el) => {
+    const w = window as unknown as { __scrolled: boolean };
+    w.__scrolled = false;
+    el.addEventListener("scroll", () => (w.__scrolled = true), { once: true });
+  });
+  await last.focus();
+  await expect(last).toBeFocused();
+  await expect.poll(() => page.evaluate(() => (window as unknown as { __scrolled: boolean }).__scrolled)).toBe(true);
+  expect(await scroller.evaluate((el) => el.scrollTop)).toBeGreaterThan(0); // the focus scrolled the page
+  expect(await readTip(page, last)).toBe("Oldest encounter");
+  // A scroll after it is up hides it, as for any tip.
+  await scroller.evaluate((el) => (el.scrollTop -= 30));
   await expect(tip(page)).toHaveCount(0);
 });

@@ -124,6 +124,27 @@ test("My Stats rows (Recent Matches): an inset, whole ring on the first and the 
   }
 });
 
+test("My Stats chart: its tab stop has an inset, whole ring that follows the panel's corners (the panel clips)", async ({ page }) => {
+  await openScene(page, "mystats");
+  const stop = page.locator(".mystats .rrchart .stop");
+  await page.getByRole("button", { name: "My Stats" }).focus();
+  await page.keyboard.press("Tab");
+  await expect(stop).toBeFocused();
+  await page.keyboard.press("Escape"); // the newest point's tip would otherwise pop up between the two shots
+  expect(await focusVisible(stop)).toBe(true);
+  expect(await outline(stop)).toEqual({ style: "solid", width: "1px", offset: "-2px" });
+  expectFullRing(await ringSides(page, stop), "chart");
+});
+
+test("a mouse click on the chart leaves no ring", async ({ page }) => {
+  await openScene(page, "mystats");
+  const stop = page.locator(".mystats .rrchart .stop");
+  await page.locator(".mystats .rrchart .hit").click();
+  await expect(stop).toBeFocused();
+  expect(await focusVisible(stop)).toBe(false);
+  expect((await outline(stop)).style).toBe("none");
+});
+
 test("a mouse click leaves no ring on the tab (keyboard only)", async ({ page }) => {
   await openScene(page, "ingame");
   const tab = page.locator(".tab.on");

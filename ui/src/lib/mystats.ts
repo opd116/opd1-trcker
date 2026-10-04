@@ -248,3 +248,43 @@ export function chartModel(series: readonly RrPoint[], box: ChartBox): ChartMode
   }
   return { points, line, area, grid, bands, plot };
 }
+
+/** The chart's picked point (spec §9.2): its match (`ms`, the start time) and the index it last stood at. */
+export interface ChartPick {
+  ms: number;
+  idx: number;
+}
+
+/**
+ * Where the pick stands in `points` (oldest first): at its match's own index, which moves when a `mystats` push
+ * inserts older points or drops some. The remembered index is tried first (nothing moved: the common case), then a
+ * search by start time; a match no longer in the series falls back to its old index, clamped. The newest with no pick
+ * (the slider's value while nothing is picked).
+ */
+export function valueIndex(points: readonly { point: { startMs: number } }[], pick: ChartPick | null): number {
+  const end = points.length - 1;
+  if (pick === null) return end;
+  if (points[pick.idx]?.point.startMs === pick.ms) return pick.idx;
+  const i = points.findIndex((p) => p.point.startMs === pick.ms);
+  return i >= 0 ? i : Math.max(0, Math.min(end, pick.idx));
+}
+
+/** The keys `keyTarget` reads (a `KeyboardEvent` has them all). */
+export interface PickKey {
+  key: string;
+  ctrlKey: boolean;
+  altKey: boolean;
+  metaKey: boolean;
+  shiftKey: boolean;
+}
+
+/**
+ * The index a key moves the pick to (`from` is where it stands, `end` the newest): ←/→ one point, Home/End the ends,
+ * clamped. null for any other key and for any with a modifier held (Ctrl+←, Alt+←, Shift+Home …): those are not the
+ * chart's and are left alone, so the page's own keys (scrolling, browser shortcuts) keep working.
+ */
+export function keyTarget(e: PickKey, from: number, end: number): number | null {
+  if (e.ctrlKey || e.altKey || e.metaKey || e.shiftKey) return null;
+  const next = e.key === "ArrowLeft" ? from - 1 : e.key === "ArrowRight" ? from + 1 : e.key === "Home" ? 0 : e.key === "End" ? end : null;
+  return next === null ? null : Math.max(0, Math.min(end, next));
+}

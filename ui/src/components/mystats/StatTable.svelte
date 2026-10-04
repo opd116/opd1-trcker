@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { retryImg } from "../../lib/imgRetry";
   import { DASH, kd2, pct0, score } from "../../lib/format";
   import { agentName, mapName } from "../../lib/meta";
   import { rateTone, signedRr, signTone } from "../../lib/mystats";
@@ -46,7 +47,7 @@
       <div class="trow">
         <div class="tname">
           {#if kind === "agent"}
-            {#if r.id}<img class="ticon" src={assetUrl("agent", r.id)} alt="" />{:else}<div class="ticon"></div>{/if}
+            {#if r.id}<img {@attach retryImg} class="ticon" src={assetUrl("agent", r.id)} alt="" />{:else}<div class="ticon"></div>{/if}
           {/if}
           <span class="n">{#if name === undefined}<Skel w={60} h={10} />{:else}{name ?? DASH}{/if}</span>
         </div>

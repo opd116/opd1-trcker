@@ -1,5 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { attachTooltips, hideTip, parseWl, retip, tip, tipOver, tipPosition, tipState, wlRow } from "./tooltip.svelte";
+import {
+  attachTooltips,
+  hideTip,
+  parseWl,
+  retip,
+  tip,
+  TIP_ID,
+  tipBlur,
+  tipFocus,
+  tipKey,
+  tipOver,
+  tipPosition,
+  tipState,
+  wlRow,
+} from "./tooltip.svelte";
 import {
   ACS_TIP,
   ACT_SCOPE,
@@ -244,6 +258,7 @@ describe("tooltip engine (delegated mouseover, 450 ms)", () => {
     const fakeRoot = {
       addEventListener: vi.fn(),
       removeEventListener: vi.fn(),
+      ownerDocument: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
       getBoundingClientRect: () => rect(0, 0, 1000, 800),
     } as unknown as HTMLElement;
     /** A trigger that finds itself for `closest`, as the real element does. */
@@ -342,6 +357,357 @@ describe("tooltip engine (delegated mouseover, 450 ms)", () => {
     hideTip();
     vi.advanceTimersByTime(1000);
     expect(tipState.tip).toBeNull();
+  });
+});
+
+// ── keyboard: focus shows, focusout and Escape hide, aria-describedby (spec §4.1) ──
+describe("keyboard focus", () => {
+  const root = { getBoundingClientRect: () => rect(0, 0, 1000, 800) } as unknown as Element;
+
+  /** An element with real attribute storage; `focusVisible` is what `:focus-visible` answers (a mouse click's focus: false). */
+  function el(attrs: Record<string, string>, r: DOMRectReadOnly = rect(400, 100, 100, 20), focusVisible = true) {
+    const a = { ...attrs };
+    const node: Record<string, unknown> = {
+      hasAttribute: (k: string) => k in a,
+      getAttribute: (k: string) => a[k] ?? null,
+      setAttribute: (k: string, v: string) => void (a[k] = v),
+      removeAttribute: (k: string) => void delete a[k],
+      matches: (sel: string) => sel === ":focus-visible" && focusVisible,
+      getBoundingClientRect: () => r,
+      querySelector: () => null,
+    };
+    node.closest = (sel: string) => (sel === "[data-tip]" && "data-tip" in a ? node : null);
+    return { node: node as unknown as Element, attrs: a };
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    hideTip();
+  });
+  afterEach(() => {
+    hideTip();
+    vi.useRealTimers();
+  });
+
+  it("a trigger that takes :focus-visible shows its tip after 450 ms, placed as a hover would", () => {
+    const { node } = el({ "data-tip": "Party · likely" });
+    tipFocus(node, root);
+    vi.advanceTimersByTime(449);
+    expect(tipState.tip).toBeNull();
+    vi.advanceTimersByTime(1);
+    expect(tipState.tip).toEqual({ text: "Party · likely", x: 450, top: 128, transform: "translate(-50%,0)" });
+  });
+
+  it("flips above near the bottom, like a hover's", () => {
+    const { node } = el({ "data-tip": "Low" }, rect(400, 700, 100, 20));
+    tipFocus(node, root);
+    vi.advanceTimersByTime(450);
+    expect(tipState.tip).toEqual({ text: "Low", x: 450, top: 692, transform: "translate(-50%,-100%)" });
+  });
+
+  it("a focus a mouse click gave (not :focus-visible) shows nothing and leaves a hover's tip alone", () => {
+    const hovered = el({ "data-tip": "Hover" }, rect(100, 100, 40, 20));
+    tipOver(hovered.node, root);
+    vi.advanceTimersByTime(450);
+    expect(tipState.tip?.text).toBe("Hover");
+
+    const clicked = el({ "data-tip": "Click" }, rect(300, 100, 40, 20), false);
+    tipFocus(clicked.node, root);
+    vi.advanceTimersByTime(1000);
+    expect(tipState.tip?.text).toBe("Hover");
+
+    hideTip();
+    tipFocus(clicked.node, root);
+    vi.advanceTimersByTime(1000);
+    expect(tipState.tip).toBeNull();
+  });
+
+  it("only the focused element itself counts: focus on something inside a trigger, or on a non-trigger, shows nothing", () => {
+    const trigger = el({ "data-tip": "Outer" });
+    const inner = el({}); // focusable, no data-tip of its own
+    (inner.node as unknown as { closest: () => Element }).closest = () => trigger.node;
+    tipFocus(inner.node, root);
+    tipFocus(null, root);
+    vi.advanceTimersByTime(1000);
+    expect(tipState.tip).toBeNull();
+  });
+
+  it("an empty tip shows nothing; an overflow-only one only while its name is cut", () => {
+    tipFocus(el({ "data-tip": "" }).node, root);
+    vi.advanceTimersByTime(1000);
+    expect(tipState.tip).toBeNull();
+
+    const fits = el({ "data-tip": "Fahad#OPD1", "data-tip-ov": "1" });
+    (fits.node as unknown as { querySelector: () => unknown }).querySelector = () => ({ scrollWidth: 60, clientWidth: 60 });
+    tipFocus(fits.node, root);
+    vi.advanceTimersByTime(1000);
+    expect(tipState.tip).toBeNull();
+  });
+
+  it("focusout hides the tip its focus started, pending or shown", () => {
+    const a = el({ "data-tip": "A" });
+    tipFocus(a.node, root);
+    vi.advanceTimersByTime(200);
+    tipBlur(a.node);
+    vi.advanceTimersByTime(1000);
+    expect(tipState.tip, "pending: cancelled").toBeNull();
+
+    tipFocus(a.node, root);
+    vi.advanceTimersByTime(450);
+    expect(tipState.tip?.text).toBe("A");
+    tipBlur(a.node);
+    expect(tipState.tip, "shown: gone at once").toBeNull();
+  });
+
+  it("focusout of some other element leaves a hover's tip alone; tabbing to another trigger swaps the tip", () => {
+    const hovered = el({ "data-tip": "Hover" }, rect(100, 100, 40, 20));
+    const other = el({ "data-tip": "Other" }, rect(600, 100, 40, 20));
+    tipOver(hovered.node, root);
+    vi.advanceTimersByTime(450);
+    tipBlur(other.node);
+    expect(tipState.tip?.text, "not the focus's tip").toBe("Hover");
+
+    const a = el({ "data-tip": "A" }, rect(100, 300, 40, 20));
+    const b = el({ "data-tip": "B" }, rect(300, 300, 40, 20));
+    tipFocus(a.node, root);
+    vi.advanceTimersByTime(450);
+    expect(tipState.tip?.text).toBe("A");
+    tipBlur(a.node); // Tab: focusout of the old one, then focusin of the new one
+    tipFocus(b.node, root);
+    expect(tipState.tip).toBeNull();
+    vi.advanceTimersByTime(450);
+    expect(tipState.tip?.text).toBe("B");
+  });
+
+  it("Escape hides a pending, a hover's and a keyboard tip, and nothing else; no other key does", () => {
+    const a = el({ "data-tip": "A" });
+    tipOver(a.node, root);
+    vi.advanceTimersByTime(450);
+    for (const key of ["Enter", " ", "Tab", "ArrowLeft", "Esc"]) tipKey({ key });
+    expect(tipState.tip?.text, "other keys").toBe("A");
+    tipKey({ key: "Escape" });
+    expect(tipState.tip, "hover's, shown").toBeNull();
+
+    tipFocus(a.node, root);
+    vi.advanceTimersByTime(200);
+    tipKey({ key: "Escape" });
+    vi.advanceTimersByTime(1000);
+    expect(tipState.tip, "keyboard, pending").toBeNull();
+
+    tipFocus(a.node, root);
+    vi.advanceTimersByTime(450);
+    expect(tipState.tip?.text).toBe("A");
+    tipKey({ key: "Escape" });
+    expect(tipState.tip, "keyboard, shown").toBeNull();
+    tipKey({ key: "Escape" }); // nothing open: nothing happens
+    expect(tipState.tip).toBeNull();
+  });
+
+  it("the focused trigger carries aria-describedby while its bubble shows, and not before or after", () => {
+    const a = el({ "data-tip": "A" });
+    tipFocus(a.node, root);
+    expect(a.attrs["aria-describedby"], "pending").toBeUndefined();
+    vi.advanceTimersByTime(450);
+    expect(a.attrs["aria-describedby"]).toBe(TIP_ID);
+    tipBlur(a.node);
+    expect(a.attrs["aria-describedby"], "after focusout").toBeUndefined();
+
+    tipFocus(a.node, root);
+    vi.advanceTimersByTime(450);
+    tipKey({ key: "Escape" });
+    expect(a.attrs["aria-describedby"], "after Escape").toBeUndefined();
+  });
+
+  it("aria-describedby keeps another id the element had, and leaves it when the tip goes", () => {
+    const a = el({ "data-tip": "A", "aria-describedby": "hint" });
+    tipFocus(a.node, root);
+    vi.advanceTimersByTime(450);
+    expect(a.attrs["aria-describedby"]).toBe(`hint ${TIP_ID}`);
+    hideTip();
+    expect(a.attrs["aria-describedby"]).toBe("hint");
+  });
+
+  it("a hover's tip describes nothing; pointing at a trigger that already has the focus makes the bubble describe it", () => {
+    const a = el({ "data-tip": "A" });
+    tipOver(a.node, root);
+    vi.advanceTimersByTime(450);
+    expect(a.attrs["aria-describedby"]).toBeUndefined();
+    tipFocus(a.node, root); // the pointer is on it and its bubble is up: the focus adopts it
+    expect(tipState.tip?.text).toBe("A");
+    expect(a.attrs["aria-describedby"]).toBe(TIP_ID);
+    tipBlur(a.node);
+    expect(tipState.tip).toBeNull();
+    expect(a.attrs["aria-describedby"]).toBeUndefined();
+  });
+
+  it("the pointer taking over from a focused trigger moves the description with the bubble", () => {
+    const a = el({ "data-tip": "A" }, rect(100, 100, 40, 20));
+    const b = el({ "data-tip": "B" }, rect(300, 100, 40, 20));
+    tipFocus(a.node, root);
+    vi.advanceTimersByTime(450);
+    tipOver(b.node, root);
+    expect(a.attrs["aria-describedby"]).toBeUndefined();
+    vi.advanceTimersByTime(450);
+    expect(tipState.tip?.text).toBe("B");
+    expect(b.attrs["aria-describedby"], "a hover's tip describes nothing").toBeUndefined();
+    tipBlur(a.node); // the old focus owns nothing now
+    expect(tipState.tip?.text).toBe("B");
+  });
+
+  it("the tip action's destroy takes the description off the element", () => {
+    const a = el({ "data-tip": "A" });
+    tipFocus(a.node, root);
+    vi.advanceTimersByTime(450);
+    // The `tip` action's own cleanup: a trigger removed while its tip is up.
+    const action = tip(a.node, "A");
+    action.destroy();
+    expect(tipState.tip).toBeNull();
+    expect(a.attrs["aria-describedby"]).toBeUndefined();
+  });
+
+  describe("retip with an owner: one surface, the focus is on its wrapper (the RR chart)", () => {
+    const fakeRoot = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      ownerDocument: { addEventListener: vi.fn(), removeEventListener: vi.fn() },
+      getBoundingClientRect: () => rect(0, 0, 1000, 800),
+    } as unknown as HTMLElement;
+
+    it("the wrapper carries aria-describedby while the bubble shows, and its blur hides the tip", () => {
+      const detach = attachTooltips(fakeRoot);
+      const anchor = el({ "data-tip": "+18 RR · Ascendant 2 · 47 RR · Sep 28" });
+      const wrapper = el({ role: "slider" });
+      retip(anchor.node, wrapper.node);
+      expect(wrapper.attrs["aria-describedby"], "pending").toBeUndefined();
+      vi.advanceTimersByTime(450);
+      expect(tipState.tip?.text).toBe("+18 RR · Ascendant 2 · 47 RR · Sep 28");
+      expect(wrapper.attrs["aria-describedby"]).toBe(TIP_ID);
+      expect(anchor.attrs["aria-describedby"]).toBeUndefined();
+
+      // The next arrow key: the old bubble goes, the description with it, and comes back with the new one.
+      anchor.attrs["data-tip"] = "−15 RR · Ascendant 2 · 32 RR · Sep 29";
+      retip(anchor.node, wrapper.node);
+      expect(tipState.tip).toBeNull();
+      expect(wrapper.attrs["aria-describedby"]).toBeUndefined();
+      vi.advanceTimersByTime(450);
+      expect(tipState.tip?.text).toBe("−15 RR · Ascendant 2 · 32 RR · Sep 29");
+      expect(wrapper.attrs["aria-describedby"]).toBe(TIP_ID);
+
+      tipBlur(anchor.node); // the anchor is not the focus
+      expect(tipState.tip).not.toBeNull();
+      tipBlur(wrapper.node);
+      expect(tipState.tip).toBeNull();
+      expect(wrapper.attrs["aria-describedby"]).toBeUndefined();
+      detach();
+    });
+
+    it("with `announce` false (the chart: its aria-valuetext says the point) the owner still hides the tip on blur but carries no aria-describedby", () => {
+      const detach = attachTooltips(fakeRoot);
+      const anchor = el({ "data-tip": "+18 RR · Ascendant 2 · 47 RR · Sep 28" });
+      const wrapper = el({ role: "slider" });
+      retip(anchor.node, wrapper.node, false);
+      vi.advanceTimersByTime(450);
+      expect(tipState.tip?.text).toBe("+18 RR · Ascendant 2 · 47 RR · Sep 28");
+      expect(wrapper.attrs["aria-describedby"]).toBeUndefined();
+      expect(anchor.attrs["aria-describedby"]).toBeUndefined();
+      tipBlur(wrapper.node);
+      expect(tipState.tip).toBeNull();
+
+      // The flag does not stick: the next owner that announces is described again.
+      retip(anchor.node, wrapper.node);
+      vi.advanceTimersByTime(450);
+      expect(wrapper.attrs["aria-describedby"]).toBe(TIP_ID);
+      hideTip();
+      detach();
+    });
+
+    it("a pointer move's retip (no owner) is not the focus's: the wrapper's blur leaves it", () => {
+      const detach = attachTooltips(fakeRoot);
+      const anchor = el({ "data-tip": "P" });
+      const wrapper = el({ role: "slider" });
+      retip(anchor.node);
+      vi.advanceTimersByTime(450);
+      tipBlur(wrapper.node);
+      expect(tipState.tip?.text).toBe("P");
+      expect(wrapper.attrs["aria-describedby"]).toBeUndefined();
+      detach();
+    });
+  });
+
+  describe("attachTooltips wiring", () => {
+    type Handler = (e: unknown) => void;
+    function mount() {
+      const onRoot = new Map<string, Handler>();
+      const onDoc = new Map<string, Handler>();
+      const rootEl = {
+        addEventListener: (t: string, f: Handler) => void onRoot.set(t, f),
+        removeEventListener: (t: string, f: Handler) => void (onRoot.get(t) === f && onRoot.delete(t)),
+        ownerDocument: {
+          addEventListener: (t: string, f: Handler) => void onDoc.set(t, f),
+          removeEventListener: (t: string, f: Handler) => void (onDoc.get(t) === f && onDoc.delete(t)),
+        },
+        getBoundingClientRect: () => rect(0, 0, 1000, 800),
+      } as unknown as HTMLElement;
+      return { onRoot, onDoc, detach: attachTooltips(rootEl) };
+    }
+
+    it("focusin and focusout on #app and keydown on the document; the cleanup removes them", () => {
+      const { onRoot, onDoc, detach } = mount();
+      expect([...onRoot.keys()].sort()).toEqual(["click", "focusin", "focusout", "mouseleave", "mouseover", "scroll"]);
+      expect([...onDoc.keys()]).toEqual(["keydown"]);
+
+      const a = el({ "data-tip": "A" });
+      onRoot.get("focusin")!({ target: a.node });
+      vi.advanceTimersByTime(450);
+      expect(tipState.tip?.text).toBe("A");
+      expect(a.attrs["aria-describedby"]).toBe(TIP_ID);
+      onDoc.get("keydown")!({ key: "Escape" });
+      expect(tipState.tip).toBeNull();
+
+      onRoot.get("focusin")!({ target: a.node });
+      vi.advanceTimersByTime(450);
+      onRoot.get("focusout")!({ target: a.node });
+      expect(tipState.tip).toBeNull();
+
+      detach();
+      expect(onRoot.size).toBe(0);
+      expect(onDoc.size).toBe(0);
+    });
+
+    it("moving focus scrolls its target into view: that scroll does not cancel a keyboard tip still pending, but hides a shown one", () => {
+      const { onRoot, detach } = mount();
+      const a = el({ "data-tip": "A" });
+      onRoot.get("focusin")!({ target: a.node });
+      vi.advanceTimersByTime(100);
+      onRoot.get("scroll")!({});
+      vi.advanceTimersByTime(350);
+      expect(tipState.tip?.text, "pending focus tip survived the scroll").toBe("A");
+      onRoot.get("scroll")!({});
+      expect(tipState.tip, "a shown one goes").toBeNull();
+      detach();
+    });
+
+    it("a scroll still cancels a hover's pending tip", () => {
+      const { onRoot, detach } = mount();
+      const a = el({ "data-tip": "A" });
+      onRoot.get("mouseover")!({ target: a.node });
+      vi.advanceTimersByTime(100);
+      onRoot.get("scroll")!({});
+      vi.advanceTimersByTime(1000);
+      expect(tipState.tip).toBeNull();
+      detach();
+    });
+
+    it("a click hides a keyboard tip too (Enter or Space on a focused trigger clicks it)", () => {
+      const { onRoot, detach } = mount();
+      const a = el({ "data-tip": "A" });
+      onRoot.get("focusin")!({ target: a.node });
+      vi.advanceTimersByTime(450);
+      onRoot.get("click")!({});
+      expect(tipState.tip).toBeNull();
+      expect(a.attrs["aria-describedby"]).toBeUndefined();
+      detach();
+    });
   });
 });
 

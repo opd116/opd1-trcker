@@ -62,6 +62,15 @@ const when = (ms: number) => `${dateLong(ms)} · ${time12(ms)}`;
 const tierName = (abs: number) => (abs >= 2400 ? "Immortal" : TIER_LABELS[Math.floor(abs / 100) - 3]!);
 const wlTip = (w: number, l: number, g: number, scope = "This act") => `${w}W · ${l}L · ${g} ${g === 1 ? "game" : "games"}\n${scope}`;
 
+/** The chart point `i`'s tip: `+18 RR · Ascendant 2 · 47 RR · Sep 29`; the first point has no change (spec §9.6). */
+function pointTip(series: ReturnType<typeof myStatsFull>["rrSeries"], i: number): string {
+  const p = series[i]!;
+  const delta = i === 0 ? null : p.absoluteRr - series[i - 1]!.absoluteRr;
+  return [delta === null ? null : `${rrDelta(delta)} RR`, tierName(p.absoluteRr), `${rrInTier(p.absoluteRr)} RR`, dateShort(p.startMs, now)]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 const sec = (p: Page, name: string) => p.locator(`.mystats .${name}`);
 const head = (p: Page, name: string) => sec(p, name).locator(".sech span");
 
@@ -115,13 +124,7 @@ test("tips: mystats, the chart: each point says its change, tier, RR and day; th
   const m = myStatsFull();
   await openScene(page, "mystats", {}, { clock: "manual" });
   const { spot, anchor } = await chartPoints(page, m.rrSeries);
-  const point = (i: number) => {
-    const p = m.rrSeries[i]!;
-    const delta = i === 0 ? null : p.absoluteRr - m.rrSeries[i - 1]!.absoluteRr;
-    return [delta === null ? null : `${rrDelta(delta)} RR`, tierName(p.absoluteRr), `${rrInTier(p.absoluteRr)} RR`, dateShort(p.startMs, now)]
-      .filter(Boolean)
-      .join(" · ");
-  };
+  const point = (i: number) => pointTip(m.rrSeries, i);
   const last = m.rrSeries.length - 1;
   for (const i of [0, 1, 17, 30, last - 1, last]) {
     await page.mouse.move(spot(i).x, spot(i).y);
@@ -322,4 +325,312 @@ test("scrolling the My Stats container hides an open tip", async ({ page }) => {
   await expect(tip(page)).toHaveText("9:14 PM");
   await page.locator("#app .scroll").evaluate((el) => (el.scrollTop += 40));
   await expect(tip(page)).toHaveCount(0);
+});
+
+// ── keyboard (spec §4.1, §9.2): the chart is one tab stop; focus, arrows, Home/End and Escape drive its tip ──────────
+
+/** Focus the My Stats tab and Tab once: the next stop is the chart's. */
+async function tabToChart(page: Page): Promise<Locator> {
+  await page.getByRole("button", { name: "My Stats" }).focus();
+  await page.keyboard.press("Tab");
+  const stop = sec(page, "rrchart").locator(".stop");
+  await expect(stop).toBeFocused();
+  return stop;
+}
+
+/** Where the crosshair stands: the x of the picked point, or null when none is picked. */
+const crossX = async (page: Page): Promise<number | null> => {
+  const xh = sec(page, "rrchart").locator(".xh");
+  return (await xh.count()) === 0 ? null : Number(await xh.getAttribute("x1"));
+};
+
+test("keyboard: Tab from the My Stats tab lands on the chart; it shows the newest point's tip (the bubble has its id; the point is announced by aria-valuetext, not aria-describedby)", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  const { anchor, model } = await chartPoints(page, m.rrSeries);
+  const last = m.rrSeries.length - 1;
+  const stop = await tabToChart(page);
+  await expect(stop).toHaveAttribute("role", "slider");
+  await expect(stop).toHaveAttribute("aria-label", "RR progression");
+  expect(await stop.evaluate((el) => el.matches(":focus-visible"))).toBe(true);
+  // The pick and its crosshair are there at once; the tip follows the delay, like a hover's.
+  expect(Math.abs((await crossX(page))! - model.points[last]!.x)).toBeLessThan(0.1);
+  await expect(tip(page)).toHaveCount(0);
+  await expect(stop).not.toHaveAttribute("aria-describedby", /.+/);
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last));
+  await expect(tip(page)).toHaveAttribute("id", "tooltip");
+  await expect(stop).not.toHaveAttribute("aria-describedby", /.+/); // the slider says its point itself (aria-valuetext)
+  await expect(stop).toHaveAttribute("aria-valuenow", String(last));
+  await expect(stop).toHaveAttribute("aria-valuetext", pointTip(m.rrSeries, last));
+  await expect(stop).toHaveAttribute("aria-valuemax", String(last));
+});
+
+test("keyboard: ←/→ move the picked point (clamped), Home and End jump to the ends, each showing that point's tip", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  const { anchor, model } = await chartPoints(page, m.rrSeries);
+  const last = m.rrSeries.length - 1;
+  const stop = await tabToChart(page);
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last));
+
+  const at = async (i: number, what: string) => {
+    expect(Math.abs((await crossX(page))! - model.points[i]!.x), `${what}: crosshair`).toBeLessThan(0.1);
+    await expect(stop, `${what}: value`).toHaveAttribute("aria-valuenow", String(i));
+  };
+  // ArrowLeft: the old bubble goes at once (and its description with it), the previous point's shows after the delay.
+  await page.keyboard.press("ArrowLeft");
+  await expect(tip(page)).toHaveCount(0);
+  await expect(stop).not.toHaveAttribute("aria-describedby", /.+/);
+  await at(last - 1, "ArrowLeft");
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last - 1));
+  await expect(stop).not.toHaveAttribute("aria-describedby", /.+/);
+  // ArrowRight comes back; at the end another ArrowRight changes nothing and does not flicker the bubble.
+  await page.keyboard.press("ArrowRight");
+  await at(last, "ArrowRight");
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last));
+  await page.keyboard.press("ArrowRight");
+  await expect(tip(page)).toHaveCount(1);
+  await at(last, "ArrowRight at the end");
+  // Home and End.
+  await page.keyboard.press("Home");
+  await at(0, "Home");
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, 0));
+  expect(pointTip(m.rrSeries, 0)).toMatch(/^Diamond \d · \d+ RR · Aug 26$/); // the first point has no change
+  await page.keyboard.press("ArrowLeft");
+  await at(0, "ArrowLeft at the start");
+  await page.keyboard.press("End");
+  await at(last, "End");
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last));
+  // A few steps in a row: the tip belongs to the last one.
+  for (let k = 0; k < 4; k++) await page.keyboard.press("ArrowLeft");
+  await at(last - 4, "4 × ArrowLeft");
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last - 4));
+  // Home and End are the chart's while it has the focus: they did not scroll the page.
+  expect(await page.locator("#app .scroll").evaluate((el) => el.scrollTop)).toBe(0);
+});
+
+test("keyboard: Escape hides the tip and does nothing else; the next arrow shows one again", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  const { anchor, model } = await chartPoints(page, m.rrSeries);
+  const last = m.rrSeries.length - 1;
+  const stop = await tabToChart(page);
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last));
+  await page.keyboard.press("Escape");
+  await expect(tip(page)).toHaveCount(0);
+  await expect(stop).not.toHaveAttribute("aria-describedby", /.+/);
+  // Nothing else happened: the chart keeps the focus and its pick, and no tip comes back by itself.
+  await expect(stop).toBeFocused();
+  expect(Math.abs((await crossX(page))! - model.points[last]!.x)).toBeLessThan(0.1);
+  await page.clock.runFor(1000);
+  await expect(tip(page)).toHaveCount(0);
+  // Escape with a tip still pending cancels it as well.
+  await page.keyboard.press("ArrowLeft");
+  await page.clock.runFor(200);
+  await page.keyboard.press("Escape");
+  await page.clock.runFor(1000);
+  await expect(tip(page)).toHaveCount(0);
+  // An arrow after Escape: the tip is back, at the new point.
+  await page.keyboard.press("ArrowLeft");
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last - 2));
+});
+
+test("keyboard: Escape also hides a hover's tip", async ({ page }) => {
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  const trigger = sec(page, "last5").locator(".rrow").nth(0).locator(".ago");
+  await trigger.scrollIntoViewIfNeeded();
+  await page.waitForTimeout(60);
+  await trigger.hover();
+  await page.clock.runFor(460);
+  await expect(tip(page)).toHaveText("9:14 PM");
+  await page.keyboard.press("Escape");
+  await expect(tip(page)).toHaveCount(0);
+});
+
+test("keyboard: leaving the chart (Tab, Shift+Tab) clears the pick, its crosshair and the tip; coming back picks the newest again", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  const { anchor } = await chartPoints(page, m.rrSeries);
+  const last = m.rrSeries.length - 1;
+  const stop = await tabToChart(page);
+  await page.keyboard.press("ArrowLeft");
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last - 1));
+  await page.keyboard.press("Tab");
+  await expect(sec(page, "last5").locator(".rrow").first()).toBeFocused();
+  await expect(tip(page)).toHaveCount(0);
+  expect(await crossX(page)).toBeNull();
+  await expect(stop).not.toHaveAttribute("aria-describedby", /.+/);
+  await expect(stop).toHaveAttribute("aria-valuenow", String(last)); // unpicked: the newest
+  await page.clock.runFor(1000);
+  await expect(tip(page)).toHaveCount(0);
+  await page.keyboard.press("Shift+Tab");
+  await expect(stop).toBeFocused();
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last));
+});
+
+test("keyboard: a click on the chart takes the focus but no ring, no keyboard pick and no tip through the focus; the pointer behaves as before", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  const { svg, model, spot } = await chartPoints(page, m.rrSeries);
+  const stop = sec(page, "rrchart").locator(".stop");
+  await page.mouse.click(spot(10).x, spot(10).y);
+  await expect(stop).toBeFocused();
+  expect(await stop.evaluate((el) => el.matches(":focus-visible"))).toBe(false);
+  expect(await stop.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe("none");
+  // The pick is the pointer's (point 10), not the keyboard's newest point; the click hid the tip and the focus brings none.
+  expect(Math.abs((await crossX(page))! - model.points[10]!.x)).toBeLessThan(0.1);
+  await page.clock.runFor(1000);
+  await expect(tip(page)).toHaveCount(0);
+  await expect(stop).not.toHaveAttribute("aria-describedby", /.+/);
+  // Leaving the plot clears the pointer's pick, as it does without focus.
+  await page.mouse.move(svg.x + 10, svg.y + 10);
+  expect(await crossX(page)).toBeNull();
+});
+
+test("keyboard: a hover while the chart has the keyboard takes the tip; leaving the plot keeps the keyboard's pick", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  const { svg, model, spot, anchor } = await chartPoints(page, m.rrSeries);
+  const last = m.rrSeries.length - 1;
+  await tabToChart(page);
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last));
+  await page.mouse.move(spot(5).x, spot(5).y);
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, 5));
+  await page.mouse.move(svg.x + 10, svg.y + 10); // the gutter: the pointer leaves the plot
+  await expect(tip(page)).toHaveCount(0);
+  // The keyboard still has the chart: the pick (where the pointer left it) stays until the focus goes.
+  expect(Math.abs((await crossX(page))! - model.points[5]!.x)).toBeLessThan(0.1);
+  await page.keyboard.press("ArrowRight");
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, 6));
+});
+
+test("keyboard: a pointer entering over the slice the keyboard picked still shows its own tip", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  const { spot, anchor } = await chartPoints(page, m.rrSeries);
+  const last = m.rrSeries.length - 1;
+  await tabToChart(page); // the keyboard picked the newest point
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last));
+  await page.keyboard.press("Escape");
+  await expect(tip(page)).toHaveCount(0);
+  // The pointer comes in over that very slice: it is the pointer's turn, so its tip shows (the pick did not change, the tip did).
+  await page.mouse.move(spot(last).x, spot(last).y);
+  expect(await readTip(page, anchor)).toBe(pointTip(m.rrSeries, last));
+  // A wiggle inside the slice keeps the bubble, as for any hover.
+  await page.mouse.move(spot(last, 1).x, spot(last).y + 4);
+  await page.clock.runFor(100);
+  await expect(tip(page)).toHaveCount(1);
+});
+
+test("keyboard: the chart prevents only the keys it handles; modified keys, ↑ ↓ and Page keys are left to the page", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  await chartPoints(page, m.rrSeries);
+  const stop = await tabToChart(page);
+  const last = m.rrSeries.length - 1;
+  await page.evaluate(() => {
+    const w = window as unknown as { __keys: string[] };
+    w.__keys = [];
+    // The document listener runs after the chart's own (bubbling): `defaultPrevented` says what the chart did.
+    document.addEventListener("keydown", (e) => {
+      if (["Control", "Shift"].includes(e.key)) return;
+      w.__keys.push(`${e.ctrlKey ? "Ctrl+" : ""}${e.shiftKey ? "Shift+" : ""}${e.key}:${e.defaultPrevented ? "prevented" : "left"}`);
+    });
+  });
+  for (const k of ["ArrowLeft", "ArrowRight", "Home", "End", "Control+ArrowLeft", "Shift+ArrowLeft", "Control+Home", "ArrowUp", "ArrowDown", "PageUp", "Escape"]) {
+    await page.keyboard.press(k);
+  }
+  const seen = await page.evaluate(() => (window as unknown as { __keys: string[] }).__keys);
+  expect(seen).toEqual([
+    "ArrowLeft:prevented",
+    "ArrowRight:prevented",
+    "Home:prevented",
+    "End:prevented",
+    "Ctrl+ArrowLeft:left",
+    "Shift+ArrowLeft:left",
+    "Ctrl+Home:left",
+    "ArrowUp:left",
+    "ArrowDown:left",
+    "PageUp:left",
+    "Escape:left",
+  ]);
+  // The ignored keys moved nothing: End left the pick on the newest point.
+  await expect(stop).toHaveAttribute("aria-valuenow", String(last));
+});
+
+test("keyboard: a mystats push that inserts older points keeps the pick on its own match, not on its index", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  const { svg, anchor } = await chartPoints(page, m.rrSeries);
+  const stop = await tabToChart(page);
+  await page.keyboard.press("Home");
+  for (let k = 0; k < 10; k++) await page.keyboard.press("ArrowRight");
+  await expect(stop).toHaveAttribute("aria-valuenow", "10");
+  const first = m.rrSeries[0]!;
+  const older = [4, 3, 2, 1].map((h) => ({ ...first, startMs: first.startMs - h * 3_600_000 }));
+  const next = [...older, ...m.rrSeries];
+  await page.evaluate(
+    `import("/src/lib/stores.ts").then(({ mystats }) => { let m; mystats.subscribe((v) => (m = v))(); mystats.set({ ...m, rrSeries: ${JSON.stringify(next)} }); })`,
+  );
+  // The same match, four places further right.
+  await expect(stop).toHaveAttribute("aria-valuenow", "14");
+  await expect(stop).toHaveAttribute("aria-valuemax", String(next.length - 1));
+  await expect(stop).toHaveAttribute("aria-valuetext", pointTip(m.rrSeries, 10));
+  expect(pointTip(next, 14)).toBe(pointTip(m.rrSeries, 10));
+  const model = chartModel(next, { w: svg.width, h: svg.height, padL: 96, padR: 18, padT: 16, padB: 30 })!;
+  expect(Math.abs((await crossX(page))! - model.points[14]!.x)).toBeLessThan(0.1);
+  // The next key moves from where the pick now stands.
+  await page.keyboard.press("ArrowLeft");
+  await expect(stop).toHaveAttribute("aria-valuenow", "13");
+  expect(await readTip(page, anchor)).toBe(pointTip(next, 13));
+});
+
+test("keyboard: when the plot goes away the pick goes with it and the chart is no tab stop", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats", {}, { clock: "manual" });
+  await chartPoints(page, m.rrSeries);
+  const stop = await tabToChart(page);
+  await page.keyboard.press("ArrowLeft");
+  await expect(stop).toHaveAttribute("aria-valuenow", String(m.rrSeries.length - 2));
+  // A push with a single point: nothing to draw a line through.
+  await page.evaluate(
+    `import("/src/lib/stores.ts").then(({ mystats }) => { let m; mystats.subscribe((v) => (m = v))(); mystats.set({ ...m, rrSeries: ${JSON.stringify(m.rrSeries.slice(0, 1))} }); })`,
+  );
+  await expect(sec(page, "rrchart").locator(".stop")).toHaveCount(0);
+  await expect(sec(page, "rrchart").locator(".none")).toHaveText("—");
+  await expect(tip(page)).toHaveCount(0);
+  // The series comes back: the chart starts with no pick (not at the old index), and a fresh focus picks the newest.
+  await page.evaluate(
+    `import("/src/lib/stores.ts").then(({ mystats }) => { let m; mystats.subscribe((v) => (m = v))(); mystats.set({ ...m, rrSeries: ${JSON.stringify(m.rrSeries)} }); })`,
+  );
+  await expect(sec(page, "rrchart").locator(".stop")).toHaveCount(1);
+  expect(await crossX(page)).toBeNull();
+  await expect(sec(page, "rrchart").locator(".stop")).toHaveAttribute("aria-valuenow", String(m.rrSeries.length - 1));
+});
+
+test("keyboard: Tab order on My Stats is DOM order: the two tabs, the chart, then the five Recent Matches rows (the cells are not stops)", async ({ page }) => {
+  await openScene(page, "mystats");
+  const seen: string[] = [];
+  for (let i = 0; i < 8; i++) {
+    await page.keyboard.press("Tab");
+    seen.push(
+      await page.evaluate(() => {
+        const a = document.activeElement as HTMLElement | null;
+        if (!a) return "none";
+        if (a.matches("header .tab")) return `tab:${a.textContent}`;
+        if (a.matches(".rrchart .stop")) return "chart";
+        if (a.matches(".last5 .rrow")) return "row";
+        return `other:${a.tagName}.${a.className}`;
+      }),
+    );
+  }
+  expect(seen).toEqual(["tab:Live", "tab:My Stats", "chart", "row", "row", "row", "row", "row"]);
+});
+
+test("keyboard: with no plot to read (nothing to chart, no answer yet, loading) the chart is not a tab stop", async ({ page }) => {
+  for (const scene of ["mystats-unranked", "mystats-new", "mystats-loading"]) {
+    await openScene(page, scene);
+    await expect(page.locator(".mystats .rrchart .stop"), scene).toHaveCount(0);
+    await expect(page.locator(".mystats .rrchart [tabindex]"), scene).toHaveCount(0);
+  }
 });

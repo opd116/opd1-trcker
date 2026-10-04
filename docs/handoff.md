@@ -8,6 +8,8 @@ Written by hand at the end of the v0.3.0 phase (`/handoff` is not installed in t
 3. Push the `v0.2.0` and `v0.3.0` tags (see Open items).
 4. Build nothing new until the user asks. Match History and Settings stay "later" (CLAUDE.md).
 
+The user's ready-to-paste brief for the next session, with the full list of planned fixes and improvements, is `docs/next-session-prompt.md`.
+
 ## Release status
 
 - **`main` = `493d4f9`** `chore(release): v0.3.0` (the working branch `claude/bold-johnson-tfn8bb` is at the same commit).

@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use serde_json::json;
 
 use opd1_core::db::repo::{CompMatchRow, CompUpdateRow, StoredTier};
-use opd1_core::model::{CurrentRank, InsightKind, MatchResultKind, StreakMark};
+use opd1_core::model::{CurrentRank, InsightKind, MatchResultKind, SessionMatch, StreakMark};
 use opd1_core::mystats::{build, rr_to_next, MyStatsInput};
 use opd1_core::stats::Act;
 
@@ -441,11 +441,99 @@ fn session_uses_6h_gap() {
     assert_eq!(session.started_ms, c);
     assert_eq!((session.wins, session.losses), (1, 1));
     // Oldest first, draws included.
+    let results: Vec<StreakMark> = session.matches.iter().map(|m| m.result).collect();
     assert_eq!(
-        session.streak,
+        results,
         [StreakMark::Win, StreakMark::Loss, StreakMark::Draw]
     );
     assert_eq!(session.net_rr, Some(20 - 15));
+}
+
+/// Each chip carries what its tooltip and its click need: the match id,
+/// the map (valorant-api uuid), the RR change and the start, oldest first
+/// whatever order the rows came in; a draw is a `D` chip with its 0 RR.
+#[test]
+fn session_matches_carry_the_chip_details() {
+    let t0 = ACT_START + 10 * DAY;
+    let matches = vec![
+        // Out of order on purpose: the session sorts them.
+        on_map(row("loss", t0 + 2 * HOUR, R::L), "map-bind"),
+        on_map(row("win", t0, R::W), "map-haven"),
+        row("draw", t0 + 4 * HOUR, R::D),
+    ];
+    let a = act();
+    let n = names();
+    let s = build(MyStatsInput {
+        now_ms: t0 + 5 * HOUR,
+        ..input(&a, &matches, &[], &n)
+    });
+    let session = s.session.expect("a session");
+    assert_eq!(
+        session.matches,
+        [
+            SessionMatch {
+                match_id: "win".into(),
+                map_id: Some("map-haven".into()),
+                rr_earned: Some(20),
+                start_ms: t0,
+                result: StreakMark::Win,
+            },
+            SessionMatch {
+                match_id: "loss".into(),
+                map_id: Some("map-bind".into()),
+                rr_earned: Some(-15),
+                start_ms: t0 + 2 * HOUR,
+                result: StreakMark::Loss,
+            },
+            SessionMatch {
+                match_id: "draw".into(),
+                map_id: Some("map-ascent".into()),
+                rr_earned: Some(0),
+                start_ms: t0 + 4 * HOUR,
+                result: StreakMark::Draw,
+            },
+        ]
+    );
+    // The chips are the session: same count as its record.
+    assert_eq!(
+        session.matches.len() as u32,
+        session.wins + session.losses + 1
+    );
+}
+
+/// An unknown map reaches the UI as `null`, never `""` (the caller's
+/// conversion gives `""` for a path it can't map); a match with no stored
+/// RR row has an unknown change (`null`), not 0 — and the session's net RR
+/// counts only the known ones.
+#[test]
+fn session_chip_unknowns_are_null() {
+    let t0 = ACT_START + 10 * DAY;
+    let matches = vec![
+        on_map(row("no-map", t0, R::W), ""),
+        no_rr(row("no-rr", t0 + HOUR, R::L)),
+    ];
+    let a = act();
+    let n = names();
+    let s = build(MyStatsInput {
+        now_ms: t0 + 2 * HOUR,
+        ..input(&a, &matches, &[], &n)
+    });
+    let session = s.session.expect("a session");
+    assert_eq!(session.net_rr, Some(20));
+    let [first, second] = session.matches.as_slice() else {
+        panic!("two chips: {:?}", session.matches);
+    };
+    assert_eq!((first.map_id.as_deref(), first.rr_earned), (None, Some(20)));
+    assert_eq!(
+        (second.map_id.as_deref(), second.rr_earned),
+        (Some("map-ascent"), None)
+    );
+
+    let json = serde_json::to_value(&session).unwrap();
+    assert_eq!(json["matches"][0]["mapId"], json!(null));
+    assert_eq!(json["matches"][1]["rrEarned"], json!(null));
+    assert_eq!(json["matches"][0]["result"], json!("W"));
+    assert_eq!(json["matches"][1]["result"], json!("L"));
 }
 
 // ---------------------------------------------------------------------
@@ -800,7 +888,14 @@ fn json_is_camel_case_with_nulls_for_unknowns() {
         ..input(&a, &matches, &updates, &n)
     }))
     .unwrap();
-    assert_eq!(full["session"]["streak"], json!(["W"]));
+    assert_eq!(
+        full["session"]["matches"],
+        json!([{
+            "matchId": "m1", "mapId": "map-ascent", "rrEarned": 20,
+            "startMs": ACT_START + DAY, "result": "W"
+        }])
+    );
+    assert!(full["session"].get("streak").is_none());
     assert_eq!(full["session"]["startedMs"], json!(ACT_START + DAY));
     assert_eq!(
         full["rank"]["changes"],
@@ -964,7 +1059,8 @@ fn no_current_session_6h_after_the_last_match() {
     assert_eq!(session_at(last + 5 * DAY), None);
     // The same rule as between matches: exactly 6h still continues it.
     let current = session_at(last + 6 * HOUR).expect("still the current session");
-    assert_eq!(current.streak, [StreakMark::Loss, StreakMark::Loss]);
+    let results: Vec<StreakMark> = current.matches.iter().map(|m| m.result).collect();
+    assert_eq!(results, [StreakMark::Loss, StreakMark::Loss]);
     assert_eq!(current.net_rr, Some(-30));
     assert_eq!(session_at(last + 6 * HOUR + 1), None);
 }

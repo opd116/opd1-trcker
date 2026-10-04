@@ -1281,6 +1281,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** No request. One IPC call per reported UI failure, bounded on both sides. Rust cannot recognise a player's name in free text; the UI is that barrier.
 - **Status:** active
 
+### R183 — Each Session chip has a tooltip and opens its match
+
+- **What:** Claude's design call (brief B5; amends §9.3 and §9.6 of the build spec, where the chips had no tooltip). `SessionSummary.streak` (results only) became `matches`: per match its id, map (a valorant-api uuid, or `null`, never `""` or a Riot path), RR change (`null` when no competitive update is stored, never 0) and start, oldest first. Each chip keeps its plain 20×20 look and gets the card's last-5 tooltip with the map in front, `Ascent · +18 RR · 2h` (the map dropped while unknown; `Win` / `Loss` / `Draw` in place of an unknown RR). It opens Match Details exactly as a Recent Matches row does (the user as focus player, Back returns to My Stats at its scroll position): `role="button"`, Enter / Space, the global focus ring at its 2px outside offset (R106), an `aria-label` with the result word in front of the tip, no hover colour. The golden contract carries a draw chip with no map and no RR.
+- **Why:** The v0.3.0 review left the chips as the only My Stats figures with nothing behind them; the data was already in the DB.
+- **Cost:** A few bytes per session match in the `mystats` payload. A long session adds one tab stop per match.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

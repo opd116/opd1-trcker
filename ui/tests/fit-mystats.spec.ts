@@ -217,10 +217,25 @@ test("mystats: the session reads the data", async ({ page }) => {
   expect(await css(s.locator(".big"), "font-size")).toBe("28px");
   expect(await text(s.locator(".val").nth(0))).toBe(`${m.session!.wins} / ${m.session!.losses}`);
   expect(await text(s.locator(".val").nth(1))).toBe(`${span(NOW.getTime() - m.session!.startedMs)} ago`);
-  // One chip per result, oldest to newest, W / L / D.
+  // One chip per match, oldest to newest, W / L / D: the plain 20×20 boxes, 6px apart, each a button that opens its match.
   const chips = s.locator(".chips .chip");
-  await expect(chips).toHaveCount(m.session!.streak.length);
-  expect(await texts(chips)).toEqual(m.session!.streak);
+  await expect(chips).toHaveCount(m.session!.matches.length);
+  expect(await texts(chips)).toEqual(m.session!.matches.map((x) => x.result));
+  const btns = s.locator(".chips .mc");
+  await expect(btns).toHaveCount(m.session!.matches.length);
+  expect(await btns.evaluateAll((els) => els.map((e) => [e.getAttribute("role"), e.getAttribute("tabindex"), getComputedStyle(e).cursor]))).toEqual(
+    m.session!.matches.map(() => ["button", "0", "pointer"]),
+  );
+  const first = await box(chips.nth(0));
+  const second = await box(chips.nth(1));
+  expect([first.width, first.height]).toEqual([20, 20]);
+  near(second.x - (first.x + first.width), 6, "gap between chips");
+  expect((await box(btns.nth(0))).width).toBe(20);
+  // The button's accessible name is the result and the tip, not the bare letter.
+  const w = { W: "Win", L: "Loss", D: "Draw" } as const;
+  for (const i of [0, m.session!.matches.length - 1]) {
+    expect(await btns.nth(i).getAttribute("aria-label")).toMatch(new RegExp(`^${w[m.session!.matches[i]!.result]} · .+ · \\d+[mhdwy]`));
+  }
 });
 
 test("mystats: Recent Matches are the Details rows with ACS and RR, newest first", async ({ page }) => {
@@ -505,10 +520,10 @@ test("mystats-longnames: the widest numbers and names fit; the streak wraps; the
     expect(await texts(p.locator(".agents .trow .n")).then((a) => a.slice(0, 2))).toEqual(["Brimstone", "Deadlock"]);
     expect(await text(p.locator(".maps .trow").first())).toContain("128");
     expect(await text(p.locator(".rank .tier"))).toBe("Ascendant 3");
-    expect(await text(p.locator(".session .big"))).toBe("−128");
+    expect(await text(p.locator(".session .big"))).toBe(rr(m.session!.netRr));
     // 30 chips wrap onto more than one line, inside the panel.
     const chips = p.locator(".session .chip");
-    await expect(chips).toHaveCount(m.session!.streak.length);
+    await expect(chips).toHaveCount(m.session!.matches.length);
     const ys = new Set((await chips.evaluateAll((els) => els.map((e) => Math.round(e.getBoundingClientRect().y)))) as number[]);
     expect(ys.size, `chip lines [${font}]`).toBeGreaterThan(1);
     expect(await checkMyStatsLayout(page)).toEqual([]);

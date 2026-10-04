@@ -3,8 +3,8 @@
 // other. Deterministic (a seeded generator, no clock), anchored at DEMO_NOW; the last five matches are the design's own
 // recent rows of the user (Fahad), so a row opens the same Match page as the Details page does.
 // Nothing here ships: it is reached only through the DEV-guarded scene registry.
-import type { Insight, MatchSummary, MyStats, RankChange, StatRow, StreakMark, WinCell } from "../types";
-import { AG, DEMO_NOW, detailsFor, MAPS, PUUID } from "./cdv8";
+import type { Insight, MatchSummary, MyStats, RankChange, SessionMatch, StatRow, StreakMark, WinCell } from "../types";
+import { AG, DEMO_NOW, detailsFor, MAPS, PUUID, sessionMatchId } from "./cdv8";
 
 const MIN = 60_000;
 const HOUR = 3_600_000;
@@ -17,6 +17,8 @@ const ACT_START = at(7, 26);
 type Res = "win" | "loss" | "draw";
 
 interface Sim {
+  /** Set for the user's own recent rows (the Match page the Details page opens); the rest get a session id (cdv8). */
+  matchId?: string;
   startMs: number;
   res: Res;
   map: string;
@@ -114,6 +116,7 @@ function simulate(finalAbs: number, seed = 20260929): Sim[] {
     rounds: (m.roundsWon ?? 13) + (m.roundsLost ?? 10),
     score: Math.round((m.acs ?? 200) * ((m.roundsWon ?? 13) + (m.roundsLost ?? 10))),
     rr: m.rrEarned ?? 0,
+    matchId: m.matchId,
   });
   const today = TODAY.map(([h, mi]) => make(at(8, 29, h, mi), result()));
   const sims = [...older, fromRow(recent[4]!), fromRow(recent[3]!), ...today, fromRow(recent[2]!), fromRow(recent[1]!), fromRow(recent[0]!)];
@@ -121,7 +124,7 @@ function simulate(finalAbs: number, seed = 20260929): Sim[] {
   // The ladder is one line in absolute RR: every match adds its RR change, so the start is the end less the sum.
   const start = finalAbs - sims.reduce((a, s) => a + s.rr, 0);
   let abs = start;
-  return sims.map((s) => ({ ...s, abs: (abs += s.rr) }));
+  return sims.map((s) => ({ ...s, matchId: s.matchId ?? sessionMatchId(s.startMs, mark(s.res), s.map), abs: (abs += s.rr) }));
 }
 
 // ── the aggregation (mirrors crates/core/src/mystats.rs) ────────────────────────────────────────────────────────
@@ -258,6 +261,10 @@ function insights(sims: Sim[], maps: StatRow[], mapNames: Record<string, string>
 
 const mark = (r: Res): StreakMark => (r === "win" ? "W" : r === "loss" ? "L" : "D");
 
+/** A session's chips from its simulated matches: the match, its map, the RR it changed and its start (oldest first). */
+const sessionOf = (sims: Sim[]): SessionMatch[] =>
+  sims.map((s) => ({ matchId: s.matchId!, mapId: s.map, rrEarned: s.rr, startMs: s.startMs, result: mark(s.res) }));
+
 /** The map names the Rust side hands the insights, from the demo meta. */
 export type NameTable = Record<string, string>;
 
@@ -296,7 +303,7 @@ function build(sims: Sim[], mapNames: NameTable, rank: { tier: number; rr: numbe
     },
     rrSeries: sims.map((s) => ({ startMs: s.startMs, absoluteRr: s.abs })),
     session: live
-      ? { netRr: st.rr, wins: st.wins, losses: st.losses, startedMs: sessionSims[0]!.startMs, streak: sessionSims.map((s) => mark(s.res)) }
+      ? { netRr: st.rr, wins: st.wins, losses: st.losses, startedMs: sessionSims[0]!.startMs, matches: sessionOf(sessionSims) }
       : null,
     last5: recent,
     maps,
@@ -387,7 +394,8 @@ export function myStatsUnranked(): MyStats {
       wins,
       losses,
       startedMs: recent[recent.length - 1]!.startMs,
-      streak: [...recent].reverse().map((m) => mark(m.result)),
+      // Placement games: Riot recorded no RR change for any of them (null, never a counted 0).
+      matches: [...recent].reverse().map((m): SessionMatch => ({ matchId: m.matchId, mapId: m.mapId, rrEarned: m.rrEarned, startMs: m.startMs, result: mark(m.result) })),
     },
     last5: recent,
     maps: rows((m) => m.mapId),
@@ -400,7 +408,7 @@ export function myStatsUnranked(): MyStats {
 
 /**
  * The widest numbers and names: Ascendant 3 with 3-digit games, a 128-game map, net RR in the hundreds, a session of 30
- * that wraps its streak, 3-digit ACS, the longest real map and agent names, and insights at their longest.
+ * that wraps its chips, 3-digit ACS, the longest real map and agent names, and insights at their longest.
  */
 export function myStatsLongnames(): MyStats {
   const base = build(simulate(2399, 11), MAP_NAMES, { tier: 23, rr: 99 });
@@ -420,16 +428,24 @@ export function myStatsLongnames(): MyStats {
   };
   const maps = base.maps.map((m, i) => big(m, i, 128 - i * 11));
   const agents = base.agents.map((a, i) => big(a, i, 128 - i * 13));
-  const streak: StreakMark[] = Array.from({ length: 30 }, (_, i) => (i % 7 === 3 ? "L" : i % 11 === 5 ? "D" : "W"));
+  // The session of 30: one match every 25 minutes from 13 hours ago, over every map (so the two longest names are in it).
+  const session: SessionMatch[] = Array.from({ length: 30 }, (_, i) => {
+    const result: StreakMark = i % 7 === 3 ? "L" : i % 11 === 5 ? "D" : "W";
+    const mapId = base.maps[i % base.maps.length]!.id;
+    const startMs = DEMO_NOW - 13 * HOUR + i * 25 * MIN;
+    const rrEarned = result === "W" ? 14 + ((i * 5) % 12) : result === "L" ? -(12 + ((i * 3) % 11)) : 0;
+    return { matchId: sessionMatchId(startMs, result, mapId), mapId, rrEarned, startMs, result };
+  });
+  const countOf = (mark: StreakMark) => session.filter((m) => m.result === mark).length;
   return {
     ...base,
     rank: { ...base.rank, wins: 301, losses: 188, netRr: -312, avgWin: 24.6, avgLoss: -21.4, rrToNext: 1 },
     session: {
-      netRr: -128,
-      wins: streak.filter((m) => m === "W").length,
-      losses: streak.filter((m) => m === "L").length,
-      startedMs: DEMO_NOW - 13 * HOUR,
-      streak,
+      netRr: session.reduce((a, m) => a + (m.rrEarned ?? 0), 0),
+      wins: countOf("W"),
+      losses: countOf("L"),
+      startedMs: session[0]!.startMs,
+      matches: session,
     },
     maps,
     agents,

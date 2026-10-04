@@ -27,7 +27,7 @@ use opd1_core::matchview::{build_match_view, MatchViewInput};
 use opd1_core::model::{
     build_card, match_summary, BuildCardInput, CurrentRank, DisplayName, EncounterCount,
     EncounterDetailRow, Field, Identity, LiveState, Loadout, MatchResultKind, MmrInput, PartyMark,
-    PlayerCard, PlayerDetails, RememberedSource, Team, TeammateSummary, WeaponSkin,
+    PlayerCard, PlayerDetails, RememberedSource, StreakMark, Team, TeammateSummary, WeaponSkin,
 };
 use opd1_core::mystats::{self, MyStatsInput};
 use opd1_core::names::KnownName;
@@ -891,8 +891,10 @@ fn ms_map_names() -> HashMap<String, String> {
 
 /// The full case: 16 competitive matches (8 wins, 8 losses; every count a power of two, so every rate in
 /// the golden is a dyadic fraction) on 2 maps with 2 agents, spread over a Monday, a Tuesday, a weekend
-/// and today (a Wednesday, 4 matches within 6h = the session). It is built so that all six insights fire,
-/// the ladder promotes and demotes (6 rank changes, 5 sent), and Morning and Night are empty buckets.
+/// and today (a Wednesday, 4 matches within 6h = the session), plus a 17th: a draw just after midnight with no
+/// RR row, map, agent or stats, which ends the session with a chip whose `rrEarned` and `mapId` are null (it
+/// sits in buckets that were empty, so no float in the golden turns non-dyadic). It is built so that all six insights fire,
+/// the ladder promotes and demotes (6 rank changes, 5 sent), and Morning is an empty bucket.
 fn my_stats_full() -> Value {
     // (day, hour, minute, won, on Split): idx 0..16 in play order.
     const GAMES: [(i64, i64, i64, bool, bool); 16] = [
@@ -974,6 +976,34 @@ fn my_stats_full() -> Value {
             start_ms,
         });
     }
+    // The newest match of the session is the odd one: Riot has no RR row for it yet (so `season_id` and the tiers
+    // are null), no map the app can name, no agent, no stats row and no winner (a draw). On the wire its chip has
+    // `rrEarned` and `mapId` null (never 0, never ""), and it is a D chip. It lands on a Thursday, in the Night
+    // bucket, both empty before, and on no map or agent row, so every rate in the golden stays dyadic. It started
+    // 5h55m after the last of the session's others: still the same session.
+    matches.push(CompMatchRow {
+        match_id: "ms-16".into(),
+        map_id: String::new(),
+        start_ms: ms_at(31, 0, 5),
+        winning_team: None,
+        team_id: "Blue".into(),
+        agent_id: None,
+        kills: 0,
+        deaths: 0,
+        assists: 0,
+        score: 0,
+        rounds: None,
+        hs: 0,
+        bs: 0,
+        ls: 0,
+        rounds_won: None,
+        rounds_lost: None,
+        rr_earned: None,
+        season_id: None,
+        tier_before: None,
+        tier_after: None,
+        tier: None,
+    });
 
     let act = ms_act();
     let names = ms_map_names();
@@ -990,7 +1020,7 @@ fn my_stats_full() -> Value {
         has_mmr: true,
         stored_tier: None,
         map_names: &names,
-        now_ms: ms_at(30, 19, 0),
+        now_ms: ms_at(31, 1, 0),
         utc_offset_ms: &utc,
     });
 
@@ -1000,7 +1030,33 @@ fn my_stats_full() -> Value {
     assert_eq!(stats.rank.rr_to_next, Some(12));
     assert_eq!(stats.rank.net_rr, Some(38));
     assert_eq!(stats.insights.len(), 6, "every insight fires");
-    assert_eq!(stats.session.as_ref().map(|s| s.streak.len()), Some(4));
+    let session = stats.session.as_ref().expect("the full case has a session");
+    assert_eq!(
+        session
+            .matches
+            .iter()
+            .map(|m| (
+                m.match_id.as_str(),
+                m.result,
+                m.map_id.as_deref(),
+                m.rr_earned
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("ms-12", StreakMark::Loss, Some(ASCENT_UUID), Some(-14)),
+            ("ms-13", StreakMark::Win, Some(ASCENT_UUID), Some(19)),
+            ("ms-14", StreakMark::Loss, Some(ASCENT_UUID), Some(-16)),
+            ("ms-15", StreakMark::Loss, Some(ASCENT_UUID), Some(-14)),
+            // No RR row and no known map: both null on the wire, never 0 and never "".
+            ("ms-16", StreakMark::Draw, None, None),
+        ],
+        "the session's chips, oldest first: four with a map and an RR change, a draw with neither"
+    );
+    assert_eq!(
+        session.net_rr,
+        Some(-25),
+        "the session's Net RR is the known RR changes' sum, the draw's unknown one left out"
+    );
     assert_eq!(stats.last5.len(), 5);
     assert_eq!((stats.maps.len(), stats.agents.len()), (2, 2));
     assert!(stats.by_daypart.iter().any(|c| c.winrate.is_none()));
@@ -1104,7 +1160,12 @@ fn my_stats_edge() -> Value {
 
 #[test]
 fn my_stats_matches_golden() {
-    check_golden("my_stats", &json!([my_stats_full(), my_stats_edge()]));
+    let both = json!([my_stats_full(), my_stats_edge()]);
+    assert!(
+        !both.to_string().contains("/Game/"),
+        "a Riot map path reached the wire"
+    );
+    check_golden("my_stats", &both);
 }
 
 // ---------------------------------------------------------------------
@@ -1300,7 +1361,11 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
     );
     assert_eq!(
         keys(&stats["session"]),
-        spec(&["netRr", "wins", "losses", "startedMs", "streak"])
+        spec(&["netRr", "wins", "losses", "startedMs", "matches"])
+    );
+    assert_eq!(
+        keys(&stats["session"]["matches"][0]),
+        spec(&["matchId", "mapId", "rrEarned", "startMs", "result"])
     );
     assert_eq!(keys(&stats["last5"][0]), keys(&golden["recent"][0]));
     assert_eq!(

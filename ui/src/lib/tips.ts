@@ -7,7 +7,8 @@
 import { CONTENT_TIERS } from "./details";
 import { actDates, actTitle, count, dateLong, dateShort, durationMin, rrDelta, span, time12 } from "./format";
 import { agentName, mapName, tierLabel } from "./meta";
-import type { DisplayName, EncounterCount, Last5Entry, Meta, PartyMark, Peak, PlayerCard } from "./types";
+import { markResult } from "./mystats";
+import type { DisplayName, EncounterCount, Last5Entry, Meta, PartyMark, Peak, PlayerCard, SessionMatch } from "./types";
 
 /** The first line of a remembered name's tip, by where the name came from (R145). */
 const REMEMBERED_HEAD = {
@@ -134,6 +135,26 @@ export const SESSION_SCOPE = "Current session";
 /** The rank card's progress bar: `74 RR to next tier`; none without a next step (Immortal and up, unranked). */
 export function rrToNextTip(n: number | null | undefined): string {
   return typeof n === "number" ? `${n} RR to next tier` : "";
+}
+
+/**
+ * A Session chip (spec §9.6): the last-5 tile's words with the map in front, `Ascent · +18 RR · 2h`, or
+ * `Ascent · Win · 2h` when Riot gave no RR change. The map is dropped while meta is pending or when it is unknown (no
+ * id, or one the table lacks), so the tip never says `undefined` (§5.8).
+ */
+export function sessionChipTip(m: SessionMatch, meta: Meta | null, nowMs: number): string {
+  const map = mapName(meta, m.mapId);
+  const rest = last5Tip({ result: markResult[m.result], rrEarned: m.rrEarned, startMs: m.startMs }, nowMs);
+  return typeof map === "string" && map !== "" ? `${map} · ${rest}` : rest;
+}
+
+/**
+ * An openable Session chip's accessible name (its text is only a letter): the result as a word in front of the tip, so a
+ * screen reader hears `Loss · Ascent · −14 RR · 2h`. Without a stored RR change the tip already says the word.
+ */
+export function sessionChipLabel(m: SessionMatch, meta: Meta | null, nowMs: number): string {
+  const tip = sessionChipTip(m, meta, nowMs);
+  return m.rrEarned === null ? tip : `${WORD[markResult[m.result]]} · ${tip}`;
 }
 
 /** A rank-change row or the session's start: the local date and clock time, `Sep 29, 2026 · 9:14 PM`. */

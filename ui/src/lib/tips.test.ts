@@ -1,7 +1,7 @@
 // The catalogue's exact strings are in tooltip.test.ts. This file checks the rules
 // every entry must obey: hidden names never leak, and no missing part prints as text.
 import { describe, expect, it } from "vitest";
-import { aprTip, encounterMapTip, encounterTip, heroStatTip, last5Tip, liveTip, loadoutTip, nameTip, partyTip, peakTip, rankTip, winTip } from "./tips";
+import { aprTip, encounterMapTip, encounterTip, heroStatTip, last5Tip, liveTip, loadoutTip, nameTip, partyTip, peakTip, rankTip, sessionChipLabel, sessionChipTip, winTip } from "./tips";
 import type { DisplayName, Meta, PlayerCard } from "./types";
 
 const meta: Meta = { agents: { a1: { name: "Jett" } }, maps: { m1: { name: "Haven" } }, tiers: {} };
@@ -45,6 +45,14 @@ describe("other entries stay clean", () => {
       aprTip(0),
       last5Tip({ result: "win", rrEarned: null, startMs: NOW }, NOW),
       last5Tip({ result: "draw", rrEarned: 0, startMs: NOW + 5 * 60_000 }, NOW),
+      ...[meta, null].flatMap((m) =>
+        [null, "m1", "gone"].flatMap((mapId) =>
+          [null, 0, 18].flatMap((rrEarned) => {
+            const c = { matchId: "x", mapId, rrEarned, startMs: NOW, result: "D" } as const;
+            return [sessionChipTip(c, m, NOW), sessionChipLabel(c, m, NOW)];
+          }),
+        ),
+      ),
       winTip({ actWins: 0, actGames: 0 } as PlayerCard),
       peakTip({ tier: 3, actLabel: "X", actName: "unparseable", sinceActEndMs: 1, actStartMs: 0, actEndMs: 86_400_000 }),
       heroStatTip(null, 0),

@@ -829,7 +829,7 @@ describe("My Stats scenes", () => {
     expect(m.rrSeries).toHaveLength(60);
     expect(m.maps).toHaveLength(7);
     expect(m.agents).toHaveLength(8);
-    expect(m.session?.streak).toHaveLength(15);
+    expect(m.session?.matches).toHaveLength(15);
     expect(m.insights.map((i) => i.kind)).toEqual(["bestMap", "worstMap", "timeOfDay", "weekdayWeekend", "rrEconomy", "last7Days"]);
     expect(m.last5).toHaveLength(5);
     expect(SCENES.mystats.route).toEqual({ name: "mystats" });
@@ -873,9 +873,12 @@ describe("My Stats scenes", () => {
     expect(s.startedMs).toBe(tail[0]!.startMs);
     expect(m.rrSeries.at(-16)!.startMs).toBeLessThan(s.startedMs - 6 * 3_600_000);
     for (let i = 1; i < tail.length; i++) expect(tail[i]!.startMs - tail[i - 1]!.startMs).toBeLessThan(6 * 3_600_000);
-    expect(s.streak.filter((x) => x === "W")).toHaveLength(s.wins);
-    expect(s.streak.filter((x) => x === "L")).toHaveLength(s.losses);
+    expect(s.matches.filter((x) => x.result === "W")).toHaveLength(s.wins);
+    expect(s.matches.filter((x) => x.result === "L")).toHaveLength(s.losses);
     expect(s.netRr).toBe(tail[tail.length - 1]!.absoluteRr - m.rrSeries.at(-16)!.absoluteRr);
+    // Each chip is its point on the ladder: the start, and the RR the point moved by.
+    expect(s.matches.map((x) => x.startMs)).toEqual(tail.map((p) => p.startMs));
+    expect(s.matches.map((x) => x.rrEarned)).toEqual(tail.map((p, i) => p.absoluteRr - (i === 0 ? m.rrSeries.at(-16)!.absoluteRr : tail[i - 1]!.absoluteRr)));
   });
 
   it("the last 5 are the user's own recent rows (the Match page opens the same matches), newest first, with a stat line each", () => {
@@ -888,13 +891,35 @@ describe("My Stats scenes", () => {
     }
   });
 
+  it("every session chip opens a Match page the demo answers, with the chip's own map, start and result, and the user's team first", () => {
+    const WORD = { W: "win", L: "loss", D: "draw" } as const;
+    let n = 0;
+    for (const name of NAMES.filter((x) => x.startsWith("mystats"))) {
+      const session = SCENES[name].mystats && SCENES[name].mystats !== "pending" ? SCENES[name].mystats.session : null;
+      for (const c of session?.matches ?? []) {
+        n++;
+        const v = matchFor(c.matchId);
+        expect([v.matchId, v.mapId, v.startMs, v.queueId, v.perspective], `${name} ${c.matchId}`).toEqual([c.matchId, c.mapId, c.startMs, "competitive", "self"]);
+        expect(v.teams[0]!.result, `${name} ${c.matchId}`).toBe(WORD[c.result]);
+        expect(v.teams[0]!.players.some((p) => p.isSelf)).toBe(true);
+        // A draw is level on rounds; the others have a winner.
+        expect(v.teams[0]!.roundsWon === v.teams[1]!.roundsWon).toBe(c.result === "D");
+      }
+    }
+    expect(n).toBeGreaterThan(40); // the full demo's 15 behind several scenes, the unranked 3, the longest names' 30
+    const ids = SCENES.mystats.mystats && SCENES.mystats.mystats !== "pending" ? SCENES.mystats.mystats.session!.matches.map((c) => c.matchId) : [];
+    expect(new Set(ids).size).toBe(ids.length);
+    // The user's own last three are the same matches the Recent Matches rows open.
+    expect(ids.slice(-3)).toEqual([2, 1, 0].map((i) => recentMatchId("fahad", i)));
+  });
+
   it("every map and agent id exists in the meta the scene uses; the longest-names scene names each only once", () => {
     for (const n of NAMES.filter((x) => x.startsWith("mystats"))) {
       const s = SCENES[n];
       if (!s.mystats || s.mystats === "pending") continue;
       const m = meta_(n);
       const ids = (kind: "maps" | "agents", xs: string[]) => xs.forEach((id) => expect(m[kind][id], `${n}: ${kind} ${id}`).toBeDefined());
-      ids("maps", [...s.mystats.maps.map((r) => r.id), ...s.mystats.last5.map((r) => r.mapId)]);
+      ids("maps", [...s.mystats.maps.map((r) => r.id), ...s.mystats.last5.map((r) => r.mapId), ...(s.mystats.session?.matches.map((c) => c.mapId!) ?? [])]);
       ids("agents", [...s.mystats.agents.map((r) => r.id), ...s.mystats.last5.flatMap((r) => (r.agentId ? [r.agentId] : []))]);
     }
     const m = meta_("mystats-longnames");
@@ -938,8 +963,8 @@ describe("My Stats scenes", () => {
     const m = stats("mystats-longnames");
     expect(Math.max(...m.maps.map((r) => r.games))).toBeGreaterThanOrEqual(100);
     expect(Math.min(...m.maps.map((r) => r.netRr!))).toBeLessThanOrEqual(-300);
-    expect(m.session?.streak).toHaveLength(30);
-    expect(m.session?.streak).toContain("D");
+    expect(m.session?.matches).toHaveLength(30);
+    expect(m.session?.matches.map((x) => x.result)).toContain("D");
     expect(m.rank.wins! + m.rank.losses!).toBeGreaterThan(300);
   });
 

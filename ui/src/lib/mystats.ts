@@ -2,7 +2,10 @@
 // tooltip strings live in tips.ts. Nothing here reads the clock or the DOM.
 import { DASH, rrDelta } from "./format";
 import { tierLabel } from "./meta";
-import type { Meta, RrPoint, WinCell } from "./types";
+import type { Meta, Result, RrPoint, StreakMark, WinCell } from "./types";
+
+/** The wire letter of a session match (W / L / D) as the `Result` word the chips and tips are keyed by. */
+export const markResult: Record<StreakMark, Result> = { W: "win", L: "loss", D: "draw" };
 
 /** "−" instead of the hyphen the backend writes before a number in an insight (`-15 RR`): the spec's U+2212. */
 export function minusSigns(text: string): string {

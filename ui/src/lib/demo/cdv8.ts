@@ -432,6 +432,8 @@ export function matchFor(matchId: string, live?: readonly PlayerCard[]): MatchDe
 
 function buildMatch(matchId: string): MatchDetailsView {
   if (/^mdemo:[a-z]+:dm$/.test(matchId)) return deathmatch(matchId);
+  const sm = SESSION_ID.exec(matchId);
+  if (sm) return sessionMatch(matchId, Number(sm[1]), sm[2] as Letter, sm[3]!);
   const m = /^mdemo:([a-z]+):([re])(\d)$/.exec(matchId);
   const r = m && rawById(m[1]!);
   if (!m || !r) throw new Error(`demo: unknown match ${matchId}`);
@@ -451,6 +453,11 @@ function teamsOf(a: ScoreRow[], b: ScoreRow[], ra: [number, number], letter: Let
 function recentMatch(r: Raw, i: number, matchId: string): MatchDetailsView {
   const d = recentData(r)[i];
   if (!d) throw new Error(`demo: ${r.id} has no recent row ${i}`);
+  return matchOf(r, d, matchId);
+}
+
+/** The user's own game (`recentData`'s shape) as the Match page shows it. */
+function matchOf(r: Raw, d: Recent, matchId: string): MatchDetailsView {
   const focus = scoreRow({
     puuid: PUUID[r.id]!, name: displayName(r), agent: d.agent, tier: d.tier, kda: d.kda, hs: d.hs,
     isSelf: !!r.self, isFocus: true,
@@ -463,6 +470,24 @@ function recentMatch(r: Raw, i: number, matchId: string): MatchDetailsView {
     matchId, mapId: MAPS[d.map], queueId: "competitive", startMs: d.startMs, durationMs: d.durationMs,
     perspective: r.self ? "self" : "focus", teams: teamsOf(a, b, d.rounds, d.letter),
   };
+}
+
+/** A match of My Stats' demo session that is not one of the user's recent rows: `mdemo:s:<startMs>:<W|L|D>:<map uuid>`. */
+const SESSION_ID = /^mdemo:s:(\d+):([WLD]):([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/;
+
+/** The id of a demo session match: everything the Match page needs rides in it, so any scene can answer it. */
+export const sessionMatchId = (startMs: number, result: Letter, mapId: string): string => `mdemo:s:${startMs}:${result}:${mapId}`;
+
+/**
+ * A session match of the user (Fahad): one of the design's own recent rows of the same result supplies the players, the
+ * scores and the stats, under the match's own map, start and result (a draw is 13–13), so the page agrees with the chip.
+ */
+function sessionMatch(matchId: string, startMs: number, letter: Letter, mapId: string): MatchDetailsView {
+  const r = rawById("fahad")!;
+  const pool = recentData(r).filter((d) => d.letter === (letter === "D" ? "W" : letter));
+  const t = pool[Math.floor(startMs / MIN) % pool.length]!;
+  const d: Recent = { ...t, letter, rounds: letter === "D" ? [13, 13] : t.rounds, startMs };
+  return { ...matchOf(r, d, matchId), mapId };
 }
 
 function encounterMatch(r: Raw, i: number, matchId: string): MatchDetailsView {

@@ -2,7 +2,7 @@
 // Agent Select forcing Live, the start page, and the page staying put when new data arrives.
 import { expect, test, type Page } from "@playwright/test";
 import { PUUID, recentMatchId } from "../src/lib/demo/cdv8";
-import { myStatsFull } from "../src/lib/demo/mystats";
+import { myStatsFull, myStatsLongnames, myStatsUnranked } from "../src/lib/demo/mystats";
 import { openScene, waitPage } from "./harness";
 
 /** DEV only: a value read from the app's own module instances (the dev server serves each module at one URL). */
@@ -85,6 +85,78 @@ test("a Recent Matches row opens its match with the user as the focus; the tab s
   await expect(tab(page, "My Stats")).toHaveClass(/\bon\b/);
   expect(await matchesClosed(page)).toBe(closedBefore + 1); // leaving the Match page tells Rust (close_match)
   await expect(page.locator(".mystats .last5 .rrow")).toHaveCount(5);
+});
+
+test("a Session chip opens its match with the user as the focus; the tab stays My Stats; Back returns to the same scroll position", async ({ page }) => {
+  const m = myStatsFull();
+  await openScene(page, "mystats");
+  const chips = page.locator(".mystats .session .mc");
+  await expect(chips).toHaveCount(m.session!.matches.length);
+  await page.locator("#app .scroll").evaluate((el) => (el.scrollTop = 150));
+  const chip = chips.nth(4);
+  await chip.scrollIntoViewIfNeeded();
+  const y = await scrollTop(page);
+  const closedBefore = await matchesClosed(page);
+  await chip.click();
+  await waitPage(page, "loaded");
+  const want = m.session!.matches[4]!;
+  expect(await route(page)).toEqual({ name: "match", matchId: want.matchId, focusPuuid: PUUID.fahad, from: "recent", back: "mystats" });
+  await expect(page.locator(".mystats")).toHaveCount(0);
+  await expect(tab(page, "My Stats")).toHaveClass(/\bon\b/);
+  await expect(tab(page, "Live")).toHaveClass(/\boff\b/);
+  // The chip's own match, from the user's side: its map and result as the chip said, their team first, the user's row framed.
+  await expect(page.locator(".match .thead .tlabel").first()).toHaveText("Your team");
+  await expect(page.locator(".match .srow .selfframe")).toHaveCount(1);
+  expect(await scrollTop(page), "the Match starts at the top").toBe(0);
+
+  await page.locator(".match .back").click();
+  expect(await route(page)).toEqual({ name: "mystats" });
+  await expect(page.locator(".mystats .session .mc")).toHaveCount(m.session!.matches.length);
+  expect(await scrollTop(page)).toBe(y);
+  expect(await matchesClosed(page)).toBe(closedBefore + 1);
+});
+
+test("every kind of Session chip opens a Match page that agrees with it: the first, a loss, the newest and a draw", async ({ page }) => {
+  const opens = async (scene: string, i: number, mark: string) => {
+    await openScene(page, scene);
+    await page.locator(".mystats .session .mc").nth(i).click();
+    await waitPage(page, "loaded");
+    // The Match header's result chip is the user's team's: the chip clicked says the same thing.
+    await expect(page.locator(".match .mhead .chip"), `${scene} chip ${i}`).toHaveText(mark);
+  };
+  const full = myStatsFull().session!.matches;
+  for (const i of [0, full.findIndex((c) => c.result === "L"), full.length - 1]) await opens("mystats", i, full[i]!.result);
+  const long = myStatsLongnames().session!.matches; // the longest-names scene's session has draws
+  const d = long.findIndex((c) => c.result === "D");
+  expect(d).toBeGreaterThanOrEqual(0);
+  await opens("mystats-longnames", d, "D");
+});
+
+test("Enter and Space on a focused Session chip open its match (keyboard)", async ({ page }) => {
+  for (const key of ["Enter", " "]) {
+    await openScene(page, "mystats");
+    const chip = page.locator(".mystats .session .mc").first();
+    await chip.focus();
+    await page.keyboard.press(key);
+    await waitPage(page, "loaded");
+    expect(await route(page), key).toMatchObject({ name: "match", matchId: myStatsFull().session!.matches[0]!.matchId, from: "recent", back: "mystats" });
+    await page.locator(".match .back").click();
+    await expect(page.locator(".mystats")).toHaveCount(1);
+  }
+});
+
+test("Session chips are reachable by Tab, in order, and a placement session (no stored RR) opens too", async ({ page }) => {
+  await openScene(page, "mystats-unranked");
+  const chips = page.locator(".mystats .session .mc");
+  await expect(chips).toHaveCount(3);
+  await chips.first().focus();
+  await page.keyboard.press("Tab");
+  await expect(chips.nth(1)).toBeFocused();
+  await page.keyboard.press("Tab");
+  await expect(chips.nth(2)).toBeFocused();
+  await page.keyboard.press("Enter");
+  await waitPage(page, "loaded");
+  expect(await route(page)).toMatchObject({ name: "match", matchId: myStatsUnranked().session!.matches[2]!.matchId, back: "mystats" });
 });
 
 test("Enter on a focused Recent Matches row opens its match (keyboard)", async ({ page }) => {

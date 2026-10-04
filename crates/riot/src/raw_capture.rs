@@ -268,6 +268,13 @@ fn is_uuid_bytes(b: &[u8]) -> bool {
 /// characters — the way the log writes ids (`logbuf::short`). A uuid glued to
 /// more hex digits is left alone: it is not one.
 pub(crate) fn shorten_uuids(s: &str) -> String {
+    shorten_uuids_with(s, true)
+}
+
+/// [`shorten_uuids`], with the left neighbour optionally ignored
+/// (`left_boundary: false`): a uuid right after a hex digit (`id` + a puuid,
+/// where `d` is hex) is then shortened too. The right neighbour still counts.
+fn shorten_uuids_with(s: &str, left_boundary: bool) -> String {
     let b = s.as_bytes();
     let mut out = String::with_capacity(s.len());
     let mut i = 0;
@@ -275,7 +282,7 @@ pub(crate) fn shorten_uuids(s: &str) -> String {
         let is_id = i + 36 <= b.len()
             && is_uuid_bytes(&b[i..i + 36])
             && !b.get(i + 36).is_some_and(u8::is_ascii_hexdigit)
-            && !(i > 0 && b[i - 1].is_ascii_hexdigit());
+            && !(left_boundary && i > 0 && b[i - 1].is_ascii_hexdigit());
         if is_id {
             out.push_str(&s[i..i + 8]);
             i += 36;
@@ -305,6 +312,12 @@ fn cut_chars(s: String, max_chars: usize) -> String {
 /// Never carries a token or a full puuid; carries no URL unless the body itself
 /// quoted one.
 pub(crate) fn excerpt(body: &[u8], max_chars: usize) -> String {
+    excerpt_with(body, max_chars, true)
+}
+
+/// [`excerpt`]; `left_boundary: false` shortens a uuid whatever precedes it
+/// (see [`shorten_uuids_with`]).
+fn excerpt_with(body: &[u8], max_chars: usize, left_boundary: bool) -> String {
     let redacted = match serde_json::from_slice::<Value>(body) {
         Ok(mut value) => {
             redact_value(&mut value);
@@ -312,9 +325,30 @@ pub(crate) fn excerpt(body: &[u8], max_chars: usize) -> String {
         }
         Err(_) => redact_jwts_in_plain_text(&String::from_utf8_lossy(body)),
     };
-    let shortened = shorten_uuids(&redacted);
+    let shortened = shorten_uuids_with(&redacted, left_boundary);
     let one_line = shortened.split_whitespace().collect::<Vec<_>>().join(" ");
     cut_chars(one_line, max_chars)
+}
+
+/// [`excerpt`] for a text that is not a response body (the UI's `ui_log`
+/// lines): redacted like a capture, on one line, every full uuid shortened to
+/// 8 characters, and at most `max_chars` characters **including** the closing
+/// `…` when it was cut (so a 500-character budget is never 501). Unlike a
+/// body, a free text has no clean boundary around an id (`"id" + puuid` is
+/// glued to a hex digit), so a uuid is shortened whatever precedes it. Never
+/// panics, whatever the input. It recognises secrets and ids only: a player
+/// name in a free text is invisible to it.
+pub fn log_excerpt(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let cut = excerpt_with(text.as_bytes(), max_chars, false);
+    if cut.chars().count() <= max_chars {
+        return cut;
+    }
+    // `excerpt` appends its ellipsis after `max_chars` characters: make room.
+    let kept: String = cut.chars().take(max_chars - 1).collect();
+    format!("{kept}…")
 }
 
 // ---------------------------------------------------------------------
@@ -753,6 +787,52 @@ mod tests {
         let exact = "a".repeat(200);
         assert_eq!(excerpt(exact.as_bytes(), LOG_EXCERPT_CHARS), exact);
         assert_eq!(excerpt(b"", LOG_EXCERPT_CHARS), "");
+    }
+
+    #[test]
+    fn log_excerpt_is_at_most_max_chars_including_the_ellipsis() {
+        let long = "é".repeat(2_000);
+        let e = log_excerpt(&long, 500);
+        assert_eq!(e.chars().count(), 500, "499 + the ellipsis");
+        assert!(e.starts_with(&"é".repeat(499)) && e.ends_with('…'));
+        // Exactly 500 is not cut; a tiny budget never overruns; 0 is empty.
+        let exact = "a".repeat(500);
+        assert_eq!(log_excerpt(&exact, 500), exact);
+        assert_eq!(log_excerpt("abcdef", 3).chars().count(), 3);
+        assert_eq!(log_excerpt("abcdef", 1), "…");
+        assert_eq!(log_excerpt("abcdef", 0), "");
+        assert_eq!(log_excerpt("", 500), "");
+    }
+
+    #[test]
+    fn log_excerpt_shortens_a_uuid_glued_to_a_hex_digit_but_excerpt_does_not() {
+        // `id` ends in a hex digit: in a free text the id is still a puuid.
+        let glued_left = format!("id{PUUID}");
+        assert_eq!(log_excerpt(&glued_left, 200), "idaaaaaaaa");
+        assert_eq!(
+            log_excerpt(&format!("\"id\"{PUUID} and {PUUID}!"), 200),
+            "\"id\"aaaaaaaa and aaaaaaaa!"
+        );
+        let json = json!({"note": format!("id{PUUID}")}).to_string();
+        let e = log_excerpt(&json, 200);
+        assert!(!e.contains(PUUID) && e.contains("idaaaaaaaa"), "{e}");
+        // A response body keeps the stricter rule.
+        assert_eq!(excerpt(glued_left.as_bytes(), 200), glued_left);
+        // The right neighbour still counts in both.
+        let glued_right = format!("{PUUID}ff");
+        assert_eq!(log_excerpt(&glued_right, 200), glued_right);
+    }
+
+    #[test]
+    fn log_excerpt_redacts_collapses_and_shortens_like_excerpt() {
+        let text = format!("window: bad {JWT}\nfor {PUUID}\n\n  at   app.js:1:2");
+        let e = log_excerpt(&text, 500);
+        assert!(!e.contains(JWT) && !e.contains(PUUID), "{e}");
+        assert_eq!(e, "window: bad REDACTED for aaaaaaaa at app.js:1:2");
+        // A JSON-shaped message is walked like a body: secret-named keys go.
+        let json = json!({"accessToken": "opaque-ui-secret", "note": "ok"}).to_string();
+        let e = log_excerpt(&json, 500);
+        assert!(!e.contains("opaque-ui-secret") && e.contains("ok"), "{e}");
     }
 
     #[test]

@@ -1124,6 +1124,11 @@ async fn the_presence_version_replaces_a_lower_source_once_the_game_shows_up() {
     let session = session_for(&server, &tmp).await;
     assert_eq!(session.client_version(), "release-api-old");
     assert_eq!(session.client_version_source(), VersionSource::ValorantApi);
+    assert_eq!(
+        session.client_version_and_source(),
+        ("release-api-old".to_string(), VersionSource::ValorantApi),
+        "both under one lock"
+    );
 
     for (version, p) in [
         ("release-api-old", mmr_path()),
@@ -1153,6 +1158,10 @@ async fn the_presence_version_replaces_a_lower_source_once_the_game_shows_up() {
     );
     assert_eq!(session.client_version(), GAME_VERSION);
     assert_eq!(session.client_version_source(), VersionSource::Presence);
+    assert_eq!(
+        session.client_version_and_source(),
+        (GAME_VERSION.to_string(), VersionSource::Presence)
+    );
     let _: Value = session
         .glz(&format!("/pregame/v1/players/{SELF_PUUID}"))
         .await

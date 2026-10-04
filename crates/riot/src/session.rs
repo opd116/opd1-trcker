@@ -22,7 +22,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use opd1_core::lockfile::parse_lockfile;
-use opd1_core::shards::{parse_client_version, parse_shards};
+use opd1_core::shards::{parse_client_version, parse_shards, Shards};
 
 use crate::locks::locked;
 use crate::raw_capture::{excerpt, shorten_uuids, ErrorDump, RawCaptures, LOG_EXCERPT_CHARS};
@@ -250,6 +250,10 @@ pub struct RiotSession {
     glz_base: String,
     /// `shared.{pd shard}.a.pvp.net` (content-service, R162).
     shared_base: String,
+    /// The region/shard pair read from `ShooterGame.log` at connect. A test
+    /// that points the bases at a mock server still has the pair its log
+    /// names. Shown in the log header ([`RiotSession::shards`]).
+    shards: Shards,
     puuid: String,
     auth: Mutex<AuthState>,
     /// The shared rate (burst 10, 10 rps) every pd/glz call draws from. Its own
@@ -464,6 +468,7 @@ impl RiotSession {
             pd_base,
             glz_base,
             shared_base,
+            shards,
             puuid: entitlements.subject,
             auth: Mutex::new(AuthState {
                 access_token: entitlements.access_token,
@@ -584,6 +589,12 @@ impl RiotSession {
         changed
     }
 
+    /// The region/shard pair this session was connected with (`pd` shard,
+    /// glz region, glz shard), as `ShooterGame.log` named them. Not secret.
+    pub fn shards(&self) -> &Shards {
+        &self.shards
+    }
+
     /// The `X-Riot-ClientVersion` this session sends on pd/glz calls.
     pub fn client_version(&self) -> String {
         locked(&self.auth).client_version.clone()
@@ -592,6 +603,13 @@ impl RiotSession {
     /// Where [`client_version`](Self::client_version) came from.
     pub fn client_version_source(&self) -> VersionSource {
         locked(&self.auth).client_version_source
+    }
+
+    /// Both of the above under one lock: a version and the source that
+    /// really gave it, even while a presence read changes them.
+    pub fn client_version_and_source(&self) -> (String, VersionSource) {
+        let auth = locked(&self.auth);
+        (auth.client_version.clone(), auth.client_version_source)
     }
 
     /// `GET`s a path on the local client (`127.0.0.1:{port}`), with Basic
@@ -1204,6 +1222,21 @@ mod tests {
         )
         .await
         .expect("connect to the mock client")
+    }
+
+    #[tokio::test]
+    async fn the_session_keeps_the_shards_its_log_named_even_with_the_bases_overridden() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        let session = mock_session(dir.path(), &server).await;
+        // `mock_session` points every base at the mock server; the pair is
+        // still the one `ShooterGame.log` carries.
+        assert_eq!(session.pd_base, server.uri());
+        let shards = session.shards();
+        assert_eq!(
+            (&*shards.pd, &*shards.glz_region, &*shards.glz_shard),
+            ("eu", "eu-1", "eu")
+        );
     }
 
     #[tokio::test]

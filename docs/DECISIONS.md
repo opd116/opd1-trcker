@@ -1274,6 +1274,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** One resize per map on first download. Savings: about 53 KB per map picture on the Live page, about 0.4 MB on a Details page with 8 maps, and about 33 MB for each of the two oversized maps. The Live In Game page's decoded images total about 5.2 MB, almost half of it the ten card arts (160 px wide, needed at that size by the Details hero).
 - **Status:** active
 
+### R182 — UI failures reach the log; the log starts with a header line
+
+- **What:** Claude's call (brief B1, B2). (1) A crashed page, a `window` error and an unhandled promise rejection are reported by `ui/src/lib/uilog.ts` (installed before any other module) through a new command `ui_log(level, message)`: one line `kind: Name: message @ path:line:col`, at most 500 characters, never an object's field values (an object becomes its `message` or `[object Object] [key names]`), a repeat within 10 s dropped, at most 20 sends per 10 s, only inside Tauri, never throwing; the console sinks are dev-only and compiled out. Rust logs the line under the `ui` module (target `opd1_trcker::ui`), after `raw_capture::log_excerpt` (secret keys and JWTs redacted, one line, every full uuid shortened to 8 characters, 500 characters at most) and a process-wide limiter of 20 ring lines per rolling minute (the `N lines dropped` notice included). The command takes no app state, so an error before `setup()` is logged too. (2) `copy_log` (Ctrl+Shift+L, now run off the UI thread) and the dump's `log.txt` start with one line: `OPD1 TRCKER <version> · Windows <major.minor.build> · stage <s> · settled <b> · shard <pd>/<glz region>/<glz shard> · client <version> (<source>) · act <first 8 of the id> <label> (<riot|valorant-api>)`, `—` for an unknown part. `RiotSession` keeps the parsed shards; the client version and its source are read together; `AppState::act_source()` says which source chose the act; the Windows build comes from `windows-version` (already in the dependency tree; Windows builds only).
+- **Why:** UI failures were invisible in a release build. The header answers the first questions about a user's log (which build, which Windows, which stage, which shard and act) without a round trip.
+- **Cost:** No request. One IPC call per reported UI failure, bounded on both sides. Rust cannot recognise a player's name in free text; the UI is that barrier.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

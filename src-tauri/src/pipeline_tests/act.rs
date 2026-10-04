@@ -188,6 +188,45 @@ async fn a_later_failure_keeps_riots_answer_while_its_act_has_not_ended() {
     assert_eq!(current_id(&h.st).as_deref(), Some("act-new-e"));
 }
 
+/// B2: the log header names where the current act came from.
+#[tokio::test]
+async fn the_log_header_names_riot_or_valorant_api_as_the_acts_source() {
+    let h = harness().await;
+    let n = now_ms();
+    let header = |h: &Harness| {
+        crate::commands::log_text(&h.st)
+            .lines()
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    h.st.set_acts_for_test(vec![
+        api_act("act-old-h", "ACT IV", n - 60 * D, n + D),
+        api_act("act-new-h", "ACT V", n + D, n + 50 * D),
+    ]);
+    assert_eq!(h.st.act_source(), "valorant-api");
+    assert!(
+        header(&h).ends_with(" · act act-old- V26 A4 (valorant-api)"),
+        "{}",
+        header(&h)
+    );
+
+    // Riot says the next act already runs: it is the current one, from Riot.
+    let mut riot = riot_new_act(n, n + 50 * D);
+    riot.current.id = "act-new-h".into();
+    h.st.set_riot_acts_for_test(Some(riot), n);
+    assert_eq!(h.st.act_source(), "riot");
+    assert!(
+        header(&h).ends_with(" · act act-new- V26 A5 (riot)"),
+        "{}",
+        header(&h)
+    );
+
+    // Riot's answer withdrawn: back to valorant-api's dates.
+    h.st.set_riot_acts_for_test(None, n);
+    assert_eq!(h.st.act_source(), "valorant-api");
+}
+
 #[tokio::test]
 async fn a_failure_after_riots_act_ended_falls_back_to_the_date_rule() {
     let h = harness().await;

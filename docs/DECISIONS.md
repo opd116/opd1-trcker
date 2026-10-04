@@ -1309,6 +1309,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** `live` is held for one emit, as `publish()` already does. No caller of `notify` / `notify_now` may hold `live` (all checked; the rule is in the `state.rs` header).
 - **Status:** active (closes the window left by R174's review round 1)
 
+### R187 — The DB stays fast at a heavy user's size; the encounter queries drive from the other player
+
+- **What:** Claude's call (brief B7). A synthetic DB the size of a heavy user's (8,000 matches, 80,000 match-player rows, 4,400 competitive, 2,000 of the user's competitive updates, 3,000 stored matches without the user, `ANALYZE` run) is built through the real `open_db` and `Repo` paths in `crates/core/tests/common/scale.rs` and shared by a core test and a `src-tauri` test, which time every hot read (the card bundle `load_player_db`, `load_my_stats`, Player Details' `details::build`, encounters, top teammates, the last-5 and comp-update reads) against a loose 1,000 ms tripwire and print them against a 50 ms goal. `EXPLAIN QUERY PLAN` tests pin every hot read to index seeks with no base-table scan, with and without SQLite statistics; the queries they pin are `pub const`s (no SQL copied into tests). The run found one slow path: `ENCOUNTER_COUNTS_SQL` and `ENCOUNTERS_SQL` walked all of the user's rows for every player; they now start from the other player's rows (`CROSS JOIN` pins that order) and seek the user's row by key, with results checked identical on 2,044 player pairs. No index or migration was needed (`user_version` stays 3). Dev builds compile SQLite at `-O3` so test timings mean something.
+- **Why:** The DB is the app's memory and only grows; a card, Details or My Stats must not get slower with it.
+- **Cost:** About 5 s more per test run. A one-time slower `libsqlite3-sys` compile in dev and CI (about 49 s per cache miss). Release builds unchanged. A stranger's encounter read went from about 8 ms to 0.1 ms; a 9-player roster's encounter counts from about 70 ms to about 9 ms.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

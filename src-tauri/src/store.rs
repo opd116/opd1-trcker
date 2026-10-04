@@ -269,20 +269,25 @@ pub fn load_player_db(repo: &Repo, self_puuid: Option<&str>, puuid: &str) -> Res
     })
 }
 
+/// [`recent_refs`]' query (`?1` the player): the newest two `history_index`
+/// rows by `idx_history_index_puuid_start` (no sort), each match's team and
+/// party by the `(match_id, puuid)` primary key. Public so a test can
+/// `EXPLAIN QUERY PLAN` exactly this text.
+pub const RECENT_REFS_SQL: &str = "\
+SELECT h.match_id, h.queue_id, mp.team_id, mp.party_id
+FROM history_index h
+LEFT JOIN match_players mp ON mp.match_id = h.match_id AND mp.puuid = h.puuid
+WHERE h.puuid = ?1
+ORDER BY h.start_ms DESC
+LIMIT 2";
+
 /// A player's last two matches from their own history listing
 /// (`history_index`: the sync indexes their last 2 matches in any queue
 /// plus their last 5 competitive ones), newest first. A match whose
 /// details aren't stored is `None` (unknown team/party — links nothing).
 /// Free-for-all matches have no team (`team_id: None`).
 pub fn recent_refs(conn: &Connection, puuid: &str) -> Result<[Option<SharedRef>; 2]> {
-    let mut stmt = conn.prepare(
-        "SELECT h.match_id, h.queue_id, mp.team_id, mp.party_id
-         FROM history_index h
-         LEFT JOIN match_players mp ON mp.match_id = h.match_id AND mp.puuid = h.puuid
-         WHERE h.puuid = ?1
-         ORDER BY h.start_ms DESC
-         LIMIT 2",
-    )?;
+    let mut stmt = conn.prepare(RECENT_REFS_SQL)?;
     let rows = stmt.query_map(params![puuid], |row| {
         let match_id: String = row.get(0)?;
         let queue_id: String = row.get(1)?;
@@ -301,9 +306,24 @@ pub fn recent_refs(conn: &Connection, puuid: &str) -> Result<[Option<SharedRef>;
     Ok(out)
 }
 
-/// The `comp_updates` columns [`comp_update_row`] reads, in its order.
-const COMP_UPDATE_COLUMNS: &str =
-    "match_id, season_id, tier_after, tier_before, rr_after, rr_earned, map_id, start_ms";
+/// [`recent_comp_updates`]' query (`?1` the player, `?2` the limit): the
+/// columns [`comp_update_row`] reads, in its order. `idx_comp_updates_puuid_start`
+/// hands the player's rows over newest first, so there is no sort step. Public
+/// so a test can `EXPLAIN QUERY PLAN` exactly this text.
+pub const RECENT_COMP_UPDATES_SQL: &str = "\
+SELECT match_id, season_id, tier_after, tier_before, rr_after, rr_earned, map_id, start_ms
+FROM comp_updates
+WHERE puuid = ?1 ORDER BY start_ms DESC LIMIT ?2";
+
+/// `season_or_recent_comp_updates`' query (`?1` the player, `?2` the season,
+/// `?3` the earliest start of the "any season" rows): the same columns, by the
+/// same index (the season is a filter on the player's own rows, not a seek).
+/// Public so a test can `EXPLAIN QUERY PLAN` exactly this text.
+pub const SEASON_OR_RECENT_COMP_UPDATES_SQL: &str = "\
+SELECT match_id, season_id, tier_after, tier_before, rr_after, rr_earned, map_id, start_ms
+FROM comp_updates
+WHERE puuid = ?1 AND (season_id = ?2 OR start_ms >= ?3)
+ORDER BY start_ms DESC";
 
 fn comp_update_row(row: &rusqlite::Row) -> Result<CompUpdateRow> {
     Ok(CompUpdateRow {
@@ -324,10 +344,7 @@ pub fn recent_comp_updates(
     puuid: &str,
     limit: u32,
 ) -> Result<Vec<CompUpdateRow>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {COMP_UPDATE_COLUMNS} FROM comp_updates
-         WHERE puuid = ?1 ORDER BY start_ms DESC LIMIT ?2"
-    ))?;
+    let mut stmt = conn.prepare(RECENT_COMP_UPDATES_SQL)?;
     let rows = stmt.query_map(params![puuid, limit], comp_update_row)?;
     rows.collect()
 }
@@ -340,11 +357,7 @@ fn season_or_recent_comp_updates(
     season_id: &str,
     since_ms: i64,
 ) -> Result<Vec<CompUpdateRow>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {COMP_UPDATE_COLUMNS} FROM comp_updates
-         WHERE puuid = ?1 AND (season_id = ?2 OR start_ms >= ?3)
-         ORDER BY start_ms DESC"
-    ))?;
+    let mut stmt = conn.prepare(SEASON_OR_RECENT_COMP_UPDATES_SQL)?;
     let rows = stmt.query_map(params![puuid, season_id, since_ms], comp_update_row)?;
     rows.collect()
 }

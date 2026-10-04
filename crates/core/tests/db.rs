@@ -3,6 +3,10 @@
 
 use std::path::Path;
 
+// The scale fixture's plan helper (`plan_of`); the rest of it is `db_scale.rs`'.
+#[path = "common/scale.rs"]
+mod scale;
+
 use opd1_core::db::open_db;
 use opd1_core::db::repo::{
     self, CompUpdateRow, EncounterRow, HistoryEntry, Match, MatchPlayer, MatchTeam, MmrSnapshot,
@@ -1567,6 +1571,20 @@ fn encounter_counts_equal_encounters_len() {
     )
     .unwrap();
 
+    // The mirror: a competitive match with the other player and a third one
+    // but WITHOUT the user is nobody's encounter with the user. The queries
+    // start from the other player's rows, so a match the user is not in must
+    // be dropped by the user-row seek, in the count and in the list alike.
+    repo.upsert_match(
+        &sample_match("elsewhere", 7_000, None),
+        &[],
+        &[
+            sample_player("other", "Blue", "Other", "222"),
+            sample_player("third", "Blue", "Third", "333"),
+        ],
+    )
+    .unwrap();
+
     let e = repo.encounters("self", "other").unwrap();
     assert_eq!(
         repo.encounter_counts("self", "other").unwrap(),
@@ -1574,6 +1592,11 @@ fn encounter_counts_equal_encounters_len() {
     );
     assert_eq!((e.with, e.against), (3, 2));
     assert_eq!(e.with + e.against, e.matches.len() as u32);
+    assert!(e.matches.iter().all(|m| m.match_id != "elsewhere"));
+    // The third player never met the user either, and the other direction
+    // (the user's rows against the other player's) agrees.
+    assert_eq!(repo.encounter_counts("self", "third").unwrap(), (0, 0));
+    assert!(repo.encounters("self", "third").unwrap().matches.is_empty());
 }
 
 #[test]
@@ -1638,7 +1661,12 @@ fn encounters_count_competitive_matches_only() {
 #[test]
 fn the_encounter_queries_are_index_backed() {
     // R156 adds the queue check: it must stay a key seek on `matches`, and
-    // neither query may scan a base table.
+    // neither query may scan a base table. B7 pins the drive order: the OTHER
+    // player's rows come first (`idx_match_players_puuid`) and the user's row
+    // is a primary-key seek. The user is in every match they played
+    // (thousands), so driving from the user's rows instead walks all of them
+    // for every card on screen (8 ms per stranger at 5 000 matches,
+    // `tests/db_scale.rs`).
     let repo = repo_in_memory();
     for (name, sql) in [
         ("encounters", repo::ENCOUNTERS_SQL),
@@ -1664,9 +1692,9 @@ fn the_encounter_queries_are_index_backed() {
         // (alias, index and key); SQLite says `COVERING INDEX` when the
         // query reads nothing else from the row.
         for (alias, seek) in [
-            ("mp_self", "idx_match_players_puuid (puuid=?)"),
+            ("mp_other", "idx_match_players_puuid (puuid=?)"),
             (
-                "mp_other",
+                "mp_self",
                 "sqlite_autoindex_match_players_1 (match_id=? AND puuid=?)",
             ),
             ("m", "sqlite_autoindex_matches_1 (match_id=?)"),
@@ -1677,7 +1705,69 @@ fn the_encounter_queries_are_index_backed() {
                 "{name}: no `{alias}` seek by {seek} in {plan:?}"
             );
         }
+        // The first table read is the other player's (the user's row, and the
+        // match, are seeks after it, in whichever order SQLite likes).
+        assert_eq!(
+            plan.first().map(|d| d.starts_with("SEARCH mp_other USING")),
+            Some(true),
+            "{name}: the other player's rows must drive: {plan:?}"
+        );
     }
+}
+
+// ---------------------------------------------------------------------
+// B7: the other hot reads are index-backed too (`EXPLAIN QUERY PLAN`)
+// ---------------------------------------------------------------------
+//
+// Each of these runs for every card on screen, or for Player Details. The
+// timings on a heavy user's database are `tests/db_scale.rs`'; these pin the
+// reason they stay fast: every table is read by a key seek, nothing is
+// scanned. The plans are the schema's (an empty database); `db_scale.rs` checks
+// that none changes once `ANALYZE` has run. No query here needed a new index.
+
+#[test]
+fn last_n_comp_is_index_backed() {
+    // The card's last 5 (every player on screen). The player's rows come from
+    // `idx_match_players_puuid`, each joins its match by primary key, and the
+    // newest are picked by a sort: the cost follows the player's own stored
+    // matches (a few ms at 5 000, see `db_scale`), never the whole table.
+    assert_eq!(
+        scale::schema_only_plan_of(repo::LAST_N_COMP_SQL),
+        [
+            "SEARCH mp USING INDEX idx_match_players_puuid (puuid=?)",
+            "SEARCH m USING INDEX sqlite_autoindex_matches_1 (match_id=?)",
+            "USE TEMP B-TREE FOR ORDER BY",
+        ]
+    );
+}
+
+#[test]
+fn top_teammates_is_index_backed() {
+    // Player Details' Top 3: the player's rows by `idx_match_players_puuid`,
+    // then every other table by key (the teammates of one match are the
+    // `match_id` prefix of the primary key).
+    assert_eq!(
+        scale::schema_only_plan_of(repo::TOP_TEAMMATES_SQL),
+        [
+            "SEARCH mp1 USING INDEX idx_match_players_puuid (puuid=?)",
+            "SEARCH m USING INDEX sqlite_autoindex_matches_1 (match_id=?)",
+            "SEARCH mp2 USING INDEX sqlite_autoindex_match_players_1 (match_id=?)",
+            "SEARCH pl USING INDEX sqlite_autoindex_players_1 (puuid=?) LEFT-JOIN",
+            "USE TEMP B-TREE FOR ORDER BY",
+        ]
+    );
+}
+
+#[test]
+fn comp_updates_for_season_is_index_backed_and_needs_no_sort() {
+    // `idx_comp_updates_puuid_start (puuid, start_ms)` serves the player's
+    // rows already newest first (the index is read backwards): no sort step.
+    // `season_id` is filtered on those rows, not seeked: only the player's own
+    // rows are read (2 000 of them take about a millisecond, see `db_scale`).
+    assert_eq!(
+        scale::schema_only_plan_of(repo::COMP_UPDATES_FOR_SEASON_SQL),
+        ["SEARCH comp_updates USING INDEX idx_comp_updates_puuid_start (puuid=?)"]
+    );
 }
 
 #[test]

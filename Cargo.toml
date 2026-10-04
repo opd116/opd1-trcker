@@ -22,3 +22,10 @@ opt-level = "s"
 lto = true
 codegen-units = 1
 strip = true
+
+# Dev builds: SQLite's C source is `bundled` and would be compiled at -O0, which
+# makes every debug-build timing of a query meaningless (B7's scale tests). Its
+# -O3 compile is not free: about 49 s on one core, once per cache miss (a clean
+# `target/`, or a rusqlite / toolchain bump); later builds reuse it.
+[profile.dev.package.libsqlite3-sys]
+opt-level = 3

@@ -1294,3 +1294,8 @@ mod ui_open;
 /// names and partial syncs (their own file; same harness).
 #[cfg(test)]
 mod sync_order;
+
+/// B7's scale tests: the shell's DB reads on a heavy user's database (their
+/// own file; builds its own DB, not the harness).
+#[cfg(test)]
+mod db_scale;

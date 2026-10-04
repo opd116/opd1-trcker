@@ -197,6 +197,21 @@ pub struct CompMatchRow {
     pub tier: Option<i64>,
 }
 
+/// [`Repo::last_n_comp`]'s query (`?1` the player, `?2` the limit): the
+/// player's rows come from `idx_match_players_puuid`, each joins its match by
+/// primary key, and the newest are picked by a sort, so the cost follows the
+/// player's own stored matches (a few ms at several thousand, never the whole
+/// table). Public so a test can `EXPLAIN QUERY PLAN` exactly this text.
+pub const LAST_N_COMP_SQL: &str = "\
+SELECT m.match_id, m.map_id, m.start_ms, m.winning_team,
+       mp.team_id, mp.party_id, mp.agent_id, mp.kills, mp.deaths, mp.assists,
+       mp.score, mp.rounds, mp.hs, mp.bs, mp.ls, mp.game_name, mp.tag_line
+FROM match_players mp
+JOIN matches m ON m.match_id = mp.match_id
+WHERE mp.puuid = ?1 AND m.queue_id = 'competitive'
+ORDER BY m.start_ms DESC
+LIMIT ?2";
+
 impl Repo {
     /// Inserts or overwrites a match and all of its teams/players in one
     /// transaction. Match details are immutable in practice (CLAUDE.md),
@@ -308,18 +323,9 @@ impl Repo {
     }
 
     /// The player's rows in matches with `queue_id = 'competitive'`,
-    /// newest first.
+    /// newest first. See [`LAST_N_COMP_SQL`].
     pub fn last_n_comp(&self, puuid: &str, n: u32) -> Result<Vec<MatchPlayerRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT m.match_id, m.map_id, m.start_ms, m.winning_team,
-                    mp.team_id, mp.party_id, mp.agent_id, mp.kills, mp.deaths, mp.assists,
-                    mp.score, mp.rounds, mp.hs, mp.bs, mp.ls, mp.game_name, mp.tag_line
-             FROM match_players mp
-             JOIN matches m ON m.match_id = mp.match_id
-             WHERE mp.puuid = ?1 AND m.queue_id = 'competitive'
-             ORDER BY m.start_ms DESC
-             LIMIT ?2",
-        )?;
+        let mut stmt = self.conn.prepare(LAST_N_COMP_SQL)?;
 
         let rows = stmt.query_map(params![puuid, n], |row| {
             Ok(MatchPlayerRow {
@@ -611,6 +617,17 @@ pub struct CompUpdateRow {
     pub start_ms: i64,
 }
 
+/// [`Repo::comp_updates_for_season`]'s query (`?1` the player, `?2` the
+/// season): `idx_comp_updates_puuid_start (puuid, start_ms)` hands the player's
+/// rows over newest first (read backwards): no sort. `season_id` is filtered on
+/// those rows, not seeked, so only the player's own rows are read. Public so a
+/// test can `EXPLAIN QUERY PLAN` exactly this text.
+pub const COMP_UPDATES_FOR_SEASON_SQL: &str = "\
+SELECT match_id, season_id, tier_after, tier_before, rr_after, rr_earned, map_id, start_ms
+FROM comp_updates
+WHERE puuid = ?1 AND season_id = ?2
+ORDER BY start_ms DESC";
+
 impl Repo {
     pub fn upsert_comp_updates(&self, puuid: &str, rows: &[CompUpdateRow]) -> Result<()> {
         let tx = self.conn.unchecked_transaction()?;
@@ -643,18 +660,14 @@ impl Repo {
         tx.commit()
     }
 
-    /// A player's competitive-update rows for one season, newest first.
+    /// A player's competitive-update rows for one season, newest first. See
+    /// [`COMP_UPDATES_FOR_SEASON_SQL`].
     pub fn comp_updates_for_season(
         &self,
         puuid: &str,
         season_id: &str,
     ) -> Result<Vec<CompUpdateRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT match_id, season_id, tier_after, tier_before, rr_after, rr_earned, map_id, start_ms
-             FROM comp_updates
-             WHERE puuid = ?1 AND season_id = ?2
-             ORDER BY start_ms DESC",
-        )?;
+        let mut stmt = self.conn.prepare(COMP_UPDATES_FOR_SEASON_SQL)?;
         let rows = stmt.query_map(params![puuid, season_id], |row| {
             Ok(CompUpdateRow {
                 match_id: row.get(0)?,
@@ -769,10 +782,16 @@ pub struct Encounters {
 
 /// [`Repo::encounters`]' query (`?1` the user, `?2` the other player): the
 /// competitive matches both played (R156, user 2026-09-30: Deathmatch and
-/// every other queue are no encounter), newest first. Every join is a key
-/// seek: the user's rows by `idx_match_players_puuid`, the other player's,
-/// the match's and each side's RR row by primary key. Public so a test can
-/// `EXPLAIN QUERY PLAN` exactly this text.
+/// every other queue are no encounter), newest first. The other player's
+/// rows drive the query (`idx_match_players_puuid`), because the user is in
+/// every match they played (thousands) and the other player in few: every
+/// join after that is a key seek, the user's row, the match and each side's RR
+/// row by primary key (B7: driven from the user's rows instead, a stranger
+/// with a dozen matches cost a walk over all of the user's thousands). Public
+/// so a test can `EXPLAIN QUERY PLAN` exactly this text.
+//
+// `CROSS JOIN` pins that order: SQLite never swaps the two tables around it,
+// whatever the statistics (a plain `JOIN` is free to start from either).
 pub const ENCOUNTERS_SQL: &str =
     "SELECT m.match_id, m.map_id, m.start_ms, mp_self.team_id, mp_other.team_id, m.winning_team,
             MAX(CASE WHEN t.team_id = mp_self.team_id THEN t.rounds_won END),
@@ -781,30 +800,33 @@ pub const ENCOUNTERS_SQL: &str =
             m.game_length_ms, mp_self.agent_id, mp_other.agent_id,
             COALESCE(mp_self.competitive_tier, cu_self.tier_after),
             COALESCE(mp_other.competitive_tier, cu_other.tier_after)
-     FROM match_players mp_self
-     JOIN match_players mp_other
-       ON mp_other.match_id = mp_self.match_id AND mp_other.puuid = ?2
-     JOIN matches m ON m.match_id = mp_self.match_id AND m.queue_id = 'competitive'
+     FROM match_players mp_other
+     CROSS JOIN match_players mp_self
+       ON mp_self.match_id = mp_other.match_id AND mp_self.puuid = ?1
+     JOIN matches m ON m.match_id = mp_other.match_id AND m.queue_id = 'competitive'
      LEFT JOIN match_teams t ON t.match_id = m.match_id
      LEFT JOIN comp_updates cu_self
        ON cu_self.puuid = mp_self.puuid AND cu_self.match_id = m.match_id
      LEFT JOIN comp_updates cu_other
        ON cu_other.puuid = mp_other.puuid AND cu_other.match_id = m.match_id
-     WHERE mp_self.puuid = ?1
+     WHERE mp_other.puuid = ?2
      GROUP BY m.match_id
      ORDER BY m.start_ms DESC";
 
 /// [`Repo::encounter_counts`]' query (`?1` the user, `?2` the other player):
-/// the same competitive-only rule as [`ENCOUNTERS_SQL`], by the same key
-/// seeks, without reading anything else. Public for the plan test.
+/// the same competitive-only rule as [`ENCOUNTERS_SQL`], driven the same way
+/// (the other player's rows first), without reading anything else. Public for
+/// the plan test.
+//
+// `CROSS JOIN` pins that order, as in [`ENCOUNTERS_SQL`].
 pub const ENCOUNTER_COUNTS_SQL: &str =
     "SELECT COALESCE(SUM(mp_self.team_id = mp_other.team_id), 0),
             COALESCE(SUM(mp_self.team_id != mp_other.team_id), 0)
-     FROM match_players mp_self
-     JOIN match_players mp_other
-       ON mp_other.match_id = mp_self.match_id AND mp_other.puuid = ?2
-     JOIN matches m ON m.match_id = mp_self.match_id AND m.queue_id = 'competitive'
-     WHERE mp_self.puuid = ?1";
+     FROM match_players mp_other
+     CROSS JOIN match_players mp_self
+       ON mp_self.match_id = mp_other.match_id AND mp_self.puuid = ?1
+     JOIN matches m ON m.match_id = mp_other.match_id AND m.queue_id = 'competitive'
+     WHERE mp_other.puuid = ?2";
 
 impl Repo {
     /// Every competitive match where both `self_puuid` and `other` have a
@@ -1066,6 +1088,26 @@ pub struct TeammateRow {
     pub count: u32,
 }
 
+/// [`Repo::top_teammates`]' query (`?1` the player, `?2` the earliest start):
+/// the player's rows by `idx_match_players_puuid`, then every other table by
+/// key (the teammates of one match are the `match_id` prefix of the primary
+/// key); the newest-first order is a sort. Public so a test can `EXPLAIN QUERY
+/// PLAN` exactly this text.
+pub const TOP_TEAMMATES_SQL: &str = "\
+SELECT mp2.puuid, mp2.game_name, mp2.tag_line, m.start_ms,
+       pl.game_name, pl.tag_line
+FROM match_players mp1
+JOIN match_players mp2
+  ON mp2.match_id = mp1.match_id
+ AND mp2.team_id = mp1.team_id
+ AND mp2.puuid != mp1.puuid
+JOIN matches m ON m.match_id = mp1.match_id
+LEFT JOIN players pl ON pl.puuid = mp2.puuid
+WHERE mp1.puuid = ?1
+  AND m.queue_id = 'competitive'
+  AND m.start_ms >= ?2
+ORDER BY m.start_ms DESC";
+
 impl Repo {
     /// The current act's most frequent teammates: competitive matches
     /// with `start_ms >= season_start_ms`, other players on the same
@@ -1080,21 +1122,7 @@ impl Repo {
         season_start_ms: i64,
         limit: usize,
     ) -> Result<Vec<TeammateRow>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT mp2.puuid, mp2.game_name, mp2.tag_line, m.start_ms,
-                    pl.game_name, pl.tag_line
-             FROM match_players mp1
-             JOIN match_players mp2
-               ON mp2.match_id = mp1.match_id
-              AND mp2.team_id = mp1.team_id
-              AND mp2.puuid != mp1.puuid
-             JOIN matches m ON m.match_id = mp1.match_id
-             LEFT JOIN players pl ON pl.puuid = mp2.puuid
-             WHERE mp1.puuid = ?1
-               AND m.queue_id = 'competitive'
-               AND m.start_ms >= ?2
-             ORDER BY m.start_ms DESC",
-        )?;
+        let mut stmt = self.conn.prepare(TOP_TEAMMATES_SQL)?;
 
         /// `(name, tag)` when both halves are non-empty.
         fn full(name: Option<String>, tag: Option<String>) -> Option<(String, String)> {

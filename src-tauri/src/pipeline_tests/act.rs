@@ -178,7 +178,10 @@ async fn an_ask_met_by_a_carried_hold_is_asked_again_right_after_it_not_after_th
     assert!(!due(30), "the hold (60 s) is still on");
     // Margins of about 10 s each way: a stalled runner between seeding the hold and the ask cannot flip them.
     assert!(!due(50), "still held near its end");
-    assert!(due(70), "due right after the hold, not after the 5-minute failure retry");
+    assert!(
+        due(70),
+        "due right after the hold, not after the 5-minute failure retry"
+    );
     assert!(!due(0), "not at once");
 
     // The control: the same ask failing for real waits the 5 minutes.

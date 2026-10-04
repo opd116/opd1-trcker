@@ -1,0 +1,1382 @@
+diff --git a/docs/ARCHITECTURE.md b/docs/ARCHITECTURE.md
+index 9c65ca8..c1ab135 100644
+--- a/docs/ARCHITECTURE.md
++++ b/docs/ARCHITECTURE.md
+@@ -2,7 +2,7 @@
+ 
+ OPD1 TRCKER reads the local Riot client API and shows live Lobby / Agent Select / In Game player cards, plus the user's own competitive stats. Lightness is priority #1 (RAM, CPU, bundle size, request count); design is #2.
+ 
+-Facts on this page come from the code on `main` for v0.3.0 (Phase 2 and the v0.3.0 round): Match Details, migration 2, the user's own loadout, the own-history backfill, lock-only agent names (R99), the own card's level (R100), the names fill after a match (R150 to R153, migration 3), the rank fallback and bounded rank retry (R154, R155), the Scout-style requests and diagnostics (R158, R159), the per-family request holds (R160), and for v0.3.0 the poll-loop supervisor (R169), the own competitive-updates backfill (R173), the `"mystats"` event (R174), the My Stats page and the `settled` start-page signal (R175), the Playwright CI job (R176), request holds that survive a new session (R185), and the My Stats push's account check under the model lock (R186). An interactive diagram of the same system is in [`docs/architecture.html`](architecture.html).
++Facts on this page come from the code on `main` for v0.3.0 (Phase 2 and the v0.3.0 round): Match Details, migration 2, the user's own loadout, the own-history backfill, lock-only agent names (R99), the own card's level (R100), the names fill after a match (R150 to R153, migration 3), the rank fallback and bounded rank retry (R154, R155), the Scout-style requests and diagnostics (R158, R159), the per-family request holds (R160), and for v0.3.0 the poll-loop supervisor (R169), the own competitive-updates backfill (R173), the `"mystats"` event (R174), the My Stats page and the `settled` start-page signal (R175), the Playwright CI job (R176), request holds that survive a new session (R185), the My Stats push's account check under the model lock (R186), and the act-change hardening (B6). An interactive diagram of the same system is in [`docs/architecture.html`](architecture.html).
+ 
+ - Product rules: [`CLAUDE.md`](../CLAUDE.md). Every ruling and its status: [`DECISIONS.md`](DECISIONS.md). Build spec for the UI: [`design-spec.md`](design-spec.md).
+ 
+@@ -109,7 +109,7 @@ The app was closed while the user played, and Player Details, Encounters and My
+ - **Trigger.** `sync::start_backfill_run` on connect and again when a match ends (INGAME to MENUS). It is a no-op while a run is active, so a second trigger keeps its cursor. On connect only the run is queued; the worker starts once VALORANT is running, so a Closed start makes no calls (R137).
+ - **Never during a match.** `LiveModel::backfill_ready` allows a run only in the Lobby or Closed stage and only while the raw presence says no match is on (`in_match`). Agent Select, In Game and a free-for-all match (whose view stays the Lobby, R41) all pause it, and a worker that claimed the job just before a match starts hands it back. The cursor waits in memory and resumes after the match.
+ - **Walk.** Pages of 20 (`BACKFILL_PAGE`) of the user's match history, any queue. Each page is indexed into `history_index`, and match-details is fetched one at a time (through the throttle) only for ids the DB doesn't know. A match Riot no longer has (404) is skipped at once. Any other failure, a decode error included, ends the run without moving the anchor, so the gap is retried next time. A failure that says something about the id itself (a status other than 401, 403, 404 and 429, or a body that doesn't decode) is counted in `self_history_failures:{puuid}`, and after 3 runs in a row ending at the same id it is skipped and logged. Rate-limit, network and auth errors end the run without counting, so an outage never skips ids for good (R139).
+-- **Stops.** With an anchor: the anchor's match id, or the first entry older than the anchor's start. First run, no anchor: the start of the current act, or 200 entries (`BACKFILL_FIRST_RUN_MAX`), whichever comes first.
++- **Stops.** With an anchor: the anchor's match id, or the first entry older than the anchor's start. First run, no anchor: the start of the current act, or 200 entries (`BACKFILL_FIRST_RUN_MAX`), whichever comes first. The act's start is read again on every page (`AppState::current_act()`, B6), not kept from when the run began, so a first run in flight across an act change stops at the new act's start; the run stores the last bound it used (`BackfillRun.act_start_ms`) as a stand-in for a moment with no current act. A run with an anchor has no act bound.
+ - **Anchor.** When a run finishes with everything stored, the newest entry page 0 showed is written to `app_state` as `self_history_anchor:{puuid}` (`{"matchId", "startMs"}`) and that account's failure counts are cleared. The key belongs to the account that ran, so an account switch can neither delete an anchor nor let one account's anchor bound another's run (R137).
+ 
+ ### The own competitive-updates backfill (R173)
+@@ -117,13 +117,13 @@ The app was closed while the user played, and Player Details, Encounters and My
+ My Stats' RR chart, net RR and rank changes need every competitive update of the act, and the live sync only fetches the newest 5 (20 for Player Details). A second lowest-priority job (`Job::CompBackfill`, after the match backfill in `next_job`) pages the user's own `competitiveupdates` (`queue=competitive`, 20 per page, newest first) and stores each page in `comp_updates`.
+ 
+ - **Trigger.** `sync::start_own_backfills` starts it together with the match backfill, on connect and at each match end. Same stage gate as the match backfill: never during Agent Select, In Game or a free-for-all match.
+-- **Stops.** A row older than the current act's start minus `ACT_EDGE_MS` (one day), the anchor's match id or a row older than the anchor's start, a short or empty page (the endpoint gives no total), or 10 pages, whichever comes first.
++- **Stops.** A row older than the current act's start minus `ACT_EDGE_MS` (one day), the anchor's match id or a row older than the anchor's start, a short or empty page (the endpoint gives no total), or 10 pages, whichever comes first. The act's start is read again on every page (`AppState::current_act()`, B6): a run in flight across an act change stops at the new act's edge, with no restart and no extra request, instead of paging on toward the old act's start. Rows the run already stored for the old act stay; nothing is lost. The last bound a page used stays in `CompBackfillRun.act_start_ms`, for a moment with no current act.
+ - **Holds and failures.** An `mmr` hold pauses the run (`Held`, nothing sent) until it ends; a real failure, a sent 429 included, ends the run until the next trigger. One page per worker turn, at least 2.5 s apart (`COMP_BACKFILL_PAGE_GAP`). Page 0 is skipped when the rows the user's own rank sync just stored (`LiveModel::own_comp_head`) already hold the anchor's match id.
+ - **Anchor.** Written to `self_comp_anchor:{puuid}` only when a run finishes.
+ 
+ ### My Stats push (R174)
+ 
+-`my_stats::notify` recomputes My Stats from the DB (the `my_stats` command's own builder) and emits `"mystats"` when the serialized bytes differ from the last emission. It is called after the user's own rank or matches step, a match-backfill pass that stored matches, a competitive-updates page that stored rows, the user's own Details sync, an act change, and when the asset tables load. Recomputes are coalesced to one task at a time, wait 750 ms so a burst becomes one push, and never run on the presence tick; an account switch notifies at once (`notify_now`), and a read that ends after a switch is dropped and re-read. **The account check and the emit are one step (R186):** `push_until_clean` holds the `live` lock from the `self_puuid` comparison to the end of the emit (lock order: push lock, then `live`), so a switch, which writes `self_puuid` under that lock, lands wholly before the check (the read is dropped) or wholly after the emit (`notify_now` then reads the new account); the old account's stats can no longer go out once in the gap. Nothing may call `my_stats::notify` / `notify_now` while holding `live` (every caller was checked; `publish()` already emits under `live`). A 15-minute tick recomputes too, so a session past its 6 h gap ages out on screen. `MyStats` carries the user's own `puuid`. `self_puuid` is read from `app_state` at startup, so My Stats is available while VALORANT is closed.
++`my_stats::notify` recomputes My Stats from the DB (the `my_stats` command's own builder) and emits `"mystats"` when the serialized bytes differ from the last emission. It is called after the user's own rank or matches step, a match-backfill pass that stored matches, a competitive-updates page that stored rows, the user's own Details sync, an act change, and when the asset tables load. Recomputes are coalesced to one task at a time, wait 750 ms so a burst becomes one push, and never run on the presence tick; an account switch notifies at once (`notify_now`), and a read that ends after a switch is dropped and re-read. **The account check and the emit are one step (R186):** `push_until_clean` holds the `live` lock from the `self_puuid` comparison to the end of the emit (lock order: push lock, then `live`), so a switch, which writes `self_puuid` under that lock, lands wholly before the check (the read is dropped) or wholly after the emit (`notify_now` then reads the new account); the old account's stats can no longer go out once in the gap. Nothing may call `my_stats::notify` / `notify_now` while holding `live` (every caller was checked; `publish()` already emits under `live`). A 15-minute tick recomputes too, so a session past its 6 h gap ages out on screen; it first calls `AppState::note_act_change` (B6, see Current act), so an act that changed by valorant-api's dates alone is pushed within 15 minutes even while Riot is silent. The push has no act of its own: `compute` reads `AppState::current_act()` and `store::load_my_stats` takes the new act's matches and RR rows by Riot's season id, so a new act with no match yet is the empty state (no rank numbers from the old act, empty chart and Last 5), not stale numbers. `MyStats` carries the user's own `puuid`. `self_puuid` is read from `app_state` at startup, so My Stats is available while VALORANT is closed.
+ 
+ ### The names fill (R150 to R153)
+ 
+@@ -164,7 +164,7 @@ A failure other than `ClientGone` is logged and skipped: the fields it would hav
+ - **Rank fallback (R154, R161).** MMR is the authority: with a snapshot, the card's rank is the snapshot's (a snapshot that says "no rank this act" included). Without one (`mmr` failed, or has not run), `core::model::rank_without_mmr` takes, in this order: (a) the newest current-act `comp_updates` row whose `tier_after` is a real tier (3 or more): tier and exact RR from `rr_after`; (b) the live tier: the `CompetitiveTier` the pregame (both teams) or party answer carried for the player (`RosterPlayer.live_tier`, `BuildCardInput.live_tier`), a ranked tier only (0 to 2 is none), no act needed, no request: tier only, `rank.rr` is `null`; core-game answers carry no tier, so `poll::fetch_ingame` fills its roster (`roster::fill_tiers`) from `LiveModel::match_tiers`, the tiers of the Agent Select answer bound to its match id and used only when the core-game match id equals it (emptied on a Lobby fetch, on the transition to Menus or Closed and on an account switch); (c) the tier of the newest stored competitive match (`Repo::newest_ranked_match_tier`, one indexed query on `idx_match_players_puuid`, loaded by `store::load_player_db` only for a player with no snapshot) when that match started in the current act: tier only, `rank.rr` is `null` and the UI shows `— RR`; (d) otherwise the rank stays missing. Nothing but the current rank falls back: Peak, Prev, Win% and Games wait for MMR. The card, the Player Details hero, the off-screen card and the Closed-stage own card all go through `card_for`, so they share it. My Stats' rank card (R167) runs the same chain, minus (b): without a stored snapshot of the user (`MyStatsInput.has_mmr` false) it takes (a), then (c) (`MyStatsInput.stored_tier`, read only in that case); a snapshot, one that says "no rank this act" included, stays the authority.
+ - **Bounded retry (R155).** A sync whose `comp_updates` or `mmr` call failed (`RankOutcome.failed`, any error but `ClientGone`), or whose matches phase was partial (R165: the history call or a match-details download failed for real, `MatchesOutcome.partial`; `LiveModel::note_partial_sync`) is run again by `Job::RankRetry` (both phases; only the missing ids are fetched): the first retry no sooner than 20 s after the failure, the second no sooner than 60 s after the first retry failed, then never again for that first pass (3 syncs at most; `src-tauri/src/rank_retry.rs`, a pure schedule that takes the time as an argument). A part that only met a hold (`RankOutcome.held`, `MatchesOutcome.held`, `RiotError::Held`: nothing was sent, R160) is not a failure and uses no retry: `LiveModel::note_rank_held` makes the player due 1.5 s after the hold ends (`RankRetries::first_pass_held`, `retry_held`). A retry is counted when it is handed out, so one cut short by a stage change still uses its turn, and a retry never starts a round of its own. Only a player still on the live roster is retried (`LiveModel::prune_rank_retries` after a roster change), never while the stage is Closed, and an account switch clears the schedule. The worker exits when nothing is due; the poll loop's tick (every 2 s while VALORANT runs) starts one when a retry comes due. Tests move time with a `#[cfg(test)]` offset on `LiveModel::now`, not real sleeps. A later MMR answer replaces the fallback.
+ 
+-- **Current act (R162).** `AppState::acts()` is the one table every "current act" and "previous act" reads. At the first presence that shows VALORANT (never while the game is closed) the poll loop asks Riot's `shared.{shard}.a.pvp.net/content-service/v3/content` (one call, global bucket) for the `act` entry with `IsActive` and the act whose `EndTime` is its `StartTime`; `roster::resolve_acts` folds that into valorant-api's list (Riot's id, start and end; valorant-api's names, else Riot's `Name`s with the episode found by time; later acts dropped). Riot's answer is used until the act's end passes, then valorant-api's date rule answers until Riot is asked again; a failure logs one line and keeps an earlier answer whose act has not ended, else leaves the date rule, and is asked again after 5 minutes. An ask a request hold refuses (`RiotError::Held`, nothing sent: R185 carries holds into a new session) is not a failure: it logs at info as held and is due again `HOLD_SLACK` after the hold (`ContentFetch.held_until`, read by `content_due`). Nothing outside `AppState` applies the date rule to the raw table.
++- **Current act (R162).** `AppState::acts()` is the one table every "current act" and "previous act" reads. At the first presence that shows VALORANT (never while the game is closed) the poll loop asks Riot's `shared.{shard}.a.pvp.net/content-service/v3/content` (one call, global bucket) for the `act` entry with `IsActive` and the act whose `EndTime` is its `StartTime`; `roster::resolve_acts` folds that into valorant-api's list (Riot's id, start and end; valorant-api's names, else Riot's `Name`s with the episode found by time; later acts dropped). Riot's answer is used until the act's end passes, then valorant-api's date rule answers until Riot is asked again; a failure logs one line and keeps an earlier answer whose act has not ended, else leaves the date rule, and is asked again after 5 minutes. An ask a request hold refuses (`RiotError::Held`, nothing sent: R185 carries holds into a new session) is not a failure: it logs at info as held and is due again `HOLD_SLACK` after the hold (`ContentFetch.held_until`, read by `content_due`). Nothing outside `AppState` applies the date rule to the raw table. **One reaction to the act changing (B6).** The current act can change by Riot's answer, by valorant-api's date rule alone (no answer yet, or the answer expired and the clock crossed the act's end) and by the asset tables loading or being replaced by a patch. `AppState::note_act_change` is the one reaction to all three: it remembers the act it last saw, as two ids, the act at the exact time (My Stats, Player Details, the backfill bounds) and the act at the hour-floored card clock (the live cards), because with a valorant-api start that is not on the hour the two switch up to an hour apart. On a change it republishes the live cards (Win%, Games and W-L come from the MMR snapshot's entry for the new act id, so they are `—` until the player has one; Peak's `This Act` label stays only for an act still running, and an older act's peak shows its label and age; Prev is the act before), notifies My Stats and rebuilds an open Player Details, once: the id is recorded before the reaction, so concurrent callers find nothing new, and with no change it is one read of the act table and a comparison. It is called after Riot's answer (`refresh_content`), after `ensure_tables` returns in its two callers (the connect spawn in `poll.rs` and startup in `lib.rs`, never while holding the tables lock, which `img://` waits on) and from My Stats' 15-minute tick. `resolve_acts` ends every earlier act at the start of the one after it, so a late valorant-api cannot keep the old act, and the peak reached in it, "this act". The act logic reads the clock through `AppState::clock_ms()`, which tests move (`advance_wall_clock`) to cross an act boundary without sleeping.
+ 
+ Assets come from valorant-api. The tables (agents, tiers, maps, seasons, chromas, cards) are re-downloaded only when `/v1/version` changes, and images are downloaded once and cached on disk (re-encoded to PNG).
+ 
+diff --git a/src-tauri/src/details.rs b/src-tauri/src/details.rs
+index 18a46af..e32a490 100644
+--- a/src-tauri/src/details.rs
++++ b/src-tauri/src/details.rs
+@@ -16,7 +16,7 @@ use opd1_core::names::{display_name, KnownName};
+ use crate::logbuf::short;
+ use crate::roster::{EquippedSkin, RawLoadout, RosterPlayer};
+ use crate::state::{
+-    card_clock, closed_self_slot, lock, now_ms, AppState, LiveModel, SkinResolveGuard, Slot,
++    card_clock, closed_self_slot, lock, AppState, LiveModel, SkinResolveGuard, Slot,
+ };
+ use crate::store::{act_hero_stats, load_player_db, recent_matches};
+ use crate::sync::RECENT_COUNT;
+@@ -208,7 +208,7 @@ fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Opt
+         ..slot.roster
+     };
+     let acts = st.acts();
+-    let now = card_clock(now_ms());
++    let now = card_clock(st.clock_ms());
+     let act_id = crate::roster::current_act(&acts, now)
+         .map(|a| a.id.clone())
+         .unwrap_or_default();
+diff --git a/src-tauri/src/lib.rs b/src-tauri/src/lib.rs
+index d5af8e9..1171c35 100644
+--- a/src-tauri/src/lib.rs
++++ b/src-tauri/src/lib.rs
+@@ -135,6 +135,9 @@ pub fn run() {
+                     // B2: the acts are known now: My Stats, if the DB has the
+                     // user's puuid, becomes computable (once, at startup).
+                     my_stats::notify(&tables_st);
++                    // B6: the acts just became known, or changed with the
++                    // patch; the reaction runs once (tables lock released).
++                    tables_st.note_act_change().await;
+                 }
+             });
+             // B2: the slow tick (every 15 minutes) that keeps what depends on
+diff --git a/src-tauri/src/my_stats.rs b/src-tauri/src/my_stats.rs
+index 1d57085..9e282bd 100644
+--- a/src-tauri/src/my_stats.rs
++++ b/src-tauri/src/my_stats.rs
+@@ -20,8 +20,10 @@
+ //! one change that must not wait, an account switch, goes through
+ //! [`notify_now`]. A slow tick ([`start_periodic`]) asks again every
+ //! [`PERIOD`] so what depends on the clock alone (a session that expired, a
+-//! last-7-days window) catches up; the byte comparison makes that free when
+-//! nothing changed. Nothing here touches the poll loop's presence tick.
++//! last-7-days window, the current act changing by valorant-api's dates while
++//! Riot is silent, B6: the tick first calls `AppState::note_act_change`) catches
++//! up; the byte comparison makes that free when nothing changed. Nothing here
++//! touches the poll loop's presence tick.
+ 
+ use std::collections::HashMap;
+ use std::sync::Arc;
+@@ -31,7 +33,7 @@ use opd1_core::model::MyStats;
+ use tokio::sync::Notify;
+ use tokio::time::{interval, timeout, MissedTickBehavior};
+ 
+-use crate::state::{lock, now_ms, AppState};
++use crate::state::{lock, AppState};
+ 
+ /// The trailing wait before each recompute: notifications inside it are one
+ /// read. Short in the tests (they wait for the push to go idle).
+@@ -138,7 +140,7 @@ async fn compute_for_user(st: &Arc<AppState>) -> Result<Option<(String, MyStats)
+         .map(|meta| meta.maps.into_iter().map(|(id, m)| (id, m.name)).collect())
+         .unwrap_or_default();
+     let assets = st.assets.clone();
+-    let now = now_ms();
++    let now = st.clock_ms();
+     let owner = me.clone();
+     st.db(move |repo| {
+         let lookup = |path: &str| {
+@@ -194,9 +196,11 @@ fn request(st: &Arc<AppState>, immediate: bool) {
+     }
+ }
+ 
+-/// The slow tick: once, at startup, from `setup`. Every [`PERIOD`] it asks
+-/// for a recompute, which costs one DB read and no event when nothing
+-/// changed. Never driven by the presence tick.
++/// The slow tick: once, at startup, from `setup`. Every [`PERIOD`] it first
++/// lets the app notice that the current act changed by the clock alone
++/// ([`AppState::note_act_change`]), then asks for a recompute, which costs one
++/// DB read and no event when nothing changed. Never driven by the presence
++/// tick.
+ pub fn start_periodic(st: &Arc<AppState>) {
+     tauri::async_runtime::spawn(periodic(st.clone(), PERIOD));
+ }
+@@ -209,6 +213,9 @@ pub(crate) async fn periodic(st: Arc<AppState>, every: Duration) {
+     tick.tick().await;
+     loop {
+         tick.tick().await;
++        // B6: a date-rule act switch while Riot is silent has no event of its
++        // own; this is where it is noticed (it notifies on a change).
++        st.note_act_change().await;
+         notify(&st);
+     }
+ }
+diff --git a/src-tauri/src/pipeline_tests/act.rs b/src-tauri/src/pipeline_tests/act.rs
+index aa825fb..c3b1624 100644
+--- a/src-tauri/src/pipeline_tests/act.rs
++++ b/src-tauri/src/pipeline_tests/act.rs
+@@ -9,6 +9,7 @@
+ use opd1_riot::endpoints::{ContentAct, ContentActs};
+ 
+ use super::*;
++use crate::my_stats::{self, idle};
+ 
+ const H: i64 = 3_600_000;
+ const D: i64 = 24 * H;
+@@ -178,7 +179,10 @@ async fn an_ask_met_by_a_carried_hold_is_asked_again_right_after_it_not_after_th
+     assert!(!due(30), "the hold (60 s) is still on");
+     // Margins of about 10 s each way: a stalled runner between seeding the hold and the ask cannot flip them.
+     assert!(!due(50), "still held near its end");
+-    assert!(due(70), "due right after the hold, not after the 5-minute failure retry");
++    assert!(
++        due(70),
++        "due right after the hold, not after the 5-minute failure retry"
++    );
+     assert!(!due(0), "not at once");
+ 
+     // The control: the same ask failing for real waits the 5 minutes.
+@@ -481,3 +485,661 @@ async fn an_exact_start_ahead_of_our_clock_is_never_after_now() {
+     assert_eq!(cur.id, "act-new-h");
+     assert!(cur.start_ms <= now_ms(), "start {} > now", cur.start_ms);
+ }
++
++// ---------------------------------------------------------------------
++// B6: the current act changing, whatever changed it
++// ---------------------------------------------------------------------
++//
++// Three things can change the current act: Riot's content-service answer,
++// valorant-api's date rule (the clock crossing an act's end while Riot is
++// silent or its answer has expired) and the asset tables loading.
++// `AppState::note_act_change` is the one reaction (republish the cards, notify
++// My Stats, rebuild an open Player Details); these tests move the wall clock
++// through `AppState::advance_wall_clock` instead of sleeping.
++
++const OLD_ACT: &str = "act-o-b6";
++const ACT_A: &str = "act-a-b6";
++const ACT_B: &str = "act-b-b6";
++
++/// `puuid`'s stored MMR: act O at tier 12 (10 wins), act A at tier 15, 42 RR,
++/// 8 wins in 14 games; nothing for act B.
++async fn store_mmr(st: &AppState, puuid: &str) {
++    let resp: PlayerMmrResponse = serde_json::from_value(json!({
++        "Subject": puuid,
++        "QueueSkills": {"competitive": {"SeasonalInfoBySeasonID": {
++            OLD_ACT: {"SeasonID": OLD_ACT, "CompetitiveTier": 12, "RankedRating": 10,
++                      "NumberOfWins": 10, "NumberOfGames": 20, "WinsByTier": {"12": 10}},
++            ACT_A: {"SeasonID": ACT_A, "CompetitiveTier": 15, "RankedRating": 42,
++                    "NumberOfWins": 8, "NumberOfGames": 14, "WinsByTier": {"15": 8}}
++        }}}
++    }))
++    .unwrap();
++    let snapshot = MmrSnapshot {
++        puuid: puuid.into(),
++        json: trim_mmr(&resp).to_string(),
++        last_comp_match_id: Some("m-old".into()),
++        fetched_ms: 1,
++    };
++    st.db(move |repo| repo.save_mmr_snapshot(&snapshot))
++        .await
++        .unwrap();
++}
++
++/// A competitive match of act A that ME and OTHER played on the same team,
++/// with ME's RR row for it.
++async fn store_act_a_match(st: &AppState, id: &str, start_ms: i64, win: bool, rr: i64) {
++    let m = Match {
++        match_id: id.into(),
++        map_id: "/Game/Maps/Ascent/Ascent".into(),
++        queue_id: "competitive".into(),
++        start_ms,
++        winning_team: Some(if win { "Blue" } else { "Red" }.into()),
++        is_ranked: true,
++        rounds_played: Some(20),
++        game_length_ms: None,
++    };
++    let team = |id: &str, won: bool| MatchTeam {
++        team_id: id.into(),
++        won,
++        rounds_won: Some(if won { 13 } else { 8 }),
++        rounds_won_h1: None,
++    };
++    let teams = vec![team("Blue", win), team("Red", !win)];
++    let mut mine = player_row(ME, "Blue", "Me", "TAG");
++    (mine.kills, mine.deaths, mine.rounds) = (20, 10, Some(20));
++    let mut other = player_row(OTHER, "Blue", "Other", "OTH");
++    (other.kills, other.deaths, other.rounds) = (15, 15, Some(20));
++    let row = CompUpdateRow {
++        match_id: id.into(),
++        season_id: ACT_A.into(),
++        tier_after: 15,
++        tier_before: Some(15),
++        rr_after: 42,
++        rr_earned: rr,
++        map_id: None,
++        start_ms,
++    };
++    st.db(move |repo| {
++        repo.upsert_match(&m, &teams, &[mine, other])?;
++        repo.upsert_comp_updates(ME, &[row])
++    })
++    .await
++    .unwrap();
++}
++
++/// ME and OTHER on the live screen (In Game), cards published.
++async fn me_and_other_on_screen(h: &Harness) {
++    let slots = vec![
++        slot_for(&h.st, ME, false).await,
++        slot_for(&h.st, OTHER, false).await,
++    ];
++    {
++        let mut live = lock(&h.st.live);
++        live.stage = Stage::Ingame;
++        live.slots = slots;
++    }
++    h.st.publish();
++}
++
++/// Everything B6's tests count: how often the reaction ran, what the sink was
++/// given and how many My Stats recomputes were asked for.
++#[derive(Debug, PartialEq)]
++struct Tally {
++    reactions: usize,
++    live: usize,
++    my_stats: usize,
++    details: usize,
++    computed: usize,
++}
++
++fn tally(h: &Harness) -> Tally {
++    Tally {
++        reactions: h.st.act_reactions(),
++        live: h.live_events().len(),
++        my_stats: h.rec.my_stats.lock().unwrap().len(),
++        details: h.rec.details.lock().unwrap().len(),
++        computed: lock(&h.st.my_stats_push).computed,
++    }
++}
++
++/// `puuid`'s card in the last `"live"` event, as the UI gets it.
++fn live_card(h: &Harness, puuid: &str) -> Value {
++    let state = h.live_events().last().cloned().expect("a live event");
++    let card = state
++        .players
++        .iter()
++        .find(|c| c.puuid == puuid)
++        .expect("card on screen");
++    serde_json::to_value(card).unwrap()
++}
++
++fn last_my_stats(h: &Harness) -> opd1_core::model::MyStats {
++    h.rec
++        .my_stats
++        .lock()
++        .unwrap()
++        .last()
++        .cloned()
++        .expect("pushed")
++}
++
++fn last_details(h: &Harness) -> PlayerDetails {
++    h.rec
++        .details
++        .lock()
++        .unwrap()
++        .last()
++        .cloned()
++        .expect("emitted")
++}
++
++/// The first answer, once: Riot says act A runs for one more day.
++async fn mount_content_once(h: &Harness, body: Value) {
++    Mock::given(method("GET"))
++        .and(path("/content-service/v3/content"))
++        .respond_with(ResponseTemplate::new(200).set_body_json(body))
++        .up_to_n_times(1)
++        .mount(&h.server)
++        .await;
++}
++
++/// Riot: act A (named `ACT 4`, Riot's own spelling) is active until `end`.
++fn content_a_until(n: i64, end: i64) -> Value {
++    json!({"Seasons": [
++        season(OLD_ACT, "ACT 3", n - 120 * D, n - 60 * D, false),
++        season(ACT_A, "ACT 4", n - 60 * D, end, true),
++    ]})
++}
++
++/// Riot: act A ended at `switch`, act B began there. With `names_a`, act A's
++/// entry is there to be found as the previous act; without it (Riot's list
++/// has no entry ending where B starts) nothing says what came before B.
++fn content_b_from(n: i64, switch: i64, names_a: bool) -> Value {
++    let mut seasons = vec![season(OLD_ACT, "ACT 3", n - 120 * D, n - 60 * D, false)];
++    if names_a {
++        seasons.push(season(ACT_A, "ACT 4", n - 60 * D, switch, false));
++    }
++    seasons.push(season(ACT_B, "ACT 5", switch, n + 90 * D, true));
++    json!({ "Seasons": seasons })
++}
++
++/// valorant-api's table. `late`: it lists act A running another 30 days (it
++/// has not caught up with the rollover); else its dates agree with Riot's, act
++/// A ending at `n + D`.
++fn valorant_api_acts(h: &Harness, n: i64, late: bool) {
++    let switch = if late { n + 30 * D } else { n + D };
++    h.st.set_acts_for_test(vec![
++        api_act(OLD_ACT, "ACT III", n - 120 * D, n - 60 * D),
++        api_act(ACT_A, "ACT IV", n - 60 * D, switch),
++        api_act(ACT_B, "ACT V", switch, n + 90 * D),
++    ]);
++}
++
++/// Act A's numbers on ME's and OTHER's cards, My Stats and OTHER's Details.
++fn assert_act_a_everywhere(h: &Harness) {
++    for who in [ME, OTHER] {
++        let card = live_card(h, who);
++        assert_eq!(card["actWins"], json!(8), "{who}");
++        assert_eq!(card["actGames"], json!(14), "{who}");
++        assert_eq!(card["rank"]["tier"], json!(15), "{who}");
++        assert_eq!(card["prevActTier"], json!(12), "{who}: the act before A");
++        assert_eq!(card["peak"]["tier"], json!(15), "{who}");
++        assert_eq!(card["peak"]["actLabel"], json!("V26 A4"), "{who}");
++        assert_eq!(
++            card["peak"]["sinceActEndMs"],
++            Value::Null,
++            "{who}: reached this act"
++        );
++    }
++    let stats = last_my_stats(h);
++    assert_eq!((stats.last5.len(), stats.rr_series.len()), (2, 2));
++    assert_eq!(stats.rank.tier, Some(15));
++    assert_eq!((stats.rank.wins, stats.rank.losses), (Some(1), Some(1)));
++}
++
++/// What an act that has just begun looks like everywhere: nothing of act A's.
++fn assert_new_act_everywhere(h: &Harness) {
++    for who in [ME, OTHER] {
++        let card = live_card(h, who);
++        assert_eq!(card["actWins"], Value::Null, "{who}: no act B entry in MMR");
++        assert_eq!(card["actGames"], Value::Null, "{who}");
++        assert_eq!(card["actWinrate"], Value::Null, "{who}");
++        assert_eq!(card["rank"], Value::Null, "{who}");
++        assert_eq!(
++            card["prevActTier"],
++            json!(15),
++            "{who}: A is the previous act"
++        );
++        // The peak is still act A's, now with its age instead of `This Act`.
++        assert_eq!(card["peak"]["tier"], json!(15), "{who}");
++        assert_eq!(card["peak"]["actLabel"], json!("V26 A4"), "{who}");
++        assert!(
++            card["peak"]["sinceActEndMs"]
++                .as_i64()
++                .is_some_and(|ms| ms >= 0),
++            "{who}: act A has ended: {}",
++            card["peak"]
++        );
++    }
++    let stats = last_my_stats(h);
++    assert!(stats.last5.is_empty(), "no match yet in the new act");
++    assert!(stats.rr_series.is_empty());
++    assert!(stats.session.is_none());
++    assert_eq!((stats.rank.tier, stats.rank.rr), (None, None));
++    assert_eq!((stats.rank.wins, stats.rank.losses), (None, None));
++    assert_eq!(stats.rank.net_rr, None);
++    assert!(stats.maps.is_empty() && stats.agents.is_empty());
++}
++
++/// The content-service switches acts mid-session: Riot answers act A (ending
++/// tomorrow), then, a day and two hours later, act B. `late`: valorant-api
++/// still dates act A as running on; else its dates already say B when Riot's
++/// answer arrives, so the date rule has changed the act before Riot says
++/// anything and the answer itself changes nothing.
++async fn riot_switches_acts_mid_session(late: bool) {
++    let h = harness().await;
++    let n = now_ms();
++    valorant_api_acts(&h, n, late);
++    for who in [ME, OTHER] {
++        store_mmr(&h.st, who).await;
++    }
++    store_act_a_match(&h.st, "b6-m1", n - 5 * H, true, 20).await;
++    store_act_a_match(&h.st, "b6-m2", n - 3 * H, false, -12).await;
++    me_and_other_on_screen(&h).await;
++    h.st.set_session(Some(h.session.clone()));
++
++    mount_content_once(&h, content_a_until(n, n + D)).await;
++    mount_content(&h, 200, content_b_from(n, n + D, true)).await;
++    h.st.refresh_content().await;
++    // The screen as the user has it: My Stats pushed, whatever else asked.
++    my_stats::notify(&h.st);
++    idle(&h.st).await;
++    assert_eq!(current_id(&h.st).as_deref(), Some(ACT_A));
++    assert_eq!(h.st.act_source(), "riot");
++    assert_act_a_everywhere(&h);
++
++    // The player has OTHER's page open: act A's hero stats and teammates.
++    let ticket = h.st.begin_open_details(OTHER);
++    let open = crate::details::build(&h.st, OTHER).await.unwrap();
++    assert!(h.st.set_open_details(ticket, &open));
++    assert_eq!(open.hero_matches, 2);
++    assert_eq!(
++        open.top_teammates.len(),
++        1,
++        "ME, from the two shared matches"
++    );
++    assert_eq!(
++        serde_json::to_value(&open.card).unwrap()["actGames"],
++        json!(14)
++    );
++
++    // A day and two hours pass; Riot's answer is stale now.
++    h.st.advance_wall_clock(D + 2 * H);
++    let before = tally(&h);
++    if late {
++        // valorant-api still says A: the act did not change, nothing reacts.
++        h.st.note_act_change().await;
++        assert_eq!(current_id(&h.st).as_deref(), Some(ACT_A));
++        assert_eq!(h.st.act_source(), "valorant-api");
++        assert_eq!(tally(&h), before);
++    } else {
++        // valorant-api's dates changed the act by themselves, and nothing has
++        // noticed yet: the screen is still act A's.
++        assert_eq!(current_id(&h.st).as_deref(), Some(ACT_B));
++        assert_eq!(h.st.act_source(), "valorant-api");
++        assert_act_a_everywhere(&h);
++    }
++
++    h.st.refresh_content().await;
++    idle(&h.st).await;
++
++    assert_eq!(current_id(&h.st).as_deref(), Some(ACT_B));
++    assert_eq!(h.st.act_source(), "riot");
++    let after = tally(&h);
++    assert_eq!(
++        after,
++        Tally {
++            reactions: before.reactions + 1,
++            live: before.live + 1,
++            my_stats: before.my_stats + 1,
++            details: before.details + 1,
++            computed: before.computed + 1,
++        },
++        "one republish, one My Stats push, one Details rebuild"
++    );
++    assert_new_act_everywhere(&h);
++    let rebuilt = last_details(&h);
++    assert_eq!(rebuilt.card.puuid, OTHER);
++    assert_eq!(rebuilt.hero_matches, 0, "hero stats are the new act's");
++    assert!(rebuilt.top_teammates.is_empty(), "so are the teammates");
++    assert_eq!(rebuilt.hero_kd, None);
++    let card = serde_json::to_value(&rebuilt.card).unwrap();
++    assert_eq!(card["actGames"], Value::Null);
++    assert!(card["peak"]["sinceActEndMs"].as_i64().is_some());
++    assert_eq!(
++        count(&h.server, "GET", "/content-service/v3/content").await,
++        2
++    );
++
++    // Riot says the same again: the act is not new, nothing reacts.
++    h.st.refresh_content().await;
++    idle(&h.st).await;
++    assert_eq!(tally(&h), after);
++}
++
++#[tokio::test]
++async fn an_act_switch_reaches_the_live_cards_my_stats_and_an_open_details_once() {
++    riot_switches_acts_mid_session(true).await;
++}
++
++#[tokio::test]
++async fn riots_answer_after_the_date_rule_already_switched_still_reaches_everything_once() {
++    // The act changed by valorant-api's dates before Riot said anything, so
++    // comparing the act before and after Riot's answer sees no change.
++    riot_switches_acts_mid_session(false).await;
++}
++
++#[tokio::test]
++async fn an_old_acts_peak_is_not_this_act_when_riot_names_no_previous_act() {
++    // Riot's list has no entry that ended where act B began, so the previous
++    // act comes from valorant-api, which is late and dates it as running for
++    // another 30 days. It is still over: the new act began.
++    let h = harness().await;
++    let n = now_ms();
++    valorant_api_acts(&h, n, true);
++    store_mmr(&h.st, ME).await;
++    me_and_other_on_screen(&h).await;
++    h.st.set_session(Some(h.session.clone()));
++    mount_content(&h, 200, content_b_from(n, n - 2 * H, false)).await;
++
++    h.st.refresh_content().await;
++
++    assert_eq!(current_id(&h.st).as_deref(), Some(ACT_B));
++    let card = live_card(&h, ME);
++    assert_eq!(card["peak"]["actLabel"], json!("V26 A4"));
++    assert!(
++        card["peak"]["sinceActEndMs"].as_i64().is_some(),
++        "act A is over, so it shows its age, not `This Act`: {}",
++        card["peak"]
++    );
++    assert_eq!(card["prevActTier"], json!(15), "the previous act is A");
++}
++
++/// valorant-api's dates alone: act A ends at `t0`, act B follows. The clock
++/// stands before `t0`; the first look at the act (the baseline) is taken.
++async fn date_rule_world(h: &Harness, n: i64, t0: i64) {
++    h.st.set_acts_for_test(vec![
++        api_act(OLD_ACT, "ACT III", t0 - 120 * D, t0 - 60 * D),
++        api_act(ACT_A, "ACT IV", t0 - 60 * D, t0),
++        api_act(ACT_B, "ACT V", t0, t0 + 60 * D),
++    ]);
++    for who in [ME, OTHER] {
++        store_mmr(&h.st, who).await;
++    }
++    store_act_a_match(&h.st, "b6-m1", n - 5 * H, true, 20).await;
++    store_act_a_match(&h.st, "b6-m2", n - 3 * H, false, -12).await;
++    me_and_other_on_screen(h).await;
++    // The first look (the tables' load) is the baseline.
++    h.st.note_act_change().await;
++    idle(&h.st).await;
++    assert_eq!(h.st.act_source(), "valorant-api");
++    assert_act_a_everywhere(h);
++}
++
++#[tokio::test]
++async fn a_date_rule_switch_with_no_riot_answer_republishes_and_notifies_once() {
++    let h = harness().await;
++    let n = now_ms();
++    // No session: Riot is never asked. The act ends at the next hour mark
++    // after two hours, the clock then moves 30 minutes into the next act.
++    let t0 = crate::state::card_clock(n) + 2 * H;
++    date_rule_world(&h, n, t0).await;
++    let before = tally(&h);
++
++    h.st.advance_wall_clock(t0 - n + H / 2);
++    assert_eq!(
++        current_id(&h.st).as_deref(),
++        Some(ACT_B),
++        "by the date rule"
++    );
++    h.st.note_act_change().await;
++    idle(&h.st).await;
++
++    assert_eq!(
++        tally(&h),
++        Tally {
++            reactions: before.reactions + 1,
++            live: before.live + 1,
++            my_stats: before.my_stats + 1,
++            details: before.details,
++            computed: before.computed + 1,
++        }
++    );
++    assert_eq!(h.st.act_source(), "valorant-api");
++    assert_new_act_everywhere(&h);
++    assert_eq!(
++        count(&h.server, "GET", "/content-service/v3/content").await,
++        0,
++        "Riot was never asked"
++    );
++}
++
++#[tokio::test]
++async fn a_date_rule_switch_off_the_hour_is_noticed_again_when_the_cards_follow() {
++    // Cards are built with the clock floored to the hour, everything that
++    // reads dates with the exact one. An act that starts at half past: My
++    // Stats and Details switch at 02:30, the cards at 03:00. Each is a change
++    // and each reacts once; the cards do not stay on the old act until
++    // something else republishes.
++    let h = harness().await;
++    let n = now_ms();
++    let hour = crate::state::card_clock(n);
++    let t0 = hour + 2 * H + H / 2;
++    // The clock first stands at 02:10, 20 minutes before act B.
++    date_rule_world(&h, n, t0).await;
++    h.st.advance_wall_clock(hour + 2 * H + H / 6 - n);
++    h.st.note_act_change().await;
++    idle(&h.st).await;
++    assert_act_a_everywhere(&h);
++    let before = tally(&h);
++
++    // 02:40: B for everything that reads exact dates, A for the cards.
++    h.st.advance_wall_clock(H / 2);
++    assert_eq!(current_id(&h.st).as_deref(), Some(ACT_B));
++    h.st.note_act_change().await;
++    idle(&h.st).await;
++    let exact = tally(&h);
++    assert_eq!(exact.reactions, before.reactions + 1);
++    assert_eq!(
++        exact.my_stats,
++        before.my_stats + 1,
++        "My Stats follows at once"
++    );
++    assert_eq!(exact.live, before.live, "the cards are still built for A");
++    assert_eq!(live_card(&h, ME)["actGames"], json!(14));
++
++    // 03:10: the card clock passed the start as well.
++    h.st.advance_wall_clock(H / 2);
++    h.st.note_act_change().await;
++    idle(&h.st).await;
++    let cards = tally(&h);
++    assert_eq!(cards.reactions, exact.reactions + 1);
++    assert_eq!(cards.live, exact.live + 1, "now the cards follow");
++    assert_eq!(live_card(&h, ME)["actGames"], Value::Null);
++    assert_new_act_everywhere(&h);
++
++    // Nothing new.
++    h.st.note_act_change().await;
++    idle(&h.st).await;
++    assert_eq!(tally(&h), cards);
++}
++
++#[tokio::test]
++async fn note_act_change_reacts_once_however_often_or_concurrently_it_is_called() {
++    let h = harness().await;
++    let n = now_ms();
++    let t0 = crate::state::card_clock(n) + 2 * H;
++    date_rule_world(&h, n, t0).await;
++    let before = tally(&h);
++    // Nothing changed yet: calling it is free of effects.
++    for _ in 0..3 {
++        h.st.note_act_change().await;
++    }
++    idle(&h.st).await;
++    assert_eq!(tally(&h), before);
++
++    h.st.advance_wall_clock(t0 - n + H / 2);
++    // Eight callers at once (the tick, a Riot answer, a tables load): one of
++    // them reacts.
++    let callers: Vec<_> = (0..8)
++        .map(|_| {
++            let st = h.st.clone();
++            tokio::spawn(async move { st.note_act_change().await })
++        })
++        .collect();
++    for caller in callers {
++        caller.await.unwrap();
++    }
++    idle(&h.st).await;
++    let once = tally(&h);
++    assert_eq!(once.reactions, before.reactions + 1);
++    assert_eq!(once.live, before.live + 1);
++    assert_eq!(once.my_stats, before.my_stats + 1);
++    assert_eq!(
++        once.computed,
++        before.computed + 1,
++        "one recompute asked for"
++    );
++
++    // And again, one after the other.
++    for _ in 0..5 {
++        h.st.note_act_change().await;
++    }
++    idle(&h.st).await;
++    assert_eq!(tally(&h), once);
++}
++
++#[tokio::test]
++async fn the_slow_my_stats_tick_notices_a_date_rule_switch() {
++    // No Riot answer, no tables load, no match: only the 15-minute tick (40 ms
++    // here) is left to notice that the clock crossed the act's end.
++    let h = harness().await;
++    let n = now_ms();
++    let t0 = crate::state::card_clock(n) + 2 * H;
++    date_rule_world(&h, n, t0).await;
++    let before = tally(&h);
++    let tick = tokio::spawn(my_stats::periodic(h.st.clone(), Duration::from_millis(40)));
++
++    h.st.advance_wall_clock(t0 - n + H / 2);
++    wait_until("the tick noticed the new act", || {
++        h.st.act_reactions() > before.reactions
++    })
++    .await;
++    // Let a few more ticks pass: they find nothing to react to.
++    let ticks_after = lock(&h.st.my_stats_push).computed + 3;
++    wait_until("three more ticks", || {
++        lock(&h.st.my_stats_push).computed >= ticks_after
++    })
++    .await;
++    tick.abort();
++    idle(&h.st).await;
++
++    let after = tally(&h);
++    assert_eq!(after.reactions, before.reactions + 1);
++    assert_eq!(after.live, before.live + 1);
++    assert_eq!(after.my_stats, before.my_stats + 1);
++    assert_new_act_everywhere(&h);
++}
++
++#[tokio::test]
++async fn a_connect_that_brings_new_act_tables_reacts_once_through_the_poll_loops_own_wiring() {
++    // `Poller::on_connected` re-checks valorant-api's version in the
++    // background (a new patch, a new act table) and calls `note_act_change`
++    // when `ensure_tables` has returned. A mock session, never a real connect.
++    let h = harness().await;
++    let n = now_ms();
++    h.st.set_acts_for_test(vec![api_act(
++        "act-stale-b6",
++        "ACT IV",
++        n - 60 * D,
++        n + 60 * D,
++    )]);
++    h.st.note_act_change().await;
++    idle(&h.st).await;
++    let before = tally(&h);
++    assert_eq!(current_id(&h.st).as_deref(), Some("act-stale-b6"));
++
++    mount_asset_tables(&h.assets_server).await;
++    let mut poller = crate::poll::Poller::new(h.st.clone());
++    poller.on_connected(h.session.clone()).await;
++    wait_until("the connect's table load reacted to the new act", || {
++        h.st.act_reactions() > before.reactions
++    })
++    .await;
++    idle(&h.st).await;
++
++    assert_eq!(current_id(&h.st).as_deref(), Some(ACT));
++    assert_eq!(h.st.act_reactions(), before.reactions + 1);
++    poller.stop_worker();
++}
++
++#[tokio::test]
++async fn loading_the_asset_tables_reacts_once_to_the_act_they_make_current() {
++    // valorant-api's tables arrive (or a patch replaces them) and name another
++    // act as current: the same single reaction, run by whoever called
++    // `ensure_tables` once it returned (its tables lock is released then).
++    let h = harness().await;
++    let n = now_ms();
++    h.st.set_acts_for_test(vec![api_act(
++        "act-stale-b6",
++        "ACT IV",
++        n - 60 * D,
++        n + 60 * D,
++    )]);
++    me_and_other_on_screen(&h).await;
++    h.st.note_act_change().await;
++    idle(&h.st).await;
++    let before = tally(&h);
++    assert_eq!(current_id(&h.st).as_deref(), Some("act-stale-b6"));
++
++    mount_asset_tables(&h.assets_server).await;
++    h.st.ensure_tables(false).await.expect("tables load");
++    assert_eq!(current_id(&h.st).as_deref(), Some(ACT));
++    assert_eq!(
++        h.st.act_reactions(),
++        before.reactions,
++        "the load itself does not react: its caller does, outside the lock"
++    );
++    h.st.note_act_change().await;
++    idle(&h.st).await;
++    assert_eq!(h.st.act_reactions(), before.reactions + 1);
++    // My Stats was recomputed once (its bytes are the same for an empty
++    // account in either act, so nothing was emitted).
++    assert_eq!(tally(&h).computed, before.computed + 1);
++
++    // A re-check that changes nothing: no second reaction.
++    h.st.ensure_tables(true).await.expect("still loaded");
++    h.st.note_act_change().await;
++    idle(&h.st).await;
++    assert_eq!(h.st.act_reactions(), before.reactions + 1);
++}
++
++/// For a backfill run that crosses an act change: act A from `a_start`, act B
++/// from `switch_ms` (valorant-api's dates alone, no Riot). The wall clock is
++/// put one hour before the switch, so act A is current;
++/// [`cross_into_act_b`] then moves it two hours on.
++pub(crate) fn acts_a_then_b(h: &Harness, a_start: i64, switch_ms: i64) {
++    h.st.set_acts_for_test(vec![
++        api_act(ACT_A, "ACT IV", a_start, switch_ms),
++        api_act(ACT_B, "ACT V", switch_ms, switch_ms + 60 * D),
++    ]);
++    h.st.advance_wall_clock(switch_ms - H - h.st.clock_ms());
++    assert_eq!(current_id(&h.st).as_deref(), Some(ACT_A));
++    assert_eq!(h.st.current_act().unwrap().start_ms, a_start);
++}
++
++/// The clock crosses the switch of [`acts_a_then_b`]: act B is current.
++pub(crate) fn cross_into_act_b(h: &Harness) {
++    h.st.advance_wall_clock(2 * H);
++    assert_eq!(current_id(&h.st).as_deref(), Some(ACT_B));
++}
+diff --git a/src-tauri/src/pipeline_tests/backfill.rs b/src-tauri/src/pipeline_tests/backfill.rs
+index f7c1b6e..43adc2f 100644
+--- a/src-tauri/src/pipeline_tests/backfill.rs
++++ b/src-tauri/src/pipeline_tests/backfill.rs
+@@ -464,11 +464,51 @@ async fn backfill_first_run_picks_up_act_tables_that_load_late() {
+     assert_eq!(details_asked(&requests(&h.server).await).len(), 31);
+ }
+ 
++#[tokio::test]
++async fn backfill_first_run_across_an_act_change_stops_at_the_new_acts_start() {
++    // B6: the first run starts under act A, which reaches back to between
++    // entries 150 and 151, and the act changes after its first page. Act B
++    // began between entries 30 and 31: the run reads the act's start again on
++    // every page, so it stops there (2 pages, 31 matches), not at act A's (8
++    // pages, 151 matches).
++    let h = harness().await;
++    let base = base_ms();
++    mount_feed(&h.server, Feed::new(230)).await;
++    let a_start = entry_start(base, 150) - 30_000;
++    let switch = entry_start(base, 30) - 30_000;
++    super::act::acts_a_then_b(&h, a_start, switch);
++    start_backfill_run(&h.st).await;
++    assert_eq!(
++        lock(&h.st.live).backfill.as_ref().unwrap().act_start_ms,
++        Some(a_start)
++    );
++    {
++        // A live job is waiting, so the step yields right after its page.
++        let mut live = lock(&h.st.live);
++        live.slots.push(Slot {
++            roster: roster(OTHER, false),
++            db: PlayerDb::default(),
++        });
++        live.names_attempted.insert(OTHER.into());
++    }
++    backfill_step(&h.st, &h.session).await.unwrap();
++    assert_eq!(count(&h.server, "GET", &history_path()).await, 1);
++    assert!(run_active(&h.st));
++
++    super::act::cross_into_act_b(&h);
++    lock(&h.st.live).slots.clear();
++    run_backfill(&h).await;
++
++    assert_eq!(count(&h.server, "GET", &history_path()).await, 2);
++    assert_eq!(details_asked(&requests(&h.server).await).len(), 31);
++    assert_eq!(stored_anchor(&h.st).await.map(|a| a.0), Some(entry_id(0)));
++}
++
+ #[tokio::test]
+ async fn backfill_stores_a_late_found_act_start_in_the_run() {
+     // The act tables load after the run started: the first page finds the act
+-    // start, and the run keeps it — the later pages don't look it up again
+-    // (and it stays the bound if the tables are reloaded meanwhile).
++    // start and stores it in the run (the later pages read it again, B6: it is
++    // the last bound a page used).
+     let h = harness().await;
+     let base = base_ms();
+     mount_feed(&h.server, Feed::new(230)).await;
+@@ -495,7 +535,11 @@ async fn backfill_stores_a_late_found_act_start_in_the_run() {
+     backfill_step(&h.st, &h.session).await.unwrap();
+ 
+     let stored = lock(&h.st.live).backfill.as_ref().unwrap().act_start_ms;
+-    assert_eq!(stored, Some(act_start), "kept in the run, found on page 0");
++    assert_eq!(
++        stored,
++        Some(act_start),
++        "stored in the run, found on page 0"
++    );
+ }
+ 
+ #[tokio::test]
+diff --git a/src-tauri/src/pipeline_tests/comp_backfill.rs b/src-tauri/src/pipeline_tests/comp_backfill.rs
+index 057a5e0..e5884b1 100644
+--- a/src-tauri/src/pipeline_tests/comp_backfill.rs
++++ b/src-tauri/src/pipeline_tests/comp_backfill.rs
+@@ -154,6 +154,59 @@ async fn drain_run(h: &Harness) {
+     assert!(!run_active(&h.st), "the run ended");
+ }
+ 
++/// One worker pass of a started run: the next page (the poll tick's wake-up
++/// first moves the model's clock past the gap).
++async fn one_page(h: &Harness) {
++    advance(h, COMP_BACKFILL_PAGE_GAP + Duration::from_millis(500));
++    let id = lock(&h.st.live).try_start_worker().expect("a page is due");
++    run_worker(h.st.clone(), h.session.clone(), id).await;
++    assert!(!lock(&h.st.live).worker_running(), "claim released on exit");
++}
++
++#[tokio::test]
++async fn a_run_that_crosses_an_act_change_stops_at_the_new_acts_edge() {
++    // B6: the run starts under act A, which reaches back to row 91 (its edge,
++    // a day before its start, lies between rows 90 and 91), and the act changes
++    // after its first page. Act B's edge lies between rows 45 and 46: the run
++    // reads the act again on every page, so it ends on the page that holds row
++    // 46 (rows 40 to 59), not on act A's (rows 80 to 99). Same requests as a run
++    // that began under act B, no restart, nothing extra.
++    const H6: i64 = 6 * 3_600_000;
++    let h = harness().await;
++    mount_comp_feed_spaced(&h.server, 100, None, H6).await;
++    let a_start = base_ms() - 90 * H6 - H6 / 2 + opd1_core::mystats::ACT_EDGE_MS;
++    let switch = base_ms() - 45 * H6 - H6 / 2 + opd1_core::mystats::ACT_EDGE_MS;
++    super::act::acts_a_then_b(&h, a_start, switch);
++
++    start_comp_backfill_run(&h.st).await;
++    assert_eq!(
++        lock(&h.st.live)
++            .comp_backfill
++            .as_ref()
++            .unwrap()
++            .act_start_ms,
++        Some(a_start),
++        "the run captured act A's start"
++    );
++    one_page(&h).await;
++    assert_eq!(comp_starts(&h).await, ["0"]);
++    assert!(
++        run_active(&h.st),
++        "page 0 holds nothing before act A's edge"
++    );
++
++    super::act::cross_into_act_b(&h);
++    drain_run(&h).await;
++
++    assert_eq!(comp_starts(&h).await, ["0", "20", "40"]);
++    assert_eq!(stored_rows(&h.st).await, 60, "three pages, not five");
++    assert_eq!(
++        stored_comp_anchor(&h.st).await,
++        Some((row_id(0), base_ms())),
++        "the run still finishes normally"
++    );
++}
++
+ #[tokio::test]
+ async fn a_first_run_pages_back_to_the_act_start_and_leaves_an_anchor() {
+     const H6: i64 = 6 * 3_600_000;
+diff --git a/src-tauri/src/poll.rs b/src-tauri/src/poll.rs
+index 5a195a6..31a3128 100644
+--- a/src-tauri/src/poll.rs
++++ b/src-tauri/src/poll.rs
+@@ -504,6 +504,9 @@ impl Poller {
+                 // B2: with the user's puuid known (just above), the tables
+                 // may be what makes My Stats computable.
+                 crate::my_stats::notify(&st);
++                // B6: a new patch can bring the act table that makes another
++                // act current (the tables lock is released by now).
++                st.note_act_change().await;
+             }
+         });
+         // The user's own card, from the DB, while the first presence
+diff --git a/src-tauri/src/roster.rs b/src-tauri/src/roster.rs
+index a33429c..9d29d02 100644
+--- a/src-tauri/src/roster.rs
++++ b/src-tauri/src/roster.rs
+@@ -709,11 +709,20 @@ pub fn resolve_acts(api: &[Act], riot: &ContentActs, now_ms: i64) -> Option<Reso
+         build(p, p.start_ms, Some(current.start_ms))
+     });
+     let before = previous.as_ref().map_or(true_start, |p| p.start_ms);
++    // B6: an earlier act is over where the act after it begins, whatever
++    // valorant-api's own end date says (it can be late: its dates would then
++    // keep the old act, and the peak reached in it, "this act" while the new
++    // one runs). The clamp is to the start the list itself carries for the next
++    // act, so the card clock agrees.
++    let over_at = previous.as_ref().map_or(current.start_ms, |p| p.start_ms);
+     let mut acts: Vec<Act> = api
+         .iter()
+         .filter(|a| a.start_ms < before && a.id != current.id)
+         .filter(|a| previous.as_ref().is_none_or(|p| p.id != a.id))
+-        .cloned()
++        .map(|a| Act {
++            end_ms: a.end_ms.min(over_at).max(a.start_ms),
++            ..a.clone()
++        })
+         .collect();
+     acts.extend(previous);
+     acts.push(current);
+@@ -1536,6 +1545,48 @@ mod tests {
+         assert_eq!(ids(&r.acts), ["a", "b", "c"]);
+     }
+ 
++    #[test]
++    fn an_earlier_act_ends_where_the_next_begins_even_when_valorant_api_is_late() {
++        // B6: Riot rolled to c two hours ago and names no previous act.
++        // valorant-api, late, dates b as running another 50 days (and a as
++        // overlapping it): b may not stay "this act" (a Peak reached in b
++        // would read `This Act` against the new act's clock).
++        let now = 250 * D;
++        let started = now - 2 * H;
++        let mut late = api();
++        late[0].end_ms = 150 * D;
++        late[1].end_ms = 300 * D;
++        let riot = ContentActs {
++            current: riot_act("c", Some(started), Some(400 * D)),
++            previous: None,
++        };
++        let r = resolve_acts(&late, &riot, now).unwrap();
++        assert_eq!(ids(&r.acts), ["a", "b", "c"]);
++        assert_eq!(r.acts[0].end_ms, 150 * D, "a ended before c began: kept");
++        assert_eq!(r.acts[1].end_ms, started, "b: over where c begins");
++        assert_eq!(r.acts[2].start_ms, started);
++        assert_eq!(current_act(&r.acts, now).unwrap().id, "c");
++        for earlier in &r.acts[..2] {
++            assert!(
++                opd1_core::stats::since_act_end(earlier, now).is_some(),
++                "{} is over, not `This Act`",
++                earlier.id
++            );
++        }
++
++        // With a previous act, the acts before it end where it begins; an act
++        // that ended earlier keeps its own end.
++        let riot = ContentActs {
++            current: riot_act("c", Some(started), Some(400 * D)),
++            previous: Some(riot_act("b", Some(100 * D), Some(started))),
++        };
++        let r = resolve_acts(&late, &riot, now).unwrap();
++        assert_eq!(r.acts[1].end_ms, started, "Riot's own end for the previous");
++        assert_eq!(r.acts[0].end_ms, 100 * D, "a is clamped to where b begins");
++        let r = resolve_acts(&api(), &riot, now).unwrap();
++        assert_eq!(r.acts[0].end_ms, 100 * D, "an end that was fine stays");
++    }
++
+     #[test]
+     fn missing_riot_times_fall_back_to_the_apis_for_a_known_id() {
+         let now = 250 * D;
+diff --git a/src-tauri/src/state.rs b/src-tauri/src/state.rs
+index 4c9be8d..f27a384 100644
+--- a/src-tauri/src/state.rs
++++ b/src-tauri/src/state.rs
+@@ -10,9 +10,15 @@
+ //! so nothing may call `my_stats::notify` / `notify_now` (which take
+ //! `my_stats_push`) while holding `live`. `set_session` takes the session
+ //! lock, then `carried_holds` (R185); the riot crate's throttle locks are leaves.
++//! `note_act_change` (B6) holds `act_watch`, a leaf, only for its comparison and
++//! reacts (`publish`, `my_stats::notify`, `details::refresh_open`) after
++//! releasing it, so it is called with no other lock held, the tables lock
++//! included.
+ 
+ use std::collections::{HashMap, HashSet, VecDeque};
+ use std::path::PathBuf;
++#[cfg(test)]
++use std::sync::atomic::AtomicI64;
+ use std::sync::atomic::{AtomicBool, Ordering};
+ use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+@@ -347,8 +353,9 @@ pub struct BackfillRun {
+     /// The last finished run's newest `(match_id, start_ms)`; `None` on the
+     /// first run ever.
+     pub anchor: Option<(String, i64)>,
+-    /// The current act's start, first run only (`None` when the act tables
+-    /// aren't loaded; each page looks it up again until it is known).
++    /// The current act's start, first run only: the last one a page read
++    /// (`None` when the act tables aren't loaded). Each page reads it again
++    /// (B6), so a run across an act change follows the new act.
+     pub act_start_ms: Option<i64>,
+     /// The next match-history `startIndex`: the last page's start plus the
+     /// entries it actually held (a short page mid-history leaves no gap).
+@@ -404,8 +411,9 @@ pub struct CompBackfillRun {
+     /// The last finished run's newest `(match_id, start_ms)`; `None` on the
+     /// first run ever.
+     pub anchor: Option<(String, i64)>,
+-    /// The current act's start (`None` when the act tables aren't loaded; each
+-    /// page looks it up again until it is known).
++    /// The current act's start: the last one a page read (`None` when the act
++    /// tables aren't loaded). Each page reads it again (B6), so a run across an
++    /// act change follows the new act.
+     pub act_start_ms: Option<i64>,
+     /// The next `startIndex`: the last page's start plus the rows it held.
+     pub next_index: u32,
+@@ -1682,6 +1690,28 @@ impl ActsState {
+     }
+ }
+ 
++/// B6: the current act as the two clocks of the app read it. The cards are
++/// built with the clock floored to the hour ([`card_clock`]) and everything
++/// that reads dates (My Stats, Player Details, the backfill bounds) with the
++/// exact one, so with a valorant-api start that is not on the hour the two
++/// switch up to an hour apart and each switch is a change of its own.
++#[derive(Debug, Clone, Default, PartialEq, Eq)]
++struct SeenActs {
++    /// The act at the exact time.
++    exact: Option<String>,
++    /// The act at the card clock.
++    card: Option<String>,
++}
++
++/// What [`AppState::note_act_change`] remembers between calls.
++#[derive(Debug, Default)]
++struct ActWatch {
++    seen: SeenActs,
++    /// How many times the reaction ran (tests count it).
++    #[cfg(test)]
++    reactions: usize,
++}
++
+ /// Bookkeeping for the content-service fetches.
+ #[derive(Default)]
+ struct ContentFetch {
+@@ -1747,6 +1777,13 @@ pub struct AppState {
+     session: RwLock<Option<Arc<RiotSession>>>,
+     pub live: Mutex<LiveModel>,
+     acts: RwLock<ActsState>,
++    /// B6: the current act as [`Self::note_act_change`] last saw it.
++    act_watch: Mutex<ActWatch>,
++    /// Test clock: added to the wall clock the act logic reads
++    /// ([`Self::clock_ms`]), so a test crosses an act boundary without
++    /// sleeping ([`Self::advance_wall_clock`]).
++    #[cfg(test)]
++    clock_skew_ms: AtomicI64,
+     content: Mutex<ContentFetch>,
+     tables: tokio::sync::Mutex<TablesStatus>,
+     details_synced: Mutex<HashMap<String, Instant>>,
+@@ -1838,6 +1875,9 @@ impl AppState {
+             session: RwLock::new(None),
+             live: Mutex::new(live),
+             acts: RwLock::new(ActsState::new()),
++            act_watch: Mutex::new(ActWatch::default()),
++            #[cfg(test)]
++            clock_skew_ms: AtomicI64::new(0),
+             content: Mutex::new(ContentFetch::default()),
+             tables: tokio::sync::Mutex::new(TablesStatus::default()),
+             details_synced: Mutex::new(HashMap::new()),
+@@ -1911,7 +1951,36 @@ impl AppState {
+     /// the current one, the one before it the previous one — and with
+     /// nothing from Riot that is valorant-api's date rule, as before.
+     pub fn acts(&self) -> Arc<Vec<Act>> {
+-        self.acts_at(now_ms())
++        self.acts_at(self.clock_ms())
++    }
++
++    /// The wall clock (epoch ms) the act logic reads: every place that decides
++    /// which act is current (the table, the cards, My Stats, Player Details,
++    /// the content-service ask) goes through it, so a test moves it
++    /// ([`Self::advance_wall_clock`]) instead of sleeping. Outside tests it is
++    /// [`now_ms`].
++    pub fn clock_ms(&self) -> i64 {
++        #[cfg(test)]
++        {
++            now_ms() + self.clock_skew_ms.load(Ordering::SeqCst)
++        }
++        #[cfg(not(test))]
++        {
++            now_ms()
++        }
++    }
++
++    /// Tests only: moves [`Self::clock_ms`] forward by `by_ms` (a negative
++    /// value moves it back).
++    #[cfg(test)]
++    pub fn advance_wall_clock(&self, by_ms: i64) {
++        self.clock_skew_ms.fetch_add(by_ms, Ordering::SeqCst);
++    }
++
++    /// Tests only: how many times [`Self::note_act_change`] reacted to a change.
++    #[cfg(test)]
++    pub fn act_reactions(&self) -> usize {
++        lock(&self.act_watch).reactions
+     }
+ 
+     pub fn acts_at(&self, now_ms: i64) -> Arc<Vec<Act>> {
+@@ -1935,7 +2004,7 @@ impl AppState {
+     fn set_base_acts(&self, acts: Vec<Act>) {
+         let mut g = self.acts.write().unwrap_or_else(PoisonError::into_inner);
+         g.base = Arc::new(acts);
+-        g.rebuild(now_ms());
++        g.rebuild(self.clock_ms());
+     }
+ 
+     /// Riot's answer, fetched at `fetched_ms`.
+@@ -1950,7 +2019,7 @@ impl AppState {
+             };
+             (r, usable_until)
+         });
+-        g.rebuild(now_ms());
++        g.rebuild(self.clock_ms());
+     }
+ 
+     #[cfg(test)]
+@@ -1960,7 +2029,7 @@ impl AppState {
+ 
+     /// The current act, if the tables are loaded.
+     pub fn current_act(&self) -> Option<Act> {
+-        let now = now_ms();
++        let now = self.clock_ms();
+         let acts = self.acts_at(now);
+         let mut act = current_act(&acts, now).cloned()?;
+         // The list may carry the hour-floored card clock as the start for the
+@@ -1983,7 +2052,7 @@ impl AppState {
+     /// (its date rule).
+     pub fn act_source(&self) -> &'static str {
+         // A due rebuild is applied first, so this agrees with `current_act()`.
+-        let _ = self.acts_at(now_ms());
++        let _ = self.acts_at(self.clock_ms());
+         if self
+             .acts
+             .read()
+@@ -2050,7 +2119,7 @@ impl AppState {
+         if self.session().is_none() {
+             return;
+         }
+-        if !force && !self.content_due(now_ms()) {
++        if !force && !self.content_due(self.clock_ms()) {
+             return;
+         }
+         let st = self.clone();
+@@ -2075,8 +2144,7 @@ impl AppState {
+             c.held_until = None;
+         }
+         let result = session.content().await;
+-        let now = now_ms();
+-        let before = self.current_act().map(|a| a.id);
++        let now = self.clock_ms();
+         // R185: a request hold (nothing was sent, e.g. one carried into this
+         // session) is "not now", not a failure.
+         let mut held = None;
+@@ -2141,15 +2209,64 @@ impl AppState {
+             }
+             c.logged = Some(key);
+         }
+-        if current.map(|a| a.id) != before {
+-            // The live cards, an open Player Details and My Stats (B2) read
+-            // the act.
+-            self.publish();
+-            crate::my_stats::notify(self);
+-            crate::details::refresh_open(self).await;
++        // B6: Riot's answer is only one of the things that can change the
++        // current act; the reaction is shared with the others.
++        self.note_act_change().await;
++    }
++
++    /// The current act as the cards and as everything that reads dates see it
++    /// at `now_ms`.
++    fn act_ids_at(&self, now_ms: i64) -> SeenActs {
++        let acts = self.acts_at(now_ms);
++        let id_at = |at: i64| current_act(&acts, at).map(|a| a.id.clone());
++        SeenActs {
++            exact: id_at(now_ms),
++            card: id_at(card_clock(now_ms)),
+         }
+     }
+ 
++    /// B6: the one reaction to the current act changing, whatever changed it.
++    /// Riot's content-service answer is one cause; the others are valorant-api's
++    /// date rule (no Riot answer, or its answer expired: the clock crossed an
++    /// act's end) and the asset tables being (re)loaded
++    /// ([`Self::ensure_tables`]). Called after each of them
++    /// ([`Self::refresh_content`], the callers of `ensure_tables`) and from
++    /// My Stats' 15-minute tick, which catches a date-rule switch while Riot is
++    /// silent. Never call it while holding the tables lock (`img://` waits on it).
++    ///
++    /// It remembers the act it last saw ([`SeenActs`]) and does nothing when it is
++    /// still the same, which is one read of the act table and a comparison, so
++    /// it is cheap to call often. On a change it republishes the live cards
++    /// (Win%, Games and Peak's label follow the new act), notifies My Stats
++    /// and rebuilds an open Player Details, once: the act is recorded before
++    /// the reaction, so a second caller arriving meanwhile finds nothing new.
++    pub async fn note_act_change(self: &Arc<Self>) {
++        let now = self.clock_ms();
++        let seen = self.act_ids_at(now);
++        let (was, now_is) = {
++            let mut watch = lock(&self.act_watch);
++            if watch.seen == seen {
++                return;
++            }
++            #[cfg(test)]
++            {
++                watch.reactions += 1;
++            }
++            let was = std::mem::replace(&mut watch.seen, seen);
++            (was, watch.seen.clone())
++        };
++        log::debug!(
++            "current act changed: {:?} (cards {:?}) -> {:?} (cards {:?})",
++            was.exact.as_deref().map(short),
++            was.card.as_deref().map(short),
++            now_is.exact.as_deref().map(short),
++            now_is.card.as_deref().map(short)
++        );
++        self.publish();
++        crate::my_stats::notify(self);
++        crate::details::refresh_open(self).await;
++    }
++
+     /// Riot map path -> valorant-api uuid (`None` if unknown or the tables
+     /// aren't loaded).
+     pub fn map_uuid(&self, path: &str) -> Option<String> {
+@@ -2273,7 +2390,7 @@ impl AppState {
+                 live.map_id = self.map_uuid(&path);
+             }
+         }
+-        let state = live.build(&acts, card_clock(now_ms()), &|p| self.map_uuid(p));
++        let state = live.build(&acts, card_clock(self.clock_ms()), &|p| self.map_uuid(p));
+         let bytes = serde_json::to_vec(&state).unwrap_or_default();
+         if bytes == live.last_bytes {
+             return;
+diff --git a/src-tauri/src/sync.rs b/src-tauri/src/sync.rs
+index d8828f1..8ab1f82 100644
+--- a/src-tauri/src/sync.rs
++++ b/src-tauri/src/sync.rs
+@@ -1115,12 +1115,16 @@ async fn backfill_page(
+     else {
+         return Ok(false);
+     };
+-    // The asset tables may have loaded since the run started (a fresh
+-    // install downloads them beside the connect): the first run's act bound
+-    // is looked up again until it is known.
+-    let act_start_ms = match act_start_ms {
+-        None if anchor.is_none() => st.current_act().map(|a| a.start_ms),
+-        known => known,
++    // The first run's act bound is the current act's start, read again on
++    // every page (B6): the tables may have loaded since the run started (a
++    // fresh install downloads them beside the connect), and the act may have
++    // changed since (a run in flight across the switch stops at the new act's
++    // start, not the old one's). The last known start stands in when no act is
++    // current. A run with an anchor has no act bound.
++    let act_start_ms = if anchor.is_none() {
++        st.current_act().map(|a| a.start_ms).or(act_start_ms)
++    } else {
++        act_start_ms
+     };
+     let take = backfill_take(&page, index, total, anchor.as_ref(), act_start_ms, scanned);
+     log::debug!(
+@@ -1164,7 +1168,7 @@ async fn backfill_page(
+             run.newest = page.first().map(|e| (e.match_id.clone(), e.start_ms));
+         }
+         run.scanned += take.entries.len() as u32;
+-        // Kept once found: the later pages don't look the act up again.
++        // The bound this page used (the next page reads it again).
+         run.act_start_ms = act_start_ms;
+         // By what the page held, not by what was asked for: a short page
+         // mid-history must not skip the entries behind it.
+@@ -1312,8 +1316,11 @@ pub async fn comp_backfill_step(
+     else {
+         return Ok(());
+     };
+-    // The asset tables may have loaded since the run started.
+-    let act_start_ms = act_start_ms.or_else(|| st.current_act().map(|a| a.start_ms));
++    // The current act's start, read again on every page (B6): the tables may
++    // have loaded since the run started, and the act may have changed since (a
++    // run in flight across the switch stops at the new act's edge, not the old
++    // one's). The last known start stands in when no act is current.
++    let act_start_ms = st.current_act().map(|a| a.start_ms).or(act_start_ms);
+     let done = comp_backfill_done(&rows, anchor.as_ref(), act_start_ms, pages + 1);
+     log::debug!(
+         "own competitive updates page {index}: {} rows{}",
+@@ -1338,7 +1345,7 @@ pub async fn comp_backfill_step(
+             run.newest = rows.first().map(|r| (r.match_id.clone(), r.start_ms));
+         }
+         run.pages += 1;
+-        // Kept once found: the later pages don't look the act up again.
++        // The bound this page used (the next page reads it again).
+         run.act_start_ms = act_start_ms;
+         // By what the page held, not by what was asked for.
+         run.next_index = index + rows.len() as u32;

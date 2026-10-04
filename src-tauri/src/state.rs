@@ -5,7 +5,11 @@
 //! synchronous work (never across an `.await`); SQLite work always goes
 //! through [`AppState::db`] (`spawn_blocking`). Order: a DB closure may
 //! take the `live` lock (`sync::fetch_self_loadout`'s account check), so
-//! nothing takes the repo while holding `live`.
+//! nothing takes the repo while holding `live`. The My Stats push checks the
+//! account and emits as one step (R186): it takes `my_stats_push`, then `live`,
+//! so nothing may call `my_stats::notify` / `notify_now` (which take
+//! `my_stats_push`) while holding `live`. `set_session` takes the session
+//! lock, then `carried_holds` (R185); the riot crate's throttle locks are leaves.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
@@ -26,12 +30,13 @@ use opd1_core::stats::Act;
 use opd1_riot::assets::{AssetCache, Meta};
 use opd1_riot::endpoints::ContentActs;
 use opd1_riot::to_core::{current_rank_from_mmr, seasonal_map_from_mmr};
+use opd1_riot::RiotError;
 use opd1_riot::RiotSession;
 use opd1_riot::VisiblePuuid;
 
 use crate::logbuf::short;
 use crate::my_stats::MyStatsPush;
-use crate::rank_retry::{RankRetries, RANK_RETRY_DELAYS};
+use crate::rank_retry::{RankRetries, HOLD_SLACK, RANK_RETRY_DELAYS};
 use crate::roster::{current_act, resolve_acts, RawLoadout, RosterPlayer};
 use crate::store::{PlayerDb, StoredPlayer, SELF_LOADOUT_KEY};
 
@@ -1072,9 +1077,12 @@ impl LiveModel {
         self.names_retry_wake = None;
     }
 
-    /// R160: forgets a names deferral. A new session (a reconnect, another
-    /// account) has its own, empty hold: what the old one refused is not
-    /// refused now.
+    /// R160: forgets a names deferral. The deferral belonged to the old
+    /// session's refusal; the request hold itself is carried into the new
+    /// session by `AppState::set_session` (R185), so a names ask that is still
+    /// held is refused again and defers itself again ([`defer_names`]).
+    ///
+    /// [`defer_names`]: Self::defer_names
     pub fn reset_names_hold(&mut self) {
         self.names_hold_until = None;
         self.fill_stand_down_until = None;
@@ -1679,6 +1687,10 @@ impl ActsState {
 struct ContentFetch {
     in_flight: bool,
     last_attempt: Option<Instant>,
+    /// R185: the last ask met a request hold (`RiotError::Held`, nothing was
+    /// sent): the next one is due when it is over ([`HOLD_SLACK`] after), not
+    /// after the failure retry. Cleared by the next ask.
+    held_until: Option<Instant>,
     /// The act and source last logged, so each is logged once.
     logged: Option<(String, &'static str)>,
 }
@@ -1687,6 +1699,45 @@ struct ContentFetch {
 struct TablesStatus {
     loaded: bool,
     last_failure: Option<Instant>,
+}
+
+/// What is left of the `mmr` and `other` request holds ([`RiotSession::hold_remaining`]).
+type HoldsLeft = (Option<Duration>, Option<Duration>);
+
+/// R185: the request holds of the sessions the app replaced, as the instants
+/// they end at. Riot's block is per client, not per session: a 429 that held a
+/// session's family must still hold the session that replaces it (a reconnect,
+/// the supervisor's restart after a panic), or the new one would hit Riot
+/// again inside the block. A hold lasts at most 120 s, so what is stored never
+/// outlives that. Kept across an account switch (the block is the client's).
+#[derive(Default)]
+struct CarriedHolds {
+    mmr: Option<Instant>,
+    other: Option<Instant>,
+}
+
+impl CarriedHolds {
+    /// Keeps the later of the stored end and the one `left` gives from `now`.
+    fn keep(&mut self, now: Instant, (mmr, other): HoldsLeft) {
+        fn later(slot: &mut Option<Instant>, now: Instant, left: Option<Duration>) {
+            if let Some(end) = left.and_then(|left| now.checked_add(left)) {
+                *slot = Some(slot.map_or(end, |old| old.max(end)));
+            }
+        }
+        later(&mut self.mmr, now, mmr);
+        later(&mut self.other, now, other);
+    }
+
+    /// What is still in the future at `now`. Takes it out: the session that is
+    /// seeded with it owns it from then on (and gives it back when it is
+    /// replaced), and an end that has passed is dropped.
+    fn take(&mut self, now: Instant) -> HoldsLeft {
+        let left = |end: Option<Instant>| {
+            end.and_then(|end| end.checked_duration_since(now))
+                .filter(|left| !left.is_zero())
+        };
+        (left(self.mmr.take()), left(self.other.take()))
+    }
 }
 
 pub struct AppState {
@@ -1737,6 +1788,9 @@ pub struct AppState {
     /// B2: the `"mystats"` push's state (`my_stats::notify`): the last emitted
     /// bytes and the one-task-at-a-time flags.
     pub(crate) my_stats_push: Mutex<MyStatsPush>,
+    /// R185: the request holds of replaced sessions, waiting for the next one
+    /// ([`Self::set_session`]).
+    carried_holds: Mutex<CarriedHolds>,
     /// R150: set when names-fill asks are queued (`queue_name_fill`), taken
     /// by the poll loop (`take_worker_kick`), which owns the worker's handle:
     /// a command can't start a worker itself.
@@ -1796,6 +1850,7 @@ impl AppState {
             details_gate: Mutex::new(OpenGate::default()),
             match_gate: Mutex::new(OpenGate::default()),
             my_stats_push: Mutex::new(MyStatsPush::default()),
+            carried_holds: Mutex::new(CarriedHolds::default()),
             worker_kick: AtomicBool::new(false),
             debug_dir,
         }
@@ -1814,8 +1869,41 @@ impl AppState {
             .clone()
     }
 
+    /// The one place a session is replaced (R185). The outgoing session's
+    /// request holds are kept by their end instants; a session that is set
+    /// gets whatever is still in the future ([`RiotSession::seed_holds`]), so
+    /// Riot's 429 block outlives the session that met it. Setting `None` only
+    /// keeps; an account switch keeps too (the block is the client's).
     pub fn set_session(&self, session: Option<Arc<RiotSession>>) {
-        *self.session.write().unwrap_or_else(PoisonError::into_inner) = session;
+        let seeded = {
+            // The write lock spans the hand-over, so two replacements cannot
+            // interleave their reads and seeds. Order: session, then the
+            // carried holds; the throttles' own locks are leaves.
+            let mut slot = self.session.write().unwrap_or_else(PoisonError::into_inner);
+            let now = Instant::now();
+            let mut carried = lock(&self.carried_holds);
+            if let Some(outgoing) = slot.as_ref() {
+                carried.keep(now, outgoing.hold_remaining());
+            }
+            let seeded = session.as_ref().map(|incoming| {
+                let (mmr, other) = carried.take(now);
+                incoming.seed_holds(mmr, other);
+                (mmr, other)
+            });
+            *slot = session;
+            seeded
+        };
+        // Logged after the locks are released, naming only what was seeded.
+        if let Some((mmr, other)) = seeded {
+            let secs = |left: Duration| left.as_secs_f64().ceil() as u64;
+            let named: Vec<String> = [("mmr", mmr), ("other", other)]
+                .into_iter()
+                .filter_map(|(family, left)| Some(format!("{family} {}s", secs(left?))))
+                .collect();
+            if !named.is_empty() {
+                log::info!("seeded request holds: {}", named.join(", "));
+            }
+        }
     }
 
     /// The acts to read "current" and "previous" from: valorant-api's table
@@ -1928,18 +2016,31 @@ impl AppState {
     /// Whether Riot's content-service should be asked now: never while
     /// another ask runs; after a failure (or before any answer) every
     /// [`CONTENT_RETRY_AFTER`]; once the act it named has ended, every
-    /// [`CONTENT_RECHECK_AFTER`] until it names the next one.
+    /// [`CONTENT_RECHECK_AFTER`] until it names the next one. An ask a request
+    /// hold refused (R185) waits for the hold instead, and is due right after
+    /// it.
     pub(crate) fn content_due(&self, now_ms: i64) -> bool {
+        self.content_due_at(now_ms, Instant::now())
+    }
+
+    /// [`content_due`](Self::content_due) with the time given, so a test moves
+    /// time by passing a later instant.
+    pub(crate) fn content_due_at(&self, now_ms: i64, now: Instant) -> bool {
         let c = lock(&self.content);
         if c.in_flight {
             return false;
         }
-        let since = c.last_attempt.map(|t| t.elapsed());
+        let ready = |window: Duration| match c.held_until {
+            Some(at) => now >= at,
+            None => c
+                .last_attempt
+                .is_none_or(|t| now.saturating_duration_since(t) >= window),
+        };
         let g = self.acts.read().unwrap_or_else(PoisonError::into_inner);
         match &g.riot {
             Some((_, usable_until)) if now_ms < *usable_until => false,
-            Some(_) => since.is_none_or(|s| s >= CONTENT_RECHECK_AFTER),
-            None => since.is_none_or(|s| s >= CONTENT_RETRY_AFTER),
+            Some(_) => ready(CONTENT_RECHECK_AFTER),
+            None => ready(CONTENT_RETRY_AFTER),
         }
     }
 
@@ -1971,10 +2072,14 @@ impl AppState {
             }
             c.in_flight = true;
             c.last_attempt = Some(Instant::now());
+            c.held_until = None;
         }
         let result = session.content().await;
         let now = now_ms();
         let before = self.current_act().map(|a| a.id);
+        // R185: a request hold (nothing was sent, e.g. one carried into this
+        // session) is "not now", not a failure.
+        let mut held = None;
         let why = match result {
             Ok(seasons) => match seasons.active_acts() {
                 Some(acts) => {
@@ -1986,6 +2091,14 @@ impl AppState {
                     Some("no active act in the answer".to_string())
                 }
             },
+            Err(RiotError::Held(left)) => {
+                self.drop_riot_answer_unless_valid(now);
+                held = Some(left);
+                Some(format!(
+                    "requests are on hold for {} s, asking again after it",
+                    left.as_secs_f64().ceil() as u64
+                ))
+            }
             Err(e) => {
                 self.drop_riot_answer_unless_valid(now);
                 Some(e.to_string())
@@ -2011,11 +2124,15 @@ impl AppState {
         {
             let mut c = lock(&self.content);
             c.in_flight = false;
+            c.held_until = held.map(|left| Instant::now() + left + HOLD_SLACK);
             let key = (
                 current.as_ref().map(|a| a.id.clone()).unwrap_or_default(),
                 source,
             );
             match (&why, c.logged.as_ref() != Some(&key)) {
+                (Some(why), _) if held.is_some() => {
+                    log::info!("content-service: {why}; current act {label} from {source}");
+                }
                 (Some(why), _) => {
                     log::warn!("content-service: {why}; current act {label} from {source}");
                 }
@@ -4780,5 +4897,33 @@ mod tests {
         m.arm_names_retry_wake();
         m.advance_clock(100 * S);
         assert!(!m.names_wakeup_due(), "nobody left who needs one");
+    }
+
+    // -- R185: carried request holds -----------------------------------
+
+    #[test]
+    fn carried_holds_keep_the_later_end_and_drop_what_has_passed() {
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let secs = Duration::from_secs;
+        let mut c = CarriedHolds::default();
+
+        // Nothing carried, nothing taken.
+        assert_eq!(c.take(t0), (None, None));
+
+        // Two sessions' reads merge by the later end, per family.
+        c.keep(t0, (Some(secs(60)), None));
+        c.keep(at(10), (Some(secs(30)), Some(secs(20))));
+        c.keep(at(20), (None, Some(secs(5))));
+        // mmr: max(t0 + 60, t0 + 40) = 60 s; other: max(10 + 20, 20 + 5) = 30 s.
+        assert_eq!(c.take(at(25)), (Some(secs(35)), Some(secs(5))));
+        assert_eq!(c.take(at(25)), (None, None), "taken: the session owns it");
+
+        // An end that has passed is dropped, not seeded as a zero hold.
+        c.keep(t0, (Some(secs(60)), Some(secs(10))));
+        assert_eq!(c.take(at(10)), (Some(secs(50)), None), "other ended at 10");
+        c.keep(t0, (Some(secs(60)), None));
+        assert_eq!(c.take(at(60)), (None, None), "ended exactly now");
+        assert_eq!(c.take(at(61)), (None, None));
     }
 }

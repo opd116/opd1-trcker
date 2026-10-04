@@ -61,6 +61,22 @@ pub struct MyStatsPush {
     /// The task is inside its trailing wait (tests).
     #[cfg(test)]
     pub waiting: bool,
+    /// Runs between the owner check and the emit, both locks held (tests).
+    #[cfg(test)]
+    pub before_emit: Option<EmitHook>,
+}
+
+/// [`MyStatsPush::before_emit`]: what a test runs at the point where the push
+/// has checked the owner and is about to emit.
+#[cfg(test)]
+#[derive(Clone)]
+pub struct EmitHook(pub Arc<dyn Fn(&AppState) + Send + Sync>);
+
+#[cfg(test)]
+impl std::fmt::Debug for EmitHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EmitHook")
+    }
 }
 
 impl Default for MyStatsPush {
@@ -76,6 +92,8 @@ impl Default for MyStatsPush {
             computed: 0,
             #[cfg(test)]
             waiting: false,
+            #[cfg(test)]
+            before_emit: None,
         }
     }
 }
@@ -253,12 +271,17 @@ async fn push_until_clean(st: &Arc<AppState>) {
             }
         };
         // An account switch while the read ran: these are the old account's
-        // stats. Dropped, and read again for the new one (checked before the
-        // push lock is taken: the model's lock is never nested inside it).
-        let current = lock(&st.live).self_puuid.clone();
+        // stats. Dropped, and read again for the new one. R186: the owner check
+        // and the emit are one step under the model's lock (the order is push,
+        // then live), so a switch, which writes `self_puuid` under that lock,
+        // lands wholly before the check (dropped here) or wholly after the
+        // emit (`notify_now` then reads the new account), never in between.
+        // That nests the model's lock inside the push lock: no caller of
+        // [`notify`] / [`notify_now`] may hold the model's lock.
         let bytes = serde_json::to_vec(&stats).unwrap_or_default();
         let mut push = lock(&st.my_stats_push);
-        if current.as_deref() != Some(owner.as_str()) {
+        let live = lock(&st.live);
+        if live.self_puuid.as_deref() != Some(owner.as_str()) {
             push.dirty = true;
             // The switch is the one change that does not wait.
             push.immediate = true;
@@ -266,6 +289,10 @@ async fn push_until_clean(st: &Arc<AppState>) {
         }
         if bytes == push.last {
             continue;
+        }
+        #[cfg(test)]
+        if let Some(hook) = push.before_emit.clone() {
+            hook.0(st);
         }
         log::debug!("emit mystats");
         st.emit_my_stats(&stats);
@@ -279,6 +306,13 @@ async fn push_until_clean(st: &Arc<AppState>) {
 #[cfg(test)]
 pub fn set_delay(st: &AppState, delay: Duration) {
     lock(&st.my_stats_push).delay = delay;
+}
+
+/// Tests: runs `hook` between the owner check and the emit, with the push and
+/// model locks held (R186), so a test sees what a concurrent switch would meet.
+#[cfg(test)]
+pub fn set_before_emit(st: &AppState, hook: impl Fn(&AppState) + Send + Sync + 'static) {
+    lock(&st.my_stats_push).before_emit = Some(EmitHook(Arc::new(hook)));
 }
 
 /// Waits until no push is running or wanted (tests: a notification has been

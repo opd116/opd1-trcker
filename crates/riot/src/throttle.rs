@@ -205,6 +205,13 @@ impl Throttle {
         self.hold.hold_for(secs)
     }
 
+    /// What is left of this bucket's hold, or `None` when none is active
+    /// (see [`Hold::remaining`]). R185: read when a session is replaced, so the
+    /// hold can be carried to the next one.
+    pub fn hold_remaining(&self) -> Option<Duration> {
+        self.hold.remaining()
+    }
+
     /// Ends this bucket's hold now (see [`Hold::end`]).
     #[cfg(any(test, feature = "test-support"))]
     pub fn end_hold(&self) {
@@ -274,6 +281,17 @@ mod tests {
         );
         assert_eq!(h.hold_until(t0, 90.0), Duration::from_secs(90));
         assert_eq!(h.remaining_at(t0 + Duration::from_secs(90)), None);
+    }
+
+    #[test]
+    fn a_throttles_hold_remaining_follows_its_own_hold_and_ends_with_it() {
+        let t = Throttle::new(10.0, 10.0);
+        assert_eq!(t.hold_remaining(), None);
+        t.hold_for(60.0);
+        let left = t.hold_remaining().expect("a hold is active");
+        assert!(left > Duration::from_secs(50) && left <= Duration::from_secs(60));
+        t.end_hold();
+        assert_eq!(t.hold_remaining(), None);
     }
 
     #[test]

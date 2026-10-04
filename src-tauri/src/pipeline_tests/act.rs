@@ -144,6 +144,64 @@ async fn a_failed_content_call_keeps_the_date_rule_and_logs_one_line_with_the_re
 }
 
 #[tokio::test]
+async fn an_ask_met_by_a_carried_hold_is_asked_again_right_after_it_not_after_the_failure_retry() {
+    // R185: a hold carried into this session (the old one met a 429 on the
+    // `other` family) refuses the ask with nothing sent. That is "not now":
+    // logged as held (info), due again just after the hold. A real failure
+    // keeps its 5-minute retry.
+    crate::logbuf::init();
+    let h = harness().await;
+    let n = now_ms();
+    h.st.set_acts_for_test(vec![api_act("act-date-held", "ACT V", n - D, n + D)]);
+    mount_content(&h, 200, json!({"Seasons": []})).await;
+    h.session.seed_holds(None, Some(Duration::from_secs(60)));
+    h.st.set_session(Some(h.session.clone()));
+    let t0 = std::time::Instant::now();
+
+    h.st.refresh_content().await;
+
+    assert_eq!(
+        count(&h.server, "GET", "/content-service/v3/content").await,
+        0,
+        "refused locally, nothing sent"
+    );
+    assert_eq!(current_id(&h.st).as_deref(), Some("act-date-held"));
+    let lines = log_lines("act-date-held");
+    assert_eq!(lines.len(), 1, "{lines:?}");
+    assert!(lines[0].contains("on hold"), "{}", lines[0]);
+    assert!(
+        lines[0].contains(" INFO ") && !lines[0].contains(" WARN "),
+        "held is not a failure: {}",
+        lines[0]
+    );
+    let due = |after: u64| h.st.content_due_at(n, t0 + Duration::from_secs(after));
+    assert!(!due(30), "the hold (60 s) is still on");
+    // Margins of about 10 s each way: a stalled runner between seeding the hold and the ask cannot flip them.
+    assert!(!due(50), "still held near its end");
+    assert!(due(70), "due right after the hold, not after the 5-minute failure retry");
+    assert!(!due(0), "not at once");
+
+    // The control: the same ask failing for real waits the 5 minutes.
+    h.session.end_holds();
+    Mock::given(method("GET"))
+        .and(path("/content-service/v3/content"))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({"errorCode": "DOWN"})))
+        .mount(&h.server)
+        .await;
+    let t1 = std::time::Instant::now();
+    h.st.refresh_content().await;
+    assert_eq!(
+        count(&h.server, "GET", "/content-service/v3/content").await,
+        1
+    );
+    assert!(
+        !h.st.content_due_at(n, t1 + Duration::from_secs(70)),
+        "a failure is retried after 5 minutes, and the old hold's wait is gone"
+    );
+    assert!(h.st.content_due_at(n, t1 + Duration::from_secs(310)));
+}
+
+#[tokio::test]
 async fn an_answer_with_no_active_act_keeps_the_date_rule() {
     let h = harness().await;
     let n = now_ms();

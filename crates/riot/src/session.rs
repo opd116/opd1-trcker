@@ -521,6 +521,31 @@ impl RiotSession {
         self.other_hold.remaining()
     }
 
+    /// What is left of each request family's hold, `(mmr, other)`; `None` for
+    /// a family that is not held (R185). The app reads it when it replaces a
+    /// session, so Riot's block outlives the session that met it
+    /// ([`seed_holds`](Self::seed_holds)).
+    pub fn hold_remaining(&self) -> (Option<Duration>, Option<Duration>) {
+        (
+            self.mmr_throttle.hold_remaining(),
+            self.other_hold.remaining(),
+        )
+    }
+
+    /// Starts each family's hold at least `mmr` / `other` from now (R185): the
+    /// holds of the session this one replaces. Extend-only like every hold
+    /// (a longer one already set stays), clamped to [`MAX_HOLD_SECS`]; `None`
+    /// or zero is nothing. Riot's block is per client, not per session, so a
+    /// fresh session must not hit it again.
+    pub fn seed_holds(&self, mmr: Option<Duration>, other: Option<Duration>) {
+        if let Some(left) = mmr {
+            self.mmr_throttle.hold_for(left.as_secs_f64());
+        }
+        if let Some(left) = other {
+            self.other_hold.hold_for(left.as_secs_f64());
+        }
+    }
+
     /// Ends both request families' holds now, so a test that needs a hold of a
     /// minute to be over does not wait it out. Test-only, like
     /// [`with_global_rate`](Self::with_global_rate) (R132).
@@ -1263,6 +1288,79 @@ mod tests {
         assert_eq!(session.client_version(), before);
         let answer: Value = session.pd("/ok").await.expect("the call still goes out");
         assert_eq!(answer, json!({"fine": true}));
+    }
+
+    #[tokio::test]
+    async fn seeded_holds_are_read_back_per_family_and_only_ever_extended() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        let session = mock_session(dir.path(), &server).await;
+        assert_eq!(session.hold_remaining(), (None, None));
+
+        // Nothing and zero seed nothing.
+        session.seed_holds(None, None);
+        session.seed_holds(Some(Duration::ZERO), Some(Duration::ZERO));
+        assert_eq!(session.hold_remaining(), (None, None));
+
+        // One family at a time: the other stays free.
+        session.seed_holds(Some(Duration::from_secs(60)), None);
+        let (mmr, other) = session.hold_remaining();
+        let mmr = mmr.expect("the mmr family is held");
+        assert!(mmr > Duration::from_secs(50) && mmr <= Duration::from_secs(60));
+        assert_eq!(other, None);
+        session.seed_holds(None, Some(Duration::from_secs(30)));
+        let (mmr_after, other) = session.hold_remaining();
+        assert!(mmr_after.is_some());
+        let other = other.expect("the other family is held");
+        assert!(other > Duration::from_secs(20) && other <= Duration::from_secs(30));
+
+        // A shorter seed never shrinks a longer hold; a longer one extends.
+        session.seed_holds(Some(Duration::from_secs(5)), Some(Duration::from_secs(5)));
+        let (mmr, other) = session.hold_remaining();
+        assert!(mmr.unwrap() > Duration::from_secs(50));
+        assert!(other.unwrap() > Duration::from_secs(20));
+        session.seed_holds(None, Some(Duration::from_secs(90)));
+        assert!(session.hold_remaining().1.unwrap() > Duration::from_secs(80));
+    }
+
+    #[tokio::test]
+    async fn a_seed_over_the_ceiling_is_clamped_and_an_ended_hold_reads_as_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        let session = mock_session(dir.path(), &server).await;
+
+        session.seed_holds(
+            Some(Duration::from_secs(100_000)),
+            Some(Duration::from_secs(100_000)),
+        );
+        let (mmr, other) = session.hold_remaining();
+        let ceiling = Duration::from_secs_f64(MAX_HOLD_SECS);
+        assert!(mmr.unwrap() <= ceiling && mmr.unwrap() > ceiling - Duration::from_secs(10));
+        assert!(other.unwrap() <= ceiling && other.unwrap() > ceiling - Duration::from_secs(10));
+
+        session.end_holds();
+        assert_eq!(session.hold_remaining(), (None, None));
+    }
+
+    #[tokio::test]
+    async fn a_seeded_hold_refuses_the_call_at_once_and_sends_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = wiremock::MockServer::start().await;
+        let session = mock_session(dir.path(), &server).await;
+        session.seed_holds(Some(Duration::from_secs(60)), Some(Duration::from_secs(60)));
+
+        // `/ok` is mounted, so a request that went out would answer 200.
+        let other = session.pd::<Value>("/ok").await.unwrap_err();
+        assert!(matches!(other, RiotError::Held(left) if left > Duration::from_secs(50)));
+        let mmr = session.pd::<Value>("/mmr/v1/players/x").await.unwrap_err();
+        assert!(matches!(mmr, RiotError::Held(left) if left > Duration::from_secs(50)));
+        let received = server.received_requests().await.unwrap();
+        assert!(
+            received
+                .iter()
+                .all(|r| r.url.path() != "/ok" && !r.url.path().starts_with("/mmr/")),
+            "nothing was sent to Riot during the seeded holds"
+        );
     }
 
     #[test]

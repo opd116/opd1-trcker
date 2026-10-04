@@ -8,6 +8,8 @@
 
 use std::time::{Duration, Instant};
 
+use opd1_riot::RiotError;
+
 use super::*;
 
 const S: Duration = Duration::from_secs(1);
@@ -843,4 +845,154 @@ async fn a_history_429_that_was_sent_counts_as_a_real_failure_and_is_retried_at_
         1
     );
     assert_eq!(retries_done(&h, ME), None, "the round ended");
+}
+
+// ---------------------------------------------------------------------
+// R185: the request holds survive a new session
+// ---------------------------------------------------------------------
+
+/// What `RiotSession::connect` makes after a reconnect: another session on the
+/// same mock client, with no hold of its own.
+async fn next_session(h: &Harness) -> Arc<RiotSession> {
+    connect_mock_session(h._dir.path(), &h.server.uri()).await
+}
+
+/// ME's match history (the `other` family) answers 429 once.
+async fn history_429_once(h: &Harness, retry_after: &str) {
+    Mock::given(method("GET"))
+        .and(path(format!("/match-history/v1/history/{ME}").as_str()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", retry_after))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+}
+
+async fn history_requests(h: &Harness) -> usize {
+    count(&h.server, "GET", &format!("/match-history/v1/history/{ME}")).await
+}
+
+#[tokio::test]
+async fn the_mmr_hold_survives_a_new_session_and_does_not_hold_the_other_family() {
+    let h = harness().await;
+    mmr_429_once(&h, ME, "60").await;
+    h.st.set_session(Some(h.session.clone()));
+    assert!(matches!(
+        h.session.mmr(ME).await,
+        Err(RiotError::RateLimited)
+    ));
+    assert_eq!(count(&h.server, "GET", &mmr_path(ME)).await, 1);
+    let (old_mmr, old_other) = h.session.hold_remaining();
+    let old_mmr = old_mmr.expect("the 429 held the mmr family");
+    assert_eq!(old_other, None);
+
+    // The client went away and came back: a new session replaces the old one.
+    h.st.set_session(None);
+    let next = next_session(&h).await;
+    assert_eq!(next.hold_remaining(), (None, None), "built free");
+    h.st.set_session(Some(next.clone()));
+
+    let (mmr, other) = next.hold_remaining();
+    let mmr = mmr.expect("the new session was seeded");
+    assert!(
+        mmr > Duration::from_secs(50) && mmr <= old_mmr + Duration::from_secs(1),
+        "carried, never extended: {mmr:?} (was {old_mmr:?})"
+    );
+    assert_eq!(other, None, "only the family that was held");
+    assert!(
+        matches!(next.mmr(ME).await, Err(RiotError::Held(left)) if left > Duration::from_secs(50)),
+        "refused at once"
+    );
+    assert!(next.comp_updates(ME, Some(0), Some(5)).await.is_err());
+    assert_eq!(
+        count(&h.server, "GET", &mmr_path(ME)).await,
+        1,
+        "nothing was sent to Riot by the new session"
+    );
+    assert_eq!(count(&h.server, "GET", &comp_path(ME)).await, 0);
+    // The other family is free.
+    assert!(next.match_history(ME, Some(0), Some(2), None).await.is_ok());
+    assert_eq!(history_requests(&h).await, 1);
+}
+
+#[tokio::test]
+async fn the_other_hold_survives_a_new_session_and_does_not_hold_mmr() {
+    let h = harness().await;
+    history_429_once(&h, "60").await;
+    h.st.set_session(Some(h.session.clone()));
+    assert!(matches!(
+        h.session.match_history(ME, Some(0), Some(2), None).await,
+        Err(RiotError::RateLimited)
+    ));
+    assert_eq!(history_requests(&h).await, 1);
+
+    h.st.set_session(None);
+    let next = next_session(&h).await;
+    h.st.set_session(Some(next.clone()));
+
+    let (mmr, other) = next.hold_remaining();
+    assert_eq!(mmr, None, "only the family that was held");
+    assert!(other.is_some_and(|left| left > Duration::from_secs(50)));
+    assert!(
+        matches!(
+            next.match_history(ME, Some(0), Some(2), None).await,
+            Err(RiotError::Held(left)) if left > Duration::from_secs(50)
+        ),
+        "refused at once"
+    );
+    assert_eq!(history_requests(&h).await, 1, "nothing was sent");
+    assert!(next.mmr(ME).await.is_ok(), "mmr is free");
+}
+
+#[tokio::test]
+async fn a_hold_is_carried_through_several_replacements_until_it_ends() {
+    // `set_session(None)` twice, then a session, then another one without a
+    // `None` between: the hold keeps its end instant all along.
+    let h = harness().await;
+    mmr_429_once(&h, ME, "60").await;
+    h.st.set_session(Some(h.session.clone()));
+    let _ = h.session.mmr(ME).await;
+    let first_left = h.session.hold_remaining().0.unwrap();
+
+    h.st.set_session(None);
+    h.st.set_session(None); // nothing outgoing: what is kept stays
+    let second = next_session(&h).await;
+    h.st.set_session(Some(second.clone()));
+    let third = next_session(&h).await;
+    h.st.set_session(Some(third.clone())); // replaced directly
+    let left = third.hold_remaining().0.expect("carried twice");
+    assert!(
+        left > Duration::from_secs(50) && left <= first_left + Duration::from_secs(1),
+        "{left:?}"
+    );
+
+    // Over: nothing of it is carried any more.
+    third.end_holds();
+    h.st.set_session(None);
+    let fourth = next_session(&h).await;
+    h.st.set_session(Some(fourth.clone()));
+    assert_eq!(fourth.hold_remaining(), (None, None));
+    assert!(fourth.mmr(ME).await.is_ok(), "goes out again");
+    assert_eq!(count(&h.server, "GET", &mmr_path(ME)).await, 2);
+}
+
+#[tokio::test]
+async fn a_session_replaced_after_its_hold_ended_seeds_nothing() {
+    let h = harness().await;
+    mmr_429_once(&h, ME, "60").await;
+    history_429_once(&h, "60").await;
+    h.st.set_session(Some(h.session.clone()));
+    let _ = h.session.mmr(ME).await;
+    let _ = h.session.match_history(ME, Some(0), Some(2), None).await;
+    assert!(h.session.hold_remaining().0.is_some() && h.session.hold_remaining().1.is_some());
+    // Riot's block is over (test seam: no real wait).
+    h.session.end_holds();
+
+    h.st.set_session(None);
+    let next = next_session(&h).await;
+    h.st.set_session(Some(next.clone()));
+
+    assert_eq!(next.hold_remaining(), (None, None));
+    assert!(next.mmr(ME).await.is_ok());
+    assert!(next.match_history(ME, Some(0), Some(2), None).await.is_ok());
 }

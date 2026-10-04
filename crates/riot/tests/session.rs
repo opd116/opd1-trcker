@@ -432,6 +432,63 @@ async fn an_mmr_hold_does_not_delay_other_calls() {
 }
 
 #[tokio::test]
+async fn a_429_hold_read_from_one_session_seeds_the_next_one() {
+    // R185: Riot's block is per client, not per session. The holds a session met
+    // are read when it is replaced and given to its successor, which then
+    // refuses both families at once with nothing sent.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    let first = connect_against(tmp.path(), &server).await;
+
+    Mock::given(method("GET"))
+        .and(path(OTHER_MMR_PATH))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(HISTORY_PATH))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "40"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(matches!(
+        first.pd::<Value>(OTHER_MMR_PATH).await.unwrap_err(),
+        RiotError::RateLimited
+    ));
+    assert!(matches!(
+        first.pd::<Value>(HISTORY_PATH).await.unwrap_err(),
+        RiotError::RateLimited
+    ));
+    let (mmr, other) = first.hold_remaining();
+    let (mmr, other) = (mmr.expect("mmr held"), other.expect("other held"));
+    assert!(mmr > Duration::from_secs(50) && other > Duration::from_secs(30));
+    drop(first);
+
+    let second = connect_against(tmp.path(), &server).await;
+    assert_eq!(
+        second.hold_remaining(),
+        (None, None),
+        "a new session starts free until it is seeded"
+    );
+    second.seed_holds(Some(mmr), Some(other));
+
+    assert!(matches!(
+        second.pd::<Value>(OTHER_MMR_PATH).await.unwrap_err(),
+        RiotError::Held(_)
+    ));
+    assert!(matches!(
+        second.pd::<Value>(HISTORY_PATH).await.unwrap_err(),
+        RiotError::Held(_)
+    ));
+    // `.expect(1)` on both mocks is checked when the server drops: the
+    // second session sent nothing.
+}
+
+#[tokio::test]
 async fn session_local_call_times_out_when_server_never_responds() {
     // Fix-round item 1: without a timeout, a non-responding local client
     // would hang `local()` forever. Uses the `local_timeout` override so

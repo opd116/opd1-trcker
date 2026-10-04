@@ -325,6 +325,39 @@ async fn a_read_for_the_old_account_that_ends_after_a_switch_is_never_emitted() 
 }
 
 #[tokio::test]
+async fn the_owner_check_and_the_emit_are_one_step_under_the_model_lock() {
+    // R186: an account switch writes `self_puuid` under the model's lock. If the
+    // push released that lock between its owner check and its emit, a switch
+    // could land in the gap and the old account's stats would go out once. The
+    // hook runs in that gap (check passed, emit not yet done): the lock must
+    // be held there, so a switch can only come before the check or after the
+    // emit.
+    let h = harness().await;
+    store_rr_row_of_a(&h).await;
+    lock(&h.st.live).self_puuid = Some(ACCOUNT_A.into());
+    let seen = Arc::new(Mutex::new(Vec::<bool>::new()));
+    my_stats::set_before_emit(&h.st, {
+        let seen = seen.clone();
+        move |st| {
+            let held = matches!(st.live.try_lock(), Err(std::sync::TryLockError::WouldBlock));
+            seen.lock().unwrap().push(held);
+        }
+    });
+
+    my_stats::notify(&h.st);
+    idle(&h.st).await;
+
+    assert_eq!(pushed(&h).len(), 1, "A's stats are out");
+    assert_eq!(
+        *seen.lock().unwrap(),
+        vec![true],
+        "the hook ran once, with the model's lock held"
+    );
+    // The lock is free again once the push is done: a switch can land now.
+    assert!(h.st.live.try_lock().is_ok());
+}
+
+#[tokio::test]
 async fn a_push_task_that_dies_does_not_stop_later_pushes() {
     let h = harness().await;
     h.rec

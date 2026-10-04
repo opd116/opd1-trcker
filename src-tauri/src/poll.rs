@@ -454,7 +454,9 @@ impl Poller {
                 // R161: nor are the tiers of its last Agent Select.
                 live.match_tiers.clear();
             }
-            // R160: a new session has its own, empty request holds.
+            // R160: the names deferral belongs to the old session's hold; a
+            // held name call defers itself again. The request holds
+            // themselves are carried to this session by `set_session` (R185).
             live.reset_names_hold();
             live.self_puuid = Some(me.clone());
             live.self_name_attempted = false;
@@ -1709,6 +1711,178 @@ mod tests {
         })
         .await;
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn the_request_holds_of_the_dead_loops_session_hold_the_restarted_one() {
+        // R185: the supervisor drops the dead loop's session and the new loop
+        // connects a fresh one. Riot's 429 block is the client's, not the
+        // session's: the new session starts with what was still held, and
+        // sends nothing into it.
+        use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
+        let h = harness().await;
+        Mock::given(method("GET"))
+            .and(path(format!("/mmr/v1/players/{ME}")))
+            .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+        h.st.set_session(Some(h.session.clone()));
+        assert!(matches!(
+            h.session.mmr(ME).await,
+            Err(RiotError::RateLimited)
+        ));
+
+        let runs = Arc::new(AtomicUsize::new(0));
+        let task = spawn_supervised(
+            h.st.clone(),
+            {
+                let runs = runs.clone();
+                move || {
+                    let first = runs.fetch_add(1, SeqCst) == 0;
+                    async move {
+                        if first {
+                            panic!("boom");
+                        }
+                        std::future::pending::<()>().await
+                    }
+                }
+            },
+            FAST,
+        );
+        crate::pipeline_tests::wait_until("the dead loop's session was dropped", || {
+            h.st.session().is_none()
+        })
+        .await;
+        crate::pipeline_tests::wait_until("the loop was started again", || runs.load(SeqCst) == 2)
+            .await;
+
+        // The new loop's `connect`, then `on_connected`'s `set_session`.
+        let next = session_with_other_wait(&h, Duration::from_secs(10)).await;
+        assert_eq!(next.hold_remaining(), (None, None), "built free");
+        h.st.set_session(Some(next.clone()));
+        assert!(
+            matches!(next.mmr(ME).await, Err(RiotError::Held(left)) if left > Duration::from_secs(50)),
+            "the hold outlived the restart"
+        );
+        let mmr_requests = h
+            .server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == format!("/mmr/v1/players/{ME}"))
+            .count();
+        assert_eq!(mmr_requests, 1, "only the dead loop's 429 was sent");
+        task.abort();
+    }
+
+    /// A second session on the mock client that sees `account` as the user
+    /// (the entitlements answer once with that subject: no real connect).
+    async fn session_of(h: &Harness, account: &str) -> Arc<RiotSession> {
+        Mock::given(method("GET"))
+            .and(path("/entitlements/v1/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "accessToken": "a", "entitlements": [], "issuer": "i",
+                "subject": account, "token": "t"
+            })))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+        let session = session_with_other_wait(h, Duration::from_secs(10)).await;
+        assert_eq!(session.self_puuid(), account);
+        session
+    }
+
+    /// The first session's 429s: on mmr and on ME's match history, 60 s each.
+    async fn both_families_held_by(h: &Harness, session: &Arc<RiotSession>) {
+        for p in [
+            format!("/mmr/v1/players/{ME}"),
+            format!("/match-history/v1/history/{ME}"),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
+                .up_to_n_times(1)
+                .with_priority(1)
+                .mount(&h.server)
+                .await;
+        }
+        assert!(matches!(session.mmr(ME).await, Err(RiotError::RateLimited)));
+        assert!(matches!(
+            session.match_history(ME, Some(0), Some(2), None).await,
+            Err(RiotError::RateLimited)
+        ));
+    }
+
+    async fn sent_to_riot(h: &Harness) -> usize {
+        h.server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| {
+                r.url.path().starts_with("/mmr/") || r.url.path().starts_with("/match-history/")
+            })
+            .count()
+    }
+
+    #[tokio::test]
+    async fn a_reconnect_through_the_poll_loops_own_wiring_keeps_the_request_holds() {
+        // R185 through `drop_session` and `on_connected`, the two places the
+        // poll loop replaces its session (mock sessions, never a real connect).
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        both_families_held_by(&h, &h.session).await;
+        assert_eq!(sent_to_riot(&h).await, 2);
+
+        poller.drop_session().await;
+        assert!(h.st.session().is_none());
+        let next = session_with_other_wait(&h, Duration::from_secs(10)).await;
+        assert_eq!(next.hold_remaining(), (None, None), "built free");
+        poller.on_connected(next.clone()).await;
+
+        assert!(Arc::ptr_eq(&h.st.session().unwrap(), &next));
+        let (mmr, other) = next.hold_remaining();
+        assert!(mmr.is_some_and(|left| left > Duration::from_secs(50)));
+        assert!(other.is_some_and(|left| left > Duration::from_secs(50)));
+        assert!(matches!(next.mmr(ME).await, Err(RiotError::Held(_))));
+        assert!(matches!(
+            next.match_history(ME, Some(0), Some(2), None).await,
+            Err(RiotError::Held(_))
+        ));
+        assert_eq!(sent_to_riot(&h).await, 2, "the new session sent nothing");
+        poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn an_account_switch_through_on_connected_keeps_the_request_holds() {
+        // Riot's block is the client's: the other account's session is held
+        // too, while everything the old account learned is forgotten.
+        const ACCOUNT_B: &str = "dddddddd-0000-0000-0000-000000000004";
+        let h = harness().await;
+        let mut poller = Poller::new(h.st.clone());
+        poller.on_connected(h.session.clone()).await;
+        both_families_held_by(&h, &h.session).await;
+
+        poller.drop_session().await;
+        let next = session_of(&h, ACCOUNT_B).await;
+        poller.on_connected(next.clone()).await;
+
+        assert_eq!(
+            lock(&h.st.live).self_puuid.as_deref(),
+            Some(ACCOUNT_B),
+            "the switch ran"
+        );
+        let (mmr, other) = next.hold_remaining();
+        assert!(mmr.is_some_and(|left| left > Duration::from_secs(50)));
+        assert!(other.is_some_and(|left| left > Duration::from_secs(50)));
+        assert!(matches!(next.mmr(ME).await, Err(RiotError::Held(_))));
+        assert_eq!(sent_to_riot(&h).await, 2, "the new session sent nothing");
+        poller.stop_worker();
     }
 
     #[tokio::test]

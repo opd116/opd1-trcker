@@ -1295,6 +1295,20 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** None at runtime beyond two document listeners. The Live cards' indicator tips (party, encounters, hidden name) stay mouse-only, as the cards themselves are the focusable controls there.
 - **Status:** active
 
+### R185 — Request holds survive a new session
+
+- **What:** Claude's call (brief B3). `AppState::set_session`, the only place a session is replaced, keeps the outgoing session's remaining `mmr` and `other` 429 holds as end instants (`CarriedHolds`, read through `RiotSession::hold_remaining`) and seeds the incoming session with what is still in the future (`RiotSession::seed_holds`, extend-only, 120 s ceiling), taking it out of the store; after releasing its locks it logs `seeded request holds: …`, naming only a seeded family. Holds are kept across an account switch. A content-service ask (R162) met by a hold is "not now": logged at info and due 1.5 s after the hold (`ContentFetch.held_until`), not after the 5-minute failure retry. The names deferral (`reset_names_hold`) is unchanged; a held names ask re-defers itself.
+- **Why:** Riot's 429 block belongs to the client. A reconnect or the supervisor's restart (R169) used to start with empty holds and could hit Riot again inside the block R160 respects.
+- **Cost:** One small struct and one log line per seeding. A task that still holds the old session when it is replaced can set a hold the new session never learns (one extra 429). An old account's hold also applies to a new account, for at most 120 s. The token buckets are not carried: a new session gets a full burst once its hold ends.
+- **Status:** active (amends R160, which assumed a new session starts free)
+
+### R186 — The My Stats push checks the account and emits under the model lock
+
+- **What:** Claude's call (brief B4). `my_stats::push_until_clean` holds the `live` lock from the `self_puuid` comparison to the end of `emit_my_stats` (lock order: push, then live). An account switch writes `self_puuid` under `live`, so it lands wholly before the check (the read is dropped and re-read) or wholly after the emit (`notify_now` then reads the new account). A `#[cfg(test)]` hook between the check and the emit proves the lock is held.
+- **Why:** The check released `live` before the emit, so a switch landing in between emitted the old account's stats once.
+- **Cost:** `live` is held for one emit, as `publish()` already does. No caller of `notify` / `notify_now` may hold `live` (all checked; the rule is in the `state.rs` header).
+- **Status:** active (closes the window left by R174's review round 1)
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

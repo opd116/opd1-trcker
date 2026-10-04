@@ -1,22 +1,56 @@
 name: Build
 
 on:
+  # Every branch and every PR gets the Linux checks; only `main` (and a manual run) also builds the Windows installer.
   push:
-    branches: [main]
+    branches: ['**']
+  pull_request:
   workflow_dispatch:
 
+# A newer push to the same branch / PR supersedes the older run. `main` is never cancelled: its run is the one that
+# builds the installer, and two quick pushes must both finish.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 jobs:
-  # The UI's Playwright suite (layout, tooltips, navigation) against the DEV demo scenes, on Linux and in its own job:
-  # it never waits for the Windows build and the build never waits for it. The two specs that compare with the design
-  # file (visual-live, visual-details) skip themselves here: `.superpowers/` is not in the repo.
-  ui-e2e:
+  # Everything that does not need Windows, in one Linux job: Rust fmt / clippy / tests, the UI build + its size, Vitest,
+  # svelte-check and the Playwright suite (layout, tooltips, navigation) against the DEV demo scenes. It never waits for
+  # the Windows build and the build never waits for it. The two specs that compare with the design file (visual-live,
+  # visual-details) skip themselves here: `.superpowers/` is not in the repo.
+  checks:
     runs-on: ubuntu-latest
-    # A hung browser must not hold the runner for the default 6 hours.
-    timeout-minutes: 30
+    # A hung browser or build must not hold the runner for the default 6 hours.
+    timeout-minutes: 45
+    # Playwright's own image: the browsers and their OS libraries are already inside (PLAYWRIGHT_BROWSERS_PATH is set by the
+    # image), so there is no browser download or `playwright install`. The tag MUST equal the `@playwright/test` version
+    # in package-lock.json; the "Guard Playwright version" step below fails the job when they drift apart.
+    container:
+      image: mcr.microsoft.com/playwright:v1.63.0-jammy
+      # Playwright's advice for Chromium in Docker: share the host's IPC namespace so a small /dev/shm cannot crash a page.
+      options: --ipc=host
+    defaults:
+      run:
+        # A container job's default shell can be plain `sh`; every step here is written for bash (with `pipefail`).
+        shell: bash
 
     steps:
+      # The image has no `git`, so without it `actions/checkout` would download a tarball and leave no `.git`. The
+      # packages after it are Tauri's Linux build libraries (the `src-tauri` crate is compiled by clippy and the tests)
+      # and `curl` (rustup is downloaded with it). The container runs as root, so there is no `sudo`.
+      - name: Install OS dependencies
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update
+          apt-get install -y git curl build-essential pkg-config libssl-dev libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev
+
       - name: Checkout
         uses: actions/checkout@v7
+
+      # The workspace is mounted from the runner and owned by another user, which git refuses to work in otherwise.
+      - name: Trust the workspace for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
       - name: Install Node
         uses: actions/setup-node@v7
@@ -25,17 +59,29 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+
       - name: Install dependencies
         run: npm ci
 
-      # The browser download (a few hundred MB) is cached per lockfile; `install --with-deps` below still adds the OS
-      # libraries and skips the download when the browser is already there.
-      - name: Cache Playwright browsers
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
-          restore-keys: playwright-${{ runner.os }}-
+      # The image's browsers belong to exactly one Playwright version. A dependency bump that moves the lockfile must
+      # move the image tag above too (and `want` below), otherwise the specs would launch a mismatched browser.
+      - name: Guard Playwright version (must match the container image)
+        working-directory: ui
+        run: |
+          want=1.63.0
+          have=$(npx playwright --version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+          echo "playwright $have (image v$want)"
+          if [ "$have" != "$want" ]; then
+            echo "::error title=Playwright version mismatch::@playwright/test resolves to $have but the container image is v$want. Bump the image tag in .github/workflows/build.yml (container.image and 'want' in this step) together with the dependency."
+            exit 1
+          fi
 
       # The specs fetch the valorant-api images once and keep them here (ui/tests/.cache/media); a cold cache only costs
       # the first run those downloads. Keyed by the demo data that names the images.
@@ -46,12 +92,57 @@ jobs:
           key: ui-test-media-${{ hashFiles('ui/src/lib/demo/*.ts', 'ui/src/lib/demo/meta.json') }}
           restore-keys: ui-test-media-
 
-      - name: Install Chromium for Playwright
-        working-directory: ui
-        run: npx playwright install --with-deps chromium
-
+      # `tauri::generate_context!` (the src-tauri crate) needs `ui/dist`, so
+      # the UI is built before clippy or any Rust test compiles it.
       - name: Build UI
         run: npm --prefix ui run build
+
+      # Demo scenes are DEV-only (R15/R40): a leaked mock roster, a Google
+      # Fonts / unpkg reference or the design prototype's runtime must never
+      # ship. `VesperUnbreakabl` and `Vantablack` are fixture-only names from
+      # `cdv8.ts`, so a leaked scene bundle fails even without the marker.
+      - name: Guard ui/dist (no demo code, no CDN)
+        run: |
+          if grep -rqE "demo-feed|VesperUnbreakabl|Vantablack|fonts.googleapis|fonts.gstatic|unpkg.com" ui/dist; then echo "demo code or a CDN reference in ui/dist"; exit 1; fi
+
+      # Lightness is priority #1: the gzipped size of every script and stylesheet is printed here and in the run's
+      # summary page, so a change that makes the UI heavier shows up in the PR.
+      - name: UI bundle size (gzip)
+        run: |
+          {
+            echo "### UI bundle size (gzip)"
+            echo
+            echo "| File | Gzip bytes |"
+            echo "| --- | ---: |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          total=0
+          count=0
+          for f in ui/dist/assets/*.js ui/dist/assets/*.css; do
+            [ -f "$f" ] || continue
+            s=$(gzip -c "$f" | wc -c)
+            total=$((total + s))
+            count=$((count + 1))
+            echo "$f: $s bytes gzipped"
+            echo "| \`$(basename "$f")\` | $s |" >> "$GITHUB_STEP_SUMMARY"
+          done
+          if [ "$count" -eq 0 ]; then echo "::error::no .js or .css files in ui/dist/assets"; exit 1; fi
+          echo "total: $total bytes gzipped"
+          echo "| **Total** | **$total** |" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Rust format
+        run: cargo fmt --check
+
+      - name: Rust clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test Rust crates
+        run: cargo test -p opd1-core -p opd1-riot -p opd1-trcker
+
+      - name: Test UI
+        run: npm --prefix ui run test
+
+      - name: Check UI (svelte-check + tsc)
+        run: npm --prefix ui run check
 
       - name: Playwright
         working-directory: ui
@@ -68,7 +159,11 @@ jobs:
             ui/tests/shots
           if-no-files-found: ignore
 
+  # The installer is only built for `main` and manual runs; branches and PRs stop at `checks`. This job does not `need`
+  # `checks`: both start at once, so the installer is ready as soon as it is built and a red check never hides it. It
+  # keeps the Rust tests for Windows platform coverage; the UI tests run once, in `checks`.
   build:
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     runs-on: windows-latest
 
     steps:
@@ -99,12 +194,6 @@ jobs:
       - name: Test Rust crates
         run: cargo test -p opd1-core -p opd1-riot -p opd1-trcker
 
-      - name: Test UI
-        run: npm --prefix ui run test
-
-      - name: Check UI (svelte-check + tsc)
-        run: npm --prefix ui run check
-
       # No `demo` cargo feature exists (or is enabled) -- release builds are
       # always the real, non-demo app.
       - name: Build app (NSIS installer)
@@ -119,11 +208,21 @@ jobs:
         run: |
           if grep -rqE "demo-feed|VesperUnbreakabl|Vantablack|fonts.googleapis|fonts.gstatic|unpkg.com" ui/dist; then echo "demo code or a CDN reference in ui/dist"; exit 1; fi
 
-      # 10 MB = 10485760 bytes (lightness goal, plan Task 19).
+      # 10 MB = 10485760 bytes (lightness goal, plan Task 19). The size is also written to the run's summary page
+      # (MB here is MiB, the same unit as the limit).
       - name: Installer size check (<= 10 MB)
         shell: bash
         run: |
-          f=$(ls target/release/bundle/nsis/*.exe); s=$(stat -c %s "$f"); echo "installer $s bytes"; [ "$s" -le 10485760 ]
+          f=$(ls target/release/bundle/nsis/*.exe); s=$(stat -c %s "$f"); mb=$(awk -v s="$s" 'BEGIN { printf "%.2f", s / 1048576 }')
+          echo "installer $s bytes ($mb MB)"
+          {
+            echo "### Installer size"
+            echo
+            echo "| File | Bytes | MB |"
+            echo "| --- | ---: | ---: |"
+            echo "| \`$(basename "$f")\` | $s | $mb |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ "$s" -le 10485760 ]
 
       # In a Cargo workspace, `target/` lives at the workspace root, not
       # under `src-tauri/`, so that's where the bundler writes the installer.

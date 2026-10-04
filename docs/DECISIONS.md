@@ -1237,7 +1237,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **What:** Claude's call, R149's parked item. The `Build` workflow has a second job, `ui-e2e` on `ubuntu-latest`, that runs the whole Playwright suite against the DEV demo scenes (Chromium, 1000×800): layout fit in all three fonts, tooltips, navigation. It does not gate the Windows installer job. The two specs that compare with the design file skip without `.superpowers/`. It caches the Playwright browsers and the test image cache, has a 30-minute limit, and uploads `ui/test-results` and `ui/tests/shots` when it fails.
 - **Why:** The fit checks ran only on Claude's machine; a layout regression could reach the installer unseen.
 - **Cost:** A few CI minutes per push to `main`.
-- **Status:** active
+- **Status:** superseded by R178 (the job became `checks`, which runs on every branch)
 
 ### R177 — v0.4.0 scope: the brief's fixes, hardening, CI and code health, plus five features the user picked
 
@@ -1245,6 +1245,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Why:** The user's words (`docs/requirements-raw.md`, 2026-10-04).
 - **Cost:** None recorded.
 - **Status:** active
+
+### R178 — Linux `checks` on every branch; the Windows installer only on `main`
+
+- **What:** Claude's call (brief C3, C4). The `Build` workflow runs on a push to any branch, on pull requests and on a manual run. Its Linux job `checks` (replacing R176's `ui-e2e`) runs everything that does not need Windows, inside the pinned `mcr.microsoft.com/playwright:v1.63.0-jammy` image: the UI build, the dist guard, the gzipped JS and CSS sizes in the run summary (C6), `cargo fmt --check`, clippy `-D warnings`, the Rust tests, Vitest, svelte-check and Playwright. A guard step fails the job when `@playwright/test` and the image tag drift apart, so a dependency bump must move the image too. The Windows `build` job runs only for a push to `main` and a manual run, keeps the Rust tests (Windows coverage), drops Vitest and svelte-check (now in `checks`), and writes the installer size to the summary. The jobs do not wait for each other. A newer push cancels a branch's older run; `main` is never cancelled.
+- **Why:** Lint and the UI suite only ran on `main` (or on Claude's machine), so a branch could carry a red check for hours; Windows minutes cost double in a private repo, so the installer is built only where it is shipped from. The pinned image gives every run the same browser and fonts, which the visual baselines need.
+- **Cost:** One Linux job per branch push (about 15 minutes cold, less with the caches). A branch that touches Windows-only code is checked on Windows by a manual run of `Build` before `main` moves.
+- **Status:** active (supersedes R176's `ui-e2e` job)
 
 ## User decisions index
 

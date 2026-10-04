@@ -24,3 +24,6 @@ Thumbs.db
 # The design file and its original zip stay local (CLAUDE.md: never committed).
 .superpowers/
 /*.zip
+
+# Agent worktrees (Claude Code) are local only.
+.claude/worktrees/

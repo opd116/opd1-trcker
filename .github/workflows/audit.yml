@@ -1,0 +1,97 @@
+name: Audit
+
+# A monthly look at known security advisories in the Rust crates (cargo-audit) and the production npm packages (npm
+# audit). It is not a gate: it runs only on its schedule and by hand, so no build or release ever waits for it. A
+# finding fails the run (both audits always run first), and that failed run is what makes GitHub email the owner.
+on:
+  schedule:
+    # The 3rd of every month, 06:17 UTC (an off-the-hour minute, when scheduled runs are least delayed).
+    - cron: '17 6 3 * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # Read-only: nothing here pushes.
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # cargo-audit reads Cargo.lock; nothing is compiled, so neither a Rust toolchain step nor Tauri's system libraries are
+      # needed (the runner's own cargo runs the subcommand). The token only lifts the rate limit on the download.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          tool: cargo-audit
+
+      # Each audit step may fail on its own (that is what a finding is) so that the other one still runs; the last step
+      # turns either failure into a failed run.
+      - name: cargo audit
+        id: cargo
+        continue-on-error: true
+        run: cargo audit
+
+      - name: Install Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # `--ignore-scripts`: nothing from the dependencies runs; the audit only needs the lockfile's tree.
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      # Only what ships (`--omit=dev`); the dev tools never reach a user's PC.
+      - name: npm audit
+        id: npm
+        continue-on-error: true
+        run: npm audit --omit=dev
+
+      # `outcome` is the real result of a step that is allowed to fail (`conclusion` would always say success). Runs even
+      # when an earlier step failed, and fails the run when either audit did not come back clean.
+      - name: Write the result
+        if: ${{ always() }}
+        env:
+          CARGO_OUTCOME: ${{ steps.cargo.outcome }}
+          NPM_OUTCOME: ${{ steps.npm.outcome }}
+        run: |
+          {
+            echo "### Dependency audit"
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+          failed=0
+          for tool in cargo npm; do
+            case "$tool" in
+              cargo) label="cargo audit (Rust crates)"; outcome="$CARGO_OUTCOME" ;;
+              npm) label="npm audit (production packages)"; outcome="$NPM_OUTCOME" ;;
+            esac
+            case "$outcome" in
+              success) line="$label: no vulnerabilities (warnings, if any, are in the log)" ;;
+              failure)
+                line="$label: vulnerabilities found, or the audit itself failed; read that step's log"
+                echo "::error title=$label::vulnerabilities found, or the audit itself failed. Read the step's log."
+                failed=1
+                ;;
+              *)
+                line="$label: did not run ($outcome)"
+                echo "::error title=$label::the audit did not run ($outcome)."
+                failed=1
+                ;;
+            esac
+            echo "- $line" >> "$GITHUB_STEP_SUMMARY"
+            echo "$line"
+          done
+          exit "$failed"

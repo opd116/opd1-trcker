@@ -27,7 +27,7 @@ The name is spelled `OPD1 TRCKER` on purpose.
 
 ## Install (for friends)
 
-1. Download the `OPD1-TRCKER-setup` artifact from GitHub Actions and unzip it. The repo is private and the installer is shared by hand, so you normally get the zip from the person who runs the project.
+1. Download `OPD1-TRCKER-<version>-setup.exe` from the repo's GitHub Releases page (each release keeps its installer for good; a `main` build also leaves it as an Actions artifact for 90 days). The repo is private and the installer is shared by hand, so you normally get it from the person who runs the project.
 2. Run the installer. The build is unsigned, so on the Windows SmartScreen screen click **More info**, then **Run anyway**.
 3. It installs per user (no administrator rights needed).
 4. A reinstall or an update keeps your history. The uninstaller has an optional **Delete app data** checkbox (off by default) that removes it.

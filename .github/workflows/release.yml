@@ -1,0 +1,314 @@
+name: Release
+
+# Publishes a GitHub Release (and creates its `v<version>` tag) with the installer attached. Run it by hand from the
+# Actions tab once the CHANGELOG has a `## [<version>]` section.
+#
+# The tag is made HERE, through the API, because a cloud session cannot push tags (HTTP 403): `gh release create` makes the
+# tag on the commit it is told to target. Nothing else in the repo creates tags, so no workflow starts from one.
+#
+# Leave `ref` empty to release the commit this run was started on. Give a branch, a tag or any commit SHA (a short one is
+# fine) to rebuild an older commit instead (a release that was never made for it): the installer is built from that
+# commit, the tag points at it, and the notes still come from the CHANGELOG on the default branch, which is where every
+# version's section is written. The workflow itself always comes from the branch you start the run on, so a very old
+# commit has to build with today's steps.
+#
+# The run first checks (`preflight`) that the version, the tag and the CHANGELOG are in order, then builds the installer
+# (`installer`), then publishes (`release`).
+#
+# The release is private, like the repo: only people with access to the repository can see or download it. The installer
+# is still shared by hand, as before (the user downloads it here and sends it to friends).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to release, exactly as in src-tauri/tauri.conf.json and CHANGELOG.md (for example 0.4.0)
+        required: true
+        type: string
+      ref:
+        description: Branch, tag or commit SHA (a short SHA is fine) to build (empty = the commit this run was started on)
+        required: false
+        type: string
+        default: ''
+
+# Read-only by default; only the `release` job may write (it creates the tag and the release).
+permissions:
+  contents: read
+
+# Two runs for the same version must not race to create the same tag. Neither is cancelled: a half-built release
+# is worse than a waiting one.
+concurrency:
+  group: release-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  # Fails in seconds, before the 10-minute Windows build, when the release cannot happen anyway: a mistyped version, a
+  # version that is not the one inside the commit, a tag or release that already exists, or a CHANGELOG with no notes for
+  # it. It also turns `ref` into one full commit SHA, which is what gets built and tagged from here on (`actions/checkout`
+  # cannot fetch a short SHA). The `release` job repeats the checks that depend on repo state (version, tag, release)
+  # right before it publishes, so a change made while the installer was building is caught too.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    env:
+      # `gh` is already on the runner; this is the token it uses.
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # An empty `ref` is the commit this run started on. The value is only echoed once it has passed the character
+      # check, so it cannot smuggle a workflow command into the log. The commits API takes a branch, a tag or a full or
+      # short SHA and answers with the full SHA of the commit.
+      - name: Resolve the commit to release
+        id: resolve
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          ref="${REF:-$GITHUB_SHA}"
+          if ! [[ "$ref" =~ ^[A-Za-z0-9._/-]+$ ]] || [[ "$ref" == *..* ]] || [[ "$ref" == -* ]]; then
+            echo "::error title=Bad ref::ref may only hold letters, digits and . _ / - (no '..', no leading '-')."
+            exit 1
+          fi
+          sha=$(gh api "repos/$GITHUB_REPOSITORY/commits/$ref" --jq .sha)
+          if ! [[ "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Unknown ref::'$ref' did not resolve to one commit."
+            exit 1
+          fi
+          echo "commit $sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
+      # The commit that will be built: only its version is read. No credentials are kept; nothing here pushes.
+      - name: Checkout the commit to release
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ steps.resolve.outputs.sha }}
+          path: commit
+          persist-credentials: false
+
+      # The default branch has the CHANGELOG.
+      - name: Checkout the default branch (for the CHANGELOG)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          path: default
+          persist-credentials: false
+
+      # What was typed must look like a version (`v0.4.0` or `0.4` are caught here) and must be the one inside the commit.
+      # The typed value is not echoed until it has matched.
+      - name: Check the version
+        env:
+          WANTED: ${{ inputs.version }}
+        run: |
+          if ! [[ "$WANTED" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error title=Bad version::the version must be plain semantic, like 0.4.0 (no leading v)."
+            exit 1
+          fi
+          built=$(node -p "require('./commit/src-tauri/tauri.conf.json').version" | tr -d '\r')
+          if [ "$WANTED" != "$built" ]; then
+            echo "::error title=Version mismatch::You asked for '$WANTED' but src-tauri/tauri.conf.json at the commit to release says '$built'. Bump the version in the commit (or pass the ref that has it) and run again."
+            exit 1
+          fi
+          echo "version $built"
+
+      # Same check as in `release`, written once more on purpose; see the comment there. A token that can only read
+      # does not see draft releases, so `release` (which can write) is the one that catches a leftover draft.
+      - name: Check the tag and the release are free
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          tag="v$VERSION"
+          if out=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" 2>&1); then
+            echo "::error title=Tag exists::$tag already exists. Releases are never replaced; use a new version."
+            exit 1
+          fi
+          case "$out" in
+            *"HTTP 404"*) ;;
+            *)
+              echo "$out"
+              echo "::error title=Tag lookup failed::could not tell whether $tag exists (see the log above); not going on."
+              exit 1
+              ;;
+          esac
+          ids=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[] | select(.tag_name=="'"$tag"'") | .id')
+          if [ -n "$ids" ]; then
+            echo "::error title=Release exists::A release for $tag already exists. Delete the release, then run again."
+            exit 1
+          fi
+          echo "$tag is free"
+
+      # The same extraction `release` does later (only the notes' presence matters here, nothing is kept).
+      - name: Check the CHANGELOG has notes for this version
+        working-directory: default
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            BEGIN { head = "## [" v "]" }
+            { sub(/\r$/, "") }
+            !found && index($0, head) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes-check.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes-check.md"; then
+            echo "::error title=No release notes::CHANGELOG.md on the default branch has no '## [$VERSION]' section with content. Write it there first."
+            exit 1
+          fi
+          echo "release notes found ($(wc -l < "$RUNNER_TEMP/notes-check.md") lines)"
+
+  # Builds the installer exactly as `main`'s build does (installer.yml), minus the Rust tests: the commit was already
+  # green on main. It stops the release when the guards or the 10 MB limit fail. It builds the full SHA `preflight`
+  # resolved, never the ref as typed.
+  installer:
+    needs: preflight
+    uses: ./.github/workflows/installer.yml
+    with:
+      ref: ${{ needs.preflight.outputs.sha }}
+      run-tests: false
+
+  release:
+    needs: [preflight, installer]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    env:
+      # `gh` is already on the runner; this is the token it uses.
+      GH_TOKEN: ${{ github.token }}
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      # The default branch, not the built commit: it has the CHANGELOG with this version's section, which a rebuilt older
+      # commit does not. Only read; the token is used by `gh`, not by git.
+      - name: Checkout the default branch (for the CHANGELOG)
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+
+      # The version typed here must be the one inside the built commit, and what was built must be the commit `preflight`
+      # resolved. Matching the version also guarantees it is a plain semantic version, which makes it safe for the
+      # commands below (the typed value is not echoed until it has matched).
+      - name: Check the build is the one that was asked for
+        env:
+          WANTED: ${{ inputs.version }}
+          BUILT: ${{ needs.installer.outputs.version }}
+          CHECKED_SHA: ${{ needs.preflight.outputs.sha }}
+          BUILT_SHA: ${{ needs.installer.outputs.sha }}
+        run: |
+          if ! [[ "$WANTED" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error title=Bad version::the version must be plain semantic, like 0.4.0 (no leading v)."
+            exit 1
+          fi
+          if [ "$WANTED" != "$BUILT" ]; then
+            echo "::error title=Version mismatch::You asked for '$WANTED' but src-tauri/tauri.conf.json at the built commit says '$BUILT'. Bump the version in the commit (or pass the ref that has it) and run again."
+            exit 1
+          fi
+          if [ "$CHECKED_SHA" != "$BUILT_SHA" ]; then
+            echo "::error title=Commit mismatch::the installer was built from $BUILT_SHA, not from the commit that was checked ($CHECKED_SHA)."
+            exit 1
+          fi
+          echo "version $BUILT, commit $BUILT_SHA"
+
+      # Never move or reuse a tag. The tag is free when the API answers 404 for it; any other answer, a failed call
+      # included, stops the step, so a network or permission problem is never read as "no tag". The releases list
+      # includes drafts (this token can write), which have no tag yet but would clash with the one made below.
+      - name: Check the tag and the release are free
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          tag="v$VERSION"
+          if out=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" 2>&1); then
+            echo "::error title=Tag exists::$tag already exists. Releases are never replaced; use a new version."
+            exit 1
+          fi
+          case "$out" in
+            *"HTTP 404"*) ;;
+            *)
+              echo "$out"
+              echo "::error title=Tag lookup failed::could not tell whether $tag exists (see the log above); not going on."
+              exit 1
+              ;;
+          esac
+          ids=$(gh api "repos/$GITHUB_REPOSITORY/releases" --paginate --jq '.[] | select(.tag_name=="'"$tag"'") | .id')
+          if [ -n "$ids" ]; then
+            echo "::error title=Release exists::A release or draft for $tag already exists. Delete the draft/release, then run again."
+            exit 1
+          fi
+          echo "$tag is free"
+
+      - name: Download the installer
+        uses: actions/download-artifact@v7
+        with:
+          name: ${{ needs.installer.outputs.artifact }}
+          path: dist
+
+      # From the `## [<version>]` heading to the next `## [` heading, without the heading line itself and without blank
+      # lines at either end. An empty result means the CHANGELOG was not written for this version: no release.
+      - name: Extract the release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          awk -v v="$VERSION" '
+            BEGIN { head = "## [" v "]" }
+            { sub(/\r$/, "") }
+            !found && index($0, head) == 1 { found = 1; next }
+            found && /^## \[/ { exit }
+            found {
+              if (!started && $0 ~ /^[[:space:]]*$/) next
+              started = 1
+              lines[++n] = $0
+            }
+            END {
+              while (n > 0 && lines[n] ~ /^[[:space:]]*$/) n--
+              for (i = 1; i <= n; i++) print lines[i]
+            }
+          ' CHANGELOG.md > notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+            echo "::error title=No release notes::CHANGELOG.md has no '## [$VERSION]' section with content. Write it on the default branch first."
+            exit 1
+          fi
+          echo "$(wc -l < notes.md) lines of release notes"
+
+      # Creates the tag `v<version>` on the built commit (`--target` takes the full SHA) and the release in one API call.
+      # A version with a `-` suffix (0.5.0-rc1) is marked as a pre-release. When `ref` was given this is a rebuild of an
+      # older commit, so the release must not take over the "Latest" badge.
+      - name: Create the release
+        env:
+          VERSION: ${{ inputs.version }}
+          SHA: ${{ needs.preflight.outputs.sha }}
+          REF_GIVEN: ${{ inputs.ref }}
+        run: |
+          if ! [[ "$SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error title=Bad commit::the commit to tag is not a full SHA."
+            exit 1
+          fi
+          exe="dist/OPD1-TRCKER-${VERSION}-setup.exe"
+          ls -la dist
+          if [ ! -f "$exe" ]; then
+            echo "::error::the downloaded artifact has no $exe"
+            exit 1
+          fi
+          args=()
+          if [[ "$VERSION" == *-* ]]; then args+=(--prerelease); fi
+          if [ -n "$REF_GIVEN" ]; then args+=(--latest=false); fi
+          url=$(gh release create "v$VERSION" "$exe" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$SHA" \
+            --title "OPD1 TRCKER $VERSION" \
+            --notes-file notes.md \
+            "${args[@]}")
+          echo "$url"
+          {
+            echo "### Release v$VERSION"
+            echo
+            echo "$url"
+            echo
+            echo "Built from \`$SHA\`."
+          } >> "$GITHUB_STEP_SUMMARY"

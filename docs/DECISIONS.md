@@ -1260,6 +1260,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** None in the app: the flag and its check exist only in test builds.
 - **Status:** active
 
+### R180 — GitHub Releases from a workflow, a versioned installer, audits, visual-baseline plumbing
+
+- **What:** Claude's call (brief C1, C2, C5, B10's CI half). (1) The Windows build moved into a reusable `installer.yml` (read-only token, no persisted git credentials) that renames the NSIS output to `OPD1-TRCKER-<version>-setup.exe`, checks the 10 MB limit on that file and uploads the artifact `OPD1-TRCKER-<version>-setup`; `Build` calls it for `main` and manual runs. (2) `release.yml` (manual: `version`, optional `ref`) publishes a GitHub Release: a `preflight` job resolves `ref` to a full SHA (a short SHA works), checks the version in that commit's `tauri.conf.json`, that the tag and any release or draft for it do not exist, and that `CHANGELOG.md` on the default branch has the version's section; then the installer is built and a `release` job (the only one with `contents: write`) runs `gh release create v<version> --target <sha>` with the installer and the section as notes. The tag is created through the API, so no git tag push is needed; a rebuild of an older commit gets `--latest=false`. (3) `audit.yml` runs `cargo audit` and `npm audit --omit=dev` monthly and on demand; a finding fails the run, which is how the owner hears of it. (4) For the visual baselines: `checks` sets `VISUAL_BASELINES=1`; a manual `Build` run with `update_baselines` renders the baselines in the pinned image (read-only) and a second job with write access, which runs no npm and no browser, commits them to the branch. (5) Every checkout that does not need git afterwards has `persist-credentials: false`; workflow inputs reach shell steps only through environment variables, validated before they are echoed.
+- **Why:** Actions artifacts expire after about 90 days and the session cannot push tags; a Release keeps each installer. A version in the file name tells the user which build they have. The audits catch a vulnerable dependency without anyone looking. The write token never meets third-party code.
+- **Cost:** A release builds the installer once more on Windows (about 10 minutes, Windows minutes count double in a private repo). The rebuilt v0.2.0 and v0.3.0 installers come from the same commits but are not the original files.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

@@ -1253,6 +1253,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** One Linux job per branch push (about 15 minutes cold, less with the caches). A branch that touches Windows-only code is checked on Windows by a manual run of `Build` before `main` moves.
 - **Status:** active (supersedes R176's `ui-e2e` job)
 
+### R179 — Tests that do not need the sync worker never start it
+
+- **What:** Claude's call (the red CI run 43 on `main`, 2026-10-04). `pipeline_tests::details_loadouts::a_hidden_player_who_left_the_screen_keeps_the_card_rule_in_details` failed once on Windows (expected `Hidden Player`, got the remembered `SecretName`) and passed on the same code in run 44. Root cause: its helper applied a roster through the real poll path, whose `ensure_worker` spawns the sync worker on the app's multi-thread runtime; the worker stored a match naming the hidden player before the test's `stop_worker()` aborted it, and an abort cannot undo a DB write already started. A `#[cfg(test)]` flag on `Poller` (`hold_worker`, set by `Poller::held`) makes `ensure_worker` claim and spawn nothing. Every test that applies or fetches a roster and does not look at the worker's output uses it (24 sites in `poll.rs`, `details_loadouts.rs`, `live_tier.rs`); tests that need the worker are unchanged. The 120 s delayed-500 rank mocks of `live_tier.rs` that only parked a racing worker are gone, and that file's "before any rank call" test now asserts that the mock saw no `/mmr/` request. A proving test (`a_held_poller_claims_no_worker_for_a_roster_that_needs_syncing`) fails on the old code every time.
+- **Why:** "Flake" is not a root cause; a race in the test made CI red at random.
+- **Cost:** None in the app: the flag and its check exist only in test builds.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

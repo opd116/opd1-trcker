@@ -280,6 +280,11 @@ pub(crate) struct Poller {
     post_match: Option<PostMatch>,
     /// The sync worker's task and the id its claim in `LiveModel` has.
     worker: Option<(JoinHandle<()>, u64)>,
+    /// Tests only: `ensure_worker` claims and starts nothing, so a test that
+    /// looks at what a roster did on its own does not race a worker syncing on
+    /// the app's runtime (aborting one later cannot undo a write it made).
+    #[cfg(test)]
+    pub(crate) hold_worker: bool,
     last_connect_error: Option<String>,
     /// R47: consecutive connect failures and when the next attempt is due.
     connect_failures: u32,
@@ -327,11 +332,22 @@ impl Poller {
             roster_retry: None,
             post_match: None,
             worker: None,
+            #[cfg(test)]
+            hold_worker: false,
             last_connect_error: None,
             connect_failures: 0,
             next_connect: Instant::now(),
             lockfile_mtime: None,
         }
+    }
+
+    /// Tests only: a poller that starts no sync worker (`hold_worker`), for a
+    /// test that looks at what a roster did on its own.
+    #[cfg(test)]
+    pub(crate) fn held(st: Arc<AppState>) -> Self {
+        let mut poller = Self::new(st);
+        poller.hold_worker = true;
+        poller
     }
 
     async fn run(mut self) {
@@ -789,6 +805,10 @@ impl Poller {
     /// `LiveModel::try_start_worker`; a running worker picks up roster
     /// changes itself).
     fn ensure_worker(&mut self, session: &Arc<RiotSession>) {
+        #[cfg(test)]
+        if self.hold_worker {
+            return;
+        }
         // A worker task that ended without releasing its claim (it
         // panicked; release builds unwind, R138, so the task ends and the
         // app keeps running) must not block all future work.
@@ -1931,7 +1951,7 @@ mod tests {
         // The ended match never lands in this DB: each check re-syncs and
         // schedules the next, five in all, then stops.
         let h = harness().await;
-        let mut poller = Poller::new(h.st.clone());
+        let mut poller = Poller::held(h.st.clone());
         poller.stage = Stage::Menus;
         synced_lobby(&h);
         poller.post_match = Some(PostMatch {
@@ -1943,7 +1963,6 @@ mod tests {
         let mut gaps = Vec::new();
         for _ in 0..POST_MATCH_DELAYS.len() {
             poller.post_match_check(&h.session).await;
-            poller.stop_worker();
             if let Some(p) = &poller.post_match {
                 gaps.push(p.due.saturating_duration_since(Instant::now()).as_secs());
             }
@@ -2385,7 +2404,7 @@ mod tests {
         // with `settled: true` is the Lobby, never a settled Closed.
         let h = harness().await;
         mock_presence(&h, "MENUS", "unrated").await;
-        let mut poller = Poller::new(h.st.clone());
+        let mut poller = Poller::held(h.st.clone());
         poller.on_connected(h.session.clone()).await;
         assert!(!h.st.live_state().settled);
         poller.presence_tick(&h.session).await.unwrap();
@@ -2398,14 +2417,13 @@ mod tests {
         for s in settled {
             assert_eq!(s.stage, Stage::Menus);
         }
-        poller.stop_worker();
     }
 
     #[tokio::test]
     async fn once_settled_it_stays_settled_through_a_later_presence_and_a_model_reset() {
         let h = harness().await;
         let cell = switchable_presence(&h, "MENUS", "unrated").await;
-        let mut poller = Poller::new(h.st.clone());
+        let mut poller = Poller::held(h.st.clone());
         poller.on_connected(h.session.clone()).await;
         poller.presence_tick(&h.session).await.unwrap();
         assert!(h.st.live_state().settled);
@@ -2424,7 +2442,6 @@ mod tests {
         );
         poller.drop_session().await;
         assert!(h.st.live_state().settled);
-        poller.stop_worker();
     }
 
     #[tokio::test]
@@ -2471,7 +2488,7 @@ mod tests {
         const OTHER: &str = "cccccccc-0000-0000-0000-000000000003";
         let h = harness().await;
         mock_presence(&h, "MENUS", "unrated").await;
-        let mut poller = Poller::new(h.st.clone());
+        let mut poller = Poller::held(h.st.clone());
         poller.stage = Stage::Ingame;
         poller.presence_stage = Stage::Ingame;
         {
@@ -2507,7 +2524,6 @@ mod tests {
             assert!(!live.names_needed().is_empty());
             assert!(!live.names_wakeup_due(), "no stale names wake-up");
         }
-        poller.stop_worker();
     }
 
     #[tokio::test]
@@ -2799,9 +2815,8 @@ mod tests {
         // taken for the one that ended.
         for queue in ["unrated", "deathmatch"] {
             let h = harness().await;
-            mount_feed(&h.server, Feed::new(1)).await;
             let presence = switchable_presence(&h, "INGAME", queue).await;
-            let mut poller = Poller::new(h.st.clone());
+            let mut poller = Poller::held(h.st.clone());
             poller.stage = if queue == "deathmatch" {
                 Stage::Menus
             } else {
@@ -2832,7 +2847,6 @@ mod tests {
             *presence.lock().unwrap() = ("PREGAME".into(), queue.into());
             poller.presence_tick(&h.session).await.unwrap();
             assert_eq!(lock(&h.st.live).match_end_ms, None, "{queue}: new match");
-            poller.stop_worker();
         }
     }
 
@@ -3342,11 +3356,10 @@ mod tests {
         let mut me = roster(ME, false);
         me.hide_account_level = true;
         me.account_level = 87;
-        let mut poller = Poller::new(h.st.clone());
+        let mut poller = Poller::held(h.st.clone());
         poller
             .apply_roster(&h.session, Stage::Menus, None, vec![me])
             .await;
-        poller.stop_worker();
 
         let stored =
             h.st.db(|repo| load_player_db(repo, Some(ME), ME))

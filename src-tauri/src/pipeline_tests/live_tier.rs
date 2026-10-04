@@ -4,32 +4,16 @@
 //! Select into In Game, where core-game answers carry none. A child of
 //! `pipeline_tests`, so it shares that module's harness and helpers through
 //! `super::*`.
+//!
+//! The tests that go through `Poller::fetch_*` use a held `Poller`
+//! (`hold_worker`): no sync worker ever runs, so no rank call is made and the
+//! card's rank fields stay as the roster left them, whatever the scheduler
+//! does. (A worker started by `fetch_*` runs on the app's own runtime while
+//! the test thread is busy or descheduled, and a later `stop_worker()` cannot
+//! undo what it already did.)
 
 use super::*;
 use crate::poll::Poller;
-
-/// Every rank call of `puuid` (competitive updates, MMR) never gets an answer
-/// within the test (a long-delayed 500), so only the roster's own tier can
-/// fill its rank, and the card's rank fields stay `Loading` (absent in the
-/// card JSON). `Poller::fetch_*` starts the sync worker on the app's own
-/// runtime, where it runs while the test thread is busy or descheduled, and
-/// the test's `stop_worker()` only aborts it later. An instant failure would
-/// let a worker that got ahead settle the fields to `Missing` (`null`), and
-/// the assertions would be about which thread won; a call that never ends
-/// parks it in the rank phase until it is aborted, whatever the scheduler does.
-async fn rank_calls_fail(h: &Harness, puuid: &str) {
-    for p in [
-        format!("/mmr/v1/players/{puuid}/competitiveupdates"),
-        format!("/mmr/v1/players/{puuid}"),
-    ] {
-        Mock::given(method("GET"))
-            .and(path(p.as_str()))
-            .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(120)))
-            .with_priority(1)
-            .mount(&h.server)
-            .await;
-    }
-}
 
 fn pregame_player(puuid: &str, tier: Value, incognito: bool) -> Value {
     json!({"Subject": puuid, "CharacterID": "", "CharacterSelectionState": "",
@@ -109,23 +93,25 @@ async fn mock_coregame(h: &Harness, match_id: &str) {
     .await;
 }
 
-async fn all_rank_calls_fail(h: &Harness) {
-    for p in [ME, OTHER, MATE, STRANGER] {
-        rank_calls_fail(h, p).await;
-    }
-}
-
 #[tokio::test]
 async fn agent_select_shows_the_tiers_riot_sent_before_any_rank_call() {
     let h = harness().await;
-    all_rank_calls_fail(&h).await;
     mock_pregame_with_tiers(&h).await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_pregame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
 
-    // No sync has run for anyone: the rank is the tier from the roster, the
-    // RR is `—` (null), and everything else from MMR is still loading.
+    // No sync has run for anyone, and no rank call was made at all: the rank
+    // is the tier from the roster, the RR is `—` (null), and everything else
+    // from MMR is still loading.
+    let rank_calls = h
+        .server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().starts_with("/mmr/"))
+        .count();
+    assert_eq!(rank_calls, 0, "no rank call before the card shows the tier");
     assert_eq!(
         card_json(&h.st, ME)["rank"],
         json!({"tier": 22, "rr": null})
@@ -148,14 +134,11 @@ async fn agent_select_shows_the_tiers_riot_sent_before_any_rank_call() {
 #[tokio::test]
 async fn in_game_keeps_the_agent_select_tiers_for_both_teams() {
     let h = harness().await;
-    all_rank_calls_fail(&h).await;
     mock_pregame_with_tiers(&h).await;
     mock_coregame(&h, "pg-1").await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_pregame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
     poller.fetch_ingame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
 
     assert_eq!(lock(&h.st.live).stage, Stage::Ingame);
     assert_eq!(
@@ -179,18 +162,15 @@ async fn in_game_with_no_agent_select_seen_has_no_tier_to_show() {
     // The app started mid-match: core-game answers carry no tier, so the
     // rank waits for the rank calls as before.
     let h = harness().await;
-    all_rank_calls_fail(&h).await;
     mock_coregame(&h, "pg-1").await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_ingame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
     assert!(card_json(&h.st, STRANGER).get("rank").is_none());
 }
 
 #[tokio::test]
 async fn the_lobby_party_shows_each_members_tier() {
     let h = harness().await;
-    all_rank_calls_fail(&h).await;
     get(
         &h.server,
         &format!("/parties/v1/players/{ME}"),
@@ -208,9 +188,8 @@ async fn the_lobby_party_shows_each_members_tier() {
         json!({"ID": "party-1", "Members": [member(ME, json!(22)), member(MATE, json!(0))]}),
     )
     .await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_party(&h.session, ME).await.unwrap();
-    poller.stop_worker();
 
     assert_eq!(
         card_json(&h.st, ME)["rank"],
@@ -258,11 +237,9 @@ fn tiers_of_match(h: &Harness, match_id: &str) -> Vec<(String, u8)> {
 #[tokio::test]
 async fn a_second_agent_select_replaces_the_first_one_wholesale() {
     let h = harness().await;
-    all_rank_calls_fail(&h).await;
     mock_pregame_with_tiers(&h).await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_pregame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
     assert_eq!(tiers_of_match(&h, "pg-1").len(), 3);
 
     // A dodge and a new Agent Select: pg-2, only ME carries a tier.
@@ -275,7 +252,6 @@ async fn a_second_agent_select_replaces_the_first_one_wholesale() {
     )
     .await;
     poller.fetch_pregame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
 
     assert_eq!(tiers_of_match(&h, "pg-2"), [(ME.to_string(), 23)]);
     assert!(tiers_of_match(&h, "pg-1").is_empty(), "no leftover puuids");
@@ -288,11 +264,9 @@ async fn a_second_agent_select_replaces_the_first_one_wholesale() {
 #[tokio::test]
 async fn a_re_poll_of_the_same_agent_select_keeps_a_tier_the_answer_leaves_out() {
     let h = harness().await;
-    all_rank_calls_fail(&h).await;
     mock_pregame_with_tiers(&h).await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_pregame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
 
     // Same match, the re-poll's answer has no tier for OTHER and a new one
     // for ME.
@@ -308,7 +282,6 @@ async fn a_re_poll_of_the_same_agent_select_keeps_a_tier_the_answer_leaves_out()
     )
     .await;
     poller.pregame_repoll(&h.session).await.unwrap();
-    poller.stop_worker();
 
     assert_eq!(
         tiers_of_match(&h, "pg-1"),
@@ -323,11 +296,9 @@ async fn a_re_poll_of_the_same_agent_select_keeps_a_tier_the_answer_leaves_out()
 #[tokio::test]
 async fn a_lobby_fetch_after_a_match_replaces_the_agent_select_tiers() {
     let h = harness().await;
-    all_rank_calls_fail(&h).await;
     mock_pregame_with_tiers(&h).await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_pregame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
     assert!(!tiers_of_match(&h, "pg-1").is_empty());
 
     get(
@@ -345,7 +316,6 @@ async fn a_lobby_fetch_after_a_match_replaces_the_agent_select_tiers() {
     )
     .await;
     poller.fetch_party(&h.session, ME).await.unwrap();
-    poller.stop_worker();
 
     assert!(lock(&h.st.live).match_tiers.is_empty());
     assert!(tiers_of_match(&h, "pg-1").is_empty());
@@ -355,9 +325,8 @@ async fn a_lobby_fetch_after_a_match_replaces_the_agent_select_tiers() {
 async fn closing_empties_the_match_tiers() {
     let h = harness().await;
     mock_pregame_with_tiers(&h).await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_pregame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
     assert!(!lock(&h.st.live).match_tiers.is_empty());
 
     poller.enter_closed().await;
@@ -385,14 +354,11 @@ async fn in_game_after_a_missed_agent_select_does_not_take_the_old_matches_tiers
     // with no Agent Select seen by the app (its fetch failed). Nothing of
     // pg-1 may reach its cards.
     let h = harness().await;
-    all_rank_calls_fail(&h).await;
     mock_pregame_with_tiers(&h).await;
     mock_coregame(&h, "cg-9").await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_pregame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
     poller.fetch_ingame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
 
     assert_eq!(lock(&h.st.live).stage, Stage::Ingame);
     for puuid in [ME, OTHER, STRANGER] {

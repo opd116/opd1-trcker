@@ -629,7 +629,7 @@ async fn pregame_loadouts_polled_once_then_stops() {
     let loadouts = "/pregame/v1/matches/pg-1/loadouts";
     let h = harness().await;
     mock_pregame(&h.server).await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_pregame(&h.session, ME).await.unwrap();
     assert_eq!(count(&h.server, "GET", loadouts).await, 0);
 
@@ -670,7 +670,7 @@ async fn pregame_loadouts_polled_once_then_stops() {
         .into_iter()
         .map(|p| (p.to_string(), RawLoadout::default()))
         .collect();
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_pregame(&h.session, ME).await.unwrap();
     for _ in 0..4 {
         poller.pregame_repoll(&h.session).await.unwrap();
@@ -1012,7 +1012,7 @@ async fn self_loadout_fetched_once_per_connect() {
     mock_valorant_presence(&h, true).await;
 
     // The connect asks once, at the first presence showing VALORANT.
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     connect_with_valorant(&mut poller, &h).await;
     wait_for_playerloadouts(&h, 1).await;
     assert_eq!(
@@ -1053,12 +1053,10 @@ async fn self_loadout_fetched_once_per_connect() {
     poller.presence_tick(&h.session).await.unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
     assert_eq!(playerloadout_requests(&h).await.len(), 1);
-    poller.stop_worker();
 
     // A reconnect asks once more, and only ever for the user.
     connect_with_valorant(&mut poller, &h).await;
     wait_for_playerloadouts(&h, 2).await;
-    poller.stop_worker();
     assert_eq!(
         playerloadout_requests(&h).await,
         [own_path.clone(), own_path]
@@ -1080,7 +1078,7 @@ async fn self_loadout_waits_for_valorant_and_is_read_once_per_connect() {
     )
     .await;
     mock_valorant_presence(&h, false).await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.on_connected(h.session.clone()).await;
     for _ in 0..3 {
         poller.presence_tick(&h.session).await.unwrap();
@@ -1114,7 +1112,6 @@ async fn self_loadout_waits_for_valorant_and_is_read_once_per_connect() {
         1,
         "once per connect"
     );
-    poller.stop_worker();
 }
 
 #[tokio::test]
@@ -1132,10 +1129,9 @@ async fn self_loadout_kept_in_app_state() {
     lobby_with(&h, ME).await;
     mock_valorant_presence(&h, true).await;
 
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     connect_with_valorant(&mut poller, &h).await;
     wait_for_playerloadouts(&h, 1).await;
-    poller.stop_worker();
     // The four skins are kept in `app_state`.
     let stored =
         h.st.db(|repo| repo.get_state("self_loadout"))
@@ -1282,10 +1278,9 @@ async fn account_switch_forgets_the_previous_users_loadout() {
     // ME connects (the playerloadout mock isn't mounted: the read fails and
     // is not retried): the previous account's loadout is gone everywhere.
     mock_valorant_presence(&h, true).await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     connect_with_valorant(&mut poller, &h).await;
     wait_for_playerloadouts(&h, 1).await;
-    poller.stop_worker();
     assert_eq!(lock(&h.st.live).self_puuid.as_deref(), Some(ME));
     assert_eq!(lock(&h.st.live).self_loadout, None);
     let kept =
@@ -1382,11 +1377,42 @@ fn hidden_ally(selection: &str) -> RosterPlayer {
     p
 }
 
-/// Applies `roster` as the stage's roster through the real poll path, then
-/// stops the worker it starts (these tests look at Details only).
+/// Applies `roster` as the stage's roster through the real poll path. The
+/// poller is held (`hold_worker`): these tests look at Details only, and a
+/// sync worker that got ahead would store ME's matches (and with them a hidden
+/// player's name) before the test says so; stopping one afterwards cannot undo
+/// a write it already made, so none may start.
 async fn show(poller: &mut Poller, h: &Harness, stage: Stage, roster: Vec<RosterPlayer>) {
+    poller.hold_worker = true;
     poller.apply_roster(&h.session, stage, None, roster).await;
-    poller.stop_worker();
+}
+
+#[tokio::test]
+async fn a_held_poller_claims_no_worker_for_a_roster_that_needs_syncing() {
+    // The proof for `hold_worker`: a roster that has work to do (ME, and a
+    // hidden ally, not synced yet) leaves the work pending and no claim
+    // taken. Without the hold `ensure_worker` claims the worker in the same
+    // call (and it may already be done by the time this looks, with the work
+    // gone): either way one of the two checks below fails. Both ways to hold
+    // a poller are covered: `Poller::held` and `show()`.
+    let roster_of = || vec![roster(ME, false), hidden_ally("")];
+    let check = |h: &Harness| {
+        let live = lock(&h.st.live);
+        assert!(live.has_pending_work(), "the roster needs syncing");
+        assert!(!live.worker_running(), "and no worker was started for it");
+    };
+
+    let h = harness().await;
+    let mut poller = Poller::held(h.st.clone());
+    poller
+        .apply_roster(&h.session, Stage::Pregame, None, roster_of())
+        .await;
+    check(&h);
+
+    let h = harness().await;
+    let mut poller = Poller::new(h.st.clone());
+    show(&mut poller, &h, Stage::Pregame, roster_of()).await;
+    check(&h);
 }
 
 #[tokio::test]
@@ -1560,9 +1586,8 @@ async fn open_details_get_the_pregame_loadouts_that_arrive_after_the_click() {
     let h = harness().await;
     mock_pregame(&h.server).await;
     mount_skin(&h.assets_server, REAVER, REAVER_RED).await;
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.fetch_pregame(&h.session, ME).await.unwrap();
-    poller.stop_worker();
 
     // MATE (an ally, on the roster) is opened before any loadout: every
     // weapon is `—` (null). MATE's entry is the capture's Reaver Vandal.
@@ -1576,7 +1601,6 @@ async fn open_details_get_the_pregame_loadouts_that_arrive_after_the_click() {
     // loadout is merged and the open Details is rebuilt with the skin named.
     poller.pregame_repoll(&h.session).await.unwrap();
     poller.pregame_repoll(&h.session).await.unwrap();
-    poller.stop_worker();
     let event = details_event_after(&h.rec, seen, MATE, |d| {
         d["loadout"].get("vandal").is_some_and(|v| v.is_object())
     })
@@ -1762,7 +1786,7 @@ async fn in_game_roster_is_published_before_the_loadouts_answer() {
     // had them in before the cards).
     mock_slow_coregame_loadouts(&h.server, std::time::Duration::from_millis(1_500)).await;
 
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     let watcher = async {
         loop {
             {
@@ -1785,7 +1809,6 @@ async fn in_game_roster_is_published_before_the_loadouts_answer() {
     assert_eq!(live.stage, Stage::Ingame);
     assert!(live.loadouts.contains_key(OTHER), "merged after the roster");
     drop(live);
-    poller.stop_worker();
 }
 
 #[tokio::test]
@@ -1795,7 +1818,7 @@ async fn in_game_loadouts_that_arrive_after_the_roster_refresh_an_open_details()
     mock_slow_coregame_loadouts(&h.server, std::time::Duration::from_millis(800)).await;
     mount_skin(&h.assets_server, REAVER, REAVER_RED).await;
 
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     // OTHER's Details is opened while the loadouts are still on their way:
     // every weapon is `—` (null).
     let opener = async {
@@ -1815,7 +1838,6 @@ async fn in_game_loadouts_that_arrive_after_the_roster_refresh_an_open_details()
     };
     let (res, (vandal_at_open, seen)) = tokio::join!(poller.fetch_ingame(&h.session, ME), opener);
     res.unwrap();
-    poller.stop_worker();
     assert_eq!(vandal_at_open, Value::Null);
 
     // The merge rebuilt the open Details, with the skin named.
@@ -1833,7 +1855,7 @@ async fn a_stuck_in_game_loadouts_call_is_cut_off_and_leaves_the_roster_alone() 
     // The answer would come after 5 s; the call is given 300 ms.
     mock_slow_coregame_loadouts(&h.server, std::time::Duration::from_secs(5)).await;
 
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller.ingame_loadouts_timeout = std::time::Duration::from_millis(300);
     let started = std::time::Instant::now();
     poller
@@ -1849,7 +1871,6 @@ async fn a_stuck_in_game_loadouts_call_is_cut_off_and_leaves_the_roster_alone() 
     assert_eq!(live.slots.len(), 2);
     assert!(live.loadouts.is_empty());
     drop(live);
-    poller.stop_worker();
 }
 
 #[tokio::test]
@@ -1862,7 +1883,7 @@ async fn a_failed_in_game_loadouts_request_leaves_the_roster_alone() {
         .mount(&h.server)
         .await;
 
-    let mut poller = Poller::new(h.st.clone());
+    let mut poller = Poller::held(h.st.clone());
     poller
         .fetch_ingame(&h.session, ME)
         .await
@@ -1871,7 +1892,6 @@ async fn a_failed_in_game_loadouts_request_leaves_the_roster_alone() {
     assert_eq!(live.slots.len(), 2);
     assert!(live.loadouts.is_empty());
     drop(live);
-    poller.stop_worker();
 }
 
 #[tokio::test]

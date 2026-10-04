@@ -11,7 +11,20 @@ export default defineConfig({
   forbidOnly: !!process.env.CI,
   reporter: [["list"]],
   timeout: 60_000,
-  expect: { timeout: 10_000 },
+  expect: {
+    timeout: 10_000,
+    // Visual baselines (tests/visual-baseline.spec.ts): committed PNGs, compared with `toHaveScreenshot`. The name has no
+    // `{platform}` / `{projectName}` suffix because only one environment ever renders them: the pinned Playwright image
+    // (`update_baselines` run of .github/workflows/build.yml). They are separate from `snapshotPathTemplate` above, whose
+    // design-file references are git-ignored and regenerated on every run.
+    toHaveScreenshot: {
+      pathTemplate: "{testDir}/baselines/{arg}{ext}",
+      maxDiffPixelRatio: 0.002,
+      animations: "disabled",
+      caret: "hide",
+      scale: "css",
+    },
+  },
   use: {
     baseURL: "http://127.0.0.1:4173",
     viewport: { width: 1000, height: 800 },

@@ -1968,3 +1968,7 @@ Done before Phase 2 started (R87): the review was Approved, the math review ran,
 - [ ] **Step 6: Tag + push** `cd /home/project-1 && git tag -a v0.2.0 -m "OPD1 TRCKER v0.2.0" && git push origin v0.2.0`, only after Step 5's run is green.
   - The controller then sends the user the artifact link and `docs/test-checklist.md` (this is Task 11, Step 1).
 - [ ] **Step 7: Phase end.** Write the Phase 2 close-out to the ledger (disk only). Then ask the user, in Arabic, to run `/handoff` (it is user-invoked only; it replaces the superseded `docs/handoff.md`): «خلصنا المرحلة. اكتب ‎/handoff عشان نحفظ كل شي للمحادثة الجاية.»
+
+## v0.3.0 round (2026-10-03)
+
+Fixes plus the My Stats page, at the user's request (R168). What was built is in `docs/DECISIONS.md` R168–R176 and `CHANGELOG.md` `[0.3.0]`; where it stands and what is next is in `docs/handoff.md`. The Task 14+ checkboxes above are historical: that work landed in v0.2.0 and v0.3.0.

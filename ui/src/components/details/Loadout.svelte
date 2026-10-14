@@ -64,8 +64,8 @@
     display: flex;
     align-items: center;
     gap: 14px;
-    height: 62px;
-    padding: 0 14px 0 8px;
+    height: 70px;
+    padding: 0 14px 0 10px;
   }
 
   .wrow + .wrow {
@@ -107,12 +107,12 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 5px;
   }
 
   .wname {
     font-size: 12px;
-    font-weight: 500;
+    font-weight: 600;
     color: var(--text2);
   }
 
@@ -120,6 +120,7 @@
   .wskin {
     font-size: 14px;
     font-weight: 600;
+    color: var(--text2);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;

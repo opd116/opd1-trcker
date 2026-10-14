@@ -47,19 +47,19 @@
 
 <style>
   .bar {
-    height: 48px;
+    height: 63px;
     flex: none;
     display: flex;
     align-items: center;
-    gap: 30px;
-    padding: 0 18px;
+    gap: 42px;
+    padding: 0 20px;
     border-bottom: 1px solid var(--line);
   }
 
   .word {
-    font-size: 14px;
+    font-size: 16px;
     font-weight: 700;
-    letter-spacing: 0.18em;
+    letter-spacing: 0.12em;
     white-space: nowrap;
   }
 
@@ -90,6 +90,7 @@
 
   button.on {
     font-weight: 600;
+    color: var(--accent);
   }
 
   /* R106 focus ring, inset: this tab touches the top edge of #app (overflow hidden), where the global 2px-outside

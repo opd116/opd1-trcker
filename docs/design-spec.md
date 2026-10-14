@@ -1,5 +1,7 @@
 # OPD1 TRCKER: cd-v8 build spec (Svelte 5)
 
+> 2026-10-15: The user's autonomous redesign request supersedes the visual geometry in this historical v8 specification. See `redesign.md` for current geometry and the review ledger. Data contracts, missing/hidden-name handling, tooltip meanings and navigation described here still apply unless explicitly superseded. Old reference images are historical, not the current design target.
+
 Build target: one Live page (Lobby / Agent Select / In Game / Closed), Player Details and Match Details, all 6 design options wired at their defaults, and the My Stats page (§9, built from the design's parts: the design file has no screen for it). The Settings page is NOT built.
 
 - Source of truth: `.superpowers/design/cd-v8/project/OPD1 Tracker v8.dc.html`. `v8:N` below means line N of that file. `screens/*.png` are stale; ignore them.

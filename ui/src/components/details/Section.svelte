@@ -26,17 +26,22 @@
   .sec {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 0;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    overflow: hidden;
   }
 
   .sech {
+    padding: 13px 14px;
     font-size: 14px;
     font-weight: 600;
+    border-bottom: 1px solid var(--line);
   }
 
   .panel {
     background: var(--card);
-    border-radius: 8px;
     overflow: hidden;
   }
 </style>

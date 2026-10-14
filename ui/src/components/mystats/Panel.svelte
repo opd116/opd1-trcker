@@ -29,19 +29,25 @@
   .sec {
     display: flex;
     flex-direction: column;
-    gap: 8px;
+    gap: 0;
     min-width: 0;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
   }
 
   .sech {
     display: flex;
     font-size: 14px;
     font-weight: 600;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--line);
   }
 
   .panel {
     background: var(--card);
-    border-radius: 8px;
+    border-radius: 0;
     overflow: hidden;
   }
 
@@ -50,4 +56,13 @@
     display: flex;
     flex-direction: column;
   }
+
+  .session { flex-direction: row; }
+  .session .sech {
+    flex: none;
+    align-items: center;
+    border-bottom: 0;
+    border-right: 1px solid var(--line);
+  }
+  .session .panel { flex: 1; min-width: 0; }
 </style>

@@ -53,18 +53,19 @@
   .mhead {
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 20px;
     background: var(--card);
-    border-radius: 8px;
-    padding: 12px 22px 12px 12px;
-    margin-bottom: 14px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 16px 24px 16px 16px;
+    margin-bottom: 16px;
   }
 
   /* An unknown map keeps the box, with the image's own (no) background. */
   .mmap {
     display: block;
     width: 150px;
-    height: 56px;
+    height: 72px;
     flex: none;
     object-fit: cover;
     border-radius: 5px;
@@ -75,11 +76,11 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 3px;
+    gap: 7px;
   }
 
   .mtitle {
-    font-size: 20px;
+    font-size: 24px;
     font-weight: 600;
   }
 
@@ -94,13 +95,16 @@
   .mres {
     display: flex;
     align-items: center;
-    gap: 14px;
+    gap: 18px;
+    padding-left: 24px;
+    border-left: 1px solid var(--line);
   }
 
   .mscol {
     display: flex;
     flex-direction: column;
     align-items: flex-end;
+    gap: 5px;
   }
 
   .mscore {

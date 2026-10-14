@@ -196,7 +196,7 @@
   .chart {
     position: relative;
     flex: 1;
-    min-height: 260px;
+    min-height: 220px;
   }
 
   /* The tab stop is the chart's whole box. Its ring is inset (the panel clips) and follows the panel's corners, like

@@ -1,5 +1,12 @@
 # Decisions
 
+### R189 — Autonomous lightweight redesign (2026-10-15)
+
+- **What:** The user's current request replaces the v8 visual approval lock for this redesign. Preserve Svelte/Tauri/Rust, every required field, hidden-name rules, English labels, fixed 1000×800 and DEV-only sample data. Implement a three-band player card (identity, current/historical ranks, performance), coherent Details/Match panels and a more compact My Stats summary. Six theme controls and scene switching live in a separate development-only `design.html` review page.
+- **Why:** The user still finds past designs uncomfortable and explicitly delegated layout decisions plus repeated critique without questions or approval stops.
+- **Cost:** A small CSS increase and updated deliberate geometry assertions; zero additional runtime dependencies, polling or service requests. Existing v8 baseline PNGs must be regenerated for the replacement design using the repository's workflow.
+- **Status:** active; supersedes visual geometry and approval gating in R92 for this task only. Product/data/privacy requirements remain active. See `redesign.md`.
+
 Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each one has what was decided, why, what it costs if it turns out wrong, and its current status.
 
 - **Status** is one of `active`, `superseded by Rn`, `narrowed by Rn`, `reversed by the user (date)`, `dropped`, or `unused number`. A note in parentheses adds detail.

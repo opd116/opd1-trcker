@@ -4,6 +4,10 @@ A lightweight Windows desktop tracker for VALORANT that reads the **local Riot c
 
 The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 
+## Current redesign authorization (2026-10-15)
+
+The user explicitly requested an autonomous redesign with mock data and repeated severe critique, without questions or approval stops. This supersedes the old v8 visual lock and its approval gate for this task. `docs/redesign.md` records the replacement layout, review evidence and intentional concept deviations. Product constraints, hidden names, 1000×800, lightness, English UI, no status text and DEV-only sample data remain binding. No new runtime dependencies. The old v8 geometry below is historical where the redesign explicitly replaces it; unrelated behavior remains unchanged.
+
 - User-facing spec, in Arabic, the source of truth: `docs/requirements-raw.md`
 - Reference screenshots (content only, never copy their styling): `docs/refs/`
 - Asset lookup table: `docs/refs/valorant-api-assets.md`

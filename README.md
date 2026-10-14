@@ -36,6 +36,10 @@ The app needs the WebView2 runtime, which Windows 11 and an up-to-date Windows 1
 
 ## Build from source
 
+### Interactive design review
+
+After `npm ci`, run `npm --prefix ui run dev -- --port 4173 --strictPort` and open [the local design review](http://127.0.0.1:4173/design.html). Switch sample screens, stress cases and appearance options without changing the fixed app layout. The review controls and mock clock are development-only and excluded from the production build. The current design and critique ledger are in [`docs/redesign.md`](docs/redesign.md).
+
 **Windows:** Rust stable, Node 24 and WebView2, then
 
 ```bash

@@ -35,7 +35,7 @@ const box = async (l: Locator): Promise<Box> => {
 };
 /** ±0.5px (spec §8.4). */
 const near = (actual: number, want: number, what: string) => expect(Math.abs(actual - want), `${what}: ${actual} vs ${want}`).toBeLessThanOrEqual(0.5);
-const cardY = (i: number) => 59 + 147.8 * i;
+const cardY = (i: number) => 108 + 137.2 * i;
 const left = (page: Page) => page.locator(".live .col").nth(0);
 const right = (page: Page) => page.locator(".live .col").nth(1);
 const cardNamed = (page: Page, text: string | RegExp) => page.locator(".live .card").filter({ hasText: text });
@@ -71,28 +71,37 @@ test("geometry: ingame", async ({ page }) => {
   await openScene(page, "ingame");
   const bar = await box(page.locator("header.bar"));
   near(bar.y, 0, "top bar y");
-  near(bar.height, 49, "top bar height");
+  near(bar.height, 64, "top bar height");
 
   const ind = page.locator("header.bar .ind");
   const ib = await box(ind);
   near(ib.height, 2, "tab indicator height");
-  near(ib.y + ib.height, 49, "tab indicator bottom");
+  near(ib.y + ib.height, 64, "tab indicator bottom");
   expect(await css(ind, "background-color")).toBe(await varRgb(page, "--accent"));
 
   const map = await box(page.locator("header.bar .map img"));
   near(map.width, 116, "map width");
   near(map.height, 32, "map height");
-  near(map.x + map.width, 982, "map right edge");
+  near(map.x + map.width, 980, "map right edge");
 
-  for (const [c, x] of [[left(page), 10], [right(page), 505]] as const) {
+  const live = page.locator(".live");
+  expect(await css(live, "padding")).toBe("14px 16px 16px");
+  expect(await css(live, "column-gap")).toBe("16px");
+  expect(await css(live, "row-gap")).toBe("10px");
+  const teams = page.locator(".live .teams");
+  await expect(teams.locator("span")).toHaveText(["Your team", "Opponents"]);
+  near((await box(teams)).y, 78, "team labels top");
+  near((await box(teams)).height, 20, "team labels height");
+
+  for (const [c, x] of [[left(page), 16], [right(page), 508]] as const) {
     const cards = c.locator(".card");
     await expect(cards).toHaveCount(5);
     for (let i = 0; i < 5; i++) {
       const b = await box(cards.nth(i));
       near(b.x, x, `card ${x}/${i} x`);
       near(b.y, cardY(i), `card ${x}/${i} y`);
-      near(b.width, 485, `card ${x}/${i} width`);
-      near(b.height, 139.8, `card ${x}/${i} height`);
+      near(b.width, 476, `card ${x}/${i} width`);
+      near(b.height, 127.2, `card ${x}/${i} height`);
     }
   }
 
@@ -104,51 +113,63 @@ test("geometry: ingame", async ({ page }) => {
     return { x: b.x - o.x, y: b.y - o.y, w: b.width, h: b.height, r: b.x + b.width - o.x, b: b.y + b.height - o.y };
   };
   const agent = await rel(".who .agent");
-  near(agent.x, 56, "agent x");
-  near(agent.y, 12, "agent y");
-  near(agent.w, 40, "agent w");
-  near(agent.h, 40, "agent h");
+  near(agent.x, 48, "agent x");
+  near(agent.y, 8, "agent y");
+  near(agent.w, 28, "agent w");
+  near(agent.h, 28, "agent h");
+  expect(await css(mara.locator(".grid"), "padding")).toBe("8px 14px 8px 48px");
+  near((await rel(".who")).w, 414, "identity spans the content width");
+  near((await rel(".art")).w, 38, "art strip width");
+  expect(await css(mara.locator(".art-img"), "opacity")).toBe("0.5");
   const ricon = await rel(".rank img");
-  near(ricon.x, 313, "rank icon x");
-  near(ricon.y, 12, "rank icon y");
+  near(ricon.x, 48, "rank icon x");
+  near(ricon.y, 42, "rank icon y");
   near(ricon.w, 40, "rank icon w");
   near(ricon.h, 40, "rank icon h");
-  for (const [sel, x] of [[".peak", 56], [".prev", 313]] as const) {
+  near((await rel(".rank")).w, 164, "current rank column width");
+  expect(await css(mara.locator(".ranking"), "column-gap")).toBe("12px");
+  expect(await css(mara.locator(".history"), "border-left-width")).toBe("1px");
+  expect(await css(mara.locator(".history"), "padding-left")).toBe("12px");
+  for (const [sel, y] of [[".peak", 64], [".prev", 42]] as const) {
     const r = await rel(sel);
-    near(r.y, 62, `${sel} y`);
+    near(r.y, y, `${sel} y`);
     near(r.h, 18, `${sel} h`);
-    near(r.x, x, `${sel} x`);
+    near(r.x, 237, `${sel} x`);
   }
   const stats = mara.locator(".stat");
   await expect(stats).toHaveCount(3);
   for (let i = 0; i < 3; i++) {
-    const b = await box(stats.nth(i));
-    near(b.width, 76, `stat ${i} width`);
-    near(b.x - o.x, 56 + 76 * i, `stat ${i} x`);
+    const stat = stats.nth(i);
+    expect(await css(stat, "flex-direction")).toBe("row-reverse");
+    expect(await css(stat.locator(".v"), "font-size")).toBe("17px");
+    expect(await css(stat.locator(".k"), "font-size")).toBe("12px");
+    const value = await box(stat.locator(".v"));
+    const label = await box(stat.locator(".k"));
+    near(label.x - (value.x + value.width), 5, `stat ${i} value-label gap`);
   }
-  near((await rel(".stats")).b, 127.8, "stat trio bottom");
+  near((await rel(".performance")).b, 119.2, "performance bottom");
   const tiles = mara.locator(".tile");
   await expect(tiles).toHaveCount(5);
   for (let i = 0; i < 5; i++) {
     const b = await box(tiles.nth(i));
     near(b.width, 22, `tile ${i} w`);
     near(b.height, 22, `tile ${i} h`);
-    near(b.y - o.y, 95.8, `tile ${i} y`);
+    near(b.y - o.y, 87.2, `tile ${i} y`);
   }
-  near((await box(tiles.first())).x - o.x, 313, "first tile x");
+  near((await box(tiles.first())).x - o.x, 332, "first tile x");
   const lastTile = await box(tiles.last());
-  near(lastTile.x + lastTile.width - o.x, 443, "last tile right");
+  near(lastTile.x + lastTile.width - o.x, 462, "last tile right");
   const arrow = await rel(".arrow");
-  near(arrow.y, 120.8, "arrow top");
-  near(arrow.b, 127.8, "arrow bottom");
+  near(arrow.y, 112.2, "arrow top");
+  near(arrow.b, 119.2, "arrow bottom");
   const slot = await rel(".encslot");
-  near(slot.x, 261, "⟲ slot x");
-  near(slot.r, 297, "⟲ slot right");
+  near(slot.x, 358, "⟲ slot x");
+  near(slot.r, 394, "⟲ slot right");
   // The design-ref gate hides the ⟲ glyph (a system-font character; Linux has no Segoe UI Symbol, so the two renders
   // would only compare the same fallback glyph) and compares only the count, whose colour and nudges are a few dozen
   // pixels: the badge's own look is pinned here instead (spec §3.5). The glyph is the design's own span (v8:73).
   const enc = mara.locator(".enc");
-  near((await rel(".enc")).r, 297, "⟲ badge right-aligned in its slot");
+  near((await rel(".enc")).r, 394, "⟲ badge right-aligned in its slot");
   const glyph = enc.locator(".glyph");
   await expect(enc.locator("svg")).toHaveCount(0);
   await expect(glyph).toHaveText("⟲");
@@ -162,70 +183,66 @@ test("geometry: ingame", async ({ page }) => {
   expect(await css(enc, "column-gap")).toBe("3px");
   await expect(enc).toHaveText("⟲3");
   const tab = await rel(".ptab");
-  near(tab.x, 464, "party tab x");
-  near(tab.r, 485, "party tab right");
-  near(tab.y, 22, "party tab y");
-  near(tab.b, 42, "party tab bottom");
+  near(tab.x, 455, "party tab x");
+  near(tab.r, 476, "party tab right");
+  near(tab.y, 12, "party tab y");
+  near(tab.b, 32, "party tab bottom");
   const stripe = await rel(".sline");
-  near(stripe.x, 482, "stripe x");
-  near(stripe.r, 485, "stripe right");
+  near(stripe.x, 473, "stripe x");
+  near(stripe.r, 476, "stripe right");
 });
 
-// R125/R126 (spec §3.6 Prev, §8.4): the card's Prev row reads icon · Prev · name. The greyed 18px icon is centred in
-// the 40px rank-icon column (the rank icon's centre line, card x 333), the label starts right after that column
-// (x 353) and the name follows 6px after the label. No prev tier: the column stays, empty, then `Prev —`.
-test("Prev row (R125/R126): icon on the rank icon's centre line, label after the 40px column, name 6px on", async ({ page }) => {
+// Historical ranks share a stable label / icon / name alignment.
+test("Prev row: label then 22px icon column then tier, preserved when unranked", async ({ page }) => {
   await openScene(page, "ingame");
   const mara = cardNamed(page, "Mara");
-  const o = await box(mara);
   const row = await box(mara.locator(".prev"));
+  const label = mara.locator(".prev .lbl");
+  await expect(label).toHaveText("Prev");
+  const lb = await box(label);
+  near(lb.x, row.x, "label starts row");
+  near(lb.width, 30, "label width");
   const col = await box(mara.locator(".prev .icol"));
-  near(col.x - o.x, 313, "icon column x");
-  near(col.width, 40, "icon column w");
+  near(col.x, lb.x + lb.width, "icon column follows label");
+  near(col.width, 22, "icon column width");
   const img = mara.locator(".prev .icol img");
   const icon = await box(img);
-  const rank = await box(mara.locator(".rank img"));
-  near(icon.width, 18, "prev icon w");
-  near(icon.height, 18, "prev icon h");
-  near(icon.x - o.x, 313 + 11, "11px before the icon");
-  near(icon.x + icon.width / 2 - o.x, 333, "prev icon centre x");
-  near(icon.x + icon.width / 2, rank.x + rank.width / 2, "the rank icon's centre line");
-  near(icon.y + icon.height / 2, row.y + row.height / 2, "icon centred in the row");
-  expect(await css(img, "filter")).toBe("grayscale(0.7)");
-  expect(await css(img, "opacity")).toBe("0.75");
-  const lbl = mara.locator(".prev .lbl");
-  await expect(lbl).toHaveText("Prev");
-  const lb = await box(lbl);
-  near(lb.x - o.x, 353, "label x: right after the 40px column");
+  near(icon.width, 18, "prev icon width");
+  near(icon.height, 18, "prev icon height");
+  near(icon.x + icon.width / 2, col.x + col.width / 2, "icon centred in column");
+  near(icon.y + icon.height / 2, row.y + row.height / 2, "icon centred vertically");
+  expect(await css(img, "opacity")).toBe("0.8");
   const name = mara.locator(".prev .pname");
   await expect(name).toHaveText("Immortal 1");
-  const nb = await box(name);
-  near(nb.x - (lb.x + lb.width), 6, "label → name gap");
+  near((await box(name)).x, col.x + col.width, "name follows icon column");
   const text2 = await varRgb(page, "--text2");
-  for (const [l, size] of [[lbl, "12px"], [name, "13px"]] as const) {
-    expect(await css(l, "font-size")).toBe(size);
-    expect(await css(l, "font-weight")).toBe("500");
-    expect(await css(l, "color")).toBe(text2);
+  for (const el of [label, name]) {
+    expect(await css(el, "font-size")).toBe("12px");
+    expect(await css(el, "font-weight")).toBe("500");
+    expect(await css(el, "color")).toBe(text2);
   }
-
-  const nova = cardNamed(page, "Nova"); // no prev tier
-  const no = await box(nova);
+  const peak = mara.locator(".peak");
+  near((await box(peak.locator(".lbl"))).width, 30, "Peak label width");
+  near((await box(peak.locator(".pi"))).width, 18, "Peak icon width");
+  expect(await css(peak.locator(".pi"), "margin-right")).toBe("4px");
+  expect(await css(peak.locator(".pname"), "margin-right")).toBe("6px");
+  for (const sel of [".pname", ".when"]) expect(await css(peak.locator(sel), "font-size")).toBe("12px");
+  const nova = cardNamed(page, "Nova");
   await expect(nova.locator(".prev img")).toHaveCount(0);
-  const ncol = await box(nova.locator(".prev .icol"));
-  near(ncol.x - no.x, 313, "empty icon column x");
-  near(ncol.width, 40, "empty icon column w (layout kept)");
-  const nlb = await box(nova.locator(".prev .lbl"));
-  near(nlb.x - no.x, 353, "label x with no prev tier");
+  const nr = await box(nova.locator(".prev"));
+  const nl = await box(nova.locator(".prev .lbl"));
+  const nc = await box(nova.locator(".prev .icol"));
+  near(nl.x, nr.x, "unranked label starts row");
+  near(nc.x, nl.x + 30, "empty column follows label");
+  near(nc.width, 22, "empty column stays");
   const dash = nova.locator(".prev .dash");
   await expect(dash).toHaveText("—");
-  near((await box(dash)).x - (nlb.x + nlb.width), 6, "label → — gap");
+  near((await box(dash)).x, nc.x + nc.width, "dash follows icon column");
 });
 
-// R126: the label starts at x 40 of the row (not at the rank name's x 50) so that the widest `Prev` + `Ascendant 3`
-// fits the 158px column in every font. ingame-longnames carries that row on all 10 cards; every other tier name is
-// written into each row in turn. Strict (the name's ellipsis is only a safety net). DPR 1.5: fit-dpr.spec.ts.
+// Every tier fits the historical rank column in every font. Ellipsis is only a safety net.
 for (const font of FONTS) {
-  test(`Prev row: \`Prev\` + every tier name fits the 158px column unclipped [${font}]`, async ({ page }) => {
+  test(`Prev row: \`Prev\` + every tier name fits the historical rank column unclipped [${font}]`, async ({ page }) => {
     await openScene(page, "ingame-longnames", { font });
     await expect(page.locator(".live .card .prev .pname")).toHaveText(Array(10).fill("Ascendant 3"));
     expect(TIER_LABELS).toHaveLength(25);
@@ -241,15 +258,15 @@ test("geometry: ingame [Underline]", async ({ page }) => {
   const tiles = fahad.locator(".tile");
   for (let i = 0; i < 5; i++) {
     const b = await box(tiles.nth(i));
-    near(b.y - o.y, 105.8, `tile ${i} y`);
-    near(b.y + b.height - o.y, 127.8, `tile ${i} bottom`);
+    near(b.y - o.y, 97.2, `tile ${i} y`);
+    near(b.y + b.height - o.y, 119.2, `tile ${i} bottom`);
   }
   await expect(fahad.locator(".arrow")).toHaveCount(0);
   await expect(fahad.locator(".uline")).toHaveCount(1);
   await expect(tiles.last().locator(".uline")).toHaveCount(1);
   // The bar hangs 6px below the tile (v8:125) and stays fully inside the card, so nothing clips it.
   const bar = await box(fahad.locator(".uline"));
-  near(bar.y - o.y, 105.8 + 22 + 6 - 2, "underline top");
+  near(bar.y - o.y, 97.2 + 22 + 6 - 2, "underline top");
   near(bar.height, 2, "underline height");
   expect(bar.y + bar.height).toBeLessThanOrEqual(o.y + o.height);
 });
@@ -266,7 +283,7 @@ test("pregame: 5 cards + 5 dashed slots", async ({ page }) => {
     expect(await s.innerText()).toBe("");
     expect(await css(s, "border-top-style")).toBe("dashed");
     const b = await box(s);
-    near(b.x, 505, `slot ${i} x`);
+    near(b.x, 508, `slot ${i} x`);
     near(b.y, cardY(i), `slot ${i} y`);
     near(b.width, card.width, `slot ${i} width`);
     near(b.height, card.height, `slot ${i} height`);
@@ -285,7 +302,7 @@ test("pregame: 5 cards + 5 dashed slots", async ({ page }) => {
 });
 
 // Spec §2.3 map skeleton (v8:31): while pregame does not know the map, the top bar's right group is a 52×12 bar
-// (radius 3) and a 116×32 block (radius 4), both --skel, gap 12, in the map group's place (right edge 982).
+// (radius 3) and a 116×32 block (radius 4), both --skel, gap 12, in the map group's place (right edge 980).
 test("pregame-nomap: the map skeleton is 52×12 + 116×32 while mapId is null", async ({ page }) => {
   await openScene(page, "pregame-nomap");
   const group = page.locator("header.bar .right .map");
@@ -300,7 +317,7 @@ test("pregame-nomap: the map skeleton is 52×12 + 116×32 while mapId is null", 
   near(block.width, 116, "image block w");
   near(block.height, 32, "image block h");
   near(block.x - (bar.x + bar.width), 12, "gap");
-  near(block.x + block.width, 982, "image block right edge (the map image's)");
+  near(block.x + block.width, 980, "image block right edge (the map image's)");
   near(bar.y + bar.height / 2, block.y + block.height / 2, "centred on one line");
   expect(await css(sk.nth(0), "border-radius")).toBe("3px");
   expect(await css(sk.nth(1), "border-radius")).toBe("4px");
@@ -320,10 +337,10 @@ for (let n = 1; n <= 5; n++) {
     await expect(page.locator(".live .stripe, .live .ptab, .live .enc")).toHaveCount(0);
     for (let i = 0; i < n; i++) {
       const b = await box(cards.nth(i));
-      near(b.x, 10, `card ${i} x`);
+      near(b.x, 16, `card ${i} x`);
       near(b.y, cardY(i), `card ${i} y`);
-      near(b.width, 485, `card ${i} width`);
-      near(b.height, 139.8, `card ${i} height`);
+      near(b.width, 476, `card ${i} width`);
+      near(b.height, 127.2, `card ${i} height`);
     }
   });
 }
@@ -335,10 +352,10 @@ test("closed: one card, empty right side", async ({ page }) => {
   expect(await right(page).locator(":scope > *").count()).toBe(0);
   expect(await page.locator("header.bar .right > *").count()).toBe(0);
   const b = await box(page.locator(".live .card"));
-  near(b.x, 10, "x");
-  near(b.y, 59, "y");
-  near(b.width, 485, "width");
-  near(b.height, 139.8, "height");
+  near(b.x, 16, "x");
+  near(b.y, 108, "y");
+  near(b.width, 476, "width");
+  near(b.height, 127.2, "height");
 });
 
 test("closed-empty: no card, no skeleton", async ({ page }) => {
@@ -568,7 +585,7 @@ test("the ⟲ slot stays 36px wide for 1–2 digit counts in all 3 fonts (design
   }
 });
 
-test("tier name right edge ≤ 463 for Ascendant 3 in all 3 fonts", async ({ page }) => {
+test("current tier stays inside its 164px column for Ascendant 3 in all 3 fonts", async ({ page }) => {
   for (const font of FONTS) {
     await openScene(page, "ingame-longnames", { font });
     const edges = await page.locator(".live .card").evaluateAll((cards) =>
@@ -580,7 +597,7 @@ test("tier name right edge ≤ 463 for Ascendant 3 in all 3 fonts", async ({ pag
     expect(edges).toHaveLength(10);
     for (const e of edges) {
       expect(e.text).toBe("Ascendant 3");
-      expect(e.right, `${font}`).toBeLessThanOrEqual(463);
+      expect(e.right, `${font}`).toBeLessThanOrEqual(212);
     }
   }
 });
@@ -659,7 +676,7 @@ test("party stripe and tab paint above the card grid", async ({ page }) => {
 
 // F8 (task 17 review, ruled in fix round 2: keep): the agent box is one look in every stage. Lobby and Closed have no
 // agent to show, and the card stays identical to every other stage's (CLAUDE.md "the card is identical everywhere";
-// R99 calls this state "the empty agent slot"): the same empty 40×40 `--raised` div that Agent Select draws before a
+// R99 calls this state "the empty agent slot"): the same empty 28×28 `--raised` div that Agent Select draws before a
 // lock, never an image and never a skeleton shape. The cards around it are populated (no `.sk` anywhere), so the box
 // reads as a slot beside real values, not as a loading card.
 type BoxLook = { tag: string; w: number; h: number; bg: string; radius: string; cls: string; shadow: string; opacity: string; border: string };
@@ -689,8 +706,8 @@ test("the empty agent box is one look in every stage (Agent Select before a lock
   await openScene(page, "pregame");
   const reference = (await emptyAgentBoxes(page))[0]; // an ally who has not locked (R99)
   expect(reference, "pregame has an unpicked ally").toBeDefined();
-  near(reference!.w, 40, "reference w");
-  near(reference!.h, 40, "reference h");
+  near(reference!.w, 28, "reference w");
+  near(reference!.h, 28, "reference h");
   expect(reference!.bg).toBe(await varRgb(page, "--raised"));
   expect(reference!.radius).toBe("6px");
   expect(reference!.shadow).toBe("none");

@@ -90,7 +90,8 @@
 <style>
   .board {
     background: var(--card);
-    border-radius: 8px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
     overflow: hidden;
   }
 
@@ -100,11 +101,11 @@
     grid-template-columns: minmax(0, 1fr) 52px 104px 48px 52px 48px;
     column-gap: 14px;
     align-items: center;
-    padding: 0 18px 0 12px;
+    padding: 0 22px 0 16px;
   }
 
   .shead {
-    height: 30px;
+    height: 36px;
     font-size: 12px;
     font-weight: 500;
     color: var(--text2);
@@ -124,8 +125,8 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    height: 36px;
-    padding: 0 12px;
+    height: 38px;
+    padding: 0 16px;
     background: var(--team-bg);
   }
 
@@ -147,7 +148,7 @@
 
   .srow {
     position: relative;
-    height: 42px;
+    height: 46px;
     border-top: 1px solid var(--line);
   }
 

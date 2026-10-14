@@ -128,8 +128,8 @@
     flex: 1;
     display: flex;
     flex-direction: column;
-    gap: 14px;
-    padding: 16px;
+    gap: 8px;
+    padding: 12px 16px;
   }
 
   .head {
@@ -292,17 +292,20 @@
   }
 
   .chg {
-    display: flex;
-    flex-direction: column;
-    padding-top: 12px;
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    column-gap: 12px;
+    padding-top: 8px;
     border-top: 1px solid var(--line);
   }
+
+  .chg > .lab { grid-column: 1 / -1; }
 
   .crow {
     display: flex;
     align-items: center;
     gap: 8px;
-    height: 28px;
+    height: 26px;
     min-width: 0;
   }
 
@@ -322,7 +325,7 @@
   .cname {
     flex: 1;
     min-width: 0;
-    font-size: 14px;
+    font-size: 12px;
     font-weight: 500;
     white-space: nowrap;
   }

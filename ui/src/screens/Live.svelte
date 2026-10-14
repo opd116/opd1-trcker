@@ -37,6 +37,10 @@
 {/snippet}
 
 <div class="live">
+  <div class="teams" aria-hidden="true">
+    <span>{live?.stage === "ingame" || live?.stage === "pregame" ? "Your team" : "Your party"}</span>
+    <span>{live?.stage === "ingame" ? "Opponents" : ""}</span>
+  </div>
   {@render column(cols.left)}
   {@render column(cols.right)}
 </div>
@@ -47,14 +51,27 @@
     min-height: 0;
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 10px;
-    padding: 10px;
+    grid-template-rows: 20px minmax(0, 1fr);
+    column-gap: 16px;
+    row-gap: 10px;
+    padding: 14px 16px 16px;
+  }
+
+  .teams {
+    grid-column: 1 / -1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+    color: var(--text2);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 20px;
   }
 
   .col {
     display: grid;
     grid-template-rows: repeat(5, minmax(0, 1fr));
-    gap: 8px;
+    gap: 10px;
     min-height: 0;
   }
 </style>

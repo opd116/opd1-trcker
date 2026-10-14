@@ -100,10 +100,10 @@ test("the Live tab's layout and indicator did not move for the ring's room", asy
   const off = await page.locator(".tab.off").boundingBox();
   const ind = await page.locator(".tab.on .ind").boundingBox();
   // The button box is the text box plus 4px of padding a side (taken back by -4px margins), so the text of Live
-  // still starts 30px after the wordmark (the bar's gap) and My Stats (a button too) 24px after the end of Live's text.
+  // starts 42px after the redesigned wordmark and My Stats 24px after the end of Live's text.
   const textLeft = tab!.x + 4;
   const textRight = tab!.x + tab!.width - 4;
-  expect(Math.abs(textLeft - (word!.x + word!.width + 30))).toBeLessThanOrEqual(0.5);
+  expect(Math.abs(textLeft - (word!.x + word!.width + 42))).toBeLessThanOrEqual(0.5);
   expect(Math.abs(off!.x + 4 - (textRight + 24))).toBeLessThanOrEqual(0.5);
   // The accent indicator spans the text, not the padding.
   expect(Math.abs(ind!.x - textLeft)).toBeLessThanOrEqual(0.5);

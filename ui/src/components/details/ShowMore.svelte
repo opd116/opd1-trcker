@@ -13,11 +13,12 @@
     align-items: center;
     justify-content: center;
     box-sizing: content-box;
-    height: 34px;
+    height: 38px;
     margin: 0;
     padding: 0;
-    border: 1px solid var(--line2);
-    border-radius: 6px;
+    border: none;
+    border-top: 1px solid var(--line);
+    border-radius: 0;
     background: transparent;
     font: inherit;
     font-size: 13px;

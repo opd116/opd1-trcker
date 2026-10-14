@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>OPD1 TRCKER · Design review</title>
+    <style>
+      * { box-sizing: border-box; }
+      body { margin: 0; background: #0e1013; color: #e4e1db; font: 14px/1.5 system-ui, sans-serif; }
+      main { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
+      aside { padding: 24px 20px; border-right: 1px solid #2c3139; }
+      h1 { font-size: 18px; margin: 0 0 8px; letter-spacing: .04em; }
+      p { color: #a3a7ae; font-size: 13px; margin: 0 0 24px; }
+      label { display: block; color: #a3a7ae; margin: 16px 0 6px; font-size: 13px; }
+      select, input, a { font: inherit; }
+      select { width: 100%; background: #20242a; color: #e4e1db; border: 1px solid #3c4149; padding: 8px; border-radius: 5px; }
+      input { width: 100%; height: 36px; background: #20242a; border: 1px solid #3c4149; border-radius: 5px; }
+      a { color: #e3a54f; display: inline-block; margin-top: 24px; text-underline-offset: 4px; }
+      :focus-visible { outline: 2px solid #e3a54f; outline-offset: 3px; }
+      .canvas { padding: 24px; min-width: 0; }
+      .stage { width: 100%; position: relative; }
+      iframe { display: block; width: 1000px; height: 800px; border: 0; transform-origin: top left; background: #0e1013; }
+      .caption { color: #a3a7ae; margin-top: 14px; font-size: 12px; }
+      @media (max-width: 780px) { main { display: flex; flex-direction: column-reverse; } aside { border: 0; border-top: 1px solid #2c3139; } .canvas { padding: 12px; } }
+    </style>
+  </head>
+  <body>
+    <main>
+      <aside>
+        <h1>OPD1 TRCKER</h1>
+        <p>Design review · sample data<br />Controls stay outside the app.</p>
+        <form id="controls">
+          <label for="scene">Screen / data</label>
+          <select id="scene" name="scene">
+            <optgroup label="Live">
+              <option value="ingame">In Game</option><option value="pregame">Agent Select</option>
+              <option value="lobby1">Lobby · solo</option><option value="lobby3">Lobby · party of 3</option><option value="lobby5">Lobby · party of 5</option>
+              <option value="ingame-longnames">Long names</option><option value="ingame-remembered">Remembered names</option>
+              <option value="ingame-parties4">Four parties</option><option value="ingame-partial">Partial data</option><option value="ingame-unranked">Unranked</option><option value="ingame-loading">Loading</option>
+            </optgroup>
+            <optgroup label="Player & match">
+              <option value="details">Player Details</option><option value="details-longnames">Details · long names</option><option value="details-hidden">Details · hidden player</option><option value="details-loading">Details · loading</option>
+              <option value="match">Match Details</option><option value="match-hidden">Match · hidden names</option><option value="match-longnames">Match · long names</option>
+            </optgroup>
+            <optgroup label="My Stats">
+              <option value="mystats">My Stats</option><option value="mystats-longnames">Stats · long values</option><option value="mystats-new">Stats · no history</option><option value="mystats-loading">Stats · loading</option><option value="mystats-immortal">Stats · Immortal</option><option value="mystats-closed">Game closed</option>
+            </optgroup>
+          </select>
+          <label for="font">Typography</label><select id="font" name="font"><option>Barlow</option><option>IBM Plex Sans</option><option>Archivo</option></select>
+          <label for="tone">Surface tone</label><select id="tone" name="tone"><option>Neutral</option><option>Cool</option><option>Warm</option></select>
+          <label for="accent">Accent</label><input id="accent" name="accent" type="color" value="#e3a54f" />
+          <label for="results">Result colors</label><select id="results" name="results"><option>Green / Red</option><option>Accent / Red</option><option>Accent / Gray</option></select>
+          <label for="fill">Result fill</label><select id="fill" name="fill"><option>Tinted</option><option>Solid</option></select>
+          <label for="last5">Newest result</label><select id="last5" name="last5"><option>Arrow</option><option selected>Underline</option></select>
+        </form>
+        <a id="open" target="_blank" rel="noopener">Open at 1000 × 800</a>
+      </aside>
+      <div class="canvas">
+        <div class="stage"><iframe title="Interactive OPD1 TRCKER preview" src="/design-screen.html?scene=ingame"></iframe></div>
+        <div class="caption">1000 × 800 · Svelte + CSS · no additional runtime dependencies</div>
+      </div>
+    </main>
+    <script type="module" src="/src/lib/demo/workbench.ts"></script>
+  </body>
+</html>

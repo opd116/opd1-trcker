@@ -267,12 +267,21 @@ test.describe("close_match (DEV counter)", () => {
 
 // Card click → Details. The second click of a double-click lands where the top-left card was: Back's spot.
 test.describe("double-click guard", () => {
-  /** Centre of Back on the Details page, which sits inside the first card on the Live page. */
+  /** Pick the actual overlap of Back and the first card, even after intentional layout changes. */
   async function backSpot(page: Page): Promise<{ x: number; y: number }> {
     await openScene(page, "details");
     const b = await page.locator(".details .back").boundingBox();
     if (!b) throw new Error("no Back button");
-    return { x: b.x + b.width / 2, y: b.y + b.height / 2 };
+    await openScene(page, "ingame");
+    const c = await page.locator(".live .card").first().boundingBox();
+    if (!c) throw new Error("no first card");
+    const left = Math.max(b.x, c.x);
+    const right = Math.min(b.x + b.width, c.x + c.width);
+    const top = Math.max(b.y, c.y);
+    const bottom = Math.min(b.y + b.height, c.y + c.height);
+    expect(right).toBeGreaterThan(left);
+    expect(bottom).toBeGreaterThan(top);
+    return { x: (left + right) / 2, y: (top + bottom) / 2 };
   }
 
   test("a double-click on a card opens Details once and the second click does not press Back", async ({ page }) => {

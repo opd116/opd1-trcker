@@ -3,7 +3,7 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { AG, encounterMatchId, matchFor, PUUID, recentMatchId } from "../src/lib/demo/cdv8";
 import { checkClipping, checkHiddenIntegrity, detailsChecks, hiddenRealNames } from "./checks";
-import { FONTS, fontSlug, openScene, pointerAway, shotFull, varRgb, waitPage } from "./harness";
+import { FONTS, fontSlug, openScene, pointerAway, SHOTS_DIR, shotFull, varRgb, waitPage } from "./harness";
 
 const DETAILS_SCENES = [
   "details", "details-more", "details-self", "details-hidden", "details-empty", "details-loading", "details-longnames",
@@ -56,6 +56,9 @@ for (const scene of [...DETAILS_SCENES, ...MATCH_SCENES]) {
       await openScene(page, scene, { font });
       await pointerAway(page);
       expect(await detailsChecks(page, scene, font)).toEqual([]);
+      if (["details", "match", "details-longnames", "details-partial", "details-loading"].includes(scene) && font === "Barlow") {
+        await page.screenshot({ path: `${SHOTS_DIR}/${scene}__viewport.png` });
+      }
       await shotFull(page, `${scene}__${fontSlug(font)}`);
     });
   }
@@ -79,8 +82,8 @@ test("details: 3 recent rows + Show more, then 8 and no button; encounter header
   await expect(mates.filter({ hasText: "Kilo" }).locator(".mlive img")).toHaveCount(2);
   // The number is its own span, 4px from the word (v8:332), as `count` writes it: `14 games`, `1 game`.
   expect(await mates.nth(0).locator(".mcount").evaluate((el) => [el.firstElementChild!.textContent, el.lastChild!.textContent])).toEqual(["14", "games"]);
-  // One-line rows are the design's 46px (v8:321); the wrap padding (Task 18 review, Minor 5) never adds to them.
-  for (let i = 0; i < 3; i++) expect(await mates.nth(i).evaluate((el) => el.clientHeight), `Top 3 row ${i} (inside its separator)`).toBe(46);
+  // Redesign: one-line rows retain a calm 60px rhythm; wrapped names can grow with their padding.
+  for (let i = 0; i < 3; i++) expect(await mates.nth(i).evaluate((el) => el.clientHeight), `Top 3 row ${i} (inside its separator)`).toBe(60);
   // The hero reads the design's values for Mara (v8:480) and R116's K/D and HS%.
   expect(await page.locator(".details .hero .hstat .v").allInnerTexts()).toEqual(["1.52", "29%", "63%", "65", "41 / 24"]);
   expect(await text(page.locator(".details .hero .hlv"))).toBe("Lv 402");
@@ -129,17 +132,17 @@ test("details-hidden: Cypher's hero name is the agent name in the hidden style; 
   expect(await page.locator(".details .encs .ehead > *").nth(1).innerText()).toBe("Rook");
 });
 
-test("details-empty: one 52px — row, no Show more, no Encounters, Top 3 —, every weapon —, hero stats —", async ({ page }) => {
+test("details-empty: one 62px — row, no Show more, no Encounters, Top 3 —, every weapon —, hero stats —", async ({ page }) => {
   await openScene(page, "details-empty");
   const rows = page.locator(".details .recent .rrow");
   await expect(rows).toHaveCount(1);
-  near((await box(rows.first())).height, 52, "empty recent row height");
+  near((await box(rows.first())).height, 62, "empty recent row height");
   expect(await text(rows.first())).toBe("—");
   await expect(page.locator(".details .more")).toHaveCount(0);
   await expect(page.locator(".details .encs")).toHaveCount(0);
   await expect(page.locator(".details .mate")).toHaveCount(1);
   expect(await text(page.locator(".details .mate"))).toBe("—");
-  near((await box(page.locator(".details .mate"))).height, 46, "empty Top 3 row");
+  near((await box(page.locator(".details .mate"))).height, 60, "empty Top 3 row");
   expect(await page.locator(".details .wskin").allInnerTexts()).toEqual(["—", "—", "—", "—"]);
   await expect(page.locator(".details .well img")).toHaveCount(0);
   expect(await page.locator(".details .hero .hstat .v").allInnerTexts()).toEqual(["—", "—", "—", "—", "— / —"]);
@@ -250,7 +253,7 @@ test("loading → loaded: the hero and the sections below it do not move (Task 1
     };
     const loading = await at("details-loading");
     const loaded = await at("details");
-    near(loaded.hero.height, 160, `loaded hero [${font}]`);
+    near(loaded.hero.height, 209, `loaded hero [${font}]`);
     near(loading.hero.height, loaded.hero.height, `hero height [${font}]`);
     near(loading.recent.y, loaded.recent.y, `Recent header y [${font}]`);
     near(loading.mates.y, loaded.mates.y, `Top 3 header y [${font}]`);
@@ -265,17 +268,16 @@ test("details-loading: the §6.9 skeleton, section labels only, no other text", 
   const words = (await d.innerText()).split(/\s+/).filter(Boolean).join(" ");
   expect(words).toBe("Back Recent Competitive Matches Map Score K / D / A K/D HS% Top 3 Teammates Loadout");
   const agent = d.locator(".hero .hagent");
-  near((await box(agent)).width, 56, "agent box");
+  near((await box(agent)).width, 60, "agent box");
   expect(await css(agent, "border-radius")).toBe("7px");
   expect(await css(agent, "background-color")).toBe(await varRgb(page, "--skel"));
   await expect(d.locator(".hero .hstat .sk")).toHaveCount(5);
-  // Task 18 review, Minor 3: the skeleton hero is as tall as the loaded one (160px), so nothing jumps when the answer
-  // comes. Each stat cell keeps the 14px label line above its 44×27 bar, as the loaded cell's label sits above its value.
-  near((await box(d.locator(".hero"))).height, 160, "skeleton hero height");
+  // The skeleton matches the redesigned 209px hero. Values sit above labels with the same 14px top padding.
+  near((await box(d.locator(".hero"))).height, 209, "skeleton hero height");
   for (let i = 0; i < 5; i++) {
     const cell = await box(d.locator(".hero .hstat").nth(i));
     const bar = await box(d.locator(".hero .hstat").nth(i).locator(".sk"));
-    near(bar.y - cell.y, 12 + 14, `stat ${i} bar below the label line`);
+    near(bar.y - cell.y, 14, `stat ${i} bar above the label line`);
   }
   await expect(d.locator(".recent .rrow")).toHaveCount(3);
   await expect(d.locator(".mate")).toHaveCount(3);
@@ -288,15 +290,15 @@ test("details-nostats: every unknown value is —, and every unknown image an em
   await openScene(page, "details-nostats");
   const hero = page.locator(".details .hero");
   expect(await text(hero.locator(".hlv"))).toBe("Lv —");
-  expect(await text(hero.locator(".hrank"))).toBe("—");
+  expect(await text(hero.locator(".hrank"))).toBe("Current Rank —");
   await expect(hero.locator(".hrank img")).toHaveCount(0);
   expect(await text(hero.locator(".hpeak"))).toBe("Peak —");
   expect(await text(hero.locator(".hprev"))).toBe("Prev —");
   await expect(hero.locator(".hrank img, .hpeak img, .hprev img")).toHaveCount(0);
   expect(await hero.locator(".hstat .v").allInnerTexts()).toEqual(["—", "—", "—", "—", "— / —"]);
   const wl = hero.locator(".hstat").nth(4).locator(".v > span");
-  expect(await wl.nth(0).evaluate((el) => getComputedStyle(el).color)).toBe(await varRgb(page, "--win"));
-  expect(await wl.nth(2).evaluate((el) => getComputedStyle(el).color)).toBe(await varRgb(page, "--loss"));
+  expect(await wl.nth(0).evaluate((el) => getComputedStyle(el).color)).toBe(await varRgb(page, "--text"));
+  expect(await wl.nth(2).evaluate((el) => getComputedStyle(el).color)).toBe(await varRgb(page, "--text"));
   await expect(hero.locator(".hl5 .tile")).toHaveCount(5);
   expect(await hero.locator(".hl5 .tile").allInnerTexts()).toEqual(["", "", "", "", ""]);
 
@@ -508,7 +510,7 @@ test("match-dm: one team block labelled Players, no chips, header score — and 
 // Spec §8.5 says every scoreboard name "truncates": at the design's column widths (v8:381) the name box is ~490px, and
 // the longest Riot ID (16 + 5 W's, ~200px + tag) fits whole in every font. So each name is asserted whole, tag included,
 // on one 42px line; a longer name would take the ellipsis (check 5 holds any truncated span to one).
-test("match-longnames: every 16-character name shows whole with its tag on one line; no row is taller than 42px; the long team label fits", async ({ page }) => {
+test("match-longnames: every 16-character name shows whole with its tag on one line; rows retain 46px; the long team label fits", async ({ page }) => {
   for (const font of FONTS) {
     await openScene(page, "match-longnames", { font });
     const named = page.locator(".match .srow .nm").filter({ has: page.locator(".t") });
@@ -521,7 +523,7 @@ test("match-longnames: every 16-character name shows whole with its tag on one l
       });
       expect(r, `row [${font}]`).toEqual({ name: W16, cut: false, tagCut: false, sameLine: true });
     }
-    for (const r of await page.locator(".match .srow").all()) expect(await r.evaluate((el) => el.clientHeight), `row height [${font}]`).toBe(42);
+    for (const r of await page.locator(".match .srow").all()) expect(await r.evaluate((el) => el.clientHeight), `row height [${font}]`).toBe(46);
     await expect(page.locator(".match .thead .tlabel").first()).toHaveText(`${W16}'s team`);
   }
 });

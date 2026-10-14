@@ -89,7 +89,7 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 12px 0;
-    padding: 14px 18px;
+    padding: 12px 18px;
   }
 
   .cell {
@@ -99,7 +99,7 @@
     gap: 2px;
     padding: 0 22px;
     border-left: 1px solid var(--line);
-    min-height: 56px;
+    min-height: 48px;
   }
 
   .cell.first {

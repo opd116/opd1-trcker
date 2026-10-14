@@ -75,7 +75,8 @@
   }
 
   .ehead {
-    height: 30px;
+    height: 32px;
+    background: var(--team-bg);
     font-size: 12px;
     font-weight: 500;
     color: var(--text2);
@@ -90,7 +91,7 @@
   }
 
   .erow {
-    height: 50px;
+    height: 60px;
     cursor: pointer;
   }
 

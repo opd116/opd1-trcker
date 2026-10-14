@@ -53,8 +53,8 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    min-height: 30px;
-    padding: 8px 14px;
+    min-height: 38px;
+    padding: 11px 14px;
   }
 
   .mate + .mate {
@@ -89,6 +89,7 @@
   }
 
   .mcount {
+    margin-left: auto;
     flex: none;
     width: 62px;
     text-align: right;

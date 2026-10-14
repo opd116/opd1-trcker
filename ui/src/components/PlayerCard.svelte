@@ -55,16 +55,22 @@
             {/if}
           </div>
         </div>
-        <div class="lv">
-          {#if card.level === undefined}<Skel w={48} h={10} />{:else}Lv <span class="v">{level(card.level)}</span>{/if}
-        </div>
+      </div>
+      <div class="lv">
+        {#if card.level === undefined}<Skel w={48} h={10} />{:else}Lv <span class="v">{level(card.level)}</span>{/if}
       </div>
     </div>
-    <RankCurrent rank={card.rank} />
-    <PeakRow peak={card.peak} />
-    <PrevRow tier={card.prevActTier} />
-    <StatTrio {card} />
-    <Last5 entries={card.last5} size="card" />
+    <div class="ranking">
+      <RankCurrent rank={card.rank} />
+      <div class="history">
+        <PrevRow tier={card.prevActTier} />
+        <PeakRow peak={card.peak} />
+      </div>
+    </div>
+    <div class="performance">
+      <StatTrio {card} />
+      <Last5 entries={card.last5} size="card" />
+    </div>
   </div>
   {#if card.isSelf}
     <div class="self"></div>
@@ -90,7 +96,7 @@
     left: 0;
     top: 0;
     bottom: 0;
-    width: 44px;
+    width: 38px;
     overflow: hidden;
   }
 
@@ -104,7 +110,7 @@
     background-size: 150% auto;
     background-position: 50% 0;
     background-repeat: no-repeat;
-    opacity: 0.8;
+    opacity: 0.5;
   }
 
   .art-fade {
@@ -116,18 +122,44 @@
     height: 100%;
     box-sizing: border-box;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 158px;
-    grid-template-rows: 40px 18px 1fr;
-    column-gap: 16px;
-    row-gap: 10px;
-    padding: 12px 14px 12px 56px;
+    grid-template-rows: 28px minmax(0, 1fr) 32px;
+    row-gap: 6px;
+    padding: 8px 14px 8px 48px;
+  }
+
+  .ranking {
+    display: grid;
+    grid-template-columns: 164px minmax(0, 1fr);
+    gap: 12px;
+    align-items: center;
+    min-width: 0;
+  }
+
+  .history {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    border-left: 1px solid var(--line);
+    padding-left: 12px;
+  }
+
+  .performance {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    border-top: 1px solid var(--line);
+    padding-top: 6px;
+    min-width: 0;
   }
 
   .who {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     min-width: 0;
+    padding-right: 16px;
   }
 
   .ncol {
@@ -153,7 +185,9 @@
   }
 
   .lv {
-    align-self: flex-start;
+    flex: none;
+    min-width: 44px;
+    text-align: right;
     font-size: 12px;
     font-weight: 500;
     color: var(--text2);

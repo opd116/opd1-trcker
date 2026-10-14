@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- Redesigned player cards into identity, rank history and performance lanes, keeping all ten players visible at 1000×800.
+- Unified Player Details and Match panels; compacted My Stats so its normal first viewport includes all five recent matches.
+
+### Added
+
+- Development-only interactive design review at `design.html`, with sample scenes, edge cases and all six appearance options outside the app layout.
+
 ## [0.3.1] - 2026-10-04
 
 Filled from `git log` (`493d4f9..da61be2`). The five features picked for v0.4.0 and the act-change work are not in this release (see `docs/next-session-prompt.md`).

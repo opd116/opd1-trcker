@@ -283,7 +283,6 @@ test("mystats: Recent Matches rows share the Details rows' inset, map column and
       agentSize: [agent.width, agent.height],
       chevronRight: pb.x + pb.width - (chevron.x + chevron.width),
       head: head.x - pb.x,
-      rowHeight: rb.height,
     };
   };
   const stats = await measure("mystats", ".mystats .last5 .panel");
@@ -291,6 +290,8 @@ test("mystats: Recent Matches rows share the Details rows' inset, map column and
   expect(stats, "My Stats rows against Details rows").toEqual(details);
   expect(stats.padL).toBe("8px");
   expect(stats.agentSize).toEqual([28, 28]);
+  // Details uses taller browsing rows; the dense five-match summary keeps 52px rows.
+  near((await box(page.locator(".details .recent .rrow").first())).height, 62, "Details row height");
 });
 
 for (const kind of ["maps", "agents"] as const) {

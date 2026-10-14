@@ -1,5 +1,4 @@
-// Spec §3.6 Prev (R125/R126): the card row reads icon · `Prev` · name. The greyed icon sits in its own 40px column
-// (the current-rank icon's width), which stays, empty, when there is no prev tier; the label follows the column.
+// Historical rank hierarchy: label, 22px icon column, then tier name. An absent tier keeps the icon column.
 import { render } from "svelte/server";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import demoMeta from "../lib/demo/meta.json";
@@ -18,13 +17,13 @@ describe("PrevRow (R125/R126)", () => {
   beforeEach(() => meta.set(demoMeta as Meta));
   afterEach(() => meta.set(null));
 
-  it("a prev tier: icon column, then Prev, then the tier name", () => {
+  it("a prev tier: Prev, then icon column, then tier name", () => {
     const h = html(22);
-    expect(h).toMatch(/^<div class="prev"><div class="icol"><img class="pi" src="[^"]+" alt=""\/?><\/div><span class="lbl">Prev<\/span><span class="pname">Ascendant 2<\/span><\/div>$/);
+    expect(h).toMatch(/^<div class="prev"><span class="lbl">Prev<\/span><div class="icol"><img class="pi" src="[^"]+" alt=""\/?><\/div><span class="pname">Ascendant 2<\/span><\/div>$/);
   });
 
-  it("no prev tier: the icon column stays, empty, then Prev —", () => {
-    expect(html(null)).toBe('<div class="prev"><div class="icol"></div><span class="lbl">Prev</span><span class="dash">—</span></div>');
+  it("no prev tier: the empty icon column stays between Prev and —", () => {
+    expect(html(null)).toBe('<div class="prev"><span class="lbl">Prev</span><div class="icol"></div><span class="dash">—</span></div>');
   });
 
   for (const tier of [0, 1, 2]) {
@@ -42,6 +41,6 @@ describe("PrevRow (R125/R126)", () => {
   it("meta pending: the name is a bar, the icon and label stay", () => {
     meta.set(null);
     const h = html(22);
-    expect(h).toMatch(/<div class="icol"><img class="pi"[^>]*><\/div><span class="lbl">Prev<\/span><span class="pname"><span class="sk"/);
+    expect(h).toMatch(/<span class="lbl">Prev<\/span><div class="icol"><img class="pi"[^>]*><\/div><span class="pname"><span class="sk"/);
   });
 });

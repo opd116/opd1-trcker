@@ -80,14 +80,14 @@
   .body {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 296px;
-    gap: 16px;
+    gap: 14px;
     align-items: start;
   }
 
   .bcol {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 14px;
     min-width: 0;
   }
 </style>

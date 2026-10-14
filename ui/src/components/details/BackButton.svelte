@@ -14,7 +14,7 @@
 <style>
   .brow {
     display: flex;
-    margin-bottom: 12px;
+    margin-bottom: 14px;
   }
 
   /* The design's box exactly (it is border-box there too); the rest resets the button's own UA look. */
@@ -22,12 +22,12 @@
     display: flex;
     align-items: center;
     gap: 7px;
-    height: 32px;
+    height: 34px;
     padding: 0 13px 0 10px;
     box-sizing: border-box;
     margin: 0;
     border: 1px solid var(--line2);
-    border-radius: 5px;
+    border-radius: 7px;
     background: var(--card);
     font: inherit;
     font-size: 13px;

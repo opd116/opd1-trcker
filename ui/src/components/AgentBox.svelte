@@ -23,8 +23,8 @@
 <style>
   .agent {
     display: block;
-    width: 40px;
-    height: 40px;
+    width: 28px;
+    height: 28px;
     flex: none;
     border-radius: 6px;
     background: var(--raised);

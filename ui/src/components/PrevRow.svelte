@@ -21,10 +21,10 @@
     <!-- Loading: the whole row is one bar (spec §5.4). -->
     <Skel w={124} h={10} block />
   {:else}
+    <span class="lbl">Prev</span>
     <div class="icol">
       {#if isRankedTier(tier)}<img {@attach retryImg} class="pi" src={assetUrl("tier", tier)} alt="" />{/if}
     </div>
-    <span class="lbl">Prev</span>
     {#if isRankedTier(tier)}
       <span class="pname">{#if name === undefined}<Skel w={60} h={10} />{:else}{name ?? "—"}{/if}</span>
     {:else}
@@ -46,7 +46,7 @@
 
   /* The rank icon's column (spec §3.6 Current): 11px + 18px icon + 11px. */
   .icol {
-    width: 40px;
+    width: 22px;
     flex: none;
     display: flex;
     justify-content: center;
@@ -57,18 +57,17 @@
     width: 18px;
     height: 18px;
     flex: none;
-    filter: grayscale(0.7);
-    opacity: 0.75;
+    opacity: 0.8;
   }
 
   .lbl {
     flex: none;
-    margin-right: 6px;
+    width: 30px;
   }
 
   .pname {
     min-width: 0;
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 500;
     color: var(--text2);
     overflow: hidden;

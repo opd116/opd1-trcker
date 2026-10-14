@@ -47,7 +47,7 @@
   .ptab {
     position: absolute;
     right: 0;
-    top: 22px;
+    top: 12px;
     z-index: 3;
     width: 21px;
     height: 20px;

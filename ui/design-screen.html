@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OPD1 TRCKER</title>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module">
+      // DEV review entry only: keep sample ages coherent with the fixture's clock.
+      // Main production index.html does not import this entry or change the clock.
+      if (import.meta.env.DEV) {
+        const anchor = Date.parse("2026-09-29T21:59:00Z");
+        const started = performance.now();
+        Date.now = () => anchor + performance.now() - started;
+        await import("/src/main.ts");
+      }
+    </script>
+  </body>
+</html>

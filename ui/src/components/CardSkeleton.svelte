@@ -4,37 +4,38 @@
 </script>
 
 <div class="skcard" aria-hidden="true">
-  <div class="row">
-    <Skel w={40} h={40} r={6} block />
-    <div class="stack"><Skel w={120} h={13} block /><Skel w={48} h={10} block /></div>
+  <div class="identity">
+    <Skel w={28} h={28} r={6} block />
+    <Skel w={140} h={13} block />
   </div>
+  <div class="ranking">
   <div class="row">
     <Skel w={40} h={40} r="50%" block />
     <div class="stack"><Skel w={84} h={13} block /><Skel w={40} h={10} block /></div>
   </div>
-  <div class="line"><Skel w={176} h={10} block /></div>
-  <div class="line"><Skel w={124} h={10} block /></div>
-  <div class="trio"><Skel w={44} h={30} block /><Skel w={44} h={30} block /><Skel w={44} h={30} block /></div>
-  <div class="l5"><Skel w={130} h={22} r={4} block /></div>
+  <div class="stack"><Skel w={160} h={10} block /><Skel w={176} h={10} block /></div>
+  </div>
+  <div class="performance">
+    <div class="trio"><Skel w={54} h={18} block /><Skel w={54} h={18} block /><Skel w={54} h={18} block /></div>
+    <div class="l5"><Skel w={130} h={22} r={4} block /></div>
+  </div>
 </div>
 
 <style>
   .skcard {
     min-height: 0;
-    background: linear-gradient(90deg, var(--raised) 0 44px, var(--card) 44px);
+    background: linear-gradient(90deg, var(--raised) 0 38px, var(--card) 38px);
     border-radius: 6px;
     overflow: hidden;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 158px;
-    grid-template-rows: 40px 18px 1fr;
-    column-gap: 16px;
-    row-gap: 10px;
-    padding: 12px 14px 12px 56px;
+    grid-template-rows: 28px minmax(0, 1fr) 32px;
+    row-gap: 6px;
+    padding: 8px 14px 8px 48px;
     box-sizing: border-box;
     cursor: default;
   }
 
-  .row {
+  .row, .identity, .ranking, .performance {
     display: flex;
     align-items: center;
     gap: 10px;
@@ -46,18 +47,12 @@
     gap: 7px;
   }
 
-  .line {
-    display: flex;
-    align-items: center;
-  }
+  .ranking { gap: 36px; }
+  .performance { border-top: 1px solid var(--line); padding-top: 6px; justify-content: space-between; }
 
   .trio {
-    align-self: end;
     display: flex;
-    gap: 28px;
+    gap: 20px;
   }
 
-  .l5 {
-    align-self: end;
-  }
 </style>

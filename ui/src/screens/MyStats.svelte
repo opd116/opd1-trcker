@@ -55,7 +55,7 @@
   .mystats {
     display: flex;
     flex-direction: column;
-    gap: 20px;
+    gap: 16px;
   }
 
   /* The rank card is the row's height; the chart beside it fills the rest of the width and that height. */

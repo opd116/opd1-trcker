@@ -24,7 +24,7 @@
     <div class="stat" use:tip={b.tip}>
       {#if b.value === undefined}
         <!-- Loading: one bar, bottom-aligned in the block (spec §3.7). -->
-        <Skel w={44} h={30} block />
+        <Skel w={54} h={18} block />
       {:else}
         <span class="k">{b.label}</span>
         <span class="v">{b.text}</span>
@@ -35,15 +35,17 @@
 
 <style>
   .stats {
-    align-self: end;
     display: flex;
+    flex: 1;
+    justify-content: space-between;
+    gap: 12px;
   }
 
   .stat {
-    width: 76px;
     display: flex;
-    flex-direction: column;
-    justify-content: flex-end;
+    flex-direction: row-reverse;
+    align-items: baseline;
+    gap: 5px;
   }
 
   .k {
@@ -54,8 +56,8 @@
   }
 
   .v {
-    font-size: 20px;
-    line-height: 24px;
+    font-size: 17px;
+    line-height: 22px;
     font-weight: 600;
     font-variant-numeric: tabular-nums;
   }

@@ -45,7 +45,7 @@
   }
 
   .lbl {
-    width: 50px;
+    width: 30px;
     flex: none;
   }
 
@@ -60,14 +60,14 @@
     width: 18px;
     height: 18px;
     flex: none;
-    margin-right: 6px;
+    margin-right: 4px;
   }
 
   .pname {
-    font-size: 13px;
-    font-weight: 600;
-    color: var(--text);
-    margin-right: 8px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text2);
+    margin-right: 6px;
   }
 
   /* The ellipsis is only a safety net: ingame-longnames proves it never triggers (spec §3.6). */
@@ -76,6 +76,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
   }
+
 
   .dash {
     font-size: 13px;

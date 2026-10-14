@@ -52,7 +52,7 @@ const stat = (p: Page, who: string, i: number) => card(p, who).locator(".stat").
 const tile = (p: Page, who: string, i: number) => card(p, who).locator(".tile").nth(i);
 
 const INGAME: Item[] = [
-  { what: "visible name, truncated", trigger: (p) => card(p, "VesperUnbreakabl").locator(".nm"), text: "VesperUnbreakabl#EUW7" },
+  { what: "visible long name now fits the full identity lane", trigger: (p) => card(p, "VesperUnbreakabl").locator(".nm"), text: null },
   { what: "visible name, not truncated", trigger: (p) => card(p, "Fahad").locator(".nm"), text: null },
   { what: "remembered name", trigger: (p) => card(p, "Rook").locator(".nm"), text: "Hidden name · known from your match\nSplit · Aug 30, 2026" },
   { what: "hidden agent name", trigger: (p) => card(p, "Cypher").locator(".nm"), text: "Hidden name" },

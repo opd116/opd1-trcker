@@ -78,6 +78,7 @@
       </div>
 
       <div class="hrank">
+        {#if card.rank !== undefined}<span class="rank-label">Current Rank</span>{/if}
         {#if card.rank === undefined}
           <Skel w={48} h={48} r="50%" block />
           <Skel w={90} h={13} block />
@@ -172,17 +173,18 @@
   .hero {
     position: relative;
     background: var(--card);
-    border-radius: 8px;
+    border: 1px solid var(--line);
+    border-radius: 10px;
     overflow: hidden;
-    margin-bottom: 20px;
+    margin-bottom: 16px;
   }
 
   .hart {
     position: absolute;
     left: 0;
     top: 0;
-    bottom: 0;
-    width: 84px;
+    height: 132px;
+    width: 76px;
     overflow: hidden;
   }
 
@@ -196,7 +198,7 @@
     background-size: 130% auto;
     background-position: 50% 22%;
     background-repeat: no-repeat;
-    opacity: 0.6;
+    opacity: 0.7;
     filter: saturate(0.65);
   }
 
@@ -206,11 +208,11 @@
 
   .hagent {
     position: absolute;
-    left: 12px;
-    top: 18px;
+    left: 18px;
+    top: 28px;
     display: block;
-    width: 56px;
-    height: 56px;
+    width: 60px;
+    height: 60px;
     border-radius: 7px;
     background: var(--raised);
     box-shadow: 0 0 0 2px var(--card);
@@ -223,11 +225,11 @@
   .htop {
     position: relative;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) auto auto auto;
+    grid-template-columns: minmax(0, 1fr) 210px 140px 166px;
     align-items: center;
-    column-gap: 30px;
-    min-height: 56px;
-    padding: 18px 22px 0 96px;
+    column-gap: 18px;
+    min-height: 132px;
+    padding: 0 20px 0 96px;
   }
 
   .hname {
@@ -258,15 +260,28 @@
   }
 
   .hrank {
+    position: relative;
     display: flex;
     align-items: center;
     gap: 12px;
+    padding-top: 24px;
+    padding-left: 18px;
+    border-left: 1px solid var(--line);
+  }
+
+  .rank-label {
+    position: absolute;
+    top: 0;
+    left: 18px;
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text2);
   }
 
   .ri {
     display: block;
-    width: 48px;
-    height: 48px;
+    width: 54px;
+    height: 54px;
     flex: none;
   }
 
@@ -279,7 +294,7 @@
   }
 
   .rname {
-    font-size: 18px;
+    font-size: 20px;
     font-weight: 600;
   }
 
@@ -307,7 +322,13 @@
     display: flex;
     align-items: center;
     gap: 10px;
+    min-height: 66px;
+    padding-left: 16px;
+    border-left: 1px solid var(--line);
   }
+
+  .hprev { grid-column: 3; grid-row: 1; }
+  .hpeak { grid-column: 4; grid-row: 1; }
 
   .pi {
     display: block;
@@ -318,8 +339,9 @@
 
   .prow {
     display: flex;
-    align-items: baseline;
-    gap: 6px;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 5px;
     white-space: nowrap;
   }
 
@@ -366,27 +388,30 @@
   .hstats {
     position: relative;
     display: grid;
-    grid-template-columns: repeat(5, minmax(0, 1fr)) 196px;
-    margin: 18px 0 0 96px;
+    grid-template-columns: repeat(5, minmax(0, 1fr)) 200px;
+    margin: 0;
     border-top: 1px solid var(--line);
   }
 
   .hstat {
-    padding: 12px 16px 14px 18px;
+    padding: 14px 12px;
     border-left: 1px solid var(--line);
   }
 
   .hstat:first-child {
-    padding-left: 0;
+    padding-left: 12px;
     border-left: none;
   }
 
   .hcol {
     display: flex;
     flex-direction: column;
+    align-items: center;
+    gap: 5px;
   }
 
   .k {
+    order: 2;
     font-size: 12px;
     line-height: 14px;
     font-weight: 500;
@@ -396,6 +421,7 @@
   /* The skeleton's empty label line: the loaded label's 14px line box. */
   .klane {
     height: 14px;
+    order: 2;
   }
 
   .hcol .v {
@@ -407,7 +433,7 @@
   }
 
   .w {
-    color: var(--win);
+    color: var(--text);
   }
 
   .sep {
@@ -416,13 +442,14 @@
   }
 
   .l {
-    color: var(--loss);
+    color: var(--text);
   }
 
   .hl5 {
     display: flex;
     align-items: center;
-    padding: 12px 20px 14px 20px;
+    justify-content: center;
+    padding: 14px 12px;
     border-left: 1px solid var(--line);
   }
 </style>

@@ -38,4 +38,3 @@ Final checks: six scene screenshots at 1000×800, no document overflow, no text 
 ## Scope and limits
 
 This is a Live comparison prototype only. Other navigation pages and a match scoreboard are intentionally not implemented. Recent match rows are evidence displays rather than links to an unbuilt scoreboard. Detail encounters are a summary rather than a complete encounter history. Production integration, backend behavior and real Riot verification are outside this study.
-

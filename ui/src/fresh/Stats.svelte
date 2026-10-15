@@ -176,5 +176,3 @@
   .insights { margin-top:32px; } .insight-list { display:grid; grid-template-columns:minmax(0,1fr) minmax(0,1fr); gap:0 30px; margin-top:10px; } .insight-list>p { padding:14px 0 14px 14px; border-bottom:1px solid #30373a; border-left:2px solid #66544f; display:grid; align-content:start; gap:8px; font-size:13px; line-height:1.55; } .insight-list>p.strength { border-left-color:#8d9f89; }
   .skeleton { display:grid; gap:12px; } .skeleton-heading { width:180px; height:28px; background:#252c2f; margin-bottom:12px; border-radius:3px; } .skeleton-overview { display:grid; grid-template-columns:248px 1fr; gap:30px; } .skeleton-overview>div { height:224px; background:#1c2023; border-radius:5px; } .skeleton-session { height:60px; background:#1c2023; border-radius:5px; margin-bottom:15px; } .skeleton-row { height:56px; background:#1c2023; border-radius:3px; }
 .session-matches .session-toggle{width:auto;padding:0 10px;white-space:nowrap}</style>
-
-

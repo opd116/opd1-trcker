@@ -17,4 +17,3 @@ if (import.meta.env.DEV) {
   const fit = () => {const scale = Math.min(1, (document.documentElement.clientWidth - 24) / 1000); iframe.style.transform = `scale(${scale})`; frame.style.width = `${1000*scale}px`; frame.style.height = `${800*scale}px`;};
   new ResizeObserver(fit).observe(document.documentElement); fit();
 }
-

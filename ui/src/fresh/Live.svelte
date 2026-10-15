@@ -45,5 +45,3 @@
 
   .roster{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}.roster section,.player{min-width:0}.topline{height:32px}.form{margin-top:8px}.rank strong{font-size:14px;font-weight:600}.encounter{width:42px;flex-shrink:0;text-align:right}.name-block :global(.identity){flex:1}.recent>span{visibility:hidden}.results{gap:3px}.result{font-size:14px;width:18px;border-radius:2px;background:#282e32}.result.win{background:#25372e}.result.loss{background:#3a2b2d}.result.newest{font-weight:600;text-decoration-thickness:2px}.empty-result{background:transparent;border-bottom:1px solid #3b454a}
 </style>
-
-

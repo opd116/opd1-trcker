@@ -1,5 +1,8 @@
 import { test, expect } from '@playwright/test';
 import { SCENES } from '../src/lib/demo/scenes';
+import { routeMedia } from './harness';
+
+test.beforeEach(async ({page}) => {await routeMedia(page);});
 
 const shots = new Set(['ingame','pregame','lobby2','ingame-longnames','ingame-partial','ingame-remembered','details','match','mystats']);
 

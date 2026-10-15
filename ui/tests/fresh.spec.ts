@@ -13,11 +13,11 @@ for (const [name, scene] of Object.entries(SCENES)) {
     const geometry = await page.locator('.fresh-app').evaluate(app => {
       const page = app.querySelector('.page')!;
       const small = Array.from(app.querySelectorAll('*')).filter(e => e.textContent?.trim() && e.childElementCount === 0 && Number.parseFloat(getComputedStyle(e).fontSize) < 12);
-      return {w:app.clientWidth,h:app.clientHeight,width:page.clientWidth,scrollWidth:page.scrollWidth,height:page.clientHeight,scrollHeight:page.scrollHeight,small:small.map(e => e.tagName)};
+      return {w:app.clientWidth,h:app.clientHeight,width:page.clientWidth,scrollWidth:page.scrollWidth,height:page.clientHeight,scrollHeight:page.scrollHeight,scrollable:page.classList.contains('scroll'),small:small.map(e => e.tagName)};
     });
     expect(geometry.w).toBe(1000); expect(geometry.h).toBe(800);
     expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.width);
-    if (scene.route.name === 'live') expect(geometry.scrollHeight).toBeLessThanOrEqual(geometry.height);
+    if (!geometry.scrollable) expect(geometry.scrollHeight).toBeLessThanOrEqual(geometry.height);
     expect(geometry.small).toEqual([]);
     expect(errors).toEqual([]);
     if (shots.has(name)) {
@@ -28,6 +28,9 @@ for (const [name, scene] of Object.entries(SCENES)) {
 }
 
 test('fresh: player, expanded history, match and tabs are navigable', async ({page}) => {
+  await page.goto('/design-screen.html?scene=match');
+  await page.getByRole('button',{name:'Back',exact:true}).click();
+  await expect(page.getByRole('region',{name:'Player overview'})).toBeVisible();
   await page.goto('/design-screen.html?scene=ingame');
   await page.locator(`[data-puuid="${SCENES.ingame.live!.players[0]!.puuid}"]`).click();
   await expect(page.getByRole('region',{name:'Player overview'})).toBeVisible();

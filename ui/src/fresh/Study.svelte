@@ -6,12 +6,17 @@
   import Scoreboard from './Scoreboard.svelte';
   import Stats from './Stats.svelte';
   import './study.css';
+  import type { Route } from '../lib/router.svelte';
   const sceneName = new URLSearchParams(location.search).get('scene') ?? 'ingame';
   const scene = getScene(sceneName);
   const layout = new URLSearchParams(location.search).get('layout') ?? 'roster';
-  let route = $state(scene.route);
-  let previous = $state(scene.route);
-  let expanded = $state(scene.route.name === 'details' && scene.route.more);
+  const initialRoute: Route = scene.autoRoute && scene.live?.settled && scene.live.stage === 'closed' ? {name:'mystats'} : scene.route;
+  const initialPrevious: Route = scene.route.name === 'match'
+    ? scene.route.back === 'mystats' ? {name:'mystats'} : {name:'details',...scene.route.back}
+    : initialRoute;
+  let route = $state(initialRoute);
+  let previous = $state(initialPrevious);
+  let expanded = $state(initialPrevious.name === 'details' && initialPrevious.more);
   const positions = new Map<string,number>();
   const rememberScroll = (node:HTMLElement) => {
     const key = route.name === 'details' ? `details:${route.puuid}` : route.name;

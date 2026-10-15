@@ -18,7 +18,7 @@
   {@const n = displayName(value)}
   <span class:wrap class="identity" title={value ? nameTip(value, meta) : undefined}>
     {#if n.hidden}<svg class="eye" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" aria-label="Hidden name"><path d="m2 2 12 12M6.5 3.7C11.3 2.8 14 8 14 8s-.8 1.5-2.2 2.8M9.4 12.2C4.8 13.1 2 8 2 8s.7-1.4 2-2.6"/><path d="M6.6 6.6a2 2 0 0 0 2.8 2.8"/></svg>{/if}
-    <span class="name" class:remembered={n.remembered} class:hidden={n.hidden && !n.remembered}>{n.name}</span>
+    {#if value === undefined}<span class="skeleton small" aria-label="Loading identity"></span>{:else}<span class="name" class:remembered={n.remembered} class:hidden={n.hidden && !n.remembered}>{n.name}</span>{/if}
     {#if n.tag}<span class="tag">#{n.tag}</span>{/if}
   </span>
 {/snippet}

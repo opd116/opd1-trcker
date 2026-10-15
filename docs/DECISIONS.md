@@ -1323,6 +1323,26 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** Until it is built, at the act change on 2026-10-14 a player whose rank snapshot has no entry for the new act shows `—` for the current rank until they play, the act switch may reach the screen only at the next publish or the 15-minute My Stats tick, and a backfill already running pages back to the old act's start (more requests, nothing lost).
 - **Status:** parked (user, 2026-10-04)
 
+### R189 — Autonomous design study
+
+- **What:** User 2026-10-15 requests a researched, iterative redesign with mock data and no clarification stops. The old v8 visual geometry/approval gate is superseded for this study; lightweight stack and privacy still bind. DEV entry `/design.html` separates the experiment from production.
+- **Why:** The user rejected a prior polish of the existing design as insufficient design thinking.
+- **Status:** user-authorized design work; prototype, not a released replacement.
+
+### R190 — Usefulness before novelty; progressive disclosure
+
+- **What:** Same-day user correction explicitly removes novelty as a requirement and gives the designer responsibility to choose which original information is useful and where it belongs. Live prioritizes recognition, current rank/RR, recent performance/results and relationship cues. Previous rank, peak and account level move to Player Details rather than disappearing from the product.
+- **Why:** Ten simultaneous histories compete with the immediate task of recognizing a player and reading their current context. Team columns remain a candidate because they support the task, not because an old design requires them.
+- **Cost:** Historical rank context needs a player click. It is intentionally secondary rather than silently omitted. This remains a design judgment to critique in the rendered study.
+- **Status:** implementation hypothesis under visual/interaction review, within user-authorized scope.
+
+### R191 — Independent design session and comparative review
+
+- **What:** The user explicitly requested a fresh agent/session to escape previous visual assumptions. A new agent with no inherited conversation reviewed product constraints and primary sources, compared three structures, and built a separate Live prototype. A separate critic preferred its edited aligned roster for comparing ten ranks/performance values.
+- **Result:** The full study adopts that roster with a 64px navigation header, HS% retained, complete privacy indicators and full existing study Details/Scoreboard/Stats. The independent prototype's intentionally limited profile is not adopted as a complete product. The two-team-summary alternative remains available in the external DEV workbench.
+- **Why:** The choice follows rendered comparison, not a requirement to be novel. Shared columns reduce repeated labels and support comparison. Historical ranks remain in Details. Further revisions fix conflicting map context, overly dominant recognition art, long-name overflow and session noise.
+- **Limit:** This is a tested mock design, not evidence that real users prefer it, and not a shipped native redesign. No backend requests, dependencies, or production bundle changes.
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

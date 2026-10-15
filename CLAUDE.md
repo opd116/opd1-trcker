@@ -1,5 +1,7 @@
 # OPD1 TRCKER
 
+**2026-10-15 design study override (R189–R190):** The user has authorized autonomous redesign with mock data, including information selection, placement and design options. The old v8 visual layout and visual approval gate below do not constrain this study. Novelty is not a goal: choose the most useful, calm tracker layout after understanding the product and critically testing alternatives. Preserve the lightweight stack, privacy, fixed window and data semantics. The study is DEV-only at `/design.html`; the shipped entry remains unchanged until the design work is integrated.
+
 A lightweight Windows desktop tracker for VALORANT that reads the **local Riot client API** (same approach as kryotrades/Valorant-Scout) and shows live Lobby / Agent Select / In Game player cards plus the user's own deep competitive stats.
 
 The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.

@@ -50,3 +50,13 @@ The first implementation used two team columns. After an independently designed 
 - `ui/src/independent/DESIGN-NOTES.md`: independent reasoning, sources, omissions and critique.
 
 Production UI/backend remain unchanged. No claim is made about live Riot integration or a new installer.
+
+## Light Design A refinement — 2026-10-19
+
+The original accepted aligned roster is preserved as Git tag `design-light-a` at `0e5f77608545f5304105dbdb01e5f1595782b26a`. The current DEV study is its refinement, selected by `layout=roster`.
+
+User requests: Team / Enemy labels, a lower-right Peak Rank emblem on the current rank with hover information, stronger last-five outcomes, recognizable party groups and previous encounters, and a fresh palette. Profile navigation remains available from each player row.
+
+After the user rejected the first palette, the study returns to neutral black `#141414`, gray surfaces `#1d1d1d`, white text `#eeeeee` and pale neutral accents. Small unfilled W/L/D marks use muted green, rose and sand underlines. Shared geometric symbols identify parties independently of color. Peak emblems are 15px with no backing, and their tooltip contains only rank abbreviation/division, act and elapsed months. Local fonts and inline SVG keep this change dependency-free. No production runtime changes or new backend requests.
+
+The user freed prototype dimensions on October 16; the accepted A geometry still fits this iteration at 1000×800, so it remains the review size. Live and match scoreboard must fit without scrolling; player detail expansion retains existing navigation and scroll restoration.

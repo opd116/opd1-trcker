@@ -139,3 +139,6 @@
 ### 2026-10-19 — Follow-up visual correction
 
 User rejected the new colors and party treatment. Return to the old black/gray palette with more white. Make Peak Rank smaller, remove its circular background, and show only the two-letter rank abbreviation (DM for Diamond, GD for Gold), division number, episode/act and elapsed months on hover. Remove other tooltip details. Make recent-game markers smaller and revise their drawing.
+
+### 2026-10-19 — الرجوع إلى التصميم المحفوظ
+«رجع زي ... الشكل القديم اللي وريتني إياه ... لكن بإضافة ... الرانك البيك بشكل صغير عند كل واحد ... نفس الطريقة ... حالياً، وبدون تغييرات للأشياء الثانية.»

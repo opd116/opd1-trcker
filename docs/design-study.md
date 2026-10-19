@@ -60,3 +60,6 @@ User requests: Team / Enemy labels, a lower-right Peak Rank emblem on the curren
 After the user rejected the first palette, the study returns to neutral black `#141414`, gray surfaces `#1d1d1d`, white text `#eeeeee` and pale neutral accents. Small unfilled W/L/D marks use muted green, rose and sand underlines. Shared geometric symbols identify parties independently of color. Peak emblems are 15px with no backing, and their tooltip contains only rank abbreviation/division, act and elapsed months. Local fonts and inline SVG keep this change dependency-free. No production runtime changes or new backend requests.
 
 The user freed prototype dimensions on October 16; the accepted A geometry still fits this iteration at 1000×800, so it remains the review size. Live and match scoreboard must fit without scrolling; player detail expansion retains existing navigation and scroll restoration.
+
+### Final user reversal — 2026-10-19
+R194 supersedes the refinement above. Current visuals match the saved design-light-a baseline, with only a transparent 15px Peak Rank overlay and compact tooltip added.

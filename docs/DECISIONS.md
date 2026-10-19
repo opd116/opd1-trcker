@@ -1369,3 +1369,6 @@ Each row is a dated block of `docs/requirements-raw.md`, in file order. That fil
 
 ### R193 — Same-day visual correction
 User rejected navy colors and numbered party chips. Restore neutral black/gray with brighter white text. Smaller transparent peak emblem; tooltip only two-letter rank + division and compact act/age. Smaller unfilled last-five letter marks; party uses shared geometric symbols. Supersedes R192 palette/chip description.
+
+### R194 — Restore saved Light A, Peak only (2026-10-19)
+User explicitly reverted the refinement. Restore all study visuals from design-light-a; retain only the transparent 15px Peak overlay and compact rank/act/month tooltip. Supersedes R192–R193 visual changes, including labels, colors, party and recent markers.

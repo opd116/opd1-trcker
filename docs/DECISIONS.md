@@ -1323,6 +1323,26 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** Until it is built, at the act change on 2026-10-14 a player whose rank snapshot has no entry for the new act shows `—` for the current rank until they play, the act switch may reach the screen only at the next publish or the 15-minute My Stats tick, and a backfill already running pages back to the old act's start (more requests, nothing lost).
 - **Status:** parked (user, 2026-10-04)
 
+### R189 — Autonomous design study
+
+- **What:** User 2026-10-15 requests a researched, iterative redesign with mock data and no clarification stops. The old v8 visual geometry/approval gate is superseded for this study; lightweight stack and privacy still bind. DEV entry `/design.html` separates the experiment from production.
+- **Why:** The user rejected a prior polish of the existing design as insufficient design thinking.
+- **Status:** user-authorized design work; prototype, not a released replacement.
+
+### R190 — Usefulness before novelty; progressive disclosure
+
+- **What:** Same-day user correction explicitly removes novelty as a requirement and gives the designer responsibility to choose which original information is useful and where it belongs. Live prioritizes recognition, current rank/RR, recent performance/results and relationship cues. Previous rank, peak and account level move to Player Details rather than disappearing from the product.
+- **Why:** Ten simultaneous histories compete with the immediate task of recognizing a player and reading their current context. Team columns remain a candidate because they support the task, not because an old design requires them.
+- **Cost:** Historical rank context needs a player click. It is intentionally secondary rather than silently omitted. This remains a design judgment to critique in the rendered study.
+- **Status:** implementation hypothesis under visual/interaction review, within user-authorized scope.
+
+### R191 — Independent design session and comparative review
+
+- **What:** The user explicitly requested a fresh agent/session to escape previous visual assumptions. A new agent with no inherited conversation reviewed product constraints and primary sources, compared three structures, and built a separate Live prototype. A separate critic preferred its edited aligned roster for comparing ten ranks/performance values.
+- **Result:** The full study adopts that roster with a 64px navigation header, HS% retained, complete privacy indicators and full existing study Details/Scoreboard/Stats. The independent prototype's intentionally limited profile is not adopted as a complete product. The two-team-summary alternative remains available in the external DEV workbench.
+- **Why:** The choice follows rendered comparison, not a requirement to be novel. Shared columns reduce repeated labels and support comparison. Historical ranks remain in Details. Further revisions fix conflicting map context, overly dominant recognition art, long-name overflow and session noise.
+- **Limit:** This is a tested mock design, not evidence that real users prefer it, and not a shipped native redesign. No backend requests, dependencies, or production bundle changes.
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.
@@ -1340,3 +1360,15 @@ Each row is a dated block of `docs/requirements-raw.md`, in file order. That fil
 | 2026-09-28 | `ملاحظات المستخدم على تصميم v7.1` | Nine points: the card is crowded, secondary text is too faint, each statistic's scope must be clear (shown without hovering: superseded, see the marker), long names truncate but the tag never does, one meaning per indicator, last 5 must be clearer, Peak names the tier, shared-match results read `Your result`, hidden means the name only. |
 | 2026-09-28 | `ملاحظات المستخدم على v8` | Remove the printed scope headings (tooltip only); numbers and last-5 results look off; the palette looks AI-made; the user said the design pleases them (to confirm). |
 | 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. Later 2026-09-29 line: Player Details hero K/D and HS% from the last 20 act matches (R116). Later 2026-09-30 lines: names Riot returns for matches the user did not play may show off the live screen (R143); a hidden player's name shows in the remembered style from any source the DB knows (R145); name-service may be asked off the live stages (R150); names are captured after each match because the game's own Match History shows them; Encounters count competitive matches only (R156); friends' names come like everyone else's (R157, withdrawn); when the rank request fails the rank shows from the player's matches (R154); build the requests the way Scout does (R159). Later line, 2026-10-01: after testing, "there is still a delay or a bug in the requests"; holds per family, full Retry-After, mmr never blocks (R160). Later line, 2026-10-03: v0.3.0 = fixes plus My Stats (R168). Later line, 2026-10-04: v0.3.0 tested fine; v0.4.0 = the brief plus five picked features (encounter tooltip, Match History, Settings as a fourth tab whose choices survive updates, hide hotkey, notes) (R177). Same day: the rank carries over into a new act (R188); then anything about the new act is postponed for now (R188, parked). |
+
+### R192 — Preserve Light Design A and improve roster recognition
+
+- **User:** 2026-10-16 accepts designer-selected compact dimensions and fonts, with no scrolling in Live/agent select/scoreboard; player details preferably without scrolling. 2026-10-19 returns to the accepted aligned roster and requests Team/Enemy labels, a small peak emblem on the current rank, clearer last-five outcomes, party groups and previous encounters, and a new palette.
+- **Baseline:** Git tag `design-light-a` permanently preserves commit `0e5f77608545f5304105dbdb01e5f1595782b26a`. Current study continues from it; production entry remains unchanged.
+- **Implementation:** Navy/slate surfaces, blue accent, teal wins, coral losses and amber draws; outcome letters remain non-color cues. Group badges retain group identity and confirmed/likely distinction. Encounter counts retain with/against meaning. Peak is readable on hover without opening a profile; row click still opens full details. No runtime dependency or backend changes.
+
+### R193 — Same-day visual correction
+User rejected navy colors and numbered party chips. Restore neutral black/gray with brighter white text. Smaller transparent peak emblem; tooltip only two-letter rank + division and compact act/age. Smaller unfilled last-five letter marks; party uses shared geometric symbols. Supersedes R192 palette/chip description.
+
+### R194 — Restore saved Light A, Peak only (2026-10-19)
+User explicitly reverted the refinement. Restore all study visuals from design-light-a; retain only the transparent 15px Peak overlay and compact rank/act/month tooltip. Supersedes R192–R193 visual changes, including labels, colors, party and recent markers.

@@ -5,7 +5,6 @@ import {
   emptyMatch,
   liveTeammate,
   pmText,
-  queueLabel,
   rowKeydown,
   settledDetails,
 } from "./details";
@@ -61,27 +60,6 @@ describe("liveTeammate (spec §6.7)", () => {
     expect(liveTeammate("loadingrank", live)).toEqual({ agentId: JETT, tier: null });
     expect(liveTeammate("nobody", live)).toBeNull();
     expect(liveTeammate("vis", null)).toBeNull();
-  });
-});
-
-describe("queueLabel (spec §6.10)", () => {
-  it("queueLabel table incl. '' → Custom and unknown → title case", () => {
-    const table: Record<string, string> = {
-      competitive: "Competitive",
-      unrated: "Unrated",
-      swiftplay: "Swiftplay",
-      spikerush: "Spike Rush",
-      deathmatch: "Deathmatch",
-      hurm: "Team Deathmatch",
-      ggteam: "Escalation",
-      onefa: "Replication",
-      premier: "Premier",
-      "": "Custom",
-    };
-    for (const [id, label] of Object.entries(table)) expect(queueLabel(id), id).toBe(label);
-    expect(queueLabel("snowball")).toBe("Snowball");
-    expect(queueLabel("new_mode")).toBe("New Mode");
-    expect(queueLabel("newmap-test")).toBe("Newmap Test");
   });
 });
 

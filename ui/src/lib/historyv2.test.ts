@@ -8,6 +8,7 @@ import {
   groupDays,
   halvesLine,
   heroMeta,
+  queueLabel,
   hsCell,
   HS_MISSING_TIP,
   kdOf,
@@ -89,6 +90,11 @@ describe("history rows", () => {
     expect(whenText(r, NOW)).toBe("45 min ago · 38 min");
     expect(whenText({ startMs: ago(1450), durationMs: 42 * MIN }, NOW)).toBe("11:12 PM · 42 min");
     expect(whenText({ startMs: ago(45), durationMs: null }, NOW)).toBe("45 min ago");
+    // A non-competitive row leads with its mode; a competitive one stays as the design draws it.
+    expect(whenText({ startMs: ago(63), durationMs: 18 * MIN, queueId: "swiftplay" }, NOW)).toBe("Swiftplay · 45 min ago · 18 min");
+    expect(whenText({ startMs: ago(83), durationMs: 38 * MIN, queueId: "competitive" }, NOW)).toBe("45 min ago · 38 min");
+    expect(whenText({ startMs: ago(1450), durationMs: 42 * MIN, queueId: "hurm" }, NOW)).toBe("Team Deathmatch · 11:12 PM · 42 min");
+    expect(whenText({ startMs: ago(45), durationMs: null, queueId: "some_new" }, NOW)).toBe("Some New · 45 min ago");
   });
 
   it("groups by day with W/L, the strip oldest → newest and RR from competitive rows only", () => {
@@ -193,5 +199,28 @@ describe("scoreboard", () => {
     expect(kdOf(8, 13)).toBe("0.62");
     expect(kdOf(5, 0)).toBe("5.00");
     expect(kdOf(null, 3)).toBe("—");
+  });
+});
+
+describe("queueLabel (History rows, scoreboard, recap, queue timer)", () => {
+  it("queueLabel table incl. '' → Custom and unknown → title case", () => {
+    const table: Record<string, string> = {
+      competitive: "Competitive",
+      unrated: "Unrated",
+      swiftplay: "Swiftplay",
+      spikerush: "Spike Rush",
+      deathmatch: "Deathmatch",
+      hurm: "Team Deathmatch",
+      ggteam: "Escalation",
+      onefa: "Replication",
+      premier: "Premier",
+      newmap: "New Map",
+      snowball: "Snowball Fight",
+      "": "Custom",
+    };
+    for (const [id, label] of Object.entries(table)) expect(queueLabel(id), id).toBe(label);
+    expect(queueLabel("valaram")).toBe("Valaram");
+    expect(queueLabel("new_mode")).toBe("New Mode");
+    expect(queueLabel("newmap-test")).toBe("Newmap Test");
   });
 });

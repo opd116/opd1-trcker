@@ -88,29 +88,6 @@ export function liveTeammate(puuid: string, live: LiveState | null): { agentId: 
   return { agentId: c.agentId, tier: isRankedTier(tier) ? tier : null };
 }
 
-const QUEUES: Record<string, string> = {
-  competitive: "Competitive",
-  unrated: "Unrated",
-  swiftplay: "Swiftplay",
-  spikerush: "Spike Rush",
-  deathmatch: "Deathmatch",
-  hurm: "Team Deathmatch",
-  ggteam: "Escalation",
-  onefa: "Replication",
-  premier: "Premier",
-  "": "Custom",
-};
-
-/** The Match header's mode name (spec §6.10 table); an id the table lacks is shown title-cased. */
-export function queueLabel(queueId: string): string {
-  if (Object.hasOwn(QUEUES, queueId)) return QUEUES[queueId]!;
-  return queueId
-    .split(/[\s_-]+/)
-    .filter(Boolean)
-    .map((w) => w[0]!.toUpperCase() + w.slice(1))
-    .join(" ");
-}
-
 /** Which Details row opened the Match page (the route's `from`): a recent-match row or an encounter row. */
 export type MatchFrom = "recent" | "encounter";
 

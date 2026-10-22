@@ -7,7 +7,7 @@
   import { launchValorant } from "../../lib/api";
   import { appStatus } from "../../lib/appdata.svelte";
   import { assetUrl } from "../../lib/assets";
-  import { queueLabel } from "../../lib/details";
+  import { queueLabel } from "../../lib/historyv2";
   import { pct0, rrDelta } from "../../lib/format";
   import { retryImg } from "../../lib/imgRetry";
   import {
@@ -23,6 +23,7 @@
     selfFirst,
     SESSION_CHIPS,
     sessionChip,
+    sessionSpanMs,
     waitChecks,
   } from "../../lib/livev2";
   import { mapName } from "../../lib/meta";
@@ -31,6 +32,7 @@
   import { tierColor, tierName, tierShort } from "../../lib/theme";
   import { tip } from "../../lib/tooltip.svelte";
   import type { LiveState } from "../../lib/types";
+  import { cachedRow } from "../history/cache";
   import Dot from "../shell/Dot.svelte";
   import Radar from "./Radar.svelte";
   import Shimmer from "./Shimmer.svelte";
@@ -46,7 +48,8 @@
   const session = $derived(ms?.session ?? null);
   const rank = $derived(ms && typeof ms.rank.tier === "number" ? ms.rank : null);
 
-  // A clock for "45 MIN AGO", the session length and the queue timer: every second while searching, else every 30 s.
+  // A clock for "45 MIN AGO" and the queue timer: every second while searching, else every 30 s. The session length
+  // is the session's own span (`sessionSpanMs`), so it does not tick.
   let nowMs = $state(Date.now());
   $effect(() => {
     nowMs = Date.now();
@@ -170,7 +173,7 @@
 
     {#if session && session.matches.length > 0}
       <div class="card pad col">
-        <div class="cap"><span class="mono">TODAY</span><span class="mono n">{session.matches.length} {session.matches.length === 1 ? "MATCH" : "MATCHES"} · {durationCaps(nowMs - session.startedMs)}</span></div>
+        <div class="cap"><span class="mono">TODAY</span><span class="mono n">{session.matches.length} {session.matches.length === 1 ? "MATCH" : "MATCHES"} · {durationCaps(sessionSpanMs(session, (id) => cachedRow(id)?.durationMs))}</span></div>
         <div class="today">
           <span class="net" style:color={rrColor(session.netRr)}>{rrDelta(session.netRr)} RR</span>
           <span class="wl"><span class="w">{session.wins}</span> – <span class="l">{session.losses}</span></span>

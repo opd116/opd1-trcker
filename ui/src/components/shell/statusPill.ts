@@ -1,5 +1,6 @@
 // The title bar's status pill (design v2, TrackerApp.dc.html 2055–2060): what each connection state looks like and
 // says. Pure, so the wording is testable; StatusPill.svelte draws it.
+import { ageShort } from "../../lib/format";
 import { PALETTE as P, rgba } from "../../lib/theme";
 import type { AppStatus, Stage } from "../../lib/types";
 
@@ -17,15 +18,6 @@ export type PillView = {
 };
 
 const secs = (ms: number) => Math.max(0, Math.round(ms / 1000));
-
-/** "2 s", "42 s", "3 min", "2 h": how long ago, for the tooltip. */
-export function agoShort(ms: number): string {
-  const s = secs(ms);
-  if (s < 60) return `${s} s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m} min`;
-  return `${Math.floor(m / 60)} h`;
-}
 
 /** `LOCKFILE_NOT_FOUND` → "LOCKFILE NOT FOUND". */
 const caps = (code: string) => code.replace(/_/g, " ").toUpperCase();
@@ -55,7 +47,7 @@ export function pillView(s: AppStatus, stage: Stage | null, nowMs: number): Pill
       const detail =
         stage === "pregame" ? "AGENT SELECT" : stage === "menus" ? (s.recapMatchId ? "MATCH ENDED" : "IN LOBBY") : "";
       const lines = [s.riotClientVersion ? `Riot Client ${s.riotClientVersion}` : "Riot Client"];
-      if (s.lastDataMs !== null) lines.push(`Last update ${agoShort(nowMs - s.lastDataMs)} ago`);
+      if (s.lastDataMs !== null) lines.push(`Last update ${ageShort(nowMs - s.lastDataMs)} ago`);
       return {
         conn: "ok",
         label: "Connected",
@@ -70,7 +62,7 @@ export function pillView(s: AppStatus, stage: Stage | null, nowMs: number): Pill
     }
     case "lost": {
       const lines: string[] = [];
-      if (s.lastDataMs !== null) lines.push(`Last data received ${agoShort(nowMs - s.lastDataMs)} ago.`);
+      if (s.lastDataMs !== null) lines.push(`Last data received ${ageShort(nowMs - s.lastDataMs)} ago.`);
       if (s.retryInMs !== null) lines.push(`Retrying in ${secs(s.retryInMs)} s.`);
       return {
         conn: "lost",

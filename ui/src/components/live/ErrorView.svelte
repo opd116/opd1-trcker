@@ -4,6 +4,8 @@
 -->
 <script lang="ts">
   import { retryNow } from "../../lib/api";
+  import { shortLockfilePath } from "../../lib/format";
+  import { tip } from "../../lib/tooltip.svelte";
   import type { AppStatus } from "../../lib/types";
   import { reportError } from "../../lib/uilog";
 
@@ -30,6 +32,8 @@
     return Math.ceil((left > 0 ? left : period - (-left % period)) / 1000);
   });
   const lockfile = $derived(status.errorCode !== "CLIENT_UNREACHABLE");
+  /** The design's `%LOCALAPPDATA%\…\lockfile`; the full path is the tooltip. */
+  const shortPath = $derived(shortLockfilePath(status.lockfilePath));
   /** `21:41:07`, local time. */
   const at = $derived.by(() => {
     if (status.errorAtMs === null) return null;
@@ -61,8 +65,8 @@
       {/if}
     </div>
     <div class="code">
-      <div><span class="c">{status.errorCode ?? "CLIENT_UNREACHABLE"}</span>{#if at} · {at}{/if}</div>
-      <div class="path">{status.lockfilePath}</div>
+      <div><span class="c">{status.errorCode ?? "CLIENT_UNREACHABLE"}</span>{at ? ` · ${at}` : ""}</div>
+      <div class="path" use:tip={shortPath === status.lockfilePath ? "" : status.lockfilePath}>{shortPath}</div>
     </div>
     <div class="actions">
       <button type="button" class="primary" onclick={retry}>Retry now</button>

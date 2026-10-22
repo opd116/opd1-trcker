@@ -144,3 +144,33 @@ export function durationMin(ms: Num): string {
   if (!ok(ms)) return DASH;
   return `${Math.round(ms / MIN)} min`;
 }
+
+/**
+ * How long ago, stepping up through the units: "42 s", "3 min", "2 h", "4 d" (whole units, rounded down past a
+ * minute). Shared by the lost banner ("Showing data from 3 min ago") and the status pill's tooltip ("Last update 2 h
+ * ago"), so a long-idle app never reads "1440 min".
+ */
+export function ageShort(ms: number): string {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s} s`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m} min`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h} h`;
+  return `${Math.floor(h / 24)} d`;
+}
+
+/** The tail every lockfile path ends with: the backend builds it as `%LOCALAPPDATA%` + this (poll.rs, state.rs). */
+const LOCKFILE_TAIL = String.raw`\Riot Games\Riot Client\Config\lockfile`;
+
+/**
+ * The lockfile path in the design's short form, `%LOCALAPPDATA%\Riot Games\Riot Client\Config\lockfile`, when it is
+ * the standard one under the user's LocalAppData (the backend always builds it from the `LOCALAPPDATA` variable, so a
+ * path ending in the standard tail starts with that folder); any other path as given. The full path stays in a tooltip.
+ */
+export function shortLockfilePath(path: string): string {
+  if (path.startsWith("%LOCALAPPDATA%")) return path;
+  const i = path.length - LOCKFILE_TAIL.length;
+  if (i <= 0 || path.slice(i).toLowerCase() !== LOCKFILE_TAIL.toLowerCase()) return path;
+  return `%LOCALAPPDATA%${path.slice(i)}`;
+}

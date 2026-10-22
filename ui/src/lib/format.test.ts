@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   actDates,
   actTitle,
+  ageShort,
   ago,
   count,
   DASH,
@@ -15,6 +16,7 @@ import {
   rr,
   rrDelta,
   score,
+  shortLockfilePath,
   span,
   tierName,
   time12,
@@ -210,5 +212,36 @@ describe("missing values", () => {
     expect(kd2(Number.POSITIVE_INFINITY)).toBe("—");
     expect(rrDelta(Number.NaN)).toBe("—");
     expect(time12(Number.NaN)).toBe("—");
+  });
+});
+
+describe("ageShort (lost banner, status pill)", () => {
+  it("steps up s → min → h → d", () => {
+    expect(ageShort(0)).toBe("0 s");
+    expect(ageShort(-5_000)).toBe("0 s");
+    expect(ageShort(42_000)).toBe("42 s");
+    expect(ageShort(59_400)).toBe("59 s");
+    expect(ageShort(60_000)).toBe("1 min");
+    expect(ageShort(59 * MIN + 59_000)).toBe("59 min");
+    expect(ageShort(HOUR)).toBe("1 h");
+    expect(ageShort(23 * HOUR + 59 * MIN)).toBe("23 h");
+    expect(ageShort(DAY)).toBe("1 d");
+    expect(ageShort(9 * DAY + 5 * HOUR)).toBe("9 d");
+  });
+});
+
+describe("shortLockfilePath (error card)", () => {
+  const SHORT = String.raw`%LOCALAPPDATA%\Riot Games\Riot Client\Config\lockfile`;
+  it("the standard path under LocalAppData reads in the design's short form", () => {
+    expect(shortLockfilePath(String.raw`C:\Users\Fahad\AppData\Local\Riot Games\Riot Client\Config\lockfile`)).toBe(SHORT);
+    expect(shortLockfilePath(String.raw`D:\Profiles\x\Local\riot games\Riot Client\Config\lockfile`)).toBe(
+      String.raw`%LOCALAPPDATA%\riot games\Riot Client\Config\lockfile`,
+    );
+    expect(shortLockfilePath(SHORT)).toBe(SHORT);
+  });
+  it("any other path as given", () => {
+    expect(shortLockfilePath(String.raw`D:\Riot\lockfile`)).toBe(String.raw`D:\Riot\lockfile`);
+    expect(shortLockfilePath(String.raw`\Riot Games\Riot Client\Config\lockfile`)).toBe(String.raw`\Riot Games\Riot Client\Config\lockfile`);
+    expect(shortLockfilePath("")).toBe("");
   });
 });

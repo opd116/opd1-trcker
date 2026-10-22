@@ -11,7 +11,7 @@
   import { closeMatch, getMatchDetails } from "../../lib/api";
   import { marks, toggleSaved } from "../../lib/appdata.svelte";
   import { assetUrl } from "../../lib/assets";
-  import { queueLabel } from "../../lib/details";
+  import { queueLabel } from "../../lib/historyv2";
   import { durationMin, rrDelta } from "../../lib/format";
   import { retryImg } from "../../lib/imgRetry";
   import { byAcs, kdaText, nameView, nextTierText, recapModel, rrColor, SESSION_CHIPS, sessionChip } from "../../lib/livev2";

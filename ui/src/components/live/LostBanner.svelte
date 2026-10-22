@@ -4,6 +4,7 @@
 -->
 <script lang="ts">
   import { retryNow } from "../../lib/api";
+  import { ageShort } from "../../lib/format";
   import type { AppStatus } from "../../lib/types";
   import { reportError } from "../../lib/uilog";
   import Dot from "../shell/Dot.svelte";
@@ -17,11 +18,7 @@
     return () => clearInterval(id);
   });
 
-  const age = $derived.by(() => {
-    if (status.lastDataMs === null) return null;
-    const s = Math.max(0, Math.round((nowMs - status.lastDataMs) / 1000));
-    return s < 60 ? `${s} s` : `${Math.floor(s / 60)} min`;
-  });
+  const age = $derived(status.lastDataMs === null ? null : ageShort(nowMs - status.lastDataMs));
   const attempt = $derived(status.attempt > 0 ? `Reconnecting, attempt ${status.attempt} of ${status.maxAttempts}.` : "Reconnecting.");
 
   function retry() {

@@ -14,6 +14,7 @@ import {
   peakOf,
   plainName,
   rankOf,
+  sessionSpanMs,
   rankRrText,
   recapModel,
   resultScore,
@@ -242,8 +243,23 @@ describe("board", () => {
     expect(loadingProgress(live("pregame", five))).toBeNull();
   });
 
+  it("sessionSpanMs: the session's own span, not the time since it started", () => {
+    const M = 60_000;
+    const m = (id: string, startMs: number) => ({ matchId: id, mapId: null, rrEarned: null, startMs, result: "W" as const });
+    const session = { startedMs: 1_000 * M, matches: [m("a", 1_000 * M), m("b", 1_040 * M), m("c", 1_085 * M)] };
+    expect(sessionSpanMs(session)).toBe(85 * M);
+    expect(sessionSpanMs(session, (id) => (id === "c" ? 38 * M : null))).toBe(123 * M);
+    expect(sessionSpanMs(session, () => undefined)).toBe(85 * M);
+    expect(sessionSpanMs({ startedMs: 5, matches: [] })).toBe(0);
+    expect(sessionSpanMs({ startedMs: 1_000 * M, matches: [m("a", 1_000 * M)] })).toBe(0);
+  });
+
   it("clock and countdown", () => {
     expect(clock(84_000)).toBe("1:24");
+    expect(clock(59 * 60_000 + 59_999)).toBe("59:59");
+    expect(clock(3_600_000)).toBe("1:00:00");
+    expect(clock((75 * 60 + 13) * 1000)).toBe("1:15:13");
+    expect(clock((10 * 3600 + 5 * 60 + 7) * 1000)).toBe("10:05:07");
     expect(countdown(41_200)).toBe("0:42");
     expect(countdown(-5)).toBe("0:00");
   });

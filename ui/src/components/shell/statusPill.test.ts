@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { AppStatus } from "../../lib/types";
-import { agoShort, pillView } from "./statusPill";
+import { pillView } from "./statusPill";
 
 const base: AppStatus = {
   conn: "ok",
@@ -59,9 +59,8 @@ describe("status pill (design v2 2055–2060)", () => {
     });
   });
 
-  it("agoShort", () => {
-    expect(agoShort(2_000)).toBe("2 s");
-    expect(agoShort(3 * 60_000)).toBe("3 min");
-    expect(agoShort(2 * 3_600_000)).toBe("2 h");
+  it("the last-update age steps up to days", () => {
+    const s: AppStatus = { ...base, lastDataMs: 0 };
+    expect(pillView(s, "menus", 3 * 86_400_000).tip).toContain("Last update 3 d ago");
   });
 });

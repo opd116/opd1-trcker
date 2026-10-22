@@ -24,6 +24,7 @@ import type {
   Result,
   ScoreRow,
   SessionMatch,
+  SessionSummary,
   Settings,
   Stage,
   Team,
@@ -343,10 +344,13 @@ export function loadingProgress(live: LiveState): { loaded: number; total: numbe
   return loaded >= total ? null : { loaded, total };
 }
 
-/** `0:42`, `1:24`, `12:05`: a whole-second countdown or stopwatch. */
+/** `0:42`, `1:24`, `12:05`, `1:15:13`: a whole-second countdown or stopwatch; hours appear from 60 minutes on. */
 export function clock(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000));
-  return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const ss = String(s % 60).padStart(2, "0");
+  return h > 0 ? `${h}:${String(m).padStart(2, "0")}:${ss}` : `${m}:${ss}`;
 }
 
 /** A countdown that rounds up, so `0:01` shows until the deadline, not `0:00` a second early. */
@@ -383,6 +387,23 @@ export function agoCaps(ms: number): string {
 }
 
 /** `3 H 48 MIN`, `25 MIN`. */
+/**
+ * The TODAY card's session length: from the session's start to the start of its newest match, plus that match's
+ * duration when it is known (`durationOf`; else nothing is added). Measured over the matches, not up to now, so the
+ * figure stays put while the user idles in the menus instead of growing every minute (a session only ends after 6 h
+ * without a competitive match). Neither `session.matches` nor `mystats.last5` carries a duration, so the Live page
+ * passes the stored History row's duration when that list has been loaded.
+ */
+export function sessionSpanMs(
+  session: Pick<SessionSummary, "startedMs" | "matches">,
+  durationOf: (matchId: string) => number | null | undefined = () => null,
+): number {
+  const newest = session.matches.at(-1);
+  if (!newest) return 0;
+  const dur = durationOf(newest.matchId);
+  return Math.max(0, newest.startMs + (typeof dur === "number" && dur > 0 ? dur : 0) - session.startedMs);
+}
+
 export function durationCaps(ms: number): string {
   const min = Math.max(0, Math.floor(ms / 60_000));
   const h = Math.floor(min / 60);

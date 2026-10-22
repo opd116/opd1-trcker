@@ -2,7 +2,6 @@
 // 1593–1616, `scoreboard` 1627–1674, `extraVals` 1741–1769). Pure: the screens render what these return. Local time,
 // en-US / en-GB written out by hand (no Intl, like format.ts: it would put a narrow no-break space before AM/PM).
 import { DASH, durationMin, rrDelta, time12 } from "./format";
-import { queueLabel } from "./details";
 import type { HistoryRow, MatchDetailsView, MatchTeamView, Result, ScoreRow } from "./types";
 
 const MIN = 60_000;
@@ -80,6 +79,32 @@ export const endMs = (m: { startMs: number; durationMs: number | null }): number
 
 export const isComp = (r: { queueId: string }): boolean => r.queueId === "competitive";
 
+/** Riot's queue ids → the mode's name (the History row, the scoreboard header, the recap, the queue timer). */
+const QUEUES: Record<string, string> = {
+  competitive: "Competitive",
+  unrated: "Unrated",
+  swiftplay: "Swiftplay",
+  spikerush: "Spike Rush",
+  deathmatch: "Deathmatch",
+  hurm: "Team Deathmatch",
+  ggteam: "Escalation",
+  onefa: "Replication",
+  premier: "Premier",
+  newmap: "New Map",
+  snowball: "Snowball Fight",
+  "": "Custom",
+};
+
+/** The mode's name for a queue id; an id the table lacks is shown title-cased (`new_mode` → `New Mode`). */
+export function queueLabel(queueId: string): string {
+  if (Object.hasOwn(QUEUES, queueId)) return QUEUES[queueId]!;
+  return queueId
+    .split(/[\s_-]+/)
+    .filter(Boolean)
+    .map((w) => w[0]!.toUpperCase() + w.slice(1))
+    .join(" ");
+}
+
 // ── the list ──────────────────────────────────────────────────────────────────────
 export interface DayGroup {
   /** The day's label, which is also its key. */
@@ -112,11 +137,17 @@ export function groupDays(rows: readonly HistoryRow[], nowMs: number): DayGroup[
   return out;
 }
 
-/** `45 min ago · 38 min` today, `11:12 PM · 42 min` on an older day; the duration is dropped when unknown. */
-export function whenText(r: Pick<HistoryRow, "startMs" | "durationMs">, nowMs: number): string {
+/**
+ * The row's sub-line: `45 min ago · 38 min` today, `11:12 PM · 42 min` on an older day; the duration is dropped when
+ * unknown. A non-competitive row (only listed under "All modes", where its RR and rank cells are dashes) leads with its
+ * mode: `Swiftplay · 45 min ago · 18 min`.
+ */
+export function whenText(r: Pick<HistoryRow, "startMs" | "durationMs"> & { queueId?: string }, nowMs: number): string {
   const s = stamp(endMs(r), nowMs);
-  const when = s.dayDiff <= 0 ? s.rel : s.hm;
-  return r.durationMs === null ? when : `${when} · ${durationMin(r.durationMs)}`;
+  const parts = [s.dayDiff <= 0 ? s.rel : s.hm];
+  if (r.queueId !== undefined && !isComp({ queueId: r.queueId })) parts.unshift(queueLabel(r.queueId));
+  if (r.durationMs !== null) parts.push(durationMin(r.durationMs));
+  return parts.join(" · ");
 }
 
 /** The design's history K/D colour: ≥ 1.3 white, < 1 dimmed, else the normal band (`extraVals` 1764). */

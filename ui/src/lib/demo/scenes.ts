@@ -2,7 +2,6 @@
 // suite all read SCENES. Scenes are built from the design's roster in cdv8.ts; nothing here is shipped
 // (it is reached only through a DEV-guarded dynamic import).
 import type { MatchFrom } from "../details";
-import type { Route } from "../router.svelte";
 import type {
   EncounterDetailRow,
   LiveState,
@@ -49,6 +48,17 @@ export type SceneName =
   | "match" | "match-enc" | "match-hidden" | "match-dm" | "match-loading" | "match-longnames" | "match-nostats"
   | "mystats" | "mystats-new" | "mystats-loading" | "mystats-unranked" | "mystats-immortal" | "mystats-rrnull"
   | "mystats-longnames" | "mystats-closed" | "closed-unsettled";
+
+/**
+ * Where a scene opens, in the v8 terms the scene table was written in. demo/feed.ts maps it onto the v2 router:
+ * live → Live, mystats → Competitive, details → the profile drawer, match → the History scoreboard.
+ */
+export type DemoRoute =
+  | { name: "live" }
+  | { name: "mystats" }
+  | { name: "details"; puuid: string; more: boolean }
+  | { name: "match"; matchId: string; focusPuuid: string; from: MatchFrom; back: { puuid: string; more: boolean } | "mystats" };
+type Route = DemoRoute;
 
 export type Scene = {
   /** null: no LiveState has arrived yet (`boot`). */

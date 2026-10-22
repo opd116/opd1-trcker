@@ -1,217 +1,331 @@
-// Theme (spec §1): the design's options, its colour math, and the CSS variables components read.
-// Pure except `applyTheme`. Components read only the variables, never these tables.
+// Theme (design v2, `.superpowers/design/v2/TrackerApp.dc.html`): one fixed dark palette with a violet accent. Every
+// colour the prototype uses is a CSS custom property on :root (`themeVars`, written by `applyTheme` before the first
+// paint); components read the variables, never the hex values. The TS helpers below cover what a variable cannot:
+// rank tiers, skin editions, party colours and the stat highlight (`hl`), all transcribed from the prototype.
+// Pure except `applyTheme`.
+import { tierName as titleCase } from "./format";
+import type { Meta } from "./types";
 
-export type ThemeOptions = {
-  tone: "Neutral" | "Cool" | "Warm";
-  accent: string;
-  results: "Green / Red" | "Accent / Red" | "Accent / Gray";
-  resultFill: "Tinted" | "Solid";
-  font: "Barlow" | "IBM Plex Sans" | "Archivo";
-  last5Style: "Arrow" | "Underline";
-};
-
-/** The values shipped until a Settings page exists. */
-export const DEFAULT_THEME: ThemeOptions = {
-  tone: "Neutral",
-  accent: "#e3a54f",
-  results: "Green / Red",
-  resultFill: "Tinted",
-  font: "Barlow",
-  last5Style: "Arrow",
-};
-
-type ToneColors = {
-  bg: string;
-  card: string;
-  raised: string;
-  line: string;
-  line2: string;
-  text: string;
-  textSoft: string;
-  text2: string;
-  text3: string;
-  gray: string;
-};
-
-/** v8:442-446, verbatim. */
-export const TONES: Record<ThemeOptions["tone"], ToneColors> = {
-  Neutral: { bg: "#0e1013", card: "#171a1f", raised: "#20242a", line: "#23272e", line2: "#2c3139", text: "#e4e1db", textSoft: "#c9c9c7", text2: "#a3a7ae", text3: "#6f747c", gray: "#8d929a" },
-  Cool: { bg: "#0b0f14", card: "#141920", raised: "#1d242e", line: "#212833", line2: "#2a323e", text: "#e0e4ea", textSoft: "#c3c9d1", text2: "#9ea7b3", text3: "#6a7380", gray: "#8b95a2" },
-  Warm: { bg: "#100f0d", card: "#1a1815", raised: "#24211d", line: "#2a2722", line2: "#35312b", text: "#e7e2d9", textSoft: "#cbc5bb", text2: "#aaa396", text3: "#77716a", gray: "#978f84" },
-};
-
-/** v8:447. */
-export const FONTS: Record<ThemeOptions["font"], string> = {
-  Barlow: "'Barlow', sans-serif",
-  "IBM Plex Sans": "'IBM Plex Sans', sans-serif",
-  Archivo: "'Archivo', sans-serif",
-};
-
-export const ACCENTS = ["#e3a54f", "#4fc3ae", "#7fb1ef", "#e58a9a"] as const;
-
-const GREEN = "#5fbf8b";
-const LOSS = "#dc7a6e";
-const ON_SOLID = "#14120e";
-
-// ── colour math (spec §1.3, v8:503-505) ─────────────────────────────────────────
+// ── colour math ──────────────────────────────────────────────────────────────────
 const rgb = (h: string) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16));
 
+/** `a` moved `t` (0–1) of the way to `b`, as #rrggbb. */
 export const mix = (a: string, b: string, t: number): string =>
   "#" +
   rgb(a)
     .map((v, i) => Math.round(v + (rgb(b)[i]! - v) * t).toString(16).padStart(2, "0"))
     .join("");
 
-export const rgba = (h: string, a: number): string => `rgba(${rgb(h).join(",")},${a})`;
+/** `#rrggbb` at alpha `a`, written the way the prototype writes it (`rgba(157,140,255,.12)`). */
+export const rgba = (h: string, a: number): string => `rgba(${rgb(h).join(",")},${String(a).replace(/^0\./, ".")})`;
 
-// ── party colours (spec §1.6) ───────────────────────────────────────────────────
-/** 4 per accent. The first 2 are the design's own (v8:448, 554). */
-export const PARTY_SETS4: Record<string, [string, string, string, string]> = {
-  "#e3a54f": ["#7fa6e8", "#b596e0", "#b0c46c", "#db8fb4"],
-  "#4fc3ae": ["#7fa6e8", "#b596e0", "#b0c46c", "#db8fb4"],
-  "#7fb1ef": ["#5fbfa9", "#c99ad8", "#b0c46c", "#db8fb4"],
-  "#e58a9a": ["#7fa6e8", "#5fbfa9", "#b0c46c", "#b596e0"],
-};
+// ── the palette (every hex the prototype uses, by role) ──────────────────────────
+export const PALETTE = {
+  // surfaces, darkest first
+  bgDeep: "#050607", // glance mode's backdrop around the 420px column
+  chrome: "#08090b", // title bar
+  rail: "#0a0b0d", // nav rail
+  bg: "#0c0d10", // app background
+  input: "#0e1013", // text fields, code wells
+  sunken: "#101215", // table head strips
+  drawer: "#111317", // profile drawer
+  surface: "#121418", // search box, the waiting status pill
+  card: "#131519", // cards / panels
+  navActive: "#15171b", // the current nav item
+  cardHead: "#16181c", // card header strip; title-bar button hover
+  rowHover: "#1a1d22", // table row hover; secondary button
+  skel: "#1c1f25", // skeleton bars, agent/avatar wells
+  tipBg: "#1d2026", // tooltip
+  chipHover: "#1f2228", // small chip/button hover
+  buttonHover: "#22252b", // secondary button hover
+  // lines, faintest first
+  lineChrome: "#1a1c20", // title bar / nav rail / glance edges
+  lineSoft: "#1d2025", // list row separators
+  line: "#1f2227", // card borders, inner separators
+  lineCard: "#23262c", // raised card borders
+  track: "#24272d", // progress tracks; waiting pill border
+  lineMedia: "#262a30", // agent / avatar frames
+  lineControl: "#2b2f36", // buttons, inputs, scrollbar thumb
+  lineTip: "#33373e", // tooltip border
+  lineHover: "#3a3e46", // button border on hover
+  lineStrong: "#4a4e56", // dashed empty slots, unchecked toggles
+  // text, brightest first
+  white: "#ffffff", // a highlighted (standout) stat
+  text: "#ecebe7",
+  textSoft: "#d6d7da", // stats with highlight off
+  textMid: "#d0d2d6", // a stat in the normal band
+  text2: "#c9cbd0", // secondary copy, tooltip sub-lines
+  text3: "#b4b7bd", // tertiary copy
+  textMuted: "#a6a9b0", // muted labels (the most used grey)
+  hlLow: "#a3a7ae", // a stat well below average (dimmed, still readable)
+  textLabel: "#9ba0a8", // small caps labels under numbers
+  textTag: "#8f949c", // Riot tag, disabled state
+  textDim: "#8a8f97", // idle icons, Unranked
+  textFaint: "#7d828b", // placeholders
+  textGhost: "#6b7079", // chevrons
+  textDisabled: "#5b6068", // unknown values ("?")
+  // accent (violet)
+  accent: "#9d8cff",
+  accentHover: "#b2a4ff",
+  accentText: "#b7abff", // links, focus ring
+  accentDeep: "#8b7cf0", // focused field border
+  accentPale: "#d6cfff", // text on accent tints, link hover
+  // results and signals
+  win: "#5fcf8f",
+  winText: "#8fe3b2",
+  loss: "#ef6a5b",
+  lossText: "#ff8b7e",
+  warn: "#ff9a3c",
+  warnText: "#ffb36b",
+  mvp: "#f0c75e",
+  ally: "#56c8d8",
+  enemy: "#ff6b7d",
+  // status pill label colours (prototype 2055–2060)
+  okText: "#cdeedb",
+  lostText: "#ffc690",
+  errorText: "#ffb1a8",
+  // window close button hover
+  danger: "#c42b1c",
+} as const;
 
-const FALLBACK_PAIR = ["#7fa6e8", "#b596e0"];
-/** lime 74°, rose 331°, lilac 265°, blue 218°: each 60–71% lightness, ≥ 7:1 contrast on `card`. */
-const RESERVE = ["#b0c46c", "#db8fb4", "#b596e0", "#7fa6e8"];
+/** Party colours A–D (prototype `PARTY`). Index = the party group on screen. */
+export const PARTY_COLORS = ["#6fa8ff", "#f0c75e", "#e88fbf", "#9fd36b"] as const;
 
-function hue(h: string): number {
-  const [r = 0, g = 0, b = 0] = rgb(h).map((v) => v / 255);
-  const max = Math.max(r, g, b);
-  const d = max - Math.min(r, g, b);
-  if (!d || Number.isNaN(d)) return 0;
-  const k = max === r ? ((g - b) / d + 6) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
-  return k * 60;
+/** The design's three families (bundled in app.css). */
+export const FONT_BODY = "'Barlow', system-ui, sans-serif";
+export const FONT_DISPLAY = "'Saira Condensed', sans-serif";
+export const FONT_MONO = "'Geist Mono', monospace";
+
+const P = PALETTE;
+
+/** Every CSS custom property, name → value. */
+export function themeVars(): Record<string, string> {
+  const vars: Record<string, string> = {
+    // surfaces
+    "--bg-deep": P.bgDeep,
+    "--chrome": P.chrome,
+    "--rail": P.rail,
+    "--bg": P.bg,
+    "--input": P.input,
+    "--sunken": P.sunken,
+    "--drawer": P.drawer,
+    "--surface": P.surface,
+    "--card": P.card,
+    "--nav-active": P.navActive,
+    "--card-head": P.cardHead,
+    "--chrome-hover": P.cardHead,
+    "--row-hover": P.rowHover,
+    "--button": P.rowHover,
+    "--skel": P.skel,
+    "--tip-bg": P.tipBg,
+    "--chip-hover": P.chipHover,
+    "--button-hover": P.buttonHover,
+    "--scrim": "rgba(5,6,8,.5)",
+    // lines
+    "--line-chrome": P.lineChrome,
+    "--line-soft": P.lineSoft,
+    "--line": P.line,
+    "--line-card": P.lineCard,
+    "--track": P.track,
+    "--line-media": P.lineMedia,
+    "--line-control": P.lineControl,
+    "--line-tip": P.lineTip,
+    "--line-hover": P.lineHover,
+    "--line-strong": P.lineStrong,
+    "--scroll-thumb": P.lineControl,
+    // text
+    "--text-hi": P.white,
+    "--text": P.text,
+    "--text-soft": P.textSoft,
+    "--text-mid": P.textMid,
+    "--text-2": P.text2,
+    "--text-3": P.text3,
+    "--text-muted": P.textMuted,
+    "--text-lo": P.hlLow,
+    "--text-label": P.textLabel,
+    "--text-tag": P.textTag,
+    "--text-dim": P.textDim,
+    "--text-faint": P.textFaint,
+    "--text-ghost": P.textGhost,
+    "--text-disabled": P.textDisabled,
+    // accent
+    "--accent": P.accent,
+    "--accent-hover": P.accentHover,
+    "--accent-text": P.accentText,
+    "--accent-deep": P.accentDeep,
+    "--accent-pale": P.accentPale,
+    "--accent-soft": rgba(P.accent, 0.12),
+    "--accent-faint": rgba(P.accent, 0.07),
+    "--accent-line": rgba(P.accent, 0.26),
+    "--focus": P.accentText,
+    "--on-accent": P.bg,
+    // results and signals
+    "--win": P.win,
+    "--win-text": P.winText,
+    "--win-soft": rgba(P.win, 0.15),
+    "--win-faint": rgba(P.win, 0.07),
+    "--win-line": rgba(P.win, 0.26),
+    "--loss": P.loss,
+    "--loss-text": P.lossText,
+    "--loss-soft": rgba(P.loss, 0.15),
+    "--loss-faint": rgba(P.loss, 0.07),
+    "--loss-line": rgba(P.loss, 0.3),
+    "--warn": P.warn,
+    "--warn-text": P.warnText,
+    "--warn-faint": rgba(P.warn, 0.07),
+    "--warn-line": rgba(P.warn, 0.3),
+    "--mvp": P.mvp,
+    "--ally": P.ally,
+    "--enemy": P.enemy,
+    "--ok-text": P.okText,
+    "--lost-text": P.lostText,
+    "--error-text": P.errorText,
+    "--danger": P.danger,
+    // party A–D
+    "--party-0": PARTY_COLORS[0],
+    "--party-1": PARTY_COLORS[1],
+    "--party-2": PARTY_COLORS[2],
+    "--party-3": PARTY_COLORS[3],
+    // type
+    "--font": FONT_BODY,
+    "--font-display": FONT_DISPLAY,
+    "--font-mono": FONT_MONO,
+  };
+  return { ...vars, ...legacyVars() };
 }
-
-const hueGap = (a: string, b: string) => {
-  const d = Math.abs(hue(a) - hue(b));
-  return Math.min(d, 360 - d);
-};
 
 /**
- * The 4 party colours for an accent. Listed accents use the table. For any other accent the design's fixed
- * fallback pair is party[0..1] unchanged (v8:554: `PARTY_SETS[accent] || ['#7fa6e8', '#b596e0']`); the reserve
- * walk runs only for party[2..3]: the first reserve colours that are ≥ 30° of hue from the accent, GREEN, LOSS
- * and every colour already taken, and if that leaves fewer than 4, fill from the reserve in order.
+ * LEGACY: the v8 card UI's variable names, mapped onto the v2 palette so the old components (PlayerCard, Last5, the
+ * details/ and mystats/ parts) still render while the screens are rebuilt. Delete this block, and its test, with the
+ * last old component.
  */
-export function partySet(accent: string): [string, string, string, string] {
-  const known = PARTY_SETS4[accent.toLowerCase()];
-  if (known) return [...known];
-
-  const set = [...FALLBACK_PAIR];
-  for (const c of RESERVE) {
-    if (set.length >= 4) break;
-    const clear = [accent, GREEN, LOSS, ...set].every((o) => hueGap(c, o) >= 30);
-    if (!set.includes(c) && clear) set.push(c);
-  }
-  for (const c of RESERVE) if (set.length < 4 && !set.includes(c)) set.push(c);
-  return set.slice(0, 4) as [string, string, string, string];
-}
-
-// ── options → CSS variables (spec §1.4, §1.5, §1.8) ─────────────────────────────
-export function themeVars(o: ThemeOptions): Record<string, string> {
-  const t = TONES[o.tone] ?? TONES.Neutral;
-  const accent = o.accent;
-  const win = o.results === "Green / Red" ? GREEN : accent;
-  const loss = o.results === "Accent / Gray" ? t.gray : LOSS;
-  const solid = o.resultFill === "Solid";
-  const tint = (c: string) => mix(t.card, c, 0.24);
-  const chip = (c: string) => (solid ? { bg: c, fg: ON_SOLID } : { bg: tint(c), fg: c });
-  const W = chip(win);
-  const L = chip(loss);
-  const party = partySet(accent);
-
-  // The newest last-5 tile in Arrow style (the Underline style uses the plain boxes).
-  const newestBd = solid ? `2px solid ${t.text}` : "none";
-
+function legacyVars(): Record<string, string> {
+  const ON_SOLID = P.bg;
   return {
-    "--bg": t.bg,
-    "--card": t.card,
-    "--raised": t.raised,
-    "--line": t.line,
-    "--line2": t.line2,
-    "--text": t.text,
-    "--text-soft": t.textSoft,
-    "--text2": t.text2,
-    "--text3": t.text3,
-    "--gray": t.gray,
-
-    "--line-hover": t.line2,
-    "--skel": t.raised,
-    "--hover-row": mix(t.card, t.raised, 0.6),
-    "--team-bg": mix(t.card, t.raised, 0.45),
-    "--tip-bg": mix(t.card, "#ffffff", 0.07),
-    "--arrow-col": rgba(t.text2, 0.6),
-    "--self-frame": rgba(t.text, 0.55),
-    "--scroll": t.line2,
-    "--strip-fade": `linear-gradient(90deg, ${rgba(t.card, 0)} 0%, ${rgba(t.card, 0.25)} 55%, ${t.card} 100%)`,
-
-    "--accent": accent,
-    "--party-0": party[0],
-    "--party-1": party[1],
-    "--party-2": party[2],
-    "--party-3": party[3],
-
-    "--win": win,
-    "--loss": loss,
-
-    "--r-w-bg": W.bg,
-    "--r-w-fg": W.fg,
+    "--raised": P.rowHover,
+    "--line2": P.lineControl,
+    "--text2": P.textMuted,
+    "--text3": P.textGhost,
+    "--gray": P.textDim,
+    "--hover-row": P.rowHover,
+    "--team-bg": P.cardHead,
+    "--arrow-col": rgba(P.textMuted, 0.6),
+    "--self-frame": rgba(P.text, 0.55),
+    "--scroll": P.lineControl,
+    "--strip-fade": `linear-gradient(90deg, ${rgba(P.card, 0)} 0%, ${rgba(P.card, 0.25)} 55%, ${P.card} 100%)`,
+    "--on-solid": ON_SOLID,
+    "--r-w-bg": rgba(P.win, 0.15),
+    "--r-w-fg": P.win,
     "--r-w-bd": "none",
-    "--r-l-bg": L.bg,
-    "--r-l-fg": L.fg,
+    "--r-l-bg": rgba(P.loss, 0.15),
+    "--r-l-fg": P.loss,
     "--r-l-bd": "none",
     "--r-d-bg": "transparent",
-    "--r-d-fg": t.text2,
-    "--r-d-bd": `1px solid ${t.text3}`,
+    "--r-d-fg": P.textMuted,
+    "--r-d-bd": `1px solid ${P.lineStrong}`,
     "--r-e-bg": "transparent",
     "--r-e-fg": "transparent",
-    "--r-e-bd": `1px dashed ${t.line2}`,
-
-    "--rn-w-bg": win,
+    "--r-e-bd": `1px dashed ${P.lineControl}`,
+    "--rn-w-bg": P.win,
     "--rn-w-fg": ON_SOLID,
-    "--rn-w-bd": newestBd,
-    "--rn-l-bg": loss,
+    "--rn-w-bd": "none",
+    "--rn-l-bg": P.loss,
     "--rn-l-fg": ON_SOLID,
-    "--rn-l-bd": newestBd,
+    "--rn-l-bd": "none",
     "--rn-d-bg": "transparent",
-    "--rn-d-fg": t.text,
-    "--rn-d-bd": `1px solid ${t.text}`,
-
-    "--font": FONTS[o.font] ?? FONTS.Barlow,
-    "--on-solid": ON_SOLID,
+    "--rn-d-fg": P.text,
+    "--rn-d-bd": `1px solid ${P.text}`,
   };
 }
 
-/** Write the variables on :root and `data-last5` on #app. Call before the first paint. */
-export function applyTheme(o: ThemeOptions): void {
-  const style = document.documentElement.style;
-  for (const [k, v] of Object.entries(themeVars(o))) style.setProperty(k, v);
-  document.getElementById("app")?.setAttribute("data-last5", o.last5Style === "Arrow" ? "arrow" : "underline");
+/** Write every variable on :root. main.ts runs it (through themeStore) before the first paint. */
+export function applyTheme(root: HTMLElement = document.documentElement): void {
+  for (const [k, v] of Object.entries(themeVars())) root.style.setProperty(k, v);
 }
 
-// ── DEV URL override (?tone=&accent=&results=&fill=&font=&last5=) ───────────────
-function pick<T extends string>(v: string | null, allowed: readonly T[]): T | undefined {
-  return allowed.find((a) => a === v);
+// ── rank tiers (prototype `TG`, `SHORT`, `tier()`) ───────────────────────────────
+/** [first tier of the group, group name, colour]. Tiers 0–2 are Unranked; 27 is Radiant. */
+export const TIER_GROUPS: readonly (readonly [number, string, string])[] = [
+  [0, "Unranked", "#8a8f97"],
+  [3, "Iron", "#a4a7a4"],
+  [6, "Bronze", "#c79f6e"],
+  [9, "Silver", "#cfd5d5"],
+  [12, "Gold", "#eccf56"],
+  [15, "Platinum", "#5fc6d4"],
+  [18, "Diamond", "#cfa6ea"],
+  [21, "Ascendant", "#6ae2af"],
+  [24, "Immortal", "#f2678f"],
+  [27, "Radiant", "#fff1a1"],
+];
+
+const SHORT: Record<string, string> = { Platinum: "Plat", Diamond: "Dia", Ascendant: "Asc", Immortal: "Imm" };
+
+/** A tier number the helpers accept: anything else (null, NaN, negative) reads as Unranked. */
+const norm = (t: number | null | undefined): number => (typeof t === "number" && Number.isFinite(t) && t > 0 ? Math.floor(t) : 0);
+
+function group(t: number): readonly [number, string, string] {
+  let g = TIER_GROUPS[0]!;
+  for (const x of TIER_GROUPS) if (t >= x[0]) g = x;
+  return g;
 }
 
-export function themeFromSearch(search: string): Partial<ThemeOptions> {
-  const q = new URLSearchParams(search);
-  const out: Partial<ThemeOptions> = {};
-  const tone = pick(q.get("tone"), ["Neutral", "Cool", "Warm"] as const);
-  if (tone) out.tone = tone;
-  const accent = /^#?([0-9a-f]{6})$/i.exec(q.get("accent") ?? "");
-  if (accent) out.accent = `#${accent[1]!.toLowerCase()}`;
-  const results = pick(q.get("results"), ["Green / Red", "Accent / Red", "Accent / Gray"] as const);
-  if (results) out.results = results;
-  const fill = pick(q.get("fill"), ["Tinted", "Solid"] as const);
-  if (fill) out.resultFill = fill;
-  const font = pick(q.get("font"), ["Barlow", "IBM Plex Sans", "Archivo"] as const);
-  if (font) out.font = font;
-  const last5 = pick(q.get("last5"), ["Arrow", "Underline"] as const);
-  if (last5) out.last5Style = last5;
-  return out;
+/** The division suffix (" 1"–" 3"); none for Unranked and Radiant. */
+const division = (t: number) => (t >= 27 || t < 3 ? "" : ` ${t - group(t)[0] + 1}`);
+
+/** The tier's name from meta (valorant-api's "DIAMOND 2" → "Diamond 2"), when meta has it; ranked tiers only. */
+function metaName(t: number, meta: Meta | null | undefined): string | null {
+  if (t < 3 || !meta) return null;
+  const raw = meta.tiers[String(t)]?.name;
+  return raw ? titleCase(raw) : null;
 }
+
+/** "Diamond 2", "Radiant", "Unranked". The name meta carries wins (it follows the game's own tables). */
+export function tierName(t: number | null | undefined, meta?: Meta | null): string {
+  const n = norm(t);
+  return metaName(n, meta) ?? group(n)[1] + division(n);
+}
+
+/** "Dia 2", "Plat 1", "Asc 3", "Imm 1", "Gold 2", "Radiant", "Unranked". */
+export function tierShort(t: number | null | undefined, meta?: Meta | null): string {
+  const n = norm(t);
+  const name = metaName(n, meta);
+  if (name) {
+    const [first = "", ...rest] = name.split(" ");
+    return [SHORT[first] ?? first, ...rest].join(" ");
+  }
+  const g = group(n)[1];
+  return (SHORT[g] ?? g) + division(n);
+}
+
+/** The design's colour for the tier's group (fixed palette, never valorant-api's colours). */
+export function tierColor(t: number | null | undefined): string {
+  return group(norm(t))[2];
+}
+
+// ── skin editions (prototype `TIERC`) ────────────────────────────────────────────
+export const EDITION_COLORS = {
+  Select: "#5a9fe2",
+  Deluxe: "#2fbfa4",
+  Premium: "#d1548d",
+  Exclusive: "#f5955b",
+  Ultra: "#fad663",
+} as const;
+
+export type Edition = keyof typeof EDITION_COLORS;
+
+// ── stat highlight (prototype `hl`) ──────────────────────────────────────────────
+/**
+ * The colour of a stat value: ≥ `hi` white, ≤ `lo` dimmed (still readable), else the normal band. With the
+ * "Highlight standout stats" setting off every value is the plain stat colour.
+ */
+export function hl(v: number | null | undefined, hi: number, lo: number, on = true): string {
+  if (!on || typeof v !== "number" || !Number.isFinite(v)) return P.textSoft;
+  return v >= hi ? P.white : v <= lo ? P.hlLow : P.textMid;
+}
+
+/** Win%: ≥ 60 white, ≤ 47 dim. */
+export const hlWinPct = (v: number | null | undefined, on = true) => hl(v, 60, 47, on);
+/** K/D: ≥ 1.3 white, ≤ 0.95 dim. */
+export const hlKd = (v: number | null | undefined, on = true) => hl(v, 1.3, 0.95, on);
+/** HS%: ≥ 28 white, ≤ 19 dim. */
+export const hlHs = (v: number | null | undefined, on = true) => hl(v, 28, 19, on);

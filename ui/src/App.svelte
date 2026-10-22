@@ -2,18 +2,25 @@
   import { isTauri } from "@tauri-apps/api/core";
   import type { Attachment } from "svelte/attachments";
   import type { Readable } from "svelte/store";
+  import ProfileDrawer from "./components/profile/ProfileDrawer.svelte";
+  import GlanceShell from "./components/shell/GlanceShell.svelte";
+  import NavRail from "./components/shell/NavRail.svelte";
+  import TitleBar from "./components/shell/TitleBar.svelte";
   import Tooltip from "./components/Tooltip.svelte";
-  import TopBar from "./components/TopBar.svelte";
   import { tauriBridge } from "./lib/api";
   import { keyAction, runKeyAction } from "./lib/boot";
   import { cardOpenGuard } from "./lib/clickGuard";
-  import { router, scrollHost } from "./lib/router.svelte";
+  import { router } from "./lib/router.svelte";
   import { live, mystats } from "./lib/stores";
   import { reportError } from "./lib/uilog";
-  import Details from "./screens/Details.svelte";
+  import About from "./screens/About.svelte";
+  import Ascii from "./screens/Ascii.svelte";
+  import Competitive from "./screens/Competitive.svelte";
+  import History from "./screens/History.svelte";
   import Live from "./screens/Live.svelte";
-  import Match from "./screens/Match.svelte";
-  import MyStats from "./screens/MyStats.svelte";
+  import Saved from "./screens/Saved.svelte";
+  import Settings from "./screens/Settings.svelte";
+  import Skins from "./screens/Skins.svelte";
 
   // Ctrl+Shift+L / Ctrl+Shift+D (no UI). Only meaningful with the Rust side present.
   function onkeydown(e: KeyboardEvent) {
@@ -25,29 +32,20 @@
     );
   }
 
-  // A card click opens Details; the second click of a double-click must not land on the page that replaced the grid
-  // (Back sits where the top-left card was). Capture phase, so it is gone before any handler on the new page sees it.
+  // A click that opens a page or the drawer must not have its double-click's second click land on what replaced it.
+  // Capture phase, so it is gone before any handler on the new page sees it.
   function swallowDoubleClick(e: MouseEvent) {
     if (!cardOpenGuard.swallows()) return;
     e.stopPropagation();
     e.preventDefault();
   }
 
-  /** One boundary per page: a crash on one page never follows the user to the next. "Show more" stays on its page. */
-  const pageKey = $derived(
-    router.route.name === "live"
-      ? "live"
-      : router.route.name === "mystats"
-        ? "mystats"
-        : router.route.name === "details"
-          ? `details:${router.route.puuid}`
-          : `match:${router.route.matchId}`,
-  );
+  /** One boundary per page: a crash on one page never follows the user to the next. A scoreboard is its own page. */
+  const pageKey = $derived(router.matchId === null ? router.screen : `${router.screen}:match:${router.matchId}`);
 
   /**
-   * A crashed page tries again on the next update of the data it shows (the likeliest cause is one bad payload): My
-   * Stats on the next My Stats update, any other page on the next live update. A live update says nothing new about My
-   * Stats, so it never re-runs a My Stats crash.
+   * A crashed page tries again on the next update of the data it shows (the likeliest cause is one bad payload):
+   * Competitive on the next My Stats update, any other page (and the drawer) on the next live update.
    */
   const retryOnNextUpdate =
     (reset: () => void, source: Readable<unknown>): Attachment =>
@@ -59,41 +57,74 @@
         else reset();
       });
     };
+
+  // #app fills the window; glance mode drops the full layout's minimum size (the window is a 420px column then).
+  $effect(() => {
+    document.getElementById("app")?.toggleAttribute("data-glance", router.glance);
+  });
 </script>
 
 <svelte:window {onkeydown} onclickcapture={swallowDoubleClick} />
 
-<TopBar route={router.route} live={$live} />
-{#key pageKey}
-  <svelte:boundary onerror={(err) => reportError("page", err)}>
-    {#if router.route.name === "live"}
-      <Live live={$live} />
-    {:else}
-      <!-- One scroll container for My Stats, Details and Match (spec §6.1, §9.1); `go` resets it to the top. -->
-      <div class="scroll" use:scrollHost>
-        {#if router.route.name === "mystats"}
-          <MyStats />
-        {:else if router.route.name === "details"}
-          <Details puuid={router.route.puuid} more={router.route.more} />
-        {:else}
-          <Match matchId={router.route.matchId} focusPuuid={router.route.focusPuuid} from={router.route.from} />
-        {/if}
-      </div>
-    {/if}
-    <!-- A quiet empty page: no text, no status. The top bar (and its Live tab) stay. -->
+{#if router.glance}
+  <svelte:boundary onerror={(err) => reportError("glance", err)}>
+    <GlanceShell />
     {#snippet failed(_error, reset)}
-      <div class="blank" {@attach retryOnNextUpdate(reset, router.route.name === "mystats" ? mystats : live)}></div>
+      <div class="blank" {@attach retryOnNextUpdate(reset, live)}></div>
     {/snippet}
   </svelte:boundary>
-{/key}
+{:else}
+  <TitleBar />
+  <div class="row">
+    <NavRail />
+    <main class="main">
+      {#key pageKey}
+        <svelte:boundary onerror={(err) => reportError("page", err)}>
+          {#if router.screen === "live"}
+            <Live live={$live} />
+          {:else if router.screen === "saved"}
+            <Saved />
+          {:else if router.screen === "history"}
+            <History />
+          {:else if router.screen === "comp"}
+            <Competitive />
+          {:else if router.screen === "skins"}
+            <Skins />
+          {:else if router.screen === "ascii"}
+            <Ascii />
+          {:else if router.screen === "settings"}
+            <Settings />
+          {:else}
+            <About />
+          {/if}
+          <!-- A quiet empty page: no text. The title bar and the nav rail stay. -->
+          {#snippet failed(_error, reset)}
+            <div class="blank" {@attach retryOnNextUpdate(reset, router.screen === "comp" ? mystats : live)}></div>
+          {/snippet}
+        </svelte:boundary>
+      {/key}
+      {#if router.profile !== null}
+        <!-- The drawer covers <main> only (the design's `position:absolute; inset:0` inside main). -->
+        <svelte:boundary onerror={(err) => reportError("profile", err)}>
+          <ProfileDrawer puuid={router.profile} />
+          {#snippet failed(_error, reset)}
+            <div class="blank" {@attach retryOnNextUpdate(reset, live)}></div>
+          {/snippet}
+        </svelte:boundary>
+      {/if}
+    </main>
+  </div>
+{/if}
 <Tooltip />
 
 <style>
-  /* #app is the mount target from index.html (spec §2.1). */
+  /* #app is the mount target from index.html: it fills the window. */
   :global(#app) {
     position: relative;
-    width: 1000px;
-    height: 800px;
+    width: 100%;
+    height: 100%;
+    min-width: 1180px;
+    min-height: 760px;
     overflow: hidden;
     background: var(--bg);
     color: var(--text);
@@ -103,18 +134,28 @@
     -webkit-font-smoothing: antialiased;
   }
 
-  .blank {
-    flex: 1;
+  :global(#app[data-glance]) {
+    min-width: 0;
     min-height: 0;
   }
 
-  .scroll {
+  .row {
     flex: 1;
     min-height: 0;
-    overflow-y: auto;
-    scrollbar-width: thin;
-    scrollbar-color: var(--scroll) transparent;
-    scrollbar-gutter: stable;
-    padding: 14px 8px 22px 16px;
+    display: flex;
+  }
+
+  .main {
+    flex: 1;
+    min-width: 0;
+    min-height: 0;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .blank {
+    flex: 1;
+    min-height: 0;
   }
 </style>

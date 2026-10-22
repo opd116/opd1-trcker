@@ -2,24 +2,22 @@
      Party Rank in the Lobby (2+ players), the map in Agent Select and In Game. Empty on My Stats, Details and Match.
      The active tab is My Stats on My Stats and on a Match opened from it, Live everywhere else. -->
 <script lang="ts">
-  import { activeTab, go, type Route } from "../lib/router.svelte";
+  // LEGACY v8 top bar: no longer in the layout (the v2 title bar + nav rail replace it); kept compiling on the v2 router.
+  import { go, router } from "../lib/router.svelte";
   import type { LiveState } from "../lib/types";
   import AvgPartyRank from "./AvgPartyRank.svelte";
   import MapGroup from "./MapGroup.svelte";
 
-  let { route, live }: { route: Route; live: LiveState | null } = $props();
+  let { live }: { live: LiveState | null } = $props();
 
   const TABS = [
     { id: "live", label: "Live" },
     { id: "mystats", label: "My Stats" },
   ] as const;
-  const active = $derived(activeTab(route));
+  const active = $derived(router.screen === "comp" ? "mystats" : "live");
+  const route = $derived({ name: router.screen === "live" && router.matchId === null ? "live" : "other" });
 
-  // A tab already showing its own page stays put (no scroll reset); from a Match or Details it goes to the page.
-  const open = (id: (typeof TABS)[number]["id"]) => {
-    if (id === "mystats" && route.name === "mystats") return;
-    go({ name: id });
-  };
+  const open = (id: (typeof TABS)[number]["id"]) => go(id === "mystats" ? "comp" : "live");
 </script>
 
 <header class="bar">

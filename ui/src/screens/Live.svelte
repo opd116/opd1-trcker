@@ -8,16 +8,16 @@
   import PlayerCard from "../components/PlayerCard.svelte";
   import { cardOpenGuard } from "../lib/clickGuard";
   import { liveColumns, type SlotItem } from "../lib/live";
-  import { go } from "../lib/router.svelte";
+  import { openProfile } from "../lib/router.svelte";
   import type { LiveState } from "../lib/types";
 
   let { live }: { live: LiveState | null } = $props();
 
   const cols = $derived(liveColumns(live));
-  // Arms the double-click guard first (App swallows clicks for 400 ms), so the second click of a double-click can't land on Details.
+  // Arms the double-click guard first (App swallows clicks for 400 ms), so the second click of a double-click can't land on the drawer.
   const open = (puuid: string) => {
     cardOpenGuard.arm();
-    go({ name: "details", puuid, more: false });
+    openProfile(puuid);
   };
   const key = (s: SlotItem, i: number) => (s.kind === "card" ? s.card.puuid : `${s.kind}:${i}`);
 </script>

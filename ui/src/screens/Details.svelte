@@ -18,8 +18,8 @@
   import { closeDetails, getPlayerDetails } from "../lib/api";
   import { DETAILS_RETRY_MS, DETAILS_TIMEOUT_MS } from "../lib/boot";
   import { recentShown, settledDetails, type MatchFrom } from "../lib/details";
-  import { go } from "../lib/router.svelte";
-  import { live, openDetails } from "../lib/stores";
+  import { openMatch as openScoreboard } from "../lib/router.svelte";
+    import { live, openDetails } from "../lib/stores";
   import { reportError } from "../lib/uilog";
 
   let { puuid, more }: { puuid: string; more: boolean } = $props();
@@ -50,8 +50,9 @@
     closeDetails(puuid).catch((err: unknown) => reportError("details close", err));
   });
 
+  // LEGACY v8 page (no longer mounted; the v2 profile drawer replaces it).
   const openMatch = (from: MatchFrom) => (matchId: string) =>
-    go({ name: "match", matchId, focusPuuid: puuid, from, back: { puuid, more } });
+    openScoreboard(matchId, { from: from === "encounter" ? "encounter" : "profile", focusPuuid: puuid });
 </script>
 
 <!--

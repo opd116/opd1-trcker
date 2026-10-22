@@ -15,7 +15,7 @@
   import SessionPanel from "../components/mystats/SessionPanel.svelte";
   import StatTable from "../components/mystats/StatTable.svelte";
   import WinCells from "../components/mystats/WinCells.svelte";
-  import { go } from "../lib/router.svelte";
+  import { openMatch } from "../lib/router.svelte";
   import { mystats, refreshMyStats } from "../lib/stores";
 
   const s = $derived($mystats);
@@ -25,7 +25,7 @@
   /** The user's id is part of the stats (`MyStats.puuid`): a row or a session chip opens its Match Details whenever the page has data. */
   const open = $derived(
     s
-      ? (matchId: string) => go({ name: "match", matchId, focusPuuid: s.puuid, from: "recent", back: "mystats" })
+      ? (matchId: string) => openMatch(matchId, { from: "comp", focusPuuid: s.puuid })
       : undefined,
   );
 

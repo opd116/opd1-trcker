@@ -1,6 +1,8 @@
-<!-- Back (spec §6.1, v8:164-168): Details → Live, Match → Details with its Show more kept (router `back`). -->
+<!-- LEGACY v8 Back (spec §6.1): a scoreboard goes back (router `backFromMatch`), the old Details page closes. -->
 <script lang="ts">
-  import { back } from "../../lib/router.svelte";
+  import { backFromMatch, closeProfile, router } from "../../lib/router.svelte";
+
+  const back = () => (router.matchId !== null ? backFromMatch() : closeProfile());
 </script>
 
 <div class="brow">

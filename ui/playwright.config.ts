@@ -1,4 +1,4 @@
-// Playwright (spec §8.1): Chromium at exactly 1000×800, DPR 1, UTC, en-US, against the DEV demo feed.
+// Playwright (spec §8.1): Chromium at 1280×800 (the v2 default window; the minimum is 1180×760), DPR 1, UTC, en-US, against the DEV demo feed.
 // The page clock is fixed by tests/harness.ts (2026-09-29T21:59:00Z). fit-dpr.spec.ts overrides the DPR to 1.5
 // with test.use; there is no second project, so no two projects write the same reference PNG.
 import { defineConfig } from "@playwright/test";
@@ -27,7 +27,7 @@ export default defineConfig({
   },
   use: {
     baseURL: "http://127.0.0.1:4173",
-    viewport: { width: 1000, height: 800 },
+    viewport: { width: 1280, height: 800 },
     deviceScaleFactor: 1,
     timezoneId: "UTC",
     locale: "en-US",

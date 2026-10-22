@@ -1,47 +1,64 @@
-// Routes and navigation (spec §2.4). One `$state` object; every navigation goes through `go`.
-import { openDetails } from "./boot";
-import type { MatchFrom } from "./details";
+// Navigation (design v2): one `$state` object. The nav rail picks a screen (`go`); the profile drawer opens over the
+// current screen (`openProfile` / `closeProfile`); a match scoreboard is the History screen with a match id
+// (`openMatch` / `backFromMatch`); glance mode is a flag (`setGlance`).
+//
+// The router also owns the data lifecycle of the two "open page" slots in boot.ts, so screens only read them:
+//   openProfile → `openDetails.open(puuid, player_details)`;  closeProfile → `openDetails.close()` + `close_details`
+//   openMatch   → `openMatch.open(matchId, match_details)`;   leaving it   → `openMatch.close()` + `close_match`
+import { closeDetails, closeMatch, getMatchDetails, getPlayerDetails, setGlance as setGlanceWindow } from "./api";
+import { DETAILS_RETRY_MS, DETAILS_TIMEOUT_MS, openDetails, openMatch as matchSlot } from "./boot";
+import { emptyMatch, settledDetails } from "./details";
 import { hideTip } from "./tooltip.svelte";
-import type { Stage } from "./types";
+import type { PlayerCard, Stage } from "./types";
+import { reportError } from "./uilog";
 
-/** Where Back goes from a Match: the Player Details it came from (with its "Show more" state), or My Stats. */
-export type MatchBack = { puuid: string; more: boolean } | "mystats";
-
-export type Route =
-  | { name: "live" }
-  | { name: "mystats" }
-  | { name: "details"; puuid: string; more: boolean }
-  | {
-      name: "match";
-      matchId: string;
-      focusPuuid: string;
-      from: MatchFrom;
-      back: MatchBack;
-    };
-
-/** The tab a route sits under: My Stats, and a Match opened from it, are My Stats; everything else is Live (spec §2.2). */
-export function activeTab(r: Route): "live" | "mystats" {
-  return r.name === "mystats" || (r.name === "match" && r.back === "mystats") ? "mystats" : "live";
+export type Screen = "live" | "saved" | "history" | "comp" | "skins" | "ascii" | "settings" | "about";
+/** Where a scoreboard was opened from: decides where Back goes (`backFromMatch`). */
+export type MatchFrom = "history" | "recap" | "lastMatch" | "encounter" | "profile" | "comp";
+/** The profile a scoreboard was opened from (an encounter row or a recent match in the drawer), and the screen under it. */
+export interface EncFrom {
+  puuid: string;
+  screen: Screen;
 }
 
-/** Starts on Live; the first live state may move it to My Stats (`startPage`). */
-export const router = $state<{ route: Route }>({ route: { name: "live" } });
+export const SCREENS: readonly Screen[] = ["live", "saved", "history", "comp", "skins", "ascii", "settings", "about"];
 
-/** The Details/Match/My Stats scroll container (registered by App.svelte). Live has none. */
+export const router = $state<{
+  screen: Screen;
+  /** The open scoreboard (shown on the History screen), or null for the History list. */
+  matchId: string | null;
+  /** The player whose perspective the scoreboard takes (`match_details`' `focusPuuid`). */
+  matchFocus: string | null;
+  matchFrom: MatchFrom | null;
+  encFrom: EncFrom | null;
+  /** The puuid of the open profile drawer. */
+  profile: string | null;
+  /** The last profile opened (the prototype keeps its row marked after the drawer closes). */
+  lastProfile: string | null;
+  glance: boolean;
+}>({
+  screen: "live",
+  matchId: null,
+  matchFocus: null,
+  matchFrom: null,
+  encFrom: null,
+  profile: null,
+  lastProfile: null,
+  glance: false,
+});
+
+// ── scroll ───────────────────────────────────────────────────────────────────────
+/** The scroll container of the screen on display (`use:scrollHost`). */
 let scroller: HTMLElement | null = null;
-
-/** How far the page Back returns to was scrolled when the user left it for a Match (My Stats, or one player's Details). */
-const savedScroll = new Map<string, number>();
-/** What the next scroll container to mount is scrolled to (Back sets it; every other navigation starts at the top). */
+/** How far each list screen was scrolled when the user left it for a scoreboard. Keyed by screen. */
+const savedScroll = new Map<Screen, number>();
+/** What the next scroll container to mount is scrolled to (Back sets it; everything else starts at the top). */
 let restoreTo = 0;
 
-/** The pages whose scroll position Back restores. */
-const pageId = (r: Route): string | null => (r.name === "mystats" ? "mystats" : r.name === "details" ? `details:${r.puuid}` : null);
-
 /**
- * `use:scrollHost` on the scroll container, so `go` can send it back to the top, and Back can put it where the page was
- * left. The container is new for every page (App keys it), so the restore happens when it mounts: its children are in
- * place by then, and a position the content is too short for yet is tried once more on the next frame.
+ * `use:scrollHost` on a screen's own scroll container, so `go` can reset it and Back from a scoreboard can put the
+ * list where it was. App keys each screen, so the container is new for every page and the restore happens when it
+ * mounts; a position the content is still too short for is tried once more on the next frame.
  */
 export function scrollHost(node: HTMLElement): { destroy(): void } {
   scroller = node;
@@ -62,53 +79,160 @@ export function scrollHost(node: HTMLElement): { destroy(): void } {
   };
 }
 
+// ── profile drawer ───────────────────────────────────────────────────────────────
+/** The element that opened the drawer: focus goes back to it when the drawer closes. */
+let profileTrigger: HTMLElement | null = null;
+
+/** The live card of a player, for the drawer's settled (failed) state. stores.ts registers it (no import cycle). */
+let liveCardOf: (puuid: string) => PlayerCard | undefined = () => undefined;
+export function setLiveCardLookup(fn: (puuid: string) => PlayerCard | undefined): void {
+  liveCardOf = fn;
+}
+
+function activeElement(): HTMLElement | null {
+  if (typeof document === "undefined") return null;
+  const el = document.activeElement;
+  return el instanceof HTMLElement && el !== document.body ? el : null;
+}
+
 /**
- * Navigate: clears the tooltip and resets the scroll container. Going to Live also forgets the open Player Details
- * (a Match page and Back keep them): a reopen then starts from the skeleton, never from an older answer. Leaving My
- * Stats or Details for a Match remembers how far the page was scrolled; `restore` (Back) puts it back.
+ * Open the drawer on `puuid` (and fetch `player_details` into `openDetails`). `trigger` gets the focus back when it
+ * closes; omitted, the element focused now does. Opening another player while one is open swaps the drawer's player
+ * (Rust replaces its open Details on the next `player_details`, so no `close_details` in between).
  */
-export function go(r: Route, restore = false): void {
+export function openProfile(puuid: string, trigger?: HTMLElement | null): void {
   hideTip();
-  if (scroller) {
-    const from = pageId(router.route);
-    if (r.name === "match" && from !== null) savedScroll.set(from, scroller.scrollTop);
-    scroller.scrollTop = 0;
+  profileTrigger = trigger === undefined ? activeElement() : trigger;
+  if (router.profile === puuid) return;
+  router.profile = puuid;
+  router.lastProfile = puuid;
+  openDetails
+    .open(puuid, getPlayerDetails, {
+      retryMs: DETAILS_RETRY_MS,
+      timeoutMs: DETAILS_TIMEOUT_MS,
+      settle: (p) => settledDetails(p, liveCardOf(p)),
+    })
+    .catch((err: unknown) => reportError("details", err));
+}
+
+/** Close the drawer without moving focus (a navigation replaces the page under it). */
+function dropProfile(): void {
+  const p = router.profile;
+  if (p === null) return;
+  router.profile = null;
+  profileTrigger = null;
+  openDetails.close();
+  closeDetails(p).catch((err: unknown) => reportError("details close", err));
+}
+
+/** Close the drawer; focus returns to the element that opened it (when it is still in the page). */
+export function closeProfile(): void {
+  if (router.profile === null) return;
+  hideTip();
+  const el = profileTrigger;
+  dropProfile();
+  if (el && el.isConnected) {
+    setTimeout(() => {
+      try {
+        el.focus({ preventScroll: true });
+      } catch {
+        // an element that cannot take focus any more
+      }
+    }, 0);
   }
-  const to = pageId(r);
-  restoreTo = restore && to !== null ? (savedScroll.get(to) ?? 0) : 0;
-  if (r.name === "live") openDetails.close();
-  router.route = r;
 }
 
-/** Back: Match → the page it was opened from (Details with "Show more" kept, or My Stats) at its old scroll position; Details → Live. */
-export function back(): void {
-  const r = router.route;
-  if (r.name === "match") {
-    go(r.back === "mystats" ? { name: "mystats" } : { name: "details", puuid: r.back.puuid, more: r.back.more }, true);
-  } else if (r.name === "details") go({ name: "live" });
+// ── match scoreboard ─────────────────────────────────────────────────────────────
+/** Leave the open scoreboard: the slot forgets it and Rust stops building it. */
+function dropMatch(): void {
+  const id = router.matchId;
+  if (id === null) return;
+  router.matchId = null;
+  router.matchFocus = null;
+  router.matchFrom = null;
+  router.encFrom = null;
+  matchSlot.close();
+  closeMatch(id).catch((err: unknown) => reportError("match close", err));
 }
-
-/** "Show more" on Details: keeps the scroll position, so it is not a `go`. */
-export function showMore(): void {
-  const r = router.route;
-  if (r.name === "details") router.route = { ...r, more: true };
-}
-
-let started = false;
 
 /**
- * The first live state with `settled: true` picks the start page, once: VALORANT closed → My Stats (the saved data is
- * all there is to show); anything else → Live. Rust publishes `closed` before it has looked at the game (the model's
- * starting value), so an unsettled state is no verdict: the app waits on Live until the first settled one. It moves
- * only a user who has not navigated yet.
+ * Open a scoreboard: the History screen with `matchId`, from `focusPuuid`'s side. Closes the drawer. The list screen
+ * it was opened from keeps its scroll position for Back. `encFrom` (the profile to reopen on Back) defaults to the
+ * drawer open right now, for `from: "encounter" | "profile"`.
  */
-export function startPage(stage: Stage, settled: boolean): void {
-  if (started || !settled) return;
-  started = true;
-  if (stage === "closed" && router.route.name === "live") go({ name: "mystats" });
+export function openMatch(matchId: string, opts: { from: MatchFrom; focusPuuid: string; encFrom?: EncFrom }): void {
+  hideTip();
+  const encFrom =
+    opts.encFrom ??
+    ((opts.from === "encounter" || opts.from === "profile") && router.profile !== null
+      ? { puuid: router.profile, screen: router.screen }
+      : null);
+  if (scroller && router.matchId === null) savedScroll.set(router.screen, scroller.scrollTop);
+  if (scroller) scroller.scrollTop = 0;
+  restoreTo = 0;
+  dropProfile();
+  if (router.matchId !== matchId) dropMatch();
+  router.screen = "history";
+  router.matchId = matchId;
+  router.matchFocus = opts.focusPuuid;
+  router.matchFrom = opts.from;
+  router.encFrom = encFrom;
+  matchSlot
+    .open(matchId, (id) => getMatchDetails(id, opts.focusPuuid), {
+      retryMs: DETAILS_RETRY_MS,
+      timeoutMs: DETAILS_TIMEOUT_MS,
+      settle: emptyMatch,
+    })
+    .catch((err: unknown) => reportError("match", err));
 }
 
-/** A new live stage: entering Agent Select always brings the user back to Live. */
-export function onStage(prev: Stage | null, next: Stage): void {
-  if (next === "pregame" && prev !== "pregame") go({ name: "live" });
+/**
+ * Back from a scoreboard: encounter / profile → the screen under the drawer, drawer reopened on that player;
+ * recap / lastMatch → Live; comp → Competitive; history → the History list. The list comes back at its old scroll.
+ */
+export function backFromMatch(): void {
+  if (router.matchId === null) return;
+  hideTip();
+  const from = router.matchFrom;
+  const enc = router.encFrom;
+  dropMatch();
+  const to: Screen =
+    (from === "encounter" || from === "profile") && enc
+      ? enc.screen
+      : from === "recap" || from === "lastMatch"
+        ? "live"
+        : from === "comp"
+          ? "comp"
+          : "history";
+  restoreTo = savedScroll.get(to) ?? 0;
+  router.screen = to;
+  if (enc && (from === "encounter" || from === "profile")) openProfile(enc.puuid, null);
 }
+
+// ── screens ──────────────────────────────────────────────────────────────────────
+/** Go to a screen (nav rail): closes the drawer and any scoreboard, hides the tooltip, starts at the top. */
+export function go(screen: Screen): void {
+  hideTip();
+  dropProfile();
+  dropMatch();
+  if (scroller) scroller.scrollTop = 0;
+  restoreTo = 0;
+  router.screen = screen;
+}
+
+// ── glance ───────────────────────────────────────────────────────────────────────
+/** Glance mode on/off: the UI flag, and the window (a 420px column, or back) through the backend's `set_glance`. */
+export function setGlance(on: boolean): void {
+  hideTip();
+  router.glance = on;
+  setGlanceWindow(on).catch((err: unknown) => reportError("glance", err));
+}
+
+// ── stage hooks (stores.ts `applyLive`) ──────────────────────────────────────────
+/** A new live stage: entering Agent Select always brings the user to Live. */
+export function onStage(prev: Stage | null, next: Stage): void {
+  if (next === "pregame" && prev !== "pregame") go("live");
+}
+
+/** Kept for `applyLive`: the v2 design always starts on Live, so the first settled stage no longer picks a page. */
+export function startPage(_stage: Stage, _settled: boolean): void {}

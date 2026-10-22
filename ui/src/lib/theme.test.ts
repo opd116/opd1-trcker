@@ -1,303 +1,152 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+/// <reference types="node" />
+import { existsSync, readFileSync } from "node:fs";
+import { describe, expect, it, vi } from "vitest";
 import {
-  ACCENTS,
   applyTheme,
-  DEFAULT_THEME,
-  FONTS,
+  EDITION_COLORS,
+  hl,
+  hlHs,
+  hlKd,
+  hlWinPct,
   mix,
-  PARTY_SETS4,
-  partySet,
+  PALETTE,
+  PARTY_COLORS,
   rgba,
-  themeFromSearch,
   themeVars,
-  TONES,
-  type ThemeOptions,
+  TIER_GROUPS,
+  tierColor,
+  tierName,
+  tierShort,
 } from "./theme";
+import type { Meta } from "./types";
 
-const NEUTRAL = {
-  "--bg": "#0e1013",
-  "--card": "#171a1f",
-  "--raised": "#20242a",
-  "--line": "#23272e",
-  "--line2": "#2c3139",
-  "--text": "#e4e1db",
-  "--text-soft": "#c9c9c7",
-  "--text2": "#a3a7ae",
-  "--text3": "#6f747c",
-  "--gray": "#8d929a",
-  "--line-hover": "#2c3139",
-  "--skel": "#20242a",
-  "--hover-row": "#1c2026",
-  "--team-bg": "#1b1f24",
-  "--tip-bg": "#272a2f",
-  "--arrow-col": "rgba(163,167,174,0.6)",
-  "--self-frame": "rgba(228,225,219,0.55)",
-  "--scroll": "#2c3139",
-  "--strip-fade": "linear-gradient(90deg, rgba(23,26,31,0) 0%, rgba(23,26,31,0.25) 55%, #171a1f 100%)",
-  "--accent": "#e3a54f",
-  "--party-0": "#7fa6e8",
-  "--party-1": "#b596e0",
-  "--party-2": "#b0c46c",
-  "--party-3": "#db8fb4",
-  "--win": "#5fbf8b",
-  "--loss": "#dc7a6e",
-  "--r-w-bg": "#284239",
-  "--r-w-fg": "#5fbf8b",
-  "--r-w-bd": "none",
-  "--r-l-bg": "#463132",
-  "--r-l-fg": "#dc7a6e",
-  "--r-l-bd": "none",
-  "--r-d-bg": "transparent",
-  "--r-d-fg": "#a3a7ae",
-  "--r-d-bd": "1px solid #6f747c",
-  "--r-e-bg": "transparent",
-  "--r-e-fg": "transparent",
-  "--r-e-bd": "1px dashed #2c3139",
-  "--rn-w-bg": "#5fbf8b",
-  "--rn-w-fg": "#14120e",
-  "--rn-w-bd": "none",
-  "--rn-l-bg": "#dc7a6e",
-  "--rn-l-fg": "#14120e",
-  "--rn-l-bd": "none",
-  "--rn-d-bg": "transparent",
-  "--rn-d-fg": "#e4e1db",
-  "--rn-d-bd": "1px solid #e4e1db",
-  "--font": "'Barlow', sans-serif",
-  "--on-solid": "#14120e",
-};
+// The prototype is not committed (.superpowers/): this cross-check runs only in a checkout that has it.
+const PROTO_URL = new URL("../../../.superpowers/design/v2/TrackerApp.dc.html", import.meta.url);
+const PROTOTYPE = existsSync(PROTO_URL) ? readFileSync(PROTO_URL, "utf8") : "";
+const hasPrototype = PROTOTYPE.length > 0;
 
-describe("colour math (spec §1.3)", () => {
-  it("mixes per channel with rounding", () => {
-    expect(mix("#171a1f", "#20242a", 0.6)).toBe("#1c2026");
+describe("palette (design v2)", () => {
+  it("the core semantic variables carry the prototype's values", () => {
+    const v = themeVars();
+    expect(v).toMatchObject({
+      "--bg": "#0c0d10",
+      "--chrome": "#08090b",
+      "--rail": "#0a0b0d",
+      "--card": "#131519",
+      "--card-head": "#16181c",
+      "--row-hover": "#1a1d22",
+      "--tip-bg": "#1d2026",
+      "--line": "#1f2227",
+      "--line-chrome": "#1a1c20",
+      "--line-control": "#2b2f36",
+      "--line-tip": "#33373e",
+      "--text": "#ecebe7",
+      "--text-muted": "#a6a9b0",
+      "--accent": "#9d8cff",
+      "--accent-soft": "rgba(157,140,255,.12)",
+      "--focus": "#b7abff",
+      "--win": "#5fcf8f",
+      "--loss": "#ef6a5b",
+      "--warn": "#ff9a3c",
+      "--mvp": "#f0c75e",
+      "--ally": "#56c8d8",
+      "--enemy": "#ff6b7d",
+      "--party-0": "#6fa8ff",
+      "--party-1": "#f0c75e",
+      "--party-2": "#e88fbf",
+      "--party-3": "#9fd36b",
+    });
+  });
+
+  it("every value is a colour, a gradient or a font stack; names are CSS custom properties", () => {
+    for (const [k, val] of Object.entries(themeVars())) {
+      expect(k, k).toMatch(/^--[a-z0-9-]+$/);
+      expect(val, k).toMatch(/^(#[0-9a-f]{6}|rgba\(|linear-gradient\(|none$|transparent$|1px |'[A-Z])/);
+    }
+  });
+
+  it("covers every hex the lead listed from the prototype", () => {
+    const listed = [
+      "#050607", "#08090b", "#0a0b0d", "#0c0d10", "#0e1013", "#111317", "#121418", "#131519", "#15171b", "#16181c", "#1a1d22",
+      "#1c1f25", "#1d2026", "#1f2228", "#22252b", "#1a1c20", "#1f2227", "#23262c", "#262a30", "#2b2f36", "#33373e", "#3a3e46",
+      "#4a4e56", "#ecebe7", "#d6d7da", "#d0d2d6", "#c9cbd0", "#b4b7bd", "#a6a9b0", "#9ba0a8", "#8f949c", "#8a8f97", "#7d828b",
+      "#6b7079", "#5b6068", "#9d8cff", "#b2a4ff", "#b7abff", "#8b7cf0", "#d6cfff", "#5fcf8f", "#8fe3b2", "#ef6a5b", "#ff8b7e",
+      "#ff9a3c", "#ffb36b", "#f0c75e", "#56c8d8", "#ff6b7d",
+    ];
+    const values = new Set(Object.values(themeVars()));
+    for (const h of listed) expect(values.has(h), h).toBe(true);
+  });
+
+  it.runIf(hasPrototype)("every palette hex appears in the prototype", () => {
+    for (const [k, h] of Object.entries(PALETTE)) expect(PROTOTYPE.toLowerCase(), k).toContain(h);
+    for (const h of PARTY_COLORS) expect(PROTOTYPE.toLowerCase()).toContain(h);
+  });
+
+  it("applyTheme writes every variable on the root it is given", () => {
+    const setProperty = vi.fn();
+    applyTheme({ style: { setProperty } } as unknown as HTMLElement);
+    const vars = themeVars();
+    expect(setProperty).toHaveBeenCalledTimes(Object.keys(vars).length);
+    for (const [k, v] of Object.entries(vars)) expect(setProperty).toHaveBeenCalledWith(k, v);
+  });
+
+  it("mix and rgba", () => {
     expect(mix("#000000", "#ffffff", 0.5)).toBe("#808080");
-    expect(mix("#123456", "#123456", 0.3)).toBe("#123456");
-  });
-
-  it("writes rgba() with integer channels", () => {
-    expect(rgba("#a3a7ae", 0.6)).toBe("rgba(163,167,174,0.6)");
-    expect(rgba("#171a1f", 0)).toBe("rgba(23,26,31,0)");
+    expect(rgba("#9d8cff", 0.12)).toBe("rgba(157,140,255,.12)");
+    expect(rgba("#9d8cff", 1)).toBe("rgba(157,140,255,1)");
   });
 });
 
-describe("themeVars", () => {
-  it("default vars equal the spec §1.4/§1.5 Neutral column", () => {
-    expect(DEFAULT_THEME).toEqual({
-      tone: "Neutral",
-      accent: "#e3a54f",
-      results: "Green / Red",
-      resultFill: "Tinted",
-      font: "Barlow",
-      last5Style: "Arrow",
-    });
-    const vars = themeVars(DEFAULT_THEME);
-    expect(vars).toEqual(NEUTRAL);
-    expect(vars["--r-w-bg"]).toBe("#284239");
-    expect(vars["--rn-w-bg"]).toBe("#5fbf8b");
+describe("tiers (prototype TG / tier())", () => {
+  it("TIER_GROUPS is the prototype's table", () => {
+    expect(TIER_GROUPS.map((g) => g[0])).toEqual([0, 3, 6, 9, 12, 15, 18, 21, 24, 27]);
+    expect(TIER_GROUPS[7]).toEqual([21, "Ascendant", "#6ae2af"]);
   });
 
-  const CASES: Array<[ThemeOptions["tone"], Record<string, string>]> = [
-    [
-      "Neutral",
-      {
-        hover: "#1c2026",
-        team: "#1b1f24",
-        tip: "#272a2f",
-        arrow: "rgba(163,167,174,0.6)",
-        self: "rgba(228,225,219,0.55)",
-        green: "#284239",
-        loss: "#463132",
-        gray: "#33373d",
-        "#e3a54f": "#483b2b",
-        "#4fc3ae": "#244341",
-        "#7fb1ef": "#303e51",
-        "#e58a9a": "#48353d",
-      },
-    ],
-    [
-      "Cool",
-      {
-        hover: "#192028",
-        team: "#181e26",
-        tip: "#242930",
-        arrow: "rgba(158,167,179,0.6)",
-        self: "rgba(224,228,234,0.55)",
-        green: "#26413a",
-        loss: "#443033",
-        gray: "#31373f",
-        "#e3a54f": "#463b2b",
-        "#4fc3ae": "#224242",
-        "#7fb1ef": "#2e3d52",
-        "#e58a9a": "#46343d",
-      },
-    ],
-    [
-      "Warm",
-      {
-        hover: "#201d1a",
-        team: "#1f1c19",
-        tip: "#2a2825",
-        arrow: "rgba(170,163,150,0.6)",
-        self: "rgba(231,226,217,0.55)",
-        green: "#2b4031",
-        loss: "#49302a",
-        gray: "#383530",
-        "#e3a54f": "#4a3a23",
-        "#4fc3ae": "#27413a",
-        "#7fb1ef": "#323d49",
-        "#e58a9a": "#4b3335",
-      },
-    ],
-  ];
-
-  it.each(CASES)("computed tints per tone: %s", (tone, want) => {
-    const base = { ...DEFAULT_THEME, tone };
-    const v = themeVars(base);
-    expect(v["--hover-row"]).toBe(want.hover);
-    expect(v["--team-bg"]).toBe(want.team);
-    expect(v["--tip-bg"]).toBe(want.tip);
-    expect(v["--arrow-col"]).toBe(want.arrow);
-    expect(v["--self-frame"]).toBe(want.self);
-    // tint(GREEN) and tint(LOSS) are the W and L chips of the default results mode.
-    expect(v["--r-w-bg"]).toBe(want.green);
-    expect(v["--r-l-bg"]).toBe(want.loss);
-    // tint(gray): the loss chip in "Accent / Gray".
-    expect(themeVars({ ...base, results: "Accent / Gray" })["--r-l-bg"]).toBe(want.gray);
-    // tint(accent): the win chip in "Accent / Red".
-    for (const accent of ACCENTS) {
-      expect(themeVars({ ...base, accent, results: "Accent / Red" })["--r-w-bg"]).toBe(want[accent]);
-    }
+  it("names, short names and colours", () => {
+    expect(tierName(0)).toBe("Unranked");
+    expect(tierName(2)).toBe("Unranked");
+    expect(tierName(3)).toBe("Iron 1");
+    expect(tierName(21)).toBe("Ascendant 1");
+    expect(tierName(23)).toBe("Ascendant 3");
+    expect(tierName(27)).toBe("Radiant");
+    expect(tierShort(16)).toBe("Plat 2");
+    expect(tierShort(20)).toBe("Dia 3");
+    expect(tierShort(22)).toBe("Asc 2");
+    expect(tierShort(24)).toBe("Imm 1");
+    expect(tierShort(13)).toBe("Gold 2");
+    expect(tierShort(27)).toBe("Radiant");
+    expect(tierShort(null)).toBe("Unranked");
+    expect(tierColor(22)).toBe("#6ae2af");
+    expect(tierColor(null)).toBe("#8a8f97");
+    expect(tierColor(27)).toBe("#fff1a1");
   });
 
-  it("follows the tone table for every base colour", () => {
-    for (const tone of ["Neutral", "Cool", "Warm"] as const) {
-      const t = TONES[tone];
-      const v = themeVars({ ...DEFAULT_THEME, tone });
-      expect([v["--bg"], v["--card"], v["--raised"], v["--line"], v["--line2"]]).toEqual([
-        t.bg,
-        t.card,
-        t.raised,
-        t.line,
-        t.line2,
-      ]);
-      expect([v["--text"], v["--text-soft"], v["--text2"], v["--text3"], v["--gray"]]).toEqual([
-        t.text,
-        t.textSoft,
-        t.text2,
-        t.text3,
-        t.gray,
-      ]);
-    }
-  });
-
-  it("results modes pick the win and loss colours", () => {
-    const acc = "#4fc3ae";
-    const accentRed = themeVars({ ...DEFAULT_THEME, accent: acc, results: "Accent / Red" });
-    expect([accentRed["--win"], accentRed["--loss"]]).toEqual([acc, "#dc7a6e"]);
-    const accentGray = themeVars({ ...DEFAULT_THEME, accent: acc, results: "Accent / Gray" });
-    expect([accentGray["--win"], accentGray["--loss"]]).toEqual([acc, TONES.Neutral.gray]);
-    expect(accentGray["--rn-l-bg"]).toBe(TONES.Neutral.gray);
-  });
-
-  it("Solid fill paints the chips and the newest tile with the result colour", () => {
-    const v = themeVars({ ...DEFAULT_THEME, resultFill: "Solid" });
-    expect([v["--r-w-bg"], v["--r-w-fg"], v["--r-w-bd"]]).toEqual(["#5fbf8b", "#14120e", "none"]);
-    expect([v["--r-l-bg"], v["--r-l-fg"], v["--r-l-bd"]]).toEqual(["#dc7a6e", "#14120e", "none"]);
-    expect([v["--rn-w-bg"], v["--rn-w-fg"], v["--rn-w-bd"]]).toEqual(["#5fbf8b", "#14120e", "2px solid #e4e1db"]);
-    expect([v["--rn-l-bd"], v["--rn-d-bd"]]).toEqual(["2px solid #e4e1db", "1px solid #e4e1db"]);
-    // Draw and empty boxes do not depend on the fill.
-    expect(v["--r-d-bg"]).toBe("transparent");
-    expect(v["--r-e-bd"]).toBe("1px dashed #2c3139");
-  });
-
-  it("font option picks the family", () => {
-    expect(themeVars({ ...DEFAULT_THEME, font: "IBM Plex Sans" })["--font"]).toBe("'IBM Plex Sans', sans-serif");
-    expect(themeVars({ ...DEFAULT_THEME, font: "Archivo" })["--font"]).toBe(FONTS.Archivo);
+  it("prefers meta's names when it has them (ranked tiers only)", () => {
+    const meta: Meta = { agents: {}, maps: {}, tiers: { "22": { name: "ASCENDANT 2", color: "x" }, "0": { name: "UNRANKED", color: "x" } } };
+    expect(tierName(22, meta)).toBe("Ascendant 2");
+    expect(tierShort(22, meta)).toBe("Asc 2");
+    expect(tierName(0, meta)).toBe("Unranked");
+    expect(tierName(16, meta)).toBe("Platinum 2"); // missing from meta: the table
   });
 });
 
-describe("party colours (spec §1.6)", () => {
-  const TABLE: Record<string, [string, string, string, string]> = {
-    "#e3a54f": ["#7fa6e8", "#b596e0", "#b0c46c", "#db8fb4"],
-    "#4fc3ae": ["#7fa6e8", "#b596e0", "#b0c46c", "#db8fb4"],
-    "#7fb1ef": ["#5fbfa9", "#c99ad8", "#b0c46c", "#db8fb4"],
-    "#e58a9a": ["#7fa6e8", "#5fbfa9", "#b0c46c", "#b596e0"],
-  };
-
-  it("party sets for the 4 accents", () => {
-    expect([...ACCENTS]).toEqual(Object.keys(TABLE));
-    for (const [accent, want] of Object.entries(TABLE)) {
-      expect(partySet(accent)).toEqual(want);
-      expect(PARTY_SETS4[accent]).toEqual(want);
-      const v = themeVars({ ...DEFAULT_THEME, accent });
-      expect([v["--party-0"], v["--party-1"], v["--party-2"], v["--party-3"]]).toEqual(want);
-    }
+describe("editions and the stat highlight", () => {
+  it("EDITION_COLORS", () => {
+    expect(EDITION_COLORS).toEqual({ Select: "#5a9fe2", Deluxe: "#2fbfa4", Premium: "#d1548d", Exclusive: "#f5955b", Ultra: "#fad663" });
   });
 
-  it("unknown accent uses the fallback rule", () => {
-    const PAIR = ["#7fa6e8", "#b596e0"];
-    // Far from every reserve colour: the fallback pair plus the first two reserve colours that pass.
-    expect(partySet("#ff00ff")).toEqual(TABLE["#e3a54f"]);
-    // The design's fixed pair is party[0..1] for every non-listed accent (v8:554), even one within 30° of
-    // blue (218°) or lilac (265°): only party[2..3] react to the accent.
-    expect(partySet("#6d9bf0")).toEqual([...PAIR, "#b0c46c", "#db8fb4"]);
-    expect(partySet("#a98ae0")).toEqual([...PAIR, "#b0c46c", "#db8fb4"]);
-    expect(themeVars({ ...DEFAULT_THEME, accent: "#6d9bf0" })["--party-0"]).toBe("#7fa6e8");
-    // A lime accent (hue 74°) rejects lime itself: the pair, rose, then the remaining reserve in order.
-    const lime = partySet("#a6c94a");
-    expect(lime.slice(0, 3)).toEqual([...PAIR, "#db8fb4"]);
-    expect(lime[3]).toBe("#b0c46c");
-    // A rose accent (hue ~337°) rejects rose: the pair, lime, then rose from the fill.
-    expect(partySet("#e0709a")).toEqual([...PAIR, "#b0c46c", "#db8fb4"]);
-    for (const accent of ["#ff00ff", "#6d9bf0", "#a98ae0", "#a6c94a", "#e0709a", "#000000", "#ffffff", "#123456", "#f00"]) {
-      expect(partySet(accent).slice(0, 2)).toEqual(PAIR);
-    }
-    // Always 4 distinct colours.
-    for (const accent of ["#000000", "#ffffff", "#123456", "#a6c94a", "#f00", "#6d9bf0", "#a98ae0", "#e0709a"]) {
-      const set = partySet(accent);
-      expect(set).toHaveLength(4);
-      expect(new Set(set).size).toBe(4);
-    }
-    expect(themeVars({ ...DEFAULT_THEME, accent: "#ff00ff" })["--party-2"]).toBe("#b0c46c");
-  });
-});
-
-describe("themeFromSearch", () => {
-  it("themeFromSearch parses all 6 params", () => {
-    const q =
-      "?scene=ingame&tone=Cool&accent=%234fc3ae&results=Accent%20%2F%20Gray&fill=Solid&font=IBM%20Plex%20Sans&last5=Underline";
-    expect(themeFromSearch(q)).toEqual({
-      tone: "Cool",
-      accent: "#4fc3ae",
-      results: "Accent / Gray",
-      resultFill: "Solid",
-      font: "IBM Plex Sans",
-      last5Style: "Underline",
-    });
-  });
-
-  it("ignores absent and invalid values", () => {
-    expect(themeFromSearch("")).toEqual({});
-    expect(themeFromSearch("?scene=ingame")).toEqual({});
-    expect(themeFromSearch("?tone=Pink&accent=red&results=x&fill=y&font=Comic&last5=z")).toEqual({});
-    expect(themeFromSearch("?accent=E3A54F")).toEqual({ accent: "#e3a54f" });
-    expect(themeFromSearch("?accent=4fc3ae")).toEqual({ accent: "#4fc3ae" });
-  });
-});
-
-describe("applyTheme", () => {
-  afterEach(() => vi.unstubAllGlobals());
-
-  it("writes the vars on :root and data-last5 on #app", () => {
-    const set: Record<string, string> = {};
-    const attrs: Record<string, string> = {};
-    vi.stubGlobal("document", {
-      documentElement: { style: { setProperty: (k: string, v: string) => (set[k] = v) } },
-      getElementById: (id: string) => (id === "app" ? { setAttribute: (k: string, v: string) => (attrs[k] = v) } : null),
-    });
-    applyTheme(DEFAULT_THEME);
-    expect(set).toEqual(NEUTRAL);
-    expect(attrs["data-last5"]).toBe("arrow");
-    applyTheme({ ...DEFAULT_THEME, last5Style: "Underline" });
-    expect(attrs["data-last5"]).toBe("underline");
+  it("hl: ≥ hi white, ≤ lo dim, else the normal band; off → plain", () => {
+    expect(hl(60, 60, 47)).toBe("#ffffff");
+    expect(hl(47, 60, 47)).toBe("#a3a7ae");
+    expect(hl(55, 60, 47)).toBe("#d0d2d6");
+    expect(hl(99, 60, 47, false)).toBe("#d6d7da");
+    expect(hl(null, 60, 47)).toBe("#d6d7da");
+    expect(hlWinPct(61)).toBe("#ffffff");
+    expect(hlKd(1.3)).toBe("#ffffff");
+    expect(hlKd(0.95)).toBe("#a3a7ae");
+    expect(hlHs(28)).toBe("#ffffff");
+    expect(hlHs(19)).toBe("#a3a7ae");
+    expect(hlHs(23)).toBe("#d0d2d6");
   });
 });

@@ -10,7 +10,9 @@ import {
   tipFocus,
   tipKey,
   tipOver,
-  tipPosition,
+  tipPlace,
+  tipView,
+  wlFill,
   tipState,
   wlRow,
 } from "./tooltip.svelte";
@@ -49,30 +51,67 @@ import type { Meta, Peak, PlayerCard, SessionMatch } from "./types";
 const rect = (left: number, top: number, width: number, height: number): DOMRectReadOnly =>
   ({ left, top, width, height, right: left + width, bottom: top + height, x: left, y: top }) as DOMRectReadOnly;
 
-describe("tipPosition (spec §4.1)", () => {
-  const R = rect(0, 0, 1000, 800);
+const anchor = (left: number, top: number, width: number, height: number) => ({ left, top, width, bottom: top + height });
 
-  it("centres on the trigger", () => {
-    expect(tipPosition(rect(400, 100, 100, 20), R)).toEqual({ x: 450, top: 128, transform: "translate(-50%,0)" });
+describe("tipPlace (design v2 attachTips)", () => {
+  it("centres above the trigger, 8px off", () => {
+    expect(tipPlace(anchor(400, 100, 100, 20), 120, 30, 1280)).toEqual({ left: 390, top: 62 });
   });
 
-  it("clamps x to 136–864", () => {
-    expect(tipPosition(rect(0, 100, 20, 20), R).x).toBe(136);
-    expect(tipPosition(rect(980, 100, 20, 20), R).x).toBe(864);
-    expect(tipPosition(rect(136 - 5, 100, 10, 20), R).x).toBe(136);
-    expect(tipPosition(rect(500, 100, 0, 20), R).x).toBe(500);
+  it("flips below when the top would come closer than 6px to the viewport", () => {
+    expect(tipPlace(anchor(400, 44, 100, 20), 120, 30, 1280)).toEqual({ left: 390, top: 6 }); // exactly 6: stays above
+    expect(tipPlace(anchor(400, 43, 100, 20), 120, 30, 1280)).toEqual({ left: 390, top: 71 });
   });
 
-  it("flips above when below > 720", () => {
-    // bottom 712 → below 720: still below
-    expect(tipPosition(rect(400, 692, 100, 20), R)).toEqual({ x: 450, top: 720, transform: "translate(-50%,0)" });
-    // bottom 713 → below 721: above the trigger
-    expect(tipPosition(rect(400, 693, 100, 20), R)).toEqual({ x: 450, top: 685, transform: "translate(-50%,-100%)" });
+  it("clamps left 6px inside the viewport, whatever its width", () => {
+    expect(tipPlace(anchor(0, 300, 20, 20), 200, 30, 1280).left).toBe(6);
+    expect(tipPlace(anchor(1270, 300, 10, 20), 200, 30, 1280).left).toBe(1280 - 200 - 6);
+    expect(tipPlace(anchor(1100, 300, 10, 20), 200, 30, 1180).left).toBe(1180 - 200 - 6);
+  });
+});
+
+describe("tipView: the design's variants", () => {
+  const attrs = (a: Record<string, string>) => ({ getAttribute: (k: string) => a[k] ?? null });
+  const at = anchor(0, 0, 10, 10);
+
+  it("plain text", () => {
+    expect(tipView(attrs({}), "Hello", at)).toEqual({ kind: "text", text: "Hello", anchor: at });
   });
 
-  it("is relative to the app rect", () => {
-    const off = rect(20, 30, 1000, 800);
-    expect(tipPosition(rect(420, 130, 100, 20), off)).toEqual({ x: 450, top: 128, transform: "translate(-50%,0)" });
+  it("data-tip-img: image beside a bold coloured first line", () => {
+    expect(tipView(attrs({ "data-tip-img": "x.png", "data-tip-color": "#6ae2af" }), "Ascendant 2\n47 RR\nPeak Imm 1", at)).toEqual({
+      kind: "img",
+      text: "Ascendant 2\n47 RR\nPeak Imm 1",
+      img: "x.png",
+      color: "#6ae2af",
+      head: "Ascendant 2",
+      sub: "47 RR\nPeak Imm 1",
+      anchor: at,
+    });
+    expect(tipView(attrs({ "data-tip-img": "x.png" }), "One", at)).toMatchObject({ color: null, head: "One", sub: "" });
+  });
+
+  it("data-tip-kv: a title over key|value rows", () => {
+    expect(tipView(attrs({ "data-tip-kv": "" }), "Played before\nWith you|1\nAgainst you|3", at)).toMatchObject({
+      kind: "kv",
+      head: "Played before",
+      rows: [
+        ["With you", "1"],
+        ["Against you", "3"],
+      ],
+    });
+  });
+
+  it("data-tip-wl: a W/L bar; a malformed one shows nothing", () => {
+    expect(tipView(attrs({ "data-tip-wl": "31,22" }), "31 wins, 22 losses", at)).toMatchObject({ kind: "wl", w: 31, l: 22 });
+    expect(tipView(attrs({ "data-tip-wl": "x,2" }), "t", at)).toBeNull();
+    expect(wlFill(31, 22)).toBe(58);
+    expect(wlFill(0, 0)).toBe(0);
+  });
+
+  it("the legacy `wl:` text still renders its row", () => {
+    expect(tipView(attrs({}), "wl:31:22:53", at)).toMatchObject({ kind: "legacyWl", w: 31, l: 22, g: 53, scope: "This act" });
+    expect(tipView(attrs({}), "wl:nope", at)).toBeNull();
   });
 });
 
@@ -154,6 +193,22 @@ describe("tip action", () => {
     tip(n as unknown as HTMLElement, "");
     expect(n.attrs.get("data-tip")).toBe("");
   });
+
+  it("the options form sets the design's variant attributes, and an update to another form clears the old ones", () => {
+    const n = node();
+    const a = tip(n as unknown as HTMLElement, { text: "Ascendant 2\n47 RR", img: "x.png", color: "#6ae2af" });
+    expect(Object.fromEntries(n.attrs)).toEqual({ "data-tip": "Ascendant 2\n47 RR", "data-tip-img": "x.png", "data-tip-color": "#6ae2af" });
+    a.update({ kv: "Played before\nWith you|1" });
+    expect(Object.fromEntries(n.attrs)).toEqual({ "data-tip": "Played before\nWith you|1", "data-tip-kv": "" });
+    a.update({ wl: [31, 22] });
+    expect(Object.fromEntries(n.attrs)).toEqual({ "data-tip": "31 wins, 22 losses", "data-tip-wl": "31,22" });
+    a.update({ wl: "3,4", text: "This act" });
+    expect(Object.fromEntries(n.attrs)).toEqual({ "data-tip": "This act", "data-tip-wl": "3,4" });
+    a.update("plain");
+    expect(Object.fromEntries(n.attrs)).toEqual({ "data-tip": "plain" });
+    a.destroy();
+    expect(n.attrs.size).toBe(0);
+  });
 });
 
 describe("tooltip engine (delegated mouseover, 450 ms)", () => {
@@ -184,7 +239,7 @@ describe("tooltip engine (delegated mouseover, 450 ms)", () => {
     vi.advanceTimersByTime(449);
     expect(tipState.tip).toBeNull();
     vi.advanceTimersByTime(1);
-    expect(tipState.tip).toEqual({ text: "Party · likely", x: 450, top: 128, transform: "translate(-50%,0)" });
+    expect(tipState.tip).toEqual({ kind: "text", text: "Party · likely", anchor: anchor(400, 100, 100, 20) });
   });
 
   it("moving to another trigger or to none clears it immediately", () => {
@@ -291,7 +346,7 @@ describe("tooltip engine (delegated mouseover, 450 ms)", () => {
       vi.advanceTimersByTime(449);
       expect(tipState.tip).toBeNull();
       vi.advanceTimersByTime(1);
-      expect(tipState.tip).toEqual({ text: "−15 RR · Ascendant 2 · 32 RR · Sep 29", x: 510, top: 156, transform: "translate(-50%,0)" });
+      expect(tipState.tip).toEqual({ kind: "text", text: "−15 RR · Ascendant 2 · 32 RR · Sep 29", anchor: anchor(500, 120, 20, 28) });
       detach();
     });
 
@@ -397,14 +452,14 @@ describe("keyboard focus", () => {
     vi.advanceTimersByTime(449);
     expect(tipState.tip).toBeNull();
     vi.advanceTimersByTime(1);
-    expect(tipState.tip).toEqual({ text: "Party · likely", x: 450, top: 128, transform: "translate(-50%,0)" });
+    expect(tipState.tip).toEqual({ kind: "text", text: "Party · likely", anchor: anchor(400, 100, 100, 20) });
   });
 
-  it("flips above near the bottom, like a hover's", () => {
+  it("anchors to the focused element's box, like a hover's", () => {
     const { node } = el({ "data-tip": "Low" }, rect(400, 700, 100, 20));
     tipFocus(node, root);
     vi.advanceTimersByTime(450);
-    expect(tipState.tip).toEqual({ text: "Low", x: 450, top: 692, transform: "translate(-50%,-100%)" });
+    expect(tipState.tip).toEqual({ kind: "text", text: "Low", anchor: anchor(400, 700, 100, 20) });
   });
 
   it("a focus a mouse click gave (not :focus-visible) shows nothing and leaves a hover's tip alone", () => {
@@ -655,7 +710,7 @@ describe("keyboard focus", () => {
 
     it("focusin and focusout on #app and keydown on the document; the cleanup removes them", () => {
       const { onRoot, onDoc, detach } = mount();
-      expect([...onRoot.keys()].sort()).toEqual(["click", "focusin", "focusout", "mouseleave", "mouseover", "scroll"]);
+      expect([...onRoot.keys()].sort()).toEqual(["click", "focusin", "focusout", "mousedown", "mouseleave", "mouseover", "scroll"]);
       expect([...onDoc.keys()]).toEqual(["keydown"]);
 
       const a = el({ "data-tip": "A" });

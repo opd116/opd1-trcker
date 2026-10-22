@@ -1,9 +1,10 @@
 <!-- Show more (spec §6.5, v8:272-274): reveals up to 8 recent rows and goes away. No "show less", no count picker. -->
 <script lang="ts">
-  import { showMore } from "../../lib/router.svelte";
+  // LEGACY v8: "Show more" lived on the old router; the v2 profile drawer owns its own list state.
+  let { onmore = () => {} }: { onmore?: () => void } = $props();
 </script>
 
-<button type="button" class="more" onclick={showMore}>Show more</button>
+<button type="button" class="more" onclick={onmore}>Show more</button>
 
 <style>
   /* The design's box: 34px tall plus a 1px border (content-box; a button defaults to border-box), the section's full

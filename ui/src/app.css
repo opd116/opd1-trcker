@@ -1,7 +1,18 @@
-/* Fonts: Barlow, IBM Plex Sans and Archivo (SIL OFL 1.1, see assets/fonts/OFL.txt).
-   Bundled latin subsets in the weights the design uses (500, 600, 700, 500 italic).
-   `block` because the files are local: no swap flash. A family's files are fetched
-   only when the theme selects it. */
+/* Fonts (SIL OFL 1.1, see assets/fonts/OFL.txt): the design's three families, bundled as latin-subset woff2 in
+   exactly the weights it uses. Barlow 400/500/600/700 + 500 italic (body), Saira Condensed 500/600/700 (display:
+   wordmark, map names, team labels), Geist Mono 400/500/600 (small caps labels, numbers in chips). `block` because
+   the files are local: no swap flash. No runtime request ever leaves the app (strict CSP). */
+
+@font-face {
+  font-family: "Barlow";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("./assets/fonts/barlow-latin-400-normal.woff2") format("woff2");
+  unicode-range:
+    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
+    U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
 
 @font-face {
   font-family: "Barlow";
@@ -48,107 +59,162 @@
 }
 
 @font-face {
-  font-family: "IBM Plex Sans";
+  font-family: "Saira Condensed";
   font-style: normal;
   font-weight: 500;
   font-display: block;
-  src: url("./assets/fonts/ibm-plex-sans-latin-500-normal.woff2") format("woff2");
+  src: url("./assets/fonts/saira-condensed-latin-500-normal.woff2") format("woff2");
   unicode-range:
     U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 @font-face {
-  font-family: "IBM Plex Sans";
+  font-family: "Saira Condensed";
   font-style: normal;
   font-weight: 600;
   font-display: block;
-  src: url("./assets/fonts/ibm-plex-sans-latin-600-normal.woff2") format("woff2");
+  src: url("./assets/fonts/saira-condensed-latin-600-normal.woff2") format("woff2");
   unicode-range:
     U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 @font-face {
-  font-family: "IBM Plex Sans";
+  font-family: "Saira Condensed";
   font-style: normal;
   font-weight: 700;
   font-display: block;
-  src: url("./assets/fonts/ibm-plex-sans-latin-700-normal.woff2") format("woff2");
+  src: url("./assets/fonts/saira-condensed-latin-700-normal.woff2") format("woff2");
   unicode-range:
     U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 @font-face {
-  font-family: "IBM Plex Sans";
-  font-style: italic;
-  font-weight: 500;
+  font-family: "Geist Mono";
+  font-style: normal;
+  font-weight: 400;
   font-display: block;
-  src: url("./assets/fonts/ibm-plex-sans-latin-500-italic.woff2") format("woff2");
+  src: url("./assets/fonts/geist-mono-latin-400-normal.woff2") format("woff2");
   unicode-range:
     U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 @font-face {
-  font-family: "Archivo";
+  font-family: "Geist Mono";
   font-style: normal;
   font-weight: 500;
   font-display: block;
-  src: url("./assets/fonts/archivo-latin-500-normal.woff2") format("woff2");
+  src: url("./assets/fonts/geist-mono-latin-500-normal.woff2") format("woff2");
   unicode-range:
     U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
 @font-face {
-  font-family: "Archivo";
+  font-family: "Geist Mono";
   font-style: normal;
   font-weight: 600;
   font-display: block;
-  src: url("./assets/fonts/archivo-latin-600-normal.woff2") format("woff2");
+  src: url("./assets/fonts/geist-mono-latin-600-normal.woff2") format("woff2");
   unicode-range:
     U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
     U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
 }
 
-@font-face {
-  font-family: "Archivo";
-  font-style: normal;
-  font-weight: 700;
-  font-display: block;
-  src: url("./assets/fonts/archivo-latin-700-normal.woff2") format("woff2");
-  unicode-range:
-    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
-    U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-@font-face {
-  font-family: "Archivo";
-  font-style: italic;
-  font-weight: 500;
-  font-display: block;
-  src: url("./assets/fonts/archivo-latin-500-italic.woff2") format("woff2");
-  unicode-range:
-    U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F,
-    U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
-}
-
-
-/* The only global rules. Exactly two things go beyond the design's own CSS: the `--bg`
-   fallback, which equals the default tone's bg (fonts.test.ts pins that) and keeps the
-   window dark in the moment before main.ts writes the theme variables, and the R106
-   focus ring below. Once the variables exist the fallback is never used. */
+/* Global rules: the design's own (TrackerApp.dc.html lines 15-27). The `--bg` fallback is the design's
+   background and keeps the window dark in the moment before main.ts writes the variables. */
 html,
 body {
   margin: 0;
   height: 100%;
-  background: var(--bg, #0e1013);
+  background: var(--bg, #0c0d10);
 }
 
-/* Keyboard focus only (R106): mouse and touch visuals stay exactly the design's. */
+/* The design sizes every box border-box (its `*{box-sizing:border-box}`); the screens are ported 1:1 from it. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+a {
+  color: var(--accent-text, #b7abff);
+  text-decoration: none;
+}
+
+a:hover {
+  color: var(--accent-pale, #d6cfff);
+}
+
+button {
+  font: inherit;
+  color: inherit;
+}
+
+textarea:focus,
+input:focus {
+  outline: none;
+  border-color: var(--accent-deep, #8b7cf0) !important;
+}
+
+textarea::placeholder,
+input::placeholder {
+  color: var(--text-faint, #7d828b);
+}
+
+/* Keyboard focus only: mouse and touch visuals stay exactly the design's. */
 :focus-visible {
-  outline: 1px solid color-mix(in srgb, var(--accent) 60%, transparent);
+  outline: 2px solid var(--focus, #b7abff);
   outline-offset: 2px;
 }
+
+[data-row]:focus-visible {
+  outline-offset: -2px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--scroll-thumb, #2b2f36);
+  border-radius: 10px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* Live dots (pulse ring), the radar sweep, skeleton shimmer. */
+@keyframes opdPulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  100% {
+    transform: scale(2.8);
+    opacity: 0;
+  }
+}
+
+@keyframes opdSweep {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes opdShimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(250%);
+  }
+}
+

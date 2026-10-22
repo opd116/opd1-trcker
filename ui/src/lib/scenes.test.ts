@@ -709,7 +709,7 @@ describe("feed", () => {
     expect(applied2).toEqual([null]);
   });
 
-  it("keys 0-8 switch scenes (R12), set the route and update the URL", async () => {
+  it("keys 0-8 switch scenes (R12), go to Live and update the URL", async () => {
     vi.resetModules();
     const b = stubBrowser("?scene=lobby1");
     const feed = await import("./demo/feed");
@@ -722,11 +722,12 @@ describe("feed", () => {
       "6": ["pregame", 5], "7": ["ingame", 10], "8": ["ingame", 10],
     };
     for (const [k, [stage, n]] of Object.entries(want)) {
-      router.go({ name: "details", puuid: "x", more: false });
+      router.go("history");
       press(k);
       expect(applied.at(-1)?.stage, k).toBe(stage);
       expect(applied.at(-1)?.players, k).toHaveLength(n);
-      expect(router.router.route, k).toEqual({ name: "live" });
+      expect(router.router.screen, k).toBe("live");
+      expect(router.router.profile, k).toBeNull();
     }
     expect(b.replaceState).toHaveBeenCalled();
     press("9"); // no scene on 9
@@ -751,7 +752,7 @@ describe("feed", () => {
     let seen: MyStats | null | undefined;
     store.subscribe((v) => (seen = v))();
     expect(seen).toEqual(SCENES["mystats-closed"].mystats);
-    expect(router.router.route).toEqual({ name: "mystats" });
+    expect(router.router.screen).toBe("live"); // the v2 design always starts on Live
 
     vi.resetModules();
     stubBrowser("?scene=mystats-loading");
@@ -779,33 +780,44 @@ describe("feed", () => {
       writable<Meta | null>(null),
       writable<MyStats | null | undefined>(undefined),
     );
-    expect(router.router.route).toEqual({ name: "live" });
+    expect(router.router.screen).toBe("live");
   });
 
-  it("routeFromSearch: &route=mystats", async () => {
-    const { routeFromSearch } = await import("./demo/feed");
-    expect(routeFromSearch(new URLSearchParams("route=mystats"), { name: "live" })).toEqual({ name: "mystats" });
-  });
-
-  it("routeFromSearch: &route=details / match override the scene route (spec §8.1)", async () => {
-    const { routeFromSearch } = await import("./demo/feed");
-    const live = { name: "live" } as const;
-    const q = (s: string) => new URLSearchParams(s);
-    expect(routeFromSearch(q(""), live)).toEqual(live);
-    expect(routeFromSearch(q("route=details&puuid=P"), live)).toEqual({ name: "details", puuid: "P", more: false });
-    expect(routeFromSearch(q("route=details&puuid=P&more=1"), live)).toEqual({ name: "details", puuid: "P", more: true });
-    expect(routeFromSearch(q("route=match&match=M&puuid=P&from=encounter"), live)).toEqual({
-      name: "match",
-      matchId: "M",
-      focusPuuid: "P",
-      from: "encounter",
-      back: { puuid: "P", more: false },
+  it("navFromRoute: a scene's v8 route on the v2 router", async () => {
+    const { navFromRoute } = await import("./demo/feed");
+    const base = { screen: "live", profile: null, match: null, glance: null };
+    expect(navFromRoute({ name: "live" })).toEqual(base);
+    expect(navFromRoute({ name: "mystats" })).toEqual({ ...base, screen: "comp" });
+    expect(navFromRoute({ name: "details", puuid: "P", more: true })).toEqual({ ...base, profile: "P" });
+    expect(navFromRoute({ name: "match", matchId: "M", focusPuuid: "P", from: "encounter", back: { puuid: "P", more: false } })).toEqual({
+      ...base,
+      match: { matchId: "M", focusPuuid: "P", from: "encounter", encFrom: { puuid: "P", screen: "live" } },
     });
-    expect(routeFromSearch(q("route=match&match=M&puuid=P"), live)).toMatchObject({ from: "recent" });
-    expect(routeFromSearch(q("route=details"), live)).toEqual(live); // no puuid
-    expect(routeFromSearch(q("route=match&puuid=P"), live)).toEqual(live); // no match id
-    expect(routeFromSearch(q("route=nope"), live)).toEqual(live);
-    expect(routeFromSearch(q("route=live"), { name: "details", puuid: "x", more: false })).toEqual(live);
+    expect(navFromRoute({ name: "match", matchId: "M", focusPuuid: "P", from: "recent", back: "mystats" })).toEqual({
+      ...base,
+      screen: "comp",
+      match: { matchId: "M", focusPuuid: "P", from: "comp" },
+    });
+  });
+
+  it("navFromSearch: ?screen / &profile / &match / &glance, and the v8 &route names", async () => {
+    const { navFromSearch, navFromRoute } = await import("./demo/feed");
+    const live = navFromRoute({ name: "live" });
+    const q = (s: string) => new URLSearchParams(s);
+    expect(navFromSearch(q(""), live)).toEqual(live);
+    expect(navFromSearch(q("screen=skins"), live)).toMatchObject({ screen: "skins", profile: null, match: null });
+    expect(navFromSearch(q("screen=nope"), live)).toEqual(live);
+    expect(navFromSearch(q("screen=saved&profile=P"), live)).toMatchObject({ screen: "saved", profile: "P" });
+    expect(navFromSearch(q("match=M&puuid=P&from=recap"), live)).toMatchObject({ match: { matchId: "M", focusPuuid: "P", from: "recap" } });
+    expect(navFromSearch(q("match=M&puuid=P"), live)).toMatchObject({ match: { from: "history" } });
+    expect(navFromSearch(q("match=M"), live)).toEqual(live); // no focus player
+    expect(navFromSearch(q("glance=1"), live)).toMatchObject({ glance: true });
+    expect(navFromSearch(q("route=mystats"), live)).toMatchObject({ screen: "comp" });
+    expect(navFromSearch(q("route=details&puuid=P"), live)).toMatchObject({ screen: "live", profile: "P" });
+    expect(navFromSearch(q("route=details"), live)).toEqual(live); // no puuid
+    expect(navFromSearch(q("route=match&match=M&puuid=P"), live)).toMatchObject({ match: { matchId: "M", from: "profile" } });
+    expect(navFromSearch(q("route=match&match=M&puuid=P&from=encounter"), live)).toMatchObject({ match: { from: "encounter" } });
+    expect(navFromSearch(q("route=live"), navFromRoute({ name: "details", puuid: "x", more: false }))).toEqual(live);
   });
 });
 

@@ -7,7 +7,6 @@
   import { last5Tiles } from "../lib/live";
   import { boxStyle } from "../lib/resultBox";
   import { now } from "../lib/stores";
-  import { theme } from "../lib/themeStore.svelte";
   import { last5Tip } from "../lib/tips";
   import { tip } from "../lib/tooltip.svelte";
   import type { Last5Entry } from "../lib/types";
@@ -16,7 +15,8 @@
   let { entries, size }: { entries: Last5Entry[] | null | undefined; size: "card" | "hero" } = $props();
 
   const tiles = $derived(last5Tiles(entries));
-  const arrow = $derived(theme.last5Style === "Arrow");
+  // The v8 theme options are gone (design v2 has one fixed theme): always the Arrow style.
+  const arrow = true;
 </script>
 
 {#if tiles === "skeleton"}

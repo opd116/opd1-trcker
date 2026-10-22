@@ -8,6 +8,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { render } from "svelte/server";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { displayNameShapes, enums, shapes, type Desc, type Kind } from "./contract.shape";
+import { CONN_STATES, liveShapes } from "./contract.shape"; // R189 (backend-live)
 import { detailsFor, encounterMatchId, matchFor, PUUID, recentMatchId, roster } from "./demo/cdv8";
 import { resolveMyStats } from "./demo/scenes";
 import demoMeta from "./demo/meta.json";
@@ -334,8 +335,10 @@ describe("the walker can fail (a check that cannot fail proves nothing)", () => 
 // ── the goldens ──────────────────────────────────────────────────────────────────
 describe("the goldens match the descriptors", () => {
   it("these are all the goldens: a new one on the Rust side needs a descriptor and a test here", () => {
+    // R189: the v2 goldens (backend-store, backend-live); their tests are at the end of this file.
     expect(readdirSync(GOLDEN_DIR).sort()).toEqual([
       "app_info.json",
+      "app_status.json",
       "ascii_art.json",
       "history_page.json",
       "live_state.json",
@@ -343,6 +346,7 @@ describe("the goldens match the descriptors", () => {
       "my_stats.json",
       "player_details.json",
       "player_marks.json",
+      "profile_extras.json",
       "saved_players.json",
       "settings.json",
     ]);
@@ -770,6 +774,54 @@ describe("the demo fixtures follow the golden contract", () => {
     for (const [n, m] of allMatches) {
       const flag = m.perspective === "self" ? "isSelf" : "isFocus";
       expect(m.teams[0]!.players.some((p) => p[flag]), n).toBe(true);
+    }
+  });
+});
+
+// ── R189 (backend-live): AppStatus and ProfileExtras ────────────────────────────────────────────────────────────────
+// Their descriptors are a block of their own in contract.shape.ts (`liveShapes`); the walker resolves nested shapes by
+// name through `registry`, so they join it here.
+Object.assign(registry, liveShapes);
+
+const APP_STATUS = golden("app_status") as Record<string, unknown>[];
+const PROFILE_EXTRAS = golden("profile_extras") as Record<string, unknown>;
+
+describe("R189: the status feed and the profile extras follow the golden contract", () => {
+  it("app_status.json holds the pills: ok in Agent Select, queueing, after a match, ok without a timer, lost, error", () => {
+    expect(APP_STATUS).toHaveLength(6);
+    APP_STATUS.forEach((s, i) => expect(problems(s, "AppStatus", `app_status[${i}]`)).toEqual([]));
+    expect(APP_STATUS.map((s) => s.conn)).toEqual(["ok", "ok", "ok", "ok", "lost", "error"]);
+    for (const s of APP_STATUS) expect(CONN_STATES as readonly unknown[]).toContain(s.conn);
+  });
+
+  it("each status keeps what the UI relies on: one live line at a time, an error has a code, lost counts attempts", () => {
+    for (const [i, s] of APP_STATUS.entries()) {
+      const here = `app_status[${i}]`;
+      expect(s.pregame !== null && s.queue !== null, `${here}: Agent Select and a queue at once`).toBe(false);
+      if (s.conn === "error") expect(["LOCKFILE_NOT_FOUND", "CLIENT_UNREACHABLE"], here).toContain(s.errorCode);
+      else expect(s.errorCode, here).toBeNull();
+      if (s.conn === "lost") expect((s.attempt as number) >= 1 && (s.attempt as number) <= (s.maxAttempts as number), here).toBe(true);
+      else expect(s.attempt, here).toBe(0);
+      if (s.recapMatchId !== null) expect(s.queue, `${here}: queueing clears the recap`).toBeNull();
+    }
+  });
+
+  it("the walker catches a status with a dropped key or a pill sent as a number", () => {
+    const { gameVersion: _dropped, ...rest } = APP_STATUS[0]!;
+    expect(problems(rest, "AppStatus", "s")).toEqual(["s.gameVersion: required key of AppStatus is missing"]);
+    expect(problems({ ...APP_STATUS[0], conn: 1 }, "AppStatus", "s")).toEqual(["s.conn: number is not one of string"]);
+  });
+
+  it("profile_extras.json is a ProfileExtras; its maps are My Stats rows with uuid ids, most played first", () => {
+    expect(problems(PROFILE_EXTRAS, "ProfileExtras", "profile_extras")).toEqual([]);
+    const maps = PROFILE_EXTRAS.maps as { id: string; games: number }[];
+    for (const m of maps) expect(m.id).toMatch(UUID);
+    expect(desc(maps.map((m) => m.games))).toBe(true);
+    const mates = PROFILE_EXTRAS.liveMates as { matchId: string; puuids: string[] }[];
+    for (const m of mates) {
+      expect(m.puuids.length).toBeGreaterThan(0);
+      expect(m.puuids).not.toContain(PROFILE_EXTRAS.puuid);
+      for (const p of m.puuids) expect(p).toMatch(UUID);
     }
   });
 });

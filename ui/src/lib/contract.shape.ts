@@ -382,3 +382,44 @@ export const displayNameShapes = {
   hiddenPlayer: { kind: { kinds: ["string"] } } satisfies ShapeOf<Extract<DisplayName, { kind: "hiddenPlayer" }>>,
   hiddenAgent: { kind: { kinds: ["string"] }, agentId: str } satisfies ShapeOf<Extract<DisplayName, { kind: "hiddenAgent" }>>,
 };
+
+// ── R189 (backend-live): AppStatus, ProfileExtras ──────────────────────────────────────────────────────────────────
+// Their own block (another lane appends other v2 types): contract.test.ts adds these to the walker's registry.
+import type { AppStatus, ConnState, ProfileExtras } from "./types";
+
+/** `AppStatus.conn`'s closed set; contract.test-d.ts pins it to `ConnState`. */
+export const CONN_STATES = ["waiting", "ok", "lost", "error"] as const satisfies readonly ConnState[];
+
+export type PregameInfo = NonNullable<AppStatus["pregame"]>;
+export type QueueInfo = NonNullable<AppStatus["queue"]>;
+export type LiveMates = ProfileExtras["liveMates"][number];
+
+export const liveShapes = {
+  PregameInfo: { phaseEndsMs: numOrNull, locked: num, total: num } satisfies ShapeOf<PregameInfo>,
+
+  QueueInfo: { queueId: str, searchingSinceMs: num } satisfies ShapeOf<QueueInfo>,
+
+  AppStatus: {
+    conn: str,
+    riotClientVersion: strOrNull,
+    lastDataMs: numOrNull,
+    attempt: num,
+    maxAttempts: num,
+    retryInMs: numOrNull,
+    errorCode: strOrNull,
+    errorAtMs: numOrNull,
+    lockfilePath: str,
+    pregame: { kinds: ["object", "null"], shape: "PregameInfo" },
+    queue: { kinds: ["object", "null"], shape: "QueueInfo" },
+    recapMatchId: strOrNull,
+    gameVersion: strOrNull,
+  } satisfies ShapeOf<AppStatus>,
+
+  LiveMates: { matchId: str, puuids: { kinds: ["array"] } } satisfies ShapeOf<LiveMates>,
+
+  ProfileExtras: {
+    puuid: str,
+    maps: { kinds: ["array"], shape: "StatRow" },
+    liveMates: { kinds: ["array"], shape: "LiveMates" },
+  } satisfies ShapeOf<ProfileExtras>,
+};

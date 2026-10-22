@@ -2,6 +2,15 @@
 // with types.ts in both directions. Run by vitest's typecheck (vite.config.ts) and by `npm run check`.
 import { expectTypeOf, test } from "vitest";
 import { displayNameShapes, enums, shapes, type ShapeOf } from "./contract.shape";
+// R189 (backend-live)
+import {
+  CONN_STATES,
+  liveShapes,
+  type LiveMates as LiveMatesRow,
+  type PregameInfo as LivePregameInfo,
+  type QueueInfo as LiveQueueInfo,
+} from "./contract.shape";
+import type { AppStatus, ConnState, ProfileExtras } from "./types";
 import type {
   AppInfo,
   AsciiArt,
@@ -238,4 +247,27 @@ test("the guard can fail: a descriptor missing a key, or with an extra one, does
   expectTypeOf<DescKinds<AsObject>>().not.toEqualTypeOf<Kinds<LiveState>>();
   // And a TS type that drifts the other way: a result that may be null where the descriptor says it never is.
   expectTypeOf<DescKinds<typeof shapes.Last5Entry>>().not.toEqualTypeOf<Kinds<Omit<Last5Entry, "result"> & { result: Last5Entry["result"] | null }>>();
+});
+
+// ── R189 (backend-live): AppStatus and ProfileExtras ────────────────────────────────────────────────────────────────
+test("R189: the status and profile-extras descriptors agree with types.ts", () => {
+  expectTypeOf<keyof typeof liveShapes.AppStatus>().toEqualTypeOf<keyof AppStatus>();
+  expectTypeOf<keyof typeof liveShapes.PregameInfo>().toEqualTypeOf<keyof LivePregameInfo>();
+  expectTypeOf<keyof typeof liveShapes.QueueInfo>().toEqualTypeOf<keyof LiveQueueInfo>();
+  expectTypeOf<keyof typeof liveShapes.ProfileExtras>().toEqualTypeOf<keyof ProfileExtras>();
+  expectTypeOf<keyof typeof liveShapes.LiveMates>().toEqualTypeOf<keyof LiveMatesRow>();
+
+  expectTypeOf<DescFlags<typeof liveShapes.AppStatus>>().toEqualTypeOf<Flags<AppStatus>>();
+  expectTypeOf<DescFlags<typeof liveShapes.PregameInfo>>().toEqualTypeOf<Flags<LivePregameInfo>>();
+  expectTypeOf<DescFlags<typeof liveShapes.QueueInfo>>().toEqualTypeOf<Flags<LiveQueueInfo>>();
+  expectTypeOf<DescFlags<typeof liveShapes.ProfileExtras>>().toEqualTypeOf<Flags<ProfileExtras>>();
+  expectTypeOf<DescFlags<typeof liveShapes.LiveMates>>().toEqualTypeOf<Flags<LiveMatesRow>>();
+
+  expectTypeOf<DescKinds<typeof liveShapes.AppStatus>>().toEqualTypeOf<Kinds<AppStatus>>();
+  expectTypeOf<DescKinds<typeof liveShapes.PregameInfo>>().toEqualTypeOf<Kinds<LivePregameInfo>>();
+  expectTypeOf<DescKinds<typeof liveShapes.QueueInfo>>().toEqualTypeOf<Kinds<LiveQueueInfo>>();
+  expectTypeOf<DescKinds<typeof liveShapes.ProfileExtras>>().toEqualTypeOf<Kinds<ProfileExtras>>();
+  expectTypeOf<DescKinds<typeof liveShapes.LiveMates>>().toEqualTypeOf<Kinds<LiveMatesRow>>();
+
+  expectTypeOf<(typeof CONN_STATES)[number]>().toEqualTypeOf<ConnState>();
 });

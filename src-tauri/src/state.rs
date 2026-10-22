@@ -13,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -1590,7 +1590,6 @@ pub trait EventSink: Send + Sync {
     fn my_stats(&self, _stats: &MyStats) {}
     /// R189: the connection pill / Agent Select / queue / recap state
     /// (`"status"`). Default: nothing.
-    #[allow(dead_code)] // R189: called once the poll loop sets the status (backend-live).
     fn status(&self, _status: &AppStatus) {}
     /// R189: saved players, notes, dismissed smurf flags (`"marks"`).
     fn marks(&self, _marks: &PlayerMarks) {}
@@ -1834,7 +1833,27 @@ pub struct AppState {
     pub debug_dir: PathBuf,
     /// R189: the last `"status"` given to the UI ([`Self::set_status`]).
     status: Mutex<AppStatus>,
+    /// R189: the last successful local-API answer (epoch ms, 0 = none), exact.
+    /// The emitted status carries it at most every [`STATUS_DATA_EVERY_MS`]
+    /// on its own ([`Self::note_local_data`]); `app_status` reads it fresh.
+    last_data_ms: AtomicI64,
+    /// R189: "Retry now" (`retry_now`): set, then the poll loop is woken
+    /// through `retry_wake` and takes it ([`Self::take_retry`]).
+    retry_requested: AtomicBool,
+    retry_wake: tokio::sync::Notify,
+    /// R189: called when a saved player first shows up in a match's live
+    /// roster (`name`, `note`). `lib.rs` wires it to the window's
+    /// notification; nothing is called while it is unset.
+    alert_hook: Mutex<Option<Arc<AlertHook>>>,
 }
+
+/// R189: the saved-player alert ([`AppState::set_alert_hook`]): the player's
+/// name as their card shows it, and the user's private note (`""` for none).
+pub type AlertHook = dyn Fn(&str, &str) + Send + Sync;
+
+/// R189: a status whose only change is `last_data_ms` is emitted at most this
+/// often (the UI counts "2 s ago" itself).
+pub const STATUS_DATA_EVERY_MS: i64 = 5_000;
 
 impl AppState {
     pub fn new(
@@ -1891,23 +1910,89 @@ impl AppState {
             worker_kick: AtomicBool::new(false),
             debug_dir,
             status: Mutex::new(AppStatus::initial(default_lockfile_path())),
+            last_data_ms: AtomicI64::new(0),
+            retry_requested: AtomicBool::new(false),
+            retry_wake: tokio::sync::Notify::new(),
+            alert_hook: Mutex::new(None),
         }
     }
 
-    /// R189: the current connection status (the `app_status` command).
+    /// R189: the current connection status (the `app_status` command), with
+    /// the exact time of the last local answer.
     pub fn status(&self) -> AppStatus {
-        lock(&self.status).clone()
+        let mut status = lock(&self.status).clone();
+        if let Some(t) = self.exact_last_data() {
+            status.last_data_ms = Some(t);
+        }
+        status
     }
 
     /// R189: changes the status through `f` and emits `"status"` when it
-    /// changed.
-    #[allow(dead_code)] // R189: the poll loop calls it (backend-live).
+    /// changed. An emitted status carries the exact `last_data_ms`.
     pub fn set_status(&self, f: impl FnOnce(&mut AppStatus)) {
         let mut cur = lock(&self.status);
         let before = cur.clone();
         f(&mut cur);
         if *cur != before {
+            if let Some(t) = self.exact_last_data() {
+                cur.last_data_ms = Some(t);
+            }
             self.sink.status(&cur);
+        }
+    }
+
+    fn exact_last_data(&self) -> Option<i64> {
+        Some(self.last_data_ms.load(Ordering::Acquire)).filter(|&t| t > 0)
+    }
+
+    /// R189: the local API just answered. The exact time is kept for
+    /// `app_status`; a `"status"` event goes out for it alone only when the
+    /// last emitted time is [`STATUS_DATA_EVERY_MS`] old (the presence is read
+    /// every 2 s, which must not mean an event every 2 s).
+    pub fn note_local_data(&self, now: i64) {
+        self.last_data_ms.store(now, Ordering::Release);
+        self.set_status(|s| {
+            let stale = s
+                .last_data_ms
+                .is_none_or(|t| now < t || now - t >= STATUS_DATA_EVERY_MS);
+            if stale {
+                s.last_data_ms = Some(now);
+            }
+        });
+    }
+
+    /// R189: "Retry now": the poll loop tries again at once (a connect while
+    /// disconnected, a presence read while connected).
+    pub fn request_retry(&self) {
+        self.retry_requested.store(true, Ordering::Release);
+        // A permit is stored when the loop is not waiting yet: no lost wake.
+        self.retry_wake.notify_one();
+    }
+
+    /// R189: whether "Retry now" was asked since the last call.
+    pub fn take_retry(&self) -> bool {
+        self.retry_requested.swap(false, Ordering::AcqRel)
+    }
+
+    /// R189: resolves at the next [`Self::request_retry`] (or at once when
+    /// one is pending). The poll loop races its waits against it.
+    pub async fn retry_wakeup(&self) {
+        self.retry_wake.notified().await;
+    }
+
+    /// R189: installs the saved-player alert (`lib.rs` wires it to the
+    /// window's notification). Replaces an earlier one.
+    #[allow(dead_code)] // R189: lib.rs wires it to `v2::window::notify_saved_player` (backend-system).
+    pub fn set_alert_hook(&self, hook: Box<AlertHook>) {
+        *lock(&self.alert_hook) = Some(Arc::from(hook));
+    }
+
+    /// R189: runs the saved-player alert, if one is installed. Called with
+    /// no lock held; the hook runs outside `alert_hook`'s lock too.
+    pub fn fire_alert(&self, name: &str, note: &str) {
+        let hook = lock(&self.alert_hook).clone();
+        if let Some(hook) = hook {
+            hook(name, note);
         }
     }
 

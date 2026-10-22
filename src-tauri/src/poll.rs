@@ -28,6 +28,14 @@
 //! A failed roster fetch never leaves the previous stage's players on
 //! screen: the new stage is emitted immediately with just the user's own
 //! card, and the fetch is retried with backoff.
+//!
+//! R189: the loop also keeps the `"status"` feed (`AppStatus`) — the
+//! connection pill (`error` / `waiting` / `ok` / `lost`), the Agent Select
+//! timer and lock count, the queue timer (from the presence it already
+//! reads), the recap pointer of the match that just ended — and raises the
+//! saved-player alert. None of it adds a request to Riot or changes a
+//! timing; "Retry now" (`AppState::request_retry`) only cuts the current
+//! wait short.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -35,17 +43,22 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use tauri::async_runtime::JoinHandle;
-use tokio::time::{sleep, sleep_until, Instant};
+use tokio::time::{sleep, Instant};
 
+use opd1_core::db::repo::Repo;
+use opd1_core::model::{DisplayName, Field};
 use opd1_core::presence::{decode_presence, Stage};
+use opd1_core::wire::{ConnState, QueueInfo};
+use opd1_riot::session::VersionSource;
 use opd1_riot::{RiotError, RiotSession};
+use rusqlite::OptionalExtension;
 
 use crate::logbuf::short;
 use crate::roster::{
     connect_retry_delay, extract_loadouts, extract_pregame_loadouts, fill_tiers, from_coregame,
-    from_party, from_pregame, is_ffa_roster, order_players, own_valorant_private, party_key,
-    plan_transition, pregame_tiers, view_stage, want_pregame_loadouts, GameVerdict, GameWatch,
-    PartyKey, RosterFetch, RosterPlayer,
+    from_party, from_pregame, is_ffa_roster, matchmaking, order_players, own_valorant_private,
+    party_key, plan_transition, pregame_info, pregame_tiers, view_stage, want_pregame_loadouts,
+    GameVerdict, GameWatch, PartyKey, RosterFetch, RosterPlayer,
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
 use crate::store::{
@@ -81,6 +94,21 @@ const POST_MATCH_DELAYS: [Duration; 5] = [
     Duration::from_secs(40),
     Duration::from_secs(80),
 ];
+
+/// R189: the status feed's error codes (`AppStatus::error_code`).
+pub(crate) const LOCKFILE_NOT_FOUND: &str = "LOCKFILE_NOT_FOUND";
+pub(crate) const CLIENT_UNREACHABLE: &str = "CLIENT_UNREACHABLE";
+/// R189: how many failed polls (presence reads, then reconnects) the pill
+/// shows as `lost` before it falls to what the lockfile says: the same five
+/// presence failures that rebuild the session.
+pub(crate) const LOST_MAX_ATTEMPTS: u32 = PRESENCE_ERRORS_TO_RECONNECT;
+/// The one `Stop` that is not a failure: VALORANT (re)started under a
+/// game-less session (R46), which is rebuilt on purpose.
+pub(crate) const VALORANT_STARTED: &str = "VALORANT started";
+/// R189: the alert's name for a hidden player nothing better is known for
+/// (the card's own words), and for a visible one whose name is not known yet.
+const HIDDEN_PLAYER: &str = "Hidden Player";
+const SAVED_PLAYER: &str = "Saved player";
 
 /// R164: the In Game loadouts only feed Player Details, and the poll loop
 /// awaits them inline after the roster is on screen, so a call stuck in a
@@ -243,7 +271,7 @@ where
 
 pub(crate) struct Poller {
     st: Arc<AppState>,
-    local_app_data: Option<PathBuf>,
+    pub(crate) local_app_data: Option<PathBuf>,
     session: Option<Arc<RiotSession>>,
     /// The stage being shown (`roster::view_stage` of the presence).
     stage: Stage,
@@ -292,6 +320,26 @@ pub(crate) struct Poller {
     /// The lockfile's mtime at the last check — a rewritten lockfile (the
     /// Riot Client restarted) retries at once, whatever the backoff.
     lockfile_mtime: Option<SystemTime>,
+    /// R189: the failed poll the pill shows as `lost` (1-based; 0 = not
+    /// lost). Counts the presence failures while VALORANT runs, then the
+    /// reconnects after that session was lost, up to [`LOST_MAX_ATTEMPTS`].
+    pub(crate) lost_attempt: u32,
+    /// R189: when this poller first saw the party matchmaking (the queue
+    /// timer's start when the presence carries no entry time).
+    queue_seen_ms: Option<i64>,
+    /// R189: the saved-player alert of the current match.
+    alerts: SavedAlerts,
+}
+
+/// R189: the saved-player alert's memory for one match: who is saved (read
+/// once per match), whether the alert is on (Settings `savedAlert`), and who
+/// was announced already (once per player per match).
+#[derive(Debug, Default)]
+struct SavedAlerts {
+    match_id: Option<String>,
+    on: bool,
+    saved: HashSet<String>,
+    fired: HashSet<String>,
 }
 
 impl Drop for Poller {
@@ -338,6 +386,9 @@ impl Poller {
             connect_failures: 0,
             next_connect: Instant::now(),
             lockfile_mtime: None,
+            lost_attempt: 0,
+            queue_seen_ms: None,
+            alerts: SavedAlerts::default(),
         }
     }
 
@@ -360,6 +411,7 @@ impl Poller {
                     Ok(()) => self.sleep_until_next().await,
                     Err(Stop::Reconnect(why)) => {
                         log::info!("dropping Riot session: {why}");
+                        self.note_session_lost(why);
                         self.drop_session().await;
                     }
                 },
@@ -369,11 +421,16 @@ impl Poller {
 
     // -- disconnected ----------------------------------------------------
 
-    async fn disconnected_tick(&mut self) {
+    pub(crate) async fn disconnected_tick(&mut self) {
+        // R189: "Retry now" — connect at once, whatever the backoff.
+        if self.st.take_retry() {
+            self.next_connect = Instant::now();
+        }
         let Some(lad) = self.local_app_data.clone() else {
             // No Riot Client can be found: the first verdict is "closed".
             self.settle();
-            sleep(CLOSED_CHECK).await;
+            self.status_error(LOCKFILE_NOT_FOUND, CLOSED_CHECK);
+            self.idle(CLOSED_CHECK).await;
             return;
         };
         let lockfile = lockfile_path(&lad);
@@ -384,7 +441,9 @@ impl Poller {
             self.last_connect_error = None;
             self.connect_failures = 0;
             self.lockfile_mtime = None;
-            sleep(CLOSED_CHECK).await;
+            self.lost_attempt = 0;
+            self.status_error(LOCKFILE_NOT_FOUND, CLOSED_CHECK);
+            self.idle(CLOSED_CHECK).await;
             return;
         };
         let mtime = meta.modified().ok();
@@ -395,7 +454,7 @@ impl Poller {
             self.next_connect = Instant::now();
         }
         if Instant::now() < self.next_connect {
-            sleep(CLOSED_CHECK).await;
+            self.idle(CLOSED_CHECK).await;
             return;
         }
         match RiotSession::connect(&lad).await {
@@ -410,6 +469,7 @@ impl Poller {
                 self.connect_failures = self.connect_failures.saturating_add(1);
                 let delay = connect_retry_delay(self.connect_failures);
                 self.next_connect = Instant::now() + delay;
+                self.status_connect_failed(delay);
                 let msg = e.to_string();
                 if self.last_connect_error.as_deref() != Some(msg.as_str()) {
                     log::info!(
@@ -418,7 +478,7 @@ impl Poller {
                     );
                     self.last_connect_error = Some(msg);
                 }
-                sleep(CLOSED_CHECK).await;
+                self.idle(CLOSED_CHECK).await;
             }
         }
     }
@@ -483,6 +543,10 @@ impl Poller {
             .await;
         self.st.set_session(Some(session.clone()));
         self.session = Some(session.clone());
+        // R189: the Riot Client answers; whether VALORANT runs is the first
+        // presence's to say.
+        self.lost_attempt = 0;
+        self.status_session(&session, false);
         self.game = GameWatch::default();
         // R90: asked at this session's first presence showing VALORANT.
         self.self_loadout_asked = false;
@@ -529,7 +593,7 @@ impl Poller {
         self.ensure_worker(session);
     }
 
-    async fn drop_session(&mut self) {
+    pub(crate) async fn drop_session(&mut self) {
         self.stop_worker();
         // R101: an interrupted run is dropped; the next connect starts over
         // from the stored anchor, which only a finished run moves. B1: the
@@ -559,6 +623,13 @@ impl Poller {
     // -- connected -------------------------------------------------------
 
     async fn connected_tick(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
+        // R189: "Retry now" — read the presence (and a pending roster) now.
+        if self.st.take_retry() {
+            self.next_presence = Instant::now();
+            if let Some((due, _)) = self.roster_retry.as_mut() {
+                *due = Instant::now();
+            }
+        }
         // R162: when the act Riot named has ended (or it never answered),
         // ask again; a no-op otherwise. Never while VALORANT is closed: the
         // session is stale then (R46/R137), like every other remote call.
@@ -635,20 +706,45 @@ impl Poller {
         if let Some(p) = &self.post_match {
             next = next.min(p.due);
         }
-        sleep_until(next).await;
+        self.idle_until(next).await;
+    }
+
+    /// R189: waits `d`, or less when "Retry now" is asked.
+    async fn idle(&self, d: Duration) {
+        self.idle_until(Instant::now() + d).await;
+    }
+
+    /// R189: waits until `t`, or less when "Retry now" is asked
+    /// (`AppState::request_retry`); the next tick takes the request.
+    async fn idle_until(&self, t: Instant) {
+        let _ = tokio::time::timeout_at(t, self.st.retry_wakeup()).await;
     }
 
     pub(crate) async fn presence_tick(&mut self, session: &Arc<RiotSession>) -> Result<(), Stop> {
         let presences = match session.presences().await {
             Ok(p) => {
                 self.presence_errors = 0;
+                self.lost_attempt = 0;
+                // R189: the local API answered.
+                self.st.note_local_data(now_ms());
                 p
             }
             Err(RiotError::ClientGone) => return Err(Stop::Reconnect("Riot client closed")),
             Err(e) => {
                 self.presence_errors += 1;
                 log::warn!("presence failed ({}x): {e}", self.presence_errors);
-                if self.presence_errors >= PRESENCE_ERRORS_TO_RECONNECT {
+                let reconnect = self.presence_errors >= PRESENCE_ERRORS_TO_RECONNECT;
+                // R189: VALORANT was running: the pill says lost, retrying.
+                if self.stage != Stage::Closed {
+                    self.lost_attempt = self.presence_errors.min(LOST_MAX_ATTEMPTS);
+                    let next = if reconnect {
+                        Duration::ZERO
+                    } else {
+                        PRESENCE_EVERY
+                    };
+                    self.status_lost(next);
+                }
+                if reconnect {
                     return Err(Stop::Reconnect("presence keeps failing"));
                 }
                 return Ok(());
@@ -663,17 +759,24 @@ impl Poller {
                 self.read_self_loadout_once(session);
                 self.content_once();
                 self.client_version_from_presence_once(session, private.as_deref());
+                // R189: after the re-resolve, so the version is the game's.
+                self.status_session(session, true);
             }
             // The session was built (or has lived) while VALORANT wasn't
             // running: stale shards / fallback client version. Rebuild it
             // now that the game is up — first launch or relaunch (R46).
-            GameVerdict::Reconnect => return Err(Stop::Reconnect("VALORANT started")),
-            GameVerdict::Absent => return Ok(()),
+            GameVerdict::Reconnect => return Err(Stop::Reconnect(VALORANT_STARTED)),
+            GameVerdict::Absent => {
+                // One odd payload: the pill keeps what the stage says.
+                self.status_session(session, self.stage != Stage::Closed);
+                return Ok(());
+            }
             GameVerdict::Closed => {
                 if self.stage != Stage::Closed {
                     log::info!("VALORANT is not running");
                     self.change_stage(session, Stage::Closed, None).await?;
                 }
+                self.status_session(session, false);
                 // Absent twice: the first verdict (or a later one, no change).
                 self.settle();
                 return Ok(());
@@ -734,6 +837,12 @@ impl Poller {
             // After the stage change above: the Lobby's roster is installed
             // (and its worker running) before the backfill is queued.
             self.begin_backfill(session).await;
+        }
+        // R189: the queue timer, from the blob already in hand; a match
+        // starting (Agent Select, a free-for-all's included) ends the recap.
+        self.update_queue(presence.stage, private.as_deref());
+        if presence.stage == Stage::Pregame {
+            self.st.set_status(|s| s.recap_match_id = None);
         }
         // VALORANT is running and its stage is on screen: the first verdict.
         self.settle();
@@ -865,6 +974,12 @@ impl Poller {
             }
             ended
         };
+        // R189: the user's own match just ended (In Game to the Lobby, or the
+        // game closed): the recap points at it.
+        let recap = match (self.stage, next) {
+            (Stage::Ingame, Stage::Menus | Stage::Closed) => ended_match.clone(),
+            _ => None,
+        };
         self.post_match = match (t.match_ended, ended_match) {
             (true, Some(match_id)) => Some(PostMatch {
                 match_id,
@@ -890,6 +1005,24 @@ impl Poller {
             _ => self.post_match.take(),
         };
         self.stage = next;
+        // R189: the Agent Select line lives only in Agent Select, the queue
+        // timer only in the Lobby; Agent Select ends the recap.
+        if next != Stage::Menus {
+            self.queue_seen_ms = None;
+        }
+        self.st.set_status(|s| {
+            if let Some(id) = recap {
+                s.recap_match_id = Some(id);
+            }
+            if next == Stage::Pregame {
+                s.recap_match_id = None;
+            } else {
+                s.pregame = None;
+            }
+            if next != Stage::Menus {
+                s.queue = None;
+            }
+        });
         self.party_key = key;
         self.pregame_match_id = None;
         self.pregame_loadouts_valid = false;
@@ -1016,6 +1149,7 @@ impl Poller {
         lock(&self.st.live)
             .match_tiers
             .set_pregame(&match_id, pregame_tiers(&m));
+        self.status_pregame(&m, &roster);
         log::info!("agent select: {} allies", roster.len());
         if self.pregame_match_id.as_deref() != Some(match_id.as_str()) {
             // A new Agent Select: its loadouts start unknown.
@@ -1042,6 +1176,7 @@ impl Poller {
                 lock(&self.st.live)
                     .match_tiers
                     .set_pregame(&match_id, pregame_tiers(&m));
+                self.status_pregame(&m, &roster);
                 let allies: Vec<String> = roster.iter().map(|p| p.puuid.clone()).collect();
                 self.apply_roster(session, Stage::Pregame, Some(m.map_id), roster)
                     .await;
@@ -1250,6 +1385,10 @@ impl Poller {
         // is not racing a sync this rebuild gave time to run.
         crate::details::refresh_open_after_live_change(&self.st).await;
         self.ensure_worker(session);
+        // R189: last, so the cards and the worker never wait on it.
+        if matches!(stage, Stage::Pregame | Stage::Ingame) {
+            self.saved_alerts(stage).await;
+        }
     }
 
     /// The new stage with only the user's own card (roster fetch failed);
@@ -1350,6 +1489,295 @@ impl Poller {
     }
 }
 
+// ---------------------------------------------------------------------
+// R189: the status feed and the saved-player alert
+// ---------------------------------------------------------------------
+
+impl Poller {
+    /// `Error` with `code`; the next automatic try is `retry_in` away. The
+    /// error's time is kept while the same error goes on.
+    fn status_error(&self, code: &'static str, retry_in: Duration) {
+        let now = now_ms();
+        self.st.set_status(|s| {
+            if s.conn != ConnState::Error || s.error_code.as_deref() != Some(code) {
+                s.error_at_ms = Some(now);
+            }
+            s.conn = ConnState::Error;
+            s.error_code = Some(code.to_string());
+            s.attempt = 0;
+            s.retry_in_ms = Some(duration_ms(retry_in));
+            s.pregame = None;
+            s.queue = None;
+        });
+    }
+
+    /// `Lost` at [`Self::lost_attempt`]; the next try is `retry_in` away.
+    fn status_lost(&self, retry_in: Duration) {
+        let attempt = self.lost_attempt.max(1);
+        self.st.set_status(|s| {
+            s.conn = ConnState::Lost;
+            s.attempt = attempt;
+            s.max_attempts = LOST_MAX_ATTEMPTS;
+            s.retry_in_ms = Some(duration_ms(retry_in));
+            s.error_code = None;
+            s.error_at_ms = None;
+            s.pregame = None;
+            s.queue = None;
+        });
+    }
+
+    /// A connect failed and the next one is `retry_in` away: one more `Lost`
+    /// attempt while a lost game's attempts last, else `CLIENT_UNREACHABLE`.
+    fn status_connect_failed(&mut self, retry_in: Duration) {
+        if (1..LOST_MAX_ATTEMPTS).contains(&self.lost_attempt) {
+            self.lost_attempt += 1;
+            self.status_lost(retry_in);
+        } else {
+            self.lost_attempt = 0;
+            self.status_error(CLIENT_UNREACHABLE, retry_in);
+        }
+    }
+
+    /// The session ended for a reason other than VALORANT starting (R46)
+    /// while the game was running: the pill says lost until the reconnects
+    /// settle it. Presence failures already counted their attempts.
+    pub(crate) fn note_session_lost(&mut self, why: &str) {
+        if why == VALORANT_STARTED || self.stage == Stage::Closed {
+            return;
+        }
+        if self.lost_attempt == 0 {
+            self.lost_attempt = 1;
+            // `drop_session` makes the next connect immediate.
+            self.status_lost(Duration::ZERO);
+        }
+    }
+
+    /// The Riot Client answered: `Ok` while VALORANT runs (`game_running`),
+    /// else `Waiting`. The versions are the session's client version (R159),
+    /// full (`riotClientVersion`) and as the game's release label; the
+    /// fallback value is no answer and leaves what was known.
+    fn status_session(&self, session: &RiotSession, game_running: bool) {
+        let (version, source) = session.client_version_and_source();
+        let known = source != VersionSource::Fallback;
+        self.st.set_status(|s| {
+            s.conn = if game_running {
+                ConnState::Ok
+            } else {
+                ConnState::Waiting
+            };
+            s.attempt = 0;
+            s.max_attempts = LOST_MAX_ATTEMPTS;
+            s.retry_in_ms = None;
+            s.error_code = None;
+            s.error_at_ms = None;
+            if known {
+                s.game_version = Some(release_label(&version));
+                s.riot_client_version = Some(version);
+            }
+            if !game_running {
+                s.pregame = None;
+                s.queue = None;
+            }
+        });
+    }
+
+    /// The queue timer: set while the raw presence is in the menus and the
+    /// party is matchmaking, else cleared. Queueing ends the recap.
+    fn update_queue(&mut self, raw: Stage, private: Option<&str>) {
+        let searching = if raw == Stage::Menus {
+            private.and_then(matchmaking)
+        } else {
+            None
+        };
+        let queue = match searching {
+            None => {
+                self.queue_seen_ms = None;
+                None
+            }
+            Some(m) => {
+                let seen = *self.queue_seen_ms.get_or_insert_with(now_ms);
+                Some(QueueInfo {
+                    queue_id: m.queue_id,
+                    searching_since_ms: m.entry_ms.unwrap_or(seen),
+                })
+            }
+        };
+        self.st.set_status(|s| {
+            if queue.is_some() {
+                s.recap_match_id = None;
+            }
+            s.queue = queue;
+        });
+    }
+
+    /// The Agent Select line from a pregame answer and its ally roster.
+    fn status_pregame(
+        &self,
+        m: &opd1_riot::endpoints::PregameMatchResponse,
+        roster: &[RosterPlayer],
+    ) {
+        let prev = self.st.status().pregame.and_then(|p| p.phase_ends_ms);
+        let info = pregame_info(m, roster, now_ms(), prev);
+        self.st.set_status(|s| {
+            s.pregame = Some(info);
+            s.recap_match_id = None;
+        });
+    }
+
+    /// The saved-player alert: the first time this match's live roster shows
+    /// a saved player (not the user), the hook is called once with the name
+    /// their card shows and the user's note. The saved list and the setting
+    /// are read once per match (one DB read); a note only when one fires.
+    /// Agent Select and In Game share the match id, so an ally announced in
+    /// Agent Select is not announced again In Game.
+    async fn saved_alerts(&mut self, stage: Stage) {
+        let match_id = match stage {
+            Stage::Pregame => self.pregame_match_id.clone(),
+            Stage::Ingame => lock(&self.st.live).coregame_match_id.clone(),
+            _ => None,
+        };
+        let Some(match_id) = match_id else { return };
+        if self.alerts.match_id.as_deref() != Some(match_id.as_str()) {
+            let (on, saved) = self
+                .st
+                .db(|repo| {
+                    let on = crate::v2::settings::load(repo)?.saved_alert;
+                    let saved = if on {
+                        saved_puuids(repo)?
+                    } else {
+                        HashSet::new()
+                    };
+                    Ok((on, saved))
+                })
+                .await
+                .unwrap_or_default();
+            self.alerts = SavedAlerts {
+                match_id: Some(match_id),
+                on,
+                saved,
+                fired: HashSet::new(),
+            };
+        }
+        if !self.alerts.on || self.alerts.saved.is_empty() {
+            return;
+        }
+        let (me, due): (String, Vec<(String, Option<String>)>) = {
+            let live = lock(&self.st.live);
+            let me = live.self_puuid.clone().unwrap_or_default();
+            let due = live
+                .current
+                .players
+                .iter()
+                .filter(|c| {
+                    c.puuid != me
+                        && self.alerts.saved.contains(&c.puuid)
+                        && !self.alerts.fired.contains(&c.puuid)
+                })
+                .map(|c| {
+                    let agents = |id: &str| -> Option<String> {
+                        let meta = self.st.assets.meta().ok()?;
+                        meta.agents.get(id).map(|a| a.name.clone())
+                    };
+                    (c.puuid.clone(), card_name(&c.name, &agents))
+                })
+                .collect();
+            (me, due)
+        };
+        for (puuid, shown) in due {
+            self.alerts.fired.insert(puuid.clone());
+            let (p, me, need_name) = (puuid.clone(), me.clone(), shown.is_none());
+            let (note, stored) = self
+                .st
+                .db(move |repo| {
+                    let stored = if need_name {
+                        repo.known_name(&me, &p)?
+                            .map(|k| format!("{}#{}", k.name, k.tag))
+                    } else {
+                        None
+                    };
+                    Ok((note_of(repo, &p)?, stored))
+                })
+                .await
+                .unwrap_or_default();
+            // A visible player whose name is neither loaded nor stored.
+            let name = shown.or(stored).unwrap_or_else(|| SAVED_PLAYER.to_string());
+            log::info!("saved player {} is in this match", short(&puuid));
+            self.st.fire_alert(&name, &note);
+        }
+    }
+}
+
+/// `release-11.08-shipping-9-3104338` -> `release-11.08`: the build the
+/// About screen and the pill show. Anything else is kept as it is.
+pub(crate) fn release_label(client_version: &str) -> String {
+    let mut parts = client_version.splitn(3, '-');
+    match (parts.next(), parts.next()) {
+        (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => format!("{a}-{b}"),
+        _ => client_version.to_string(),
+    }
+}
+
+fn duration_ms(d: Duration) -> i64 {
+    i64::try_from(d.as_millis()).unwrap_or(i64::MAX)
+}
+
+/// The name a card shows, as alert text: `Name#TAG` (a remembered name
+/// too, R145), the agent's name for a hidden player who locked one (R99),
+/// `Hidden Player`; `None` while a visible player's name is still loading
+/// (the caller then reads the DB's).
+fn card_name(
+    name: &Field<DisplayName>,
+    agent_name: &dyn Fn(&str) -> Option<String>,
+) -> Option<String> {
+    match name {
+        Field::Value(DisplayName::Visible { name, tag })
+        | Field::Value(DisplayName::Remembered { name, tag, .. }) => Some(format!("{name}#{tag}")),
+        Field::Value(DisplayName::HiddenAgent { agent_id }) => {
+            Some(agent_name(agent_id).unwrap_or_else(|| HIDDEN_PLAYER.to_string()))
+        }
+        Field::Value(DisplayName::HiddenPlayer) => Some(HIDDEN_PLAYER.to_string()),
+        Field::Loading | Field::Missing => None,
+    }
+}
+
+/// Whether `e` says a table is not there (the saved players' and notes'
+/// tables arrive with migration 4; before it, nobody is saved).
+fn missing_table(e: &rusqlite::Error) -> bool {
+    e.to_string().contains("no such table")
+}
+
+/// R189: every saved puuid (`saved_players`); empty without the table.
+pub(crate) fn saved_puuids(repo: &Repo) -> rusqlite::Result<HashSet<String>> {
+    let mut stmt = match repo
+        .conn()
+        .prepare_cached("SELECT puuid FROM saved_players")
+    {
+        Ok(stmt) => stmt,
+        Err(e) if missing_table(&e) => return Ok(HashSet::new()),
+        Err(e) => return Err(e),
+    };
+    let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+    rows.collect()
+}
+
+/// R189: the user's private note on `puuid` (`player_notes`); `""` for none
+/// or without the table.
+pub(crate) fn note_of(repo: &Repo, puuid: &str) -> rusqlite::Result<String> {
+    let found = repo
+        .conn()
+        .query_row(
+            "SELECT note FROM player_notes WHERE puuid = ?1",
+            [puuid],
+            |r| r.get::<_, String>(0),
+        )
+        .optional();
+    match found {
+        Ok(note) => Ok(note.unwrap_or_default()),
+        Err(e) if missing_table(&e) => Ok(String::new()),
+        Err(e) => Err(e),
+    }
+}
+
 /// The shared model in the Closed stage, published: the user's own card from
 /// the DB (when it knows them), nothing else.
 async fn show_closed(st: &Arc<AppState>) {
@@ -1379,6 +1807,11 @@ async fn show_closed(st: &Arc<AppState>) {
         live.prune_rank_retries();
     }
     st.publish();
+    // R189: no Agent Select and no queue while closed.
+    st.set_status(|s| {
+        s.pregame = None;
+        s.queue = None;
+    });
 }
 
 fn lockfile_path(local_app_data: &Path) -> PathBuf {

@@ -1776,3 +1776,165 @@ fn v2_wire_keys_are_the_ones_types_ts_spells() {
         ])
     );
 }
+
+// ---------------------------------------------------------------------
+// R189 (backend-live): AppStatus and ProfileExtras
+// ---------------------------------------------------------------------
+
+/// The `"status"` feed: OK in Agent Select (with and without Riot's timer),
+/// OK queueing, OK in the Lobby with a recap, lost, and the error screen. Values, not a builder: the poll
+/// loop sets the fields (its pipeline tests cover when); this pins the wire.
+fn app_statuses_value() -> Value {
+    use opd1_core::wire::{AppStatus, ConnState, PregameInfo, QueueInfo};
+    let lockfile = r"C:\Users\me\AppData\Local\Riot Games\Riot Client\Config\lockfile".to_string();
+    let mut agent_select = AppStatus::initial(lockfile.clone());
+    agent_select.conn = ConnState::Ok;
+    agent_select.riot_client_version = Some("release-11.08-shipping-9-3104338".into());
+    agent_select.game_version = Some("release-11.08".into());
+    agent_select.last_data_ms = Some(SEEN_MS);
+    agent_select.pregame = Some(PregameInfo {
+        phase_ends_ms: Some(SEEN_MS + 42_500),
+        locked: 3,
+        total: 5,
+    });
+    let mut queueing = agent_select.clone();
+    queueing.pregame = None;
+    queueing.queue = Some(QueueInfo {
+        queue_id: "competitive".into(),
+        searching_since_ms: SEEN_MS - 65_000,
+    });
+    // Back in the Lobby after a match: the recap points at it (until the
+    // next queue, which clears it).
+    let mut after_match = agent_select.clone();
+    after_match.pregame = None;
+    after_match.recap_match_id = Some("aaaa0000-1111-2222-3333-444455556666".into());
+    let mut agent_select_no_timer = agent_select.clone();
+    agent_select_no_timer.pregame = Some(PregameInfo {
+        phase_ends_ms: None,
+        locked: 0,
+        total: 5,
+    });
+    let mut lost = agent_select.clone();
+    lost.conn = ConnState::Lost;
+    lost.pregame = None;
+    lost.attempt = 2;
+    lost.retry_in_ms = Some(2_000);
+    let mut error = AppStatus::initial(lockfile);
+    error.conn = ConnState::Error;
+    error.error_code = Some("LOCKFILE_NOT_FOUND".into());
+    error.error_at_ms = Some(SEEN_MS);
+    error.retry_in_ms = Some(5_000);
+    serde_json::to_value([
+        agent_select,
+        queueing,
+        after_match,
+        agent_select_no_timer,
+        lost,
+        error,
+    ])
+    .unwrap()
+}
+
+#[test]
+fn app_status_matches_golden() {
+    check_golden("app_status", &app_statuses_value());
+}
+
+/// The profile drawer's extras: a map row as My Stats builds it, and the
+/// "in your match" chips of two recent matches.
+fn profile_extras_value() -> Value {
+    use opd1_core::model::StatRow;
+    use opd1_core::wire::{LiveMates, ProfileExtras};
+    let extras = ProfileExtras {
+        puuid: "bbbbbbbb-0000-0000-0000-000000000002".into(),
+        maps: vec![
+            StatRow {
+                id: SPLIT_UUID.into(),
+                games: 4,
+                wins: 3,
+                losses: 1,
+                winrate: 0.75,
+                net_rr: Some(38),
+                kd: 1.5,
+                acs: Some(212.5),
+            },
+            StatRow {
+                id: ASCENT_UUID.into(),
+                games: 1,
+                wins: 0,
+                losses: 0,
+                winrate: 0.0,
+                net_rr: None,
+                kd: 0.5,
+                acs: None,
+            },
+        ],
+        live_mates: vec![
+            LiveMates {
+                match_id: "aaaa0000-1111-2222-3333-444455556666".into(),
+                puuids: vec![
+                    "aaaaaaaa-0000-0000-0000-000000000001".into(),
+                    "eeeeeeee-0000-0000-0000-000000000005".into(),
+                ],
+            },
+            LiveMates {
+                match_id: "aaaa0000-1111-2222-3333-777788889999".into(),
+                puuids: vec!["eeeeeeee-0000-0000-0000-000000000005".into()],
+            },
+        ],
+    };
+    serde_json::to_value(extras).unwrap()
+}
+
+#[test]
+fn profile_extras_matches_golden() {
+    let extras = profile_extras_value();
+    assert!(!extras.to_string().contains("/Game/"));
+    check_golden("profile_extras", &extras);
+}
+
+#[test]
+fn r189_live_wire_keys() {
+    let statuses = app_statuses_value();
+    assert_eq!(
+        keys(&statuses[0]),
+        spec(&[
+            "conn",
+            "riotClientVersion",
+            "lastDataMs",
+            "attempt",
+            "maxAttempts",
+            "retryInMs",
+            "errorCode",
+            "errorAtMs",
+            "lockfilePath",
+            "pregame",
+            "queue",
+            "recapMatchId",
+            "gameVersion"
+        ])
+    );
+    assert_eq!(
+        keys(&statuses[0]["pregame"]),
+        spec(&["phaseEndsMs", "locked", "total"])
+    );
+    assert_eq!(
+        keys(&statuses[1]["queue"]),
+        spec(&["queueId", "searchingSinceMs"])
+    );
+    let conns: Vec<&str> = statuses
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["conn"].as_str().unwrap())
+        .collect();
+    assert_eq!(conns, ["ok", "ok", "ok", "ok", "lost", "error"]);
+
+    let extras = profile_extras_value();
+    assert_eq!(keys(&extras), spec(&["puuid", "maps", "liveMates"]));
+    assert_eq!(
+        keys(&extras["maps"][0]),
+        keys(&serde_json::to_value(&my_stats_full()["maps"][0]).unwrap())
+    );
+    assert_eq!(keys(&extras["liveMates"][0]), spec(&["matchId", "puuids"]));
+}

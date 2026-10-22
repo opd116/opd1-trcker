@@ -8,7 +8,7 @@
 //! - card/sync order: self -> own party -> other allies -> enemies
 //!   ([`order_players`])
 //! - the presence "party key" that triggers a lobby party re-fetch
-//!   ([`party_key`])
+//!   ([`party_key`]) and the party's matchmaking state ([`matchmaking`], R189)
 //! - equipped Vandal/Phantom/Operator/Sheriff skins from core-game
 //!   loadouts ([`extract_loadouts`]), pre-game loadouts
 //!   ([`extract_pregame_loadouts`], gated by [`want_pregame_loadouts`]) and
@@ -31,6 +31,7 @@ use serde_json::Value;
 use opd1_core::model::{display_tier, Team};
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
+use opd1_core::wire::PregameInfo;
 use opd1_riot::endpoints::{
     ContentAct, ContentActs, CoreGameLoadoutsResponse, CoreGameMatchResponse, PartyResponse,
     PlayerIdentity, PlayerLoadoutResponse, PregameLoadoutsResponse, PregameMatchResponse,
@@ -398,6 +399,41 @@ pub fn from_coregame(
 }
 
 /// R161: the current ranked tier of every player a pregame answer lists,
+/// R189: a newly read phase end that moved by less than this from the one
+/// shown is the same deadline (each re-poll measures "remaining" a little
+/// later), so the status is not re-sent every re-poll.
+pub const PHASE_END_JITTER_MS: i64 = 1_000;
+
+/// R189: the Agent Select line of the status feed: when the phase ends
+/// (`now_ms` + `PhaseTimeRemainingNS`; `prev_end` is kept when the new one is
+/// within [`PHASE_END_JITTER_MS`] of it) and how many of the allies on
+/// screen (`roster`, from [`from_pregame`]) locked an agent (R99: a hover is
+/// not a lock).
+pub fn pregame_info(
+    resp: &PregameMatchResponse,
+    roster: &[RosterPlayer],
+    now_ms: i64,
+    prev_end: Option<i64>,
+) -> PregameInfo {
+    let end = resp
+        .phase_time_remaining_ns
+        .filter(|&ns| ns >= 0)
+        .map(|ns| now_ms.saturating_add(ns / 1_000_000));
+    let phase_ends_ms = match (end, prev_end) {
+        (Some(new), Some(old)) if (new - old).abs() < PHASE_END_JITTER_MS => Some(old),
+        (new, _) => new,
+    };
+    let locked = roster
+        .iter()
+        .filter(|p| p.selection_state == "locked")
+        .count();
+    PregameInfo {
+        phase_ends_ms,
+        locked: u8::try_from(locked).unwrap_or(u8::MAX),
+        total: u8::try_from(roster.len()).unwrap_or(u8::MAX),
+    }
+}
+
 /// both teams: Riot sends `CompetitiveTier` for the enemy team too, which
 /// Agent Select does not show but In Game will (core-game answers carry no
 /// tier). Unranked players are left out.
@@ -468,6 +504,60 @@ pub fn party_key(private_b64: &str) -> Option<PartyKey> {
         .map(str::to_string);
     let size = field("partySize").and_then(Value::as_u64);
     Some(PartyKey { party_id, size })
+}
+
+/// R189: the party is searching for a match, from the user's own presence
+/// blob (`partyState == "MATCHMAKING"`, flat or under `partyPresenceData`).
+/// No request: the poll loop already holds the blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Matchmaking {
+    /// `queueId` (flat or under `matchPresenceData`); `""` when Riot gave none.
+    pub queue_id: String,
+    /// `queueEntryTime` (`yyyy.MM.dd-HH.mm.ss`, UTC) as epoch ms; `None`
+    /// when absent, unparsable or Riot's empty `0001.01.01-00.00.00`.
+    pub entry_ms: Option<i64>,
+}
+
+/// [`Matchmaking`] when the presence says the party is in the queue, else
+/// `None` (any other party state, or a blob that does not decode).
+pub fn matchmaking(private_b64: &str) -> Option<Matchmaking> {
+    let bytes = BASE64.decode(private_b64).ok()?;
+    let value: Value = serde_json::from_slice(&bytes).ok()?;
+    let in_party = |key: &str| -> Option<&Value> {
+        value
+            .get(key)
+            .or_else(|| value.get("partyPresenceData").and_then(|n| n.get(key)))
+    };
+    if in_party("partyState").and_then(Value::as_str) != Some("MATCHMAKING") {
+        return None;
+    }
+    let queue_id = value
+        .get("queueId")
+        .or_else(|| {
+            value
+                .get("matchPresenceData")
+                .and_then(|n| n.get("queueId"))
+        })
+        .or_else(|| {
+            value
+                .get("partyPresenceData")
+                .and_then(|n| n.get("queueId"))
+        })
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let entry_ms = in_party("queueEntryTime")
+        .and_then(Value::as_str)
+        .and_then(riot_time_ms);
+    Some(Matchmaking { queue_id, entry_ms })
+}
+
+/// Riot's presence timestamp (`2026.10.22-18.05.09`, UTC) as epoch ms. A
+/// year before 2000 is Riot's "never" (`0001.01.01-00.00.00`).
+fn riot_time_ms(text: &str) -> Option<i64> {
+    let t = chrono::NaiveDateTime::parse_from_str(text.trim(), "%Y.%m.%d-%H.%M.%S").ok()?;
+    let ms = t.and_utc().timestamp_millis();
+    (ms >= 946_684_800_000).then_some(ms)
 }
 
 // ---------------------------------------------------------------------
@@ -990,6 +1080,58 @@ mod tests {
         assert_eq!(tier("gone"), None, "no field, no tier");
     }
 
+    // -- R189: the Agent Select status --------------------------------
+
+    fn pregame_with_timer(ns: Value) -> PregameMatchResponse {
+        serde_json::from_value(json!({
+            "MapID": "/Game/Maps/Ascent/Ascent",
+            "AllyTeam": {"TeamID": "Blue", "Players": [
+                {"Subject": "me", "CharacterID": "a1", "CharacterSelectionState": "locked",
+                 "PlayerIdentity": identity(false)},
+                {"Subject": "p2", "CharacterID": "a2", "CharacterSelectionState": "selected",
+                 "PlayerIdentity": identity(false)},
+                {"Subject": "p3", "CharacterID": "", "CharacterSelectionState": "",
+                 "PlayerIdentity": identity(true)},
+                {"Subject": "p4", "CharacterID": "a4", "CharacterSelectionState": "locked",
+                 "PlayerIdentity": identity(true)}
+            ]},
+            "PhaseTimeRemainingNS": ns
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn pregame_info_counts_locks_not_hovers_and_dates_the_phase_end() {
+        let m = pregame_with_timer(json!(42_500_000_000i64));
+        let roster = from_pregame(&m, "me", &HashSet::new());
+        let info = pregame_info(&m, &roster, 1_000_000, None);
+        assert_eq!(
+            info,
+            PregameInfo {
+                phase_ends_ms: Some(1_042_500),
+                locked: 2,
+                total: 4
+            }
+        );
+        // A re-poll 3 s later reads ~3 s less: the same deadline, kept.
+        let later = pregame_with_timer(json!(39_400_000_000i64));
+        let again = pregame_info(&later, &roster, 1_003_000, info.phase_ends_ms);
+        assert_eq!(again.phase_ends_ms, Some(1_042_500));
+        // A new phase (a new deadline) replaces it.
+        let next = pregame_info(&later, &roster, 1_010_000, info.phase_ends_ms);
+        assert_eq!(next.phase_ends_ms, Some(1_049_400));
+    }
+
+    #[test]
+    fn pregame_info_without_a_timer_has_no_phase_end() {
+        for ns in [Value::Null, json!(-5), json!("x")] {
+            let m = pregame_with_timer(ns.clone());
+            let info = pregame_info(&m, &[], 1_000, Some(9_999));
+            assert_eq!(info.phase_ends_ms, None, "{ns}");
+            assert_eq!((info.locked, info.total), (0, 0));
+        }
+    }
+
     #[test]
     fn pregame_tiers_cover_both_teams_without_the_unranked() {
         let tiers = pregame_tiers(&pregame_with_tiers());
@@ -1149,6 +1291,52 @@ mod tests {
         assert_eq!(secs, [5, 10, 20, 40, 60, 60, 60]);
         assert_eq!(connect_retry_delay(0).as_secs(), 5);
         assert_eq!(connect_retry_delay(u32::MAX).as_secs(), 60);
+    }
+
+    #[test]
+    fn matchmaking_reads_flat_and_nested_shapes() {
+        let flat = BASE64.encode(
+            r#"{"sessionLoopState":"MENUS","partyState":"MATCHMAKING","queueId":"competitive","queueEntryTime":"2026.10.22-18.05.09"}"#,
+        );
+        assert_eq!(
+            matchmaking(&flat),
+            Some(Matchmaking {
+                queue_id: "competitive".into(),
+                entry_ms: Some(1_792_692_309_000),
+            })
+        );
+        let nested = BASE64.encode(
+            r#"{"matchPresenceData":{"sessionLoopState":"MENUS","queueId":"swiftplay"},"partyPresenceData":{"partyState":"MATCHMAKING","queueEntryTime":"0001.01.01-00.00.00"}}"#,
+        );
+        assert_eq!(
+            matchmaking(&nested),
+            Some(Matchmaking {
+                queue_id: "swiftplay".into(),
+                entry_ms: None,
+            }),
+            "Riot's empty time is no time"
+        );
+    }
+
+    #[test]
+    fn matchmaking_is_none_outside_the_queue() {
+        for blob in [
+            r#"{"sessionLoopState":"MENUS","partyState":"DEFAULT","queueId":"competitive"}"#,
+            r#"{"sessionLoopState":"MENUS","partyState":"MATCHMADE_GAME_STARTING"}"#,
+            r#"{"sessionLoopState":"MENUS"}"#,
+            r#"[]"#,
+        ] {
+            assert_eq!(matchmaking(&BASE64.encode(blob)), None, "{blob}");
+        }
+        assert_eq!(matchmaking("not base64!"), None);
+        let odd = BASE64.encode(r#"{"partyState":"MATCHMAKING","queueEntryTime":"yesterday"}"#);
+        assert_eq!(
+            matchmaking(&odd),
+            Some(Matchmaking {
+                queue_id: String::new(),
+                entry_ms: None
+            })
+        );
     }
 
     #[test]

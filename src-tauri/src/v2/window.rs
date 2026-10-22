@@ -2,7 +2,7 @@
 //! (no decorations, 1280×800, at least 1180×760), Glance mode, the tray,
 //! close to tray, launch with Windows and the saved-player toast.
 //!
-//! - [`setup`] (from `lib.rs`): the autostart plugin, the tray icon, the
+//! - [`setup`] (from `lib.rs`): the tray icon, the
 //!   stored settings applied once, and the `--minimized` start (the
 //!   autostart entry passes it: the window stays hidden in the tray).
 //! - [`on_window_event`]: the title bar's × (`getCurrentWindow().close()`)
@@ -112,19 +112,12 @@ fn show_main(app: &AppHandle) {
     }
 }
 
-/// Startup: the autostart plugin, the tray, the stored settings applied
+/// Startup: the tray, the stored settings applied
 /// once, and the window shown — unless the app was started with
 /// [`MINIMIZED_ARG`] (by the autostart entry): then it stays hidden in the
 /// tray, or minimized when the `tray` setting is off.
 pub fn setup(app: &tauri::App, st: &AppState) -> tauri::Result<()> {
     app.manage(WindowFlags::default());
-    #[cfg(desktop)]
-    app.handle().plugin(
-        tauri_plugin_autostart::Builder::new()
-            .args([MINIMIZED_ARG])
-            .app_name(AUTOSTART_NAME)
-            .build(),
-    )?;
     setup_tray(app)?;
 
     let settings = st.db_blocking(super::settings::load).unwrap_or_default();
@@ -132,6 +125,12 @@ pub fn setup(app: &tauri::App, st: &AppState) -> tauri::Result<()> {
 
     let minimized = std::env::args().any(|a| a == MINIMIZED_ARG);
     if let Some(w) = main_window(app.handle()) {
+        // The config's `center` is not applied to a window created hidden
+        // (`visible: false`): on Windows it came up at x = -27 on a
+        // 1920×1080 screen. Center it here, before it is first shown.
+        if let Err(e) = w.center() {
+            log::warn!("window center failed: {e}");
+        }
         if !minimized {
             w.show()?;
         } else if !settings.tray {
@@ -221,27 +220,61 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
 /// The `boot` setting: the autostart entry written (it also refreshes the
 /// exe path) or removed. A debug build leaves it alone, so `tauri dev` and
 /// tests never register a dev binary.
+///
+/// `auto-launch` directly (the crate `tauri-plugin-autostart` wraps), for
+/// two things the plugin does not expose: the entry always goes to the
+/// current user's `Run` key (the plugin's default writes the machine-wide
+/// one when the app runs elevated, which the per-user uninstaller cannot
+/// remove), and the exe path is quoted (it contains a space). Removing
+/// clears both keys, so an older machine-wide entry goes too.
 fn set_autostart(app: &AppHandle, on: bool) {
-    #[cfg(desktop)]
-    {
-        if cfg!(debug_assertions) {
-            log::debug!("autostart not changed in a debug build (boot: {on})");
-            return;
-        }
-        let Some(manager) = app.try_state::<tauri_plugin_autostart::AutoLaunchManager>() else {
-            return;
-        };
-        let result = if on {
-            manager.enable()
-        } else {
-            manager.disable()
-        };
-        if let Err(e) = result {
-            log::warn!("autostart {}: {e}", if on { "enable" } else { "disable" });
-        }
+    let _ = app;
+    if cfg!(debug_assertions) {
+        log::debug!("autostart not changed in a debug build (boot: {on})");
+        return;
     }
-    #[cfg(not(desktop))]
-    let _ = (app, on);
+    let result = autostart()
+        .and_then(|a| if on { a.enable() } else { a.disable() }.map_err(|e| e.to_string()));
+    if let Err(e) = result {
+        log::warn!("autostart {}: {e}", if on { "enable" } else { "disable" });
+    }
+}
+
+/// The `Run` value's command line: the quoted exe path, then [`MINIMIZED_ARG`].
+pub fn autostart_command(exe: &std::path::Path) -> (String, [&'static str; 1]) {
+    (format!("\"{}\"", exe.display()), [MINIMIZED_ARG])
+}
+
+#[cfg(windows)]
+fn autostart() -> Result<auto_launch::AutoLaunch, String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let (path, args) = autostart_command(&exe);
+    auto_launch::AutoLaunchBuilder::new()
+        .set_app_name(AUTOSTART_NAME)
+        .set_app_path(&path)
+        .set_args(&args)
+        .set_windows_enable_mode(auto_launch::WindowsEnableMode::CurrentUser)
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(windows))]
+fn autostart() -> Result<NoAutostart, String> {
+    Err("launch with Windows is Windows only".into())
+}
+
+/// Stands in for `auto_launch::AutoLaunch` off Windows (never built).
+#[cfg(not(windows))]
+struct NoAutostart;
+
+#[cfg(not(windows))]
+impl NoAutostart {
+    fn enable(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn disable(&self) -> Result<(), String> {
+        Ok(())
+    }
 }
 
 /// Glance mode: a 420px-wide column (on) or the normal window (off). On:
@@ -354,6 +387,17 @@ mod tests {
         width: 1280,
         height: 800,
     };
+
+    #[test]
+    fn the_autostart_command_quotes_a_path_with_a_space() {
+        let exe = std::path::Path::new(r"C:\Users\me\AppData\Local\OPD1 TRCKER\opd1-trcker.exe");
+        let (path, args) = autostart_command(exe);
+        assert_eq!(
+            path,
+            r#""C:\Users\me\AppData\Local\OPD1 TRCKER\opd1-trcker.exe""#
+        );
+        assert_eq!(args, ["--minimized"]);
+    }
 
     #[test]
     fn glance_is_420_wide_keeps_the_height_and_the_top_left() {

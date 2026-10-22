@@ -815,3 +815,24 @@ fn needs_seen_name_is_a_row_without_a_stored_name_that_is_not_hidden_now() {
     assert!(!needs_seen_name(&hidden_nameless, &hidden_now));
     assert!(!needs_seen_name(&hidden_named, &hidden_now));
 }
+
+#[test]
+fn the_users_blank_row_falls_back_to_the_players_table_name() {
+    // VALORANT closed: no chat-session name, and match-details blanked the
+    // user's row. The `players`-table name stands in, as for any other row.
+    let m = duel(vec![player(ME, "Blue", ""), player("a", "Red", "Opp")]);
+    let mut seen = HashMap::new();
+    seen.insert(ME.to_string(), ("Fahad".to_string(), "OPD1".to_string()));
+    let (hidden, remembered) = (HashMap::new(), HashMap::new());
+    let v = build_match_view(MatchViewInput {
+        stored: &m,
+        map_uuid: &split_lookup,
+        self_puuid: Some(ME),
+        self_name: None,
+        focus_puuid: ME,
+        hidden_now: &hidden,
+        remembered: &remembered,
+        seen: &seen,
+    });
+    assert_eq!(names(&v)[ME], visible("Fahad", "OPD1"));
+}

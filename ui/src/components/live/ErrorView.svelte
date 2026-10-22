@@ -19,7 +19,16 @@
     return () => clearInterval(id);
   });
 
-  const secondsLeft = $derived(deadline === null ? null : Math.ceil(Math.max(0, deadline - nowMs) / 1000));
+  /**
+   * Rust keeps retrying every `retryInMs` while the status stays the same, and an unchanged status is not sent again,
+   * so once the deadline passes the countdown starts over on the same period instead of stopping at 0.
+   */
+  const secondsLeft = $derived.by(() => {
+    const period = status.retryInMs;
+    if (deadline === null || period === null || period <= 0) return null;
+    const left = deadline - nowMs;
+    return Math.ceil((left > 0 ? left : period - (-left % period)) / 1000);
+  });
   const lockfile = $derived(status.errorCode !== "CLIENT_UNREACHABLE");
   /** `21:41:07`, local time. */
   const at = $derived.by(() => {

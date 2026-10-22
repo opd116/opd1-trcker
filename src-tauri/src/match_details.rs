@@ -91,6 +91,7 @@ async fn read(
     let m = match_id.to_string();
     let me = self_puuid.clone();
     let hidden = hidden_now.clone();
+    let self_named = self_name.is_some();
     let loaded = st
         .db(move |repo| {
             let Some(stored) = repo.match_rows(&m)? else {
@@ -105,6 +106,14 @@ async fn read(
             let me = me.as_deref().unwrap_or_default();
             let mut remembered: HashMap<String, KnownName> = HashMap::new();
             let mut seen: HashMap<String, (String, String)> = HashMap::new();
+            // The user's own row: with VALORANT closed there is no chat-
+            // session name, and match-details may have blanked the row, so
+            // the `players`-table name stands in (matchview rule 1).
+            if !self_named && !me.is_empty() {
+                if let Some(name) = repo.seen_name(me)? {
+                    seen.insert(me.to_string(), name);
+                }
+            }
             for p in stored.players.iter().filter(|p| p.puuid != me) {
                 if needs_seen_name(p, &hidden) && !seen.contains_key(&p.puuid) {
                     if let Some(name) = repo.seen_name(&p.puuid)? {

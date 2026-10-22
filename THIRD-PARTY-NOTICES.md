@@ -16,11 +16,10 @@ The fonts are bundled as latin subsets and are not sold on their own.
 
 ## Rust crates added with R189 (tray, launch with Windows, notifications)
 
-Tauri's `tray-icon` feature and two official Tauri plugins, approved by the user on 2026-10-22, plus the crates they pull into the Windows build:
+Tauri's `tray-icon` feature, the official notification plugin, and `auto-launch` (the crate behind the official autostart plugin, used directly so the entry is per-user), approved by the user on 2026-10-22, plus the crates they pull into the Windows build:
 
 | Crate | Version | Licence |
 |---|---|---|
-| tauri-plugin-autostart | 2.7.0 | Apache-2.0 OR MIT |
 | tauri-plugin-notification | 2.7.0 | Apache-2.0 OR MIT |
 | auto-launch | 0.6.0 | MIT |
 | notify-rust | 4.18.2 | MIT OR Apache-2.0 |

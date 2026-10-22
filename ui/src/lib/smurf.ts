@@ -26,7 +26,7 @@ function mean(xs: (number | null | undefined)[]): number | null {
   return known.length === 0 ? null : known.reduce((a, b) => a + b, 0) / known.length;
 }
 
-/** The lobby averages the signals compare against: every card of the live roster, the player included. */
+/** The lobby averages the signals compare against: every other card of the live roster (the design: "38% headshots, lobby average 23%"). */
 export function lobbyAverages(lobby: readonly PlayerCard[]): { level: number | null; hs: number | null } {
   return { level: mean(lobby.map((c) => c.level)), hs: mean(lobby.map((c) => c.hsPct)) };
 }
@@ -42,7 +42,7 @@ export function smurfSignal(
   dismissed: readonly string[] = [],
 ): SmurfSignal | null {
   if (level === "off" || card.isSelf || dismissed.includes(card.puuid)) return null;
-  const avg = lobbyAverages(lobby);
+  const avg = lobbyAverages(lobby.filter((c) => c.puuid !== card.puuid));
   const reasons: string[] = [];
   if (typeof card.level === "number" && card.level < SMURF_LEVEL_MAX) {
     reasons.push(`Account level ${card.level}${avg.level !== null ? `; this lobby averages ${Math.round(avg.level)}` : ""}`);

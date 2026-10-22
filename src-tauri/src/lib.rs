@@ -12,6 +12,7 @@
 //! - `my_stats` — My Stats' DB-only computation and its `"mystats"` push
 //! - `imgproto` — the `img` URI scheme
 //! - `commands` — IPC commands
+//! - `v2` — the redesign's commands, one file per area (R189)
 
 mod commands;
 mod details;
@@ -27,6 +28,7 @@ mod roster;
 mod state;
 mod store;
 mod sync;
+mod v2;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -119,6 +121,24 @@ pub fn run() {
             commands::copy_log,
             commands::ui_log,
             commands::dump_raw,
+            v2::status::app_status,
+            v2::status::retry_now,
+            v2::status::launch_valorant,
+            v2::marks::player_marks,
+            v2::marks::saved_players,
+            v2::marks::set_saved,
+            v2::marks::set_note,
+            v2::marks::dismiss_smurf,
+            v2::history::match_history,
+            v2::settings::get_settings,
+            v2::settings::set_settings,
+            v2::ascii::ascii_list,
+            v2::ascii::ascii_save,
+            v2::ascii::ascii_delete,
+            v2::appinfo::app_info,
+            v2::collection::collection,
+            v2::profile::profile_extras,
+            v2::window::set_glance,
         ])
         .setup(|app| {
             let started = std::time::Instant::now();

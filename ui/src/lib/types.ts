@@ -365,3 +365,162 @@ export interface Meta {
   /** Keyed by tier number (JSON object keys are strings). `color` is valorant-api's "rrggbbaa" or a CSS hex. */
   tiers: Record<string, { name: string; color: string }>;
 }
+
+// ── v2 redesign (R189, user 2026-10-22; crates/core/src/wire.rs) ─────────────────────────────────────────────────────
+// New commands and events only: nothing above changes shape. `null` is a known-missing value (shown as —).
+
+/** The title-bar pill: Riot Client up but VALORANT not running / game running / reconnecting / client unreachable. */
+export type ConnState = "waiting" | "ok" | "lost" | "error";
+
+/** `invoke("app_status")`, then the `status` event. */
+export interface AppStatus {
+  conn: ConnState;
+  riotClientVersion: string | null;
+  /** The last successful local-API answer, epoch ms. */
+  lastDataMs: number | null;
+  /** While `lost`: the reconnect attempt (1-based) of `maxAttempts`. */
+  attempt: number;
+  maxAttempts: number;
+  /** While `lost` / `error`: ms until the next automatic retry. */
+  retryInMs: number | null;
+  /** While `error`: `LOCKFILE_NOT_FOUND` or `CLIENT_UNREACHABLE`. */
+  errorCode: string | null;
+  errorAtMs: number | null;
+  lockfilePath: string;
+  /** Agent Select only. */
+  pregame: { phaseEndsMs: number | null; locked: number; total: number } | null;
+  /** Menus while matchmaking only. */
+  queue: { queueId: string; searchingSinceMs: number } | null;
+  /** The user's own match that just ended, until they queue again: the recap reads `match_details(recapMatchId, self)`. */
+  recapMatchId: string | null;
+  /** e.g. `release-11.08`. */
+  gameVersion: string | null;
+}
+
+/** `invoke("player_marks")`, then the `marks` event. */
+export interface PlayerMarks {
+  /** Newest saved first. */
+  saved: string[];
+  /** Non-empty notes by puuid; the user's own puuid holds their personal notes. */
+  notes: Record<string, string>;
+  /** Dismissed smurf flags. */
+  notSmurf: string[];
+}
+
+/** Stored competitive matches with the user on one side, counted from the user's side. */
+export interface SharedRecord {
+  games: number;
+  wins: number;
+  losses: number;
+}
+
+/** One row of `invoke("saved_players")`. */
+export interface SavedPlayer {
+  puuid: string;
+  name: DisplayName;
+  agentId: string | null;
+  tier: number | null;
+  with: SharedRecord;
+  against: SharedRecord;
+  /** "" when none. */
+  note: string;
+  savedMs: number;
+  lastSeenMs: number | null;
+  lastSeenMapId: string | null;
+}
+
+export type HistoryQueue = "competitive" | "all";
+
+/** One of the user's own stored matches, any queue. */
+export interface HistoryRow {
+  matchId: string;
+  mapId: string | null;
+  queueId: string;
+  startMs: number;
+  durationMs: number | null;
+  result: Result;
+  roundsWon: number | null;
+  roundsLost: number | null;
+  agentId: string | null;
+  kills: number | null;
+  deaths: number | null;
+  assists: number | null;
+  kd: number | null;
+  acs: number | null;
+  /** Fraction 0..1. */
+  hsPct: number | null;
+  rrEarned: number | null;
+  tierAfter: number | null;
+}
+
+/** `invoke("match_history", { queue, offset, limit })`. */
+export interface HistoryPage {
+  /** Newest first. */
+  rows: HistoryRow[];
+  total: number;
+  competitiveTotal: number;
+  allTotal: number;
+}
+
+export type SmurfLevel = "off" | "cautious" | "eager";
+
+/** `invoke("get_settings")` / `invoke("set_settings", { settings })`, then the `settings` event. */
+export interface Settings {
+  highlight: boolean;
+  enemyFirst: boolean;
+  smurf: SmurfLevel;
+  savedAlert: boolean;
+  sound: boolean;
+  onTop: boolean;
+  boot: boolean;
+  tray: boolean;
+}
+
+/** One saved ASCII gallery item. */
+export interface AsciiArt {
+  id: number;
+  title: string;
+  /** Rows joined by "\n". */
+  raw: string;
+  createdMs: number;
+}
+
+/** `invoke("app_info")`: the About screen. */
+export interface AppInfo {
+  version: string;
+  commit: string | null;
+  buildMs: number | null;
+  riotClientVersion: string | null;
+  valorantVersion: string | null;
+  dbMatches: number;
+  dbBytes: number;
+}
+
+export type Edition = "select" | "deluxe" | "premium" | "exclusive" | "ultra";
+
+export interface OwnedSkin {
+  skinId: string;
+  /** The skin's first level: its `skinLevel` image. */
+  levelId: string;
+  name: string;
+  weaponId: string;
+  edition: Edition | null;
+  /** Standard store price for its edition; null when not sold for VP. */
+  vp: number | null;
+}
+
+/** `invoke("collection")`: null while the owned list was never fetched. */
+export interface Collection {
+  items: OwnedSkin[];
+  weapons: { id: string; name: string }[];
+  fetchedMs: number;
+}
+
+/** `invoke("profile_extras", { puuid })`: the profile drawer's maps and "in your match" chips. */
+export interface ProfileExtras {
+  puuid: string;
+  /** Current-act competitive record per map, most played first. */
+  maps: StatRow[];
+  /** For the player's recent matches: which players of the current live match were in each. */
+  liveMates: { matchId: string; puuids: string[] }[];
+}

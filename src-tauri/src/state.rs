@@ -27,6 +27,7 @@ use opd1_core::model::{
 use opd1_core::party::detect_parties;
 use opd1_core::presence::Stage;
 use opd1_core::stats::Act;
+use opd1_core::wire::{AppStatus, PlayerMarks, Settings};
 use opd1_riot::assets::{AssetCache, Meta};
 use opd1_riot::endpoints::ContentActs;
 use opd1_riot::to_core::{current_rank_from_mmr, seasonal_map_from_mmr};
@@ -1587,6 +1588,15 @@ pub trait EventSink: Send + Sync {
     /// B2: the user's My Stats changed (`"mystats"`; the same JSON the
     /// `my_stats` command returns). Default: nothing.
     fn my_stats(&self, _stats: &MyStats) {}
+    /// R189: the connection pill / Agent Select / queue / recap state
+    /// (`"status"`). Default: nothing.
+    #[allow(dead_code)] // R189: called once the poll loop sets the status (backend-live).
+    fn status(&self, _status: &AppStatus) {}
+    /// R189: saved players, notes, dismissed smurf flags (`"marks"`).
+    #[allow(dead_code)] // R189: called once marks are stored (backend-store).
+    fn marks(&self, _marks: &PlayerMarks) {}
+    /// R189: the stored settings changed (`"settings"`).
+    fn settings(&self, _settings: &Settings) {}
 }
 
 impl EventSink for AppHandle {
@@ -1618,6 +1628,32 @@ impl EventSink for AppHandle {
         if let Err(e) = self.emit("mystats", stats) {
             log::warn!("emit mystats failed: {e}");
         }
+    }
+
+    fn status(&self, status: &AppStatus) {
+        if let Err(e) = self.emit("status", status) {
+            log::warn!("emit status failed: {e}");
+        }
+    }
+
+    fn marks(&self, marks: &PlayerMarks) {
+        if let Err(e) = self.emit("marks", marks) {
+            log::warn!("emit marks failed: {e}");
+        }
+    }
+
+    fn settings(&self, settings: &Settings) {
+        if let Err(e) = self.emit("settings", settings) {
+            log::warn!("emit settings failed: {e}");
+        }
+    }
+}
+
+/// R189: where the Riot Client's lockfile lives (shown on the error screen).
+pub fn default_lockfile_path() -> String {
+    match std::env::var("LOCALAPPDATA") {
+        Ok(base) => format!(r"{base}\Riot Games\Riot Client\Config\lockfile"),
+        Err(_) => r"%LOCALAPPDATA%\Riot Games\Riot Client\Config\lockfile".into(),
     }
 }
 
@@ -1797,6 +1833,8 @@ pub struct AppState {
     worker_kick: AtomicBool,
     /// `app_data_dir()/debug` — where `dump_raw` writes.
     pub debug_dir: PathBuf,
+    /// R189: the last `"status"` given to the UI ([`Self::set_status`]).
+    status: Mutex<AppStatus>,
 }
 
 impl AppState {
@@ -1853,7 +1891,36 @@ impl AppState {
             carried_holds: Mutex::new(CarriedHolds::default()),
             worker_kick: AtomicBool::new(false),
             debug_dir,
+            status: Mutex::new(AppStatus::initial(default_lockfile_path())),
         }
+    }
+
+    /// R189: the current connection status (the `app_status` command).
+    pub fn status(&self) -> AppStatus {
+        lock(&self.status).clone()
+    }
+
+    /// R189: changes the status through `f` and emits `"status"` when it
+    /// changed.
+    #[allow(dead_code)] // R189: the poll loop calls it (backend-live).
+    pub fn set_status(&self, f: impl FnOnce(&mut AppStatus)) {
+        let mut cur = lock(&self.status);
+        let before = cur.clone();
+        f(&mut cur);
+        if *cur != before {
+            self.sink.status(&cur);
+        }
+    }
+
+    /// R189: hands changed marks to the UI.
+    #[allow(dead_code)] // R189: the marks commands call it (backend-store).
+    pub fn emit_marks(&self, marks: &PlayerMarks) {
+        self.sink.marks(marks);
+    }
+
+    /// R189: hands changed settings to the UI.
+    pub fn emit_settings(&self, settings: &Settings) {
+        self.sink.settings(settings);
     }
 
     /// B2: hands a freshly computed My Stats to the UI (`my_stats::notify`

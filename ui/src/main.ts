@@ -6,6 +6,7 @@ import "./lib/themeStore.svelte";
 import { mount } from "svelte";
 import App from "./App.svelte";
 import { installReleaseGuards } from "./lib/boot";
+import { startAppData } from "./lib/appdata.svelte";
 import { startFeeds } from "./lib/stores";
 import { attachTooltips } from "./lib/tooltip.svelte";
 
@@ -16,6 +17,6 @@ if (!import.meta.env.DEV) installReleaseGuards(window);
 const root = document.getElementById("app")!;
 const app = mount(App, { target: root });
 attachTooltips(root);
-void startFeeds();
+void startFeeds().then(() => startAppData());
 
 export default app;

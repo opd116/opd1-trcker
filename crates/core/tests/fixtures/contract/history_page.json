@@ -1,0 +1,111 @@
+[
+  {
+    "allTotal": 3,
+    "competitiveTotal": 2,
+    "rows": [
+      {
+        "acs": 200.0,
+        "agentId": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+        "assists": 4,
+        "deaths": 16,
+        "durationMs": 2280000,
+        "hsPct": 0.25,
+        "kd": 1.25,
+        "kills": 20,
+        "mapId": null,
+        "matchId": "00000002-1111-4111-8111-111111111111",
+        "queueId": "competitive",
+        "result": "draw",
+        "roundsLost": 12,
+        "roundsWon": 12,
+        "rrEarned": null,
+        "startMs": 1758977200000,
+        "tierAfter": null
+      },
+      {
+        "acs": 200.0,
+        "agentId": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+        "assists": 4,
+        "deaths": 16,
+        "durationMs": 2280000,
+        "hsPct": 0.25,
+        "kd": 1.25,
+        "kills": 20,
+        "mapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+        "matchId": "00000001-1111-4111-8111-111111111111",
+        "queueId": "competitive",
+        "result": "win",
+        "roundsLost": 11,
+        "roundsWon": 13,
+        "rrEarned": 22,
+        "startMs": 1758973600000,
+        "tierAfter": 16
+      }
+    ],
+    "total": 2
+  },
+  {
+    "allTotal": 3,
+    "competitiveTotal": 2,
+    "rows": [
+      {
+        "acs": null,
+        "agentId": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+        "assists": null,
+        "deaths": null,
+        "durationMs": 2280000,
+        "hsPct": null,
+        "kd": null,
+        "kills": null,
+        "mapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+        "matchId": "00000003-1111-4111-8111-111111111111",
+        "queueId": "unrated",
+        "result": "loss",
+        "roundsLost": 13,
+        "roundsWon": 11,
+        "rrEarned": null,
+        "startMs": 1758980800000,
+        "tierAfter": null
+      },
+      {
+        "acs": 200.0,
+        "agentId": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+        "assists": 4,
+        "deaths": 16,
+        "durationMs": 2280000,
+        "hsPct": 0.25,
+        "kd": 1.25,
+        "kills": 20,
+        "mapId": null,
+        "matchId": "00000002-1111-4111-8111-111111111111",
+        "queueId": "competitive",
+        "result": "draw",
+        "roundsLost": 12,
+        "roundsWon": 12,
+        "rrEarned": null,
+        "startMs": 1758977200000,
+        "tierAfter": null
+      },
+      {
+        "acs": 200.0,
+        "agentId": "add6443a-41bd-e414-f6ad-e58d267f4e95",
+        "assists": 4,
+        "deaths": 16,
+        "durationMs": 2280000,
+        "hsPct": 0.25,
+        "kd": 1.25,
+        "kills": 20,
+        "mapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+        "matchId": "00000001-1111-4111-8111-111111111111",
+        "queueId": "competitive",
+        "result": "win",
+        "roundsLost": 11,
+        "roundsWon": 13,
+        "rrEarned": 22,
+        "startMs": 1758973600000,
+        "tierAfter": 16
+      }
+    ],
+    "total": 3
+  }
+]

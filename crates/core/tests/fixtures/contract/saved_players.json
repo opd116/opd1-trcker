@@ -1,0 +1,98 @@
+[
+  {
+    "against": {
+      "games": 0,
+      "losses": 0,
+      "wins": 0
+    },
+    "agentId": "8e253930-4c05-31dd-1b6c-968525494517",
+    "lastSeenMapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+    "lastSeenMs": 1758980800000,
+    "name": {
+      "kind": "visible",
+      "name": "Duo",
+      "tag": "TAG"
+    },
+    "note": "Entry every round, dry-peeks A long",
+    "puuid": "a1b2c3d4-0000-4000-8000-000000000002",
+    "savedMs": 1759006000000,
+    "tier": 16,
+    "with": {
+      "games": 1,
+      "losses": 0,
+      "wins": 1
+    }
+  },
+  {
+    "against": {
+      "games": 1,
+      "losses": 0,
+      "wins": 0
+    },
+    "agentId": "8e253930-4c05-31dd-1b6c-968525494517",
+    "lastSeenMapId": null,
+    "lastSeenMs": 1758977200000,
+    "name": {
+      "fromMapId": null,
+      "fromStartMs": 1758977200000,
+      "kind": "remembered",
+      "name": "Secret",
+      "source": "ownMatch",
+      "tag": "TAG"
+    },
+    "note": "",
+    "puuid": "a1b2c3d4-0000-4000-8000-000000000003",
+    "savedMs": 1759002400000,
+    "tier": 18,
+    "with": {
+      "games": 0,
+      "losses": 0,
+      "wins": 0
+    }
+  },
+  {
+    "against": {
+      "games": 0,
+      "losses": 0,
+      "wins": 0
+    },
+    "agentId": null,
+    "lastSeenMapId": null,
+    "lastSeenMs": null,
+    "name": {
+      "agentId": "8e253930-4c05-31dd-1b6c-968525494517",
+      "kind": "hiddenAgent"
+    },
+    "note": "",
+    "puuid": "a1b2c3d4-0000-4000-8000-000000000004",
+    "savedMs": 1758998800000,
+    "tier": null,
+    "with": {
+      "games": 0,
+      "losses": 0,
+      "wins": 0
+    }
+  },
+  {
+    "against": {
+      "games": 0,
+      "losses": 0,
+      "wins": 0
+    },
+    "agentId": null,
+    "lastSeenMapId": null,
+    "lastSeenMs": null,
+    "name": {
+      "kind": "hiddenPlayer"
+    },
+    "note": "",
+    "puuid": "a1b2c3d4-0000-4000-8000-000000000005",
+    "savedMs": 1758995200000,
+    "tier": null,
+    "with": {
+      "games": 0,
+      "losses": 0,
+      "wins": 0
+    }
+  }
+]

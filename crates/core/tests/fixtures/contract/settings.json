@@ -1,0 +1,22 @@
+[
+  {
+    "boot": true,
+    "enemyFirst": false,
+    "highlight": true,
+    "onTop": true,
+    "savedAlert": true,
+    "smurf": "cautious",
+    "sound": false,
+    "tray": true
+  },
+  {
+    "boot": false,
+    "enemyFirst": true,
+    "highlight": false,
+    "onTop": false,
+    "savedAlert": false,
+    "smurf": "eager",
+    "sound": true,
+    "tray": false
+  }
+]

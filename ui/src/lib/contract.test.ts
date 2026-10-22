@@ -12,7 +12,19 @@ import { detailsFor, encounterMatchId, matchFor, PUUID, recentMatchId, roster } 
 import { resolveMyStats } from "./demo/scenes";
 import demoMeta from "./demo/meta.json";
 import { SCENES } from "./demo/scenes";
-import type { Meta, MyStats, PlayerCard as Card, PlayerDetails } from "./types";
+import { DEFAULT_SETTINGS } from "./demo/v2/store";
+import type {
+  AppInfo,
+  AsciiArt,
+  HistoryPage,
+  Meta,
+  MyStats,
+  PlayerCard as Card,
+  PlayerDetails,
+  PlayerMarks,
+  SavedPlayer,
+  Settings,
+} from "./types";
 
 // ── goldens ──────────────────────────────────────────────────────────────────────
 const GOLDEN_DIR = new URL("../../../crates/core/tests/fixtures/contract/", import.meta.url);
@@ -22,6 +34,13 @@ const LIVE = golden("live_state") as { players: Record<string, unknown>[] } & Re
 const DETAILS = golden("player_details") as Record<string, unknown>;
 const MATCHES = golden("match_details_view") as Record<string, unknown>[];
 const MY_STATS = golden("my_stats") as Record<string, unknown>[];
+// v2 redesign (R189).
+const HISTORY = golden("history_page") as HistoryPage[];
+const SAVED = golden("saved_players") as SavedPlayer[];
+const MARKS = golden("player_marks") as PlayerMarks[];
+const SETTINGS = golden("settings") as Settings[];
+const ASCII = golden("ascii_art") as AsciiArt[];
+const APP_INFO = golden("app_info") as AppInfo[];
 
 // ── the walker ───────────────────────────────────────────────────────────────────
 type Shape = Record<string, Desc>;
@@ -315,7 +334,18 @@ describe("the walker can fail (a check that cannot fail proves nothing)", () => 
 // ── the goldens ──────────────────────────────────────────────────────────────────
 describe("the goldens match the descriptors", () => {
   it("these are all the goldens: a new one on the Rust side needs a descriptor and a test here", () => {
-    expect(readdirSync(GOLDEN_DIR).sort()).toEqual(["live_state.json", "match_details_view.json", "my_stats.json", "player_details.json"]);
+    expect(readdirSync(GOLDEN_DIR).sort()).toEqual([
+      "app_info.json",
+      "ascii_art.json",
+      "history_page.json",
+      "live_state.json",
+      "match_details_view.json",
+      "my_stats.json",
+      "player_details.json",
+      "player_marks.json",
+      "saved_players.json",
+      "settings.json",
+    ]);
   });
 
   it("live_state.json is a LiveState", () => {
@@ -349,6 +379,89 @@ describe("the goldens match the descriptors", () => {
         `${key} is never null`,
       ).toBe(true);
     }
+  });
+});
+
+describe("the v2 goldens match the descriptors (R189)", () => {
+  it("history_page.json holds two HistoryPages (the competitive tab and the all tab)", () => {
+    expect(HISTORY).toHaveLength(2);
+    HISTORY.forEach((p, i) => expect(problems(p, "HistoryPage", `history_page[${i}]`)).toEqual([]));
+  });
+
+  it("saved_players.json is a list of SavedPlayers", () => {
+    expect(SAVED.length).toBeGreaterThan(0);
+    SAVED.forEach((p, i) => expect(problems(p, "SavedPlayer", `saved_players[${i}]`)).toEqual([]));
+  });
+
+  it("player_marks.json holds two PlayerMarks (some marks, none)", () => {
+    expect(MARKS).toHaveLength(2);
+    MARKS.forEach((m, i) => expect(problems(m, "PlayerMarks", `player_marks[${i}]`)).toEqual([]));
+  });
+
+  it("settings.json holds two Settings (the defaults, every value changed)", () => {
+    expect(SETTINGS).toHaveLength(2);
+    SETTINGS.forEach((s, i) => expect(problems(s, "Settings", `settings[${i}]`)).toEqual([]));
+  });
+
+  it("ascii_art.json is a list of AsciiArt", () => {
+    expect(ASCII.length).toBeGreaterThan(0);
+    ASCII.forEach((a, i) => expect(problems(a, "AsciiArt", `ascii_art[${i}]`)).toEqual([]));
+  });
+
+  it("app_info.json holds two AppInfos (everything known, a build without git and no game)", () => {
+    expect(APP_INFO).toHaveLength(2);
+    APP_INFO.forEach((a, i) => expect(problems(a, "AppInfo", `app_info[${i}]`)).toEqual([]));
+  });
+});
+
+describe("v2 golden invariants the UI relies on (R189)", () => {
+  it("history: newest first, the tab's rows in its queue, the counts consistent, a null stat line null as a whole (R102)", () => {
+    const [comp, all] = HISTORY as [HistoryPage, HistoryPage];
+    for (const p of HISTORY) {
+      expect(desc(p.rows.map((r) => r.startMs))).toBe(true);
+      expect(p.rows.length).toBeLessThanOrEqual(p.total);
+      expect(p.competitiveTotal).toBeLessThanOrEqual(p.allTotal);
+      for (const r of p.rows) {
+        if (r.kills === null) expect([r.deaths, r.assists, r.kd, r.acs, r.hsPct]).toEqual([null, null, null, null, null]);
+        expect(r.mapId === null || UUID.test(r.mapId)).toBe(true);
+      }
+    }
+    expect(comp.rows.every((r) => r.queueId === "competitive")).toBe(true);
+    expect(comp.total).toBe(comp.competitiveTotal);
+    expect(all.total).toBe(all.allTotal);
+    expect(all.rows.some((r) => r.queueId !== "competitive")).toBe(true);
+    expect(all.rows.some((r) => r.kills === null)).toBe(true);
+    expect(all.rows.some((r) => r.mapId === null)).toBe(true);
+    expect(strings(HISTORY).filter((s) => s.includes("/Game/"))).toEqual([]);
+  });
+
+  it("saved players: newest saved first, every name style, records that add up, map ids uuids", () => {
+    expect(desc(SAVED.map((p) => p.savedMs))).toBe(true);
+    expect(SAVED.map((p) => p.name.kind).sort()).toEqual(["hiddenAgent", "hiddenPlayer", "remembered", "visible"]);
+    for (const p of SAVED) {
+      for (const r of [p.with, p.against]) expect(r.wins + r.losses).toBeLessThanOrEqual(r.games);
+      expect(p.lastSeenMapId === null || UUID.test(p.lastSeenMapId)).toBe(true);
+      if (p.lastSeenMs === null) expect(p.lastSeenMapId).toBeNull();
+    }
+    expect(SAVED.some((p) => p.note !== "")).toBe(true);
+    expect(strings(SAVED).filter((s) => s.includes("/Game/"))).toEqual([]);
+  });
+
+  it("marks: saved and notSmurf are puuid lists, every note is non-empty", () => {
+    for (const m of MARKS) {
+      for (const p of [...m.saved, ...m.notSmurf]) expect(typeof p).toBe("string");
+      for (const note of Object.values(m.notes)) expect(typeof note === "string" && note.trim() !== "").toBe(true);
+    }
+    expect(MARKS[1]).toEqual({ saved: [], notes: {}, notSmurf: [] });
+  });
+
+  it("settings: the backend's defaults are the UI's", () => {
+    expect(SETTINGS[0]).toEqual(DEFAULT_SETTINGS);
+    expect(SETTINGS[1]).not.toEqual(DEFAULT_SETTINGS);
+  });
+
+  it("the ASCII gallery comes newest first", () => {
+    expect(desc(ASCII.map((a) => a.createdMs))).toBe(true);
   });
 });
 

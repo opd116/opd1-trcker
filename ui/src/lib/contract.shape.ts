@@ -10,9 +10,13 @@
 //  - `Desc` has two optional fields beyond `{ kinds, optional?, shape? }`: `enum` (a closed string set) and
 //    `fraction` (a 0..1 number). Both are additive, and the type tests pin them.
 import type {
+  AppInfo,
+  AsciiArt,
   DisplayName,
   EncounterCount,
   EncounterDetailRow,
+  HistoryPage,
+  HistoryRow,
   Insight,
   Last5Entry,
   LiveState,
@@ -25,13 +29,17 @@ import type {
   Peak,
   PlayerCard,
   PlayerDetails,
+  PlayerMarks,
   Rank,
   RankChange,
   RankSummary,
   RrPoint,
+  SavedPlayer,
   ScoreRow,
   SessionMatch,
   SessionSummary,
+  Settings,
+  SharedRecord,
   StatRow,
   TeammateSummary,
   WeaponSkin,
@@ -49,6 +57,7 @@ export const enums = {
   rememberedSource: ["ownMatch", "otherMatch", "seen"],
   streakMark: ["W", "L", "D"],
   insightKind: ["bestMap", "worstMap", "timeOfDay", "weekdayWeekend", "rrEconomy", "last7Days"],
+  smurfLevel: ["off", "cautious", "eager"],
 } as const satisfies Record<string, readonly string[]>;
 
 export type Desc = {
@@ -281,6 +290,82 @@ export const shapes = {
     byDaypart: { kinds: ["array"], shape: "WinCell" },
     insights: { kinds: ["array"], shape: "Insight" },
   } satisfies ShapeOf<MyStats>,
+
+  // ── v2 redesign (R189; history_page.json, saved_players.json, player_marks.json, settings.json, ascii_art.json,
+  // app_info.json) ──
+  HistoryRow: {
+    matchId: str,
+    // null when the asset tables do not know the map: never a Riot path.
+    mapId: strOrNull,
+    queueId: str,
+    startMs: num,
+    durationMs: numOrNull,
+    result: { kinds: ["string"], enum: "result" },
+    roundsWon: numOrNull,
+    roundsLost: numOrNull,
+    agentId: strOrNull,
+    // R102: the whole stat line is null when the match has no stats row for the user.
+    kills: numOrNull,
+    deaths: numOrNull,
+    assists: numOrNull,
+    kd: numOrNull,
+    acs: numOrNull,
+    hsPct: { kinds: ["number", "null"], fraction: true },
+    rrEarned: numOrNull,
+    tierAfter: numOrNull,
+  } satisfies ShapeOf<HistoryRow>,
+
+  HistoryPage: {
+    rows: { kinds: ["array"], shape: "HistoryRow" },
+    total: num,
+    competitiveTotal: num,
+    allTotal: num,
+  } satisfies ShapeOf<HistoryPage>,
+
+  SharedRecord: { games: num, wins: num, losses: num } satisfies ShapeOf<SharedRecord>,
+
+  SavedPlayer: {
+    puuid: str,
+    name: { kinds: ["object"], shape: "DisplayName" },
+    agentId: strOrNull,
+    tier: numOrNull,
+    with: { kinds: ["object"], shape: "SharedRecord" },
+    against: { kinds: ["object"], shape: "SharedRecord" },
+    note: str,
+    savedMs: num,
+    lastSeenMs: numOrNull,
+    lastSeenMapId: strOrNull,
+  } satisfies ShapeOf<SavedPlayer>,
+
+  // `notes` is a puuid -> note map: an object with no fixed keys, so no nested descriptor.
+  PlayerMarks: {
+    saved: { kinds: ["array"] },
+    notes: { kinds: ["object"] },
+    notSmurf: { kinds: ["array"] },
+  } satisfies ShapeOf<PlayerMarks>,
+
+  Settings: {
+    highlight: bool,
+    enemyFirst: bool,
+    smurf: { kinds: ["string"], enum: "smurfLevel" },
+    savedAlert: bool,
+    sound: bool,
+    onTop: bool,
+    boot: bool,
+    tray: bool,
+  } satisfies ShapeOf<Settings>,
+
+  AsciiArt: { id: num, title: str, raw: str, createdMs: num } satisfies ShapeOf<AsciiArt>,
+
+  AppInfo: {
+    version: str,
+    commit: strOrNull,
+    buildMs: numOrNull,
+    riotClientVersion: strOrNull,
+    valorantVersion: strOrNull,
+    dbMatches: num,
+    dbBytes: num,
+  } satisfies ShapeOf<AppInfo>,
 };
 
 /** One descriptor per `DisplayName` variant, keyed by its `kind` tag. */

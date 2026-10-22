@@ -1593,7 +1593,6 @@ pub trait EventSink: Send + Sync {
     #[allow(dead_code)] // R189: called once the poll loop sets the status (backend-live).
     fn status(&self, _status: &AppStatus) {}
     /// R189: saved players, notes, dismissed smurf flags (`"marks"`).
-    #[allow(dead_code)] // R189: called once marks are stored (backend-store).
     fn marks(&self, _marks: &PlayerMarks) {}
     /// R189: the stored settings changed (`"settings"`).
     fn settings(&self, _settings: &Settings) {}
@@ -1913,7 +1912,6 @@ impl AppState {
     }
 
     /// R189: hands changed marks to the UI.
-    #[allow(dead_code)] // R189: the marks commands call it (backend-store).
     pub fn emit_marks(&self, marks: &PlayerMarks) {
         self.sink.marks(marks);
     }

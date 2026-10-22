@@ -362,6 +362,8 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
                 puuid: t.puuid.clone(),
                 name: teammate_name(t, &hidden_now, &remembered, &|p| st.map_uuid(p)),
                 count: t.count,
+                wins: t.wins,
+                losses: t.losses,
             })
             .collect(),
         loadout: loadout_view(st, puuid, raw_loadout.as_ref()),
@@ -383,6 +385,8 @@ mod tests {
             game_name: name.map(str::to_string),
             tag_line: name.map(|_| "TAG".to_string()),
             count: 3,
+            wins: 2,
+            losses: 1,
         }
     }
 

@@ -172,6 +172,9 @@ export interface TeammateSummary {
   puuid: string;
   name: DisplayName;
   count: number;
+  /** Of those `count` shared competitive matches, the profile owner's wins and losses (a draw is neither). */
+  wins: number;
+  losses: number;
 }
 
 export interface PlayerDetails {

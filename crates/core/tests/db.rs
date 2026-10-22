@@ -1032,6 +1032,45 @@ fn top_teammates_orders_by_count() {
 }
 
 #[test]
+fn top_teammates_count_the_players_wins_and_losses_together() {
+    // From the player's side: two wins, one loss and a draw (no winner)
+    // shared with the same teammate; a draw is neither.
+    let repo = repo_in_memory();
+    for (id, start, winner) in [
+        ("w1", 1_000, Some("Blue")),
+        ("w2", 2_000, Some("Blue")),
+        ("l1", 3_000, Some("Red")),
+        ("d1", 4_000, None),
+    ] {
+        repo.upsert_match(
+            &sample_match(id, start, winner),
+            &[],
+            &[
+                sample_player("self", "Blue", "Self", "111"),
+                sample_player("mate", "Blue", "Mate", "AAA"),
+                sample_player("foe", "Red", "Foe", "BBB"),
+            ],
+        )
+        .unwrap();
+    }
+
+    let top = repo.top_teammates("self", 0, 10).unwrap();
+    assert_eq!(top.len(), 1, "an opponent is never a teammate");
+    assert_eq!(top[0].puuid, "mate");
+    assert_eq!(top[0].count, 4);
+    assert_eq!((top[0].wins, top[0].losses), (2, 1));
+
+    // The other side of the same matches: the foe's record is the mirror.
+    let foe = repo.top_teammates("foe", 0, 10).unwrap();
+    assert!(foe.is_empty(), "the foe had no teammate stored");
+    let mate = repo.top_teammates("mate", 0, 10).unwrap();
+    assert_eq!(
+        (mate[0].puuid.as_str(), mate[0].wins, mate[0].losses),
+        ("self", 2, 1)
+    );
+}
+
+#[test]
 fn top_teammates_tie_breaks_by_recency() {
     let repo = repo_in_memory();
 

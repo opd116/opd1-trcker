@@ -338,7 +338,7 @@
         {:else if card}
           <Encounters rows={encRows} {puuid} them={nv} expected={encExpected} />
         {/if}
-        <Mates mates={details ? details.topTeammates : null} live={$live} {party} />
+        <Mates mates={details ? details.topTeammates : null} live={$live} {party} {isSelf} />
         <Loadout loadout={details ? details.loadout : null} wide={wideLoadout} />
         <Maps rows={extras === undefined ? undefined : (extras?.maps ?? [])} pad={!wideLoadout} />
       </div>

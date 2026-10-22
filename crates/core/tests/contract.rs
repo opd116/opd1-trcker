@@ -537,6 +537,8 @@ fn player_details_value() -> Value {
                 tag: "ONE".into(),
             },
             count: 5,
+            wins: 3,
+            losses: 2,
         },
         TeammateSummary {
             puuid: "puuid-mate-2".into(),
@@ -548,6 +550,8 @@ fn player_details_value() -> Value {
                 from_start_ms: Some(SEEN_MS),
             },
             count: 3,
+            wins: 1,
+            losses: 1,
         },
         TeammateSummary {
             puuid: "puuid-mate-3".into(),
@@ -555,6 +559,8 @@ fn player_details_value() -> Value {
                 agent_id: "agent-sova".into(),
             },
             count: 1,
+            wins: 0,
+            losses: 0,
         },
     ];
 
@@ -1278,7 +1284,7 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
     );
     assert_eq!(
         keys(&golden["topTeammates"][0]),
-        spec(&["puuid", "name", "count"])
+        spec(&["puuid", "name", "count", "wins", "losses"])
     );
     assert_eq!(
         keys(&golden["loadout"]["vandal"]),

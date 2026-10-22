@@ -229,9 +229,9 @@ function detailsLongnames(): Record<string, PlayerDetails> {
   // Spec §6.7's three name styles at their widest: a live visible teammate (the narrowest block), a remembered name
   // (eye + 16 W's + tag, so it wraps), and a hidden agent (Task 18 review, Minor 4).
   d.topTeammates = [
-    { puuid: PUUID.kilo!, name: w(LONGEST_TAG), count: 14 }, // on the live roster
-    { puuid: "d0000000-0000-4000-8000-000000000001", name: { kind: "remembered", name: LONGEST_NAME, tag: "WWWWV", ...REMEMBERED }, count: 9 },
-    { puuid: "d0000000-0000-4000-8000-000000000002", name: { kind: "hiddenAgent", agentId: AG.Brimstone }, count: 6 },
+    { puuid: PUUID.kilo!, name: w(LONGEST_TAG), count: 14, wins: 9, losses: 5 }, // on the live roster
+    { puuid: "d0000000-0000-4000-8000-000000000001", name: { kind: "remembered", name: LONGEST_NAME, tag: "WWWWV", ...REMEMBERED }, count: 9, wins: 5, losses: 4 },
+    { puuid: "d0000000-0000-4000-8000-000000000002", name: { kind: "hiddenAgent", agentId: AG.Brimstone }, count: 6, wins: 3, losses: 3 },
   ];
   const lo = loadout();
   for (const k of ["vandal", "phantom", "operator", "sheriff"] as const) {

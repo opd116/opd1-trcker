@@ -303,11 +303,13 @@ const poolPuuid = (j: number) => {
 /** Kova is only ever a Top 3 name, never on a roster or in a pool. */
 const KOVA = uuid("c", 1);
 
-const MATES: Record<string, Array<[string, string, number]>> = {
-  mara: [["Kilo", "2210", 14], ["Vantablack", "0001", 9], ["Ishi", "KR1", 6]],
-  fahad: [["Sable", "1177", 13], ["Drake", "5520", 10], ["Kova", "0482", 7]],
+/** name, tag, games together, the profile owner's wins and losses in them (a draw is neither). */
+type Mate = [string, string, number, number, number];
+const MATES: Record<string, Mate[]> = {
+  mara: [["Kilo", "2210", 14, 9, 5], ["Vantablack", "0001", 9, 5, 4], ["Ishi", "KR1", 6, 2, 4]],
+  fahad: [["Sable", "1177", 13, 9, 4], ["Drake", "5520", 10, 6, 3], ["Kova", "0482", 7, 3, 4]],
 };
-const MATES_DEFAULT: Array<[string, string, number]> = [["Kova", "0482", 12], ["Tarek", "0552", 8], ["Fennec", "4402", 5]];
+const MATES_DEFAULT: Mate[] = [["Kova", "0482", 12, 7, 5], ["Tarek", "0552", 8, 4, 4], ["Fennec", "4402", 5, 2, 3]];
 
 /**
  * R93: a player who is hidden on the live screen (their live card's name is not `visible`) shows as that card
@@ -331,11 +333,11 @@ function hiddenRowName(live: readonly PlayerCard[] | undefined, row: ScoreRow): 
 }
 
 function mates(r: Raw, live?: readonly PlayerCard[]): TeammateSummary[] {
-  return (MATES[r.id] ?? MATES_DEFAULT).map(([name, tag, count]) => {
+  return (MATES[r.id] ?? MATES_DEFAULT).map(([name, tag, count, wins, losses]) => {
     const onRoster = ROSTER_RAW.find((x) => x.name === name && x.tag === tag);
     const pool = POOL.findIndex((p) => p[0] === name && p[1] === tag);
     const puuid = onRoster ? PUUID[onRoster.id]! : pool >= 0 ? poolPuuid(pool) : KOVA;
-    return { puuid, name: hiddenName(live, puuid) ?? { kind: "visible", name, tag }, count };
+    return { puuid, name: hiddenName(live, puuid) ?? { kind: "visible", name, tag }, count, wins, losses };
   });
 }
 

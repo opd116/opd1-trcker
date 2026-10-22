@@ -1,7 +1,9 @@
 <!--
   Who the player queues with most (prototype 1050–1062; `topTeammates`, current act): the agent when that teammate is
   on the live screen with a visible name (else a silhouette, so a row never reveals who is behind a hidden card), the
-  name as the data gives it (hidden-name rules applied upstream, R93), and the games together.
+  name as the data gives it (hidden-name rules applied upstream, R93), and the games together. On the user's own
+  profile the design adds the record under the name ("10W – 4L together", prototype 1502), left out while no shared
+  match has a winner.
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
@@ -21,15 +23,18 @@
     live: LiveState | null;
     /** The profile player's live party: its members' icons take the party colour. */
     party: PartyChip | null;
+    /** The user's own profile: the rows carry the record together. */
+    isSelf?: boolean;
   }
 
-  let { mates, live, party }: Props = $props();
+  let { mates, live, party, isSelf = false }: Props = $props();
 
   const rows = $derived(
     (mates ?? []).slice(0, 3).map((m) => ({
       puuid: m.puuid,
       nv: nameView(m.name, $meta),
       count: m.count,
+      record: isSelf && m.wins + m.losses > 0 ? `${m.wins}W – ${m.losses}L together` : null,
       lv: liveTeammate(m.puuid, live),
       inParty: !!party?.mates.some((x) => x.puuid === m.puuid),
     })),
@@ -68,6 +73,7 @@
             <span class={["nm", m.nv?.style]} dir="auto" data-ellipsis>{m.nv?.text ?? "—"}</span>
             {#if m.nv?.tag}<span class="tg">{m.nv.tag}</span>{/if}
           </div>
+          {#if m.record}<span class="sub">{m.record}</span>{/if}
         </div>
         <div class="g"><span class="gn">{m.count}</span><span class="gl">{m.count === 1 ? "game" : "games"}</span></div>
       </div>
@@ -162,6 +168,12 @@
     flex: none;
     font: 500 12px/1 var(--font);
     color: var(--text-tag);
+  }
+
+  .sub {
+    font: 500 12px/1 var(--font);
+    color: var(--text-label);
+    white-space: nowrap;
   }
 
   .g {

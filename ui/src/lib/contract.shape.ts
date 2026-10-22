@@ -180,7 +180,13 @@ export const shapes = {
     selfTier: numOrNull,
   } satisfies ShapeOf<EncounterDetailRow>,
 
-  TeammateSummary: { puuid: str, name: { kinds: ["object"], shape: "DisplayName" }, count: num } satisfies ShapeOf<TeammateSummary>,
+  TeammateSummary: {
+    puuid: str,
+    name: { kinds: ["object"], shape: "DisplayName" },
+    count: num,
+    wins: num,
+    losses: num,
+  } satisfies ShapeOf<TeammateSummary>,
 
   PlayerDetails: {
     card: { kinds: ["object"], shape: "PlayerCard" },

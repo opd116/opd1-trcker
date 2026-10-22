@@ -45,7 +45,7 @@ use crate::sync::DetailsSync;
 
 type AppStateRef<'a> = State<'a, Arc<AppState>>;
 
-fn is_uuid(s: &str) -> bool {
+pub(crate) fn is_uuid(s: &str) -> bool {
     s.len() == 36
         && s.char_indices().all(|(i, c)| {
             if matches!(i, 8 | 13 | 18 | 23) {

@@ -1,0 +1,20 @@
+[
+  {
+    "buildMs": 1758970000000,
+    "commit": "cb58707",
+    "dbBytes": 3145728,
+    "dbMatches": 1234,
+    "riotClientVersion": "release-11.08-shipping-14-3373442",
+    "valorantVersion": "release-11.08",
+    "version": "0.4.0"
+  },
+  {
+    "buildMs": null,
+    "commit": null,
+    "dbBytes": 0,
+    "dbMatches": 0,
+    "riotClientVersion": null,
+    "valorantVersion": null,
+    "version": "0.4.0"
+  }
+]

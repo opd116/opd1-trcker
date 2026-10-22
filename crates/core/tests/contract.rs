@@ -1383,3 +1383,396 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
         spec(&["kind", "text", "matches", "positive"])
     );
 }
+
+// ---------------------------------------------------------------------
+// v2 redesign (R189): HistoryPage, SavedPlayer, PlayerMarks, Settings,
+// AsciiArt, AppInfo
+// ---------------------------------------------------------------------
+
+use opd1_core::db::marks::saved_player;
+use opd1_core::db::repo::{HistoryEntry, Player, Repo};
+use opd1_core::wire::{AppInfo, HistoryQueue, Settings, SmurfLevel};
+
+const V2_ME: &str = "a1b2c3d4-0000-4000-8000-000000000001";
+const V2_DUO: &str = "a1b2c3d4-0000-4000-8000-000000000002";
+const V2_HIDDEN: &str = "a1b2c3d4-0000-4000-8000-000000000003";
+const V2_NAMELESS: &str = "a1b2c3d4-0000-4000-8000-000000000004";
+const V2_NEVER_SEEN: &str = "a1b2c3d4-0000-4000-8000-000000000005";
+const V2_JETT: &str = "add6443a-41bd-e414-f6ad-e58d267f4e95";
+const V2_OMEN: &str = "8e253930-4c05-31dd-1b6c-968525494517";
+/// The first match's start (2025-09-27 10:46:40 UTC); the others follow by
+/// the hour.
+const V2_T0: i64 = SEEN_MS;
+const V2_HOUR: i64 = 3_600_000;
+
+fn v2_match_id(n: u32) -> String {
+    format!("0000000{n}-1111-4111-8111-111111111111")
+}
+
+fn v2_repo() -> Repo {
+    Repo::new(opd1_core::db::open_db(std::path::Path::new(":memory:")).unwrap())
+}
+
+/// One other player of a stored match: puuid, team, name, tier.
+type Other<'a> = (&'a str, &'a str, &'a str, Option<i64>);
+
+/// One stored match of the user's, indexed in their history list; the user
+/// is on Blue, `winner` `None` is a draw. The user's stat line is 20/16/4,
+/// 5000 score over 25 rounds, 10/25/5 shots (K/D 1.25, ACS 200, HS 0.25);
+/// `no_stats` stores none (R102).
+fn v2_store(
+    r: &Repo,
+    n: u32,
+    queue: &str,
+    map: &str,
+    winner: Option<&str>,
+    others: &[Other],
+    no_stats: bool,
+) {
+    let mut me = player(V2_ME, "Blue", "Me", 5_000);
+    (me.kills, me.deaths, me.assists) = (20, 16, 4);
+    (me.hs, me.bs, me.ls, me.rounds) = (10, 25, 5, Some(25));
+    me.agent_id = Some(V2_JETT.into());
+    if no_stats {
+        (me.kills, me.deaths, me.assists, me.score) = (0, 0, 0, 0);
+        (me.hs, me.bs, me.ls, me.rounds) = (0, 0, 0, None);
+    }
+    let mut rows = vec![me];
+    for (puuid, team_id, name, tier) in others {
+        let mut p = player(puuid, team_id, name, 3_000);
+        p.competitive_tier = *tier;
+        p.agent_id = Some(V2_OMEN.into());
+        rows.push(p);
+    }
+    let id = v2_match_id(n);
+    let start_ms = V2_T0 + i64::from(n) * V2_HOUR;
+    let rounds = |side: &str| match winner {
+        Some(w) if w == side => 13,
+        Some(_) => 11,
+        None => 12,
+    };
+    r.upsert_match(
+        &Match {
+            match_id: id.clone(),
+            map_id: map.into(),
+            queue_id: queue.into(),
+            start_ms,
+            winning_team: winner.map(str::to_string),
+            is_ranked: queue == "competitive",
+            rounds_played: Some(25),
+            game_length_ms: Some(2_280_000),
+        },
+        &[
+            team("Blue", winner == Some("Blue"), rounds("Blue"), Some(7)),
+            team("Red", winner == Some("Red"), rounds("Red"), Some(5)),
+        ],
+        &rows,
+    )
+    .unwrap();
+    r.index_history(
+        V2_ME,
+        &[HistoryEntry {
+            match_id: id,
+            queue_id: queue.into(),
+            start_ms,
+        }],
+    )
+    .unwrap();
+}
+
+/// The user's history: a competitive win with its RR row, a competitive draw
+/// on a map the asset tables do not know, an unrated loss without a stats row
+/// (R102), and a match only in the history list (skipped: no details).
+fn v2_history_repo() -> Repo {
+    let r = v2_repo();
+    v2_store(
+        &r,
+        1,
+        "competitive",
+        SPLIT_PATH,
+        Some("Blue"),
+        &[(V2_DUO, "Blue", "Duo", Some(16))],
+        false,
+    );
+    v2_store(
+        &r,
+        2,
+        "competitive",
+        "/Game/Maps/Unknown/Unknown",
+        None,
+        &[(V2_HIDDEN, "Red", "Secret", Some(18))],
+        false,
+    );
+    v2_store(
+        &r,
+        3,
+        "unrated",
+        SPLIT_PATH,
+        Some("Red"),
+        &[(V2_DUO, "Red", "Duo", None)],
+        true,
+    );
+    r.index_history(
+        V2_ME,
+        &[HistoryEntry {
+            match_id: v2_match_id(4),
+            queue_id: "competitive".into(),
+            start_ms: V2_T0 + 4 * V2_HOUR,
+        }],
+    )
+    .unwrap();
+    r.upsert_comp_updates(
+        V2_ME,
+        &[CompUpdateRow {
+            match_id: v2_match_id(1),
+            season_id: CURRENT_ACT_ID.into(),
+            tier_after: 16,
+            tier_before: Some(15),
+            rr_after: 9,
+            rr_earned: 22,
+            map_id: Some(SPLIT_PATH.into()),
+            start_ms: V2_T0 + V2_HOUR,
+        }],
+    )
+    .unwrap();
+    r
+}
+
+/// `[the competitive tab, the all tab]`, first page each.
+fn history_page_value() -> Value {
+    let r = v2_history_repo();
+    let page = |queue| r.match_history(V2_ME, queue, 0, 50, &split_lookup).unwrap();
+    serde_json::to_value([page(HistoryQueue::Competitive), page(HistoryQueue::All)]).unwrap()
+}
+
+#[test]
+fn history_page_matches_golden() {
+    let v = history_page_value();
+    assert!(
+        !v.to_string().contains("/Game/"),
+        "a Riot map path reached the wire"
+    );
+    check_golden("history_page", &v);
+}
+
+/// The Saved screen, newest saved first: the duo the DB knows (visible, with
+/// a note), the opponent incognito on the live screen now (remembered, R145),
+/// a nameless player who locked an agent live (hidden agent), and one the DB
+/// never saw (hidden player, everything unknown).
+fn saved_players_value() -> Value {
+    let r = v2_history_repo();
+    r.upsert_player(&Player {
+        puuid: V2_NAMELESS.into(),
+        game_name: String::new(),
+        tag_line: String::new(),
+        account_level: 12,
+        card_id: "card".into(),
+        updated_ms: V2_T0,
+    })
+    .unwrap();
+    for (puuid, hours) in [
+        (V2_DUO, 10),
+        (V2_HIDDEN, 9),
+        (V2_NAMELESS, 8),
+        (V2_NEVER_SEEN, 7),
+    ] {
+        r.set_saved(puuid, true, V2_T0 + hours * V2_HOUR).unwrap();
+    }
+    r.set_note(V2_DUO, "Entry every round, dry-peeks A long", 1)
+        .unwrap();
+    let hidden_now: HashMap<&str, Option<&str>> =
+        [(V2_HIDDEN, None), (V2_NAMELESS, Some(V2_OMEN))].into();
+    let rows: Vec<_> = r
+        .saved_rows(Some(V2_ME))
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            let hidden = hidden_now.get(row.puuid.as_str()).copied();
+            saved_player(row, hidden, &split_lookup)
+        })
+        .collect();
+    serde_json::to_value(rows).unwrap()
+}
+
+#[test]
+fn saved_players_match_golden() {
+    let v = saved_players_value();
+    assert!(
+        !v.to_string().contains("/Game/"),
+        "a Riot map path reached the wire"
+    );
+    let kinds: Vec<&str> = v
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"]["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["visible", "remembered", "hiddenAgent", "hiddenPlayer"]
+    );
+    check_golden("saved_players", &v);
+}
+
+/// `[some marks, none]`.
+fn player_marks_value() -> Value {
+    let r = v2_repo();
+    r.set_saved(V2_DUO, true, V2_T0 + 2).unwrap();
+    r.set_saved(V2_HIDDEN, true, V2_T0 + 1).unwrap();
+    r.set_note(V2_DUO, "Entry every round", 1).unwrap();
+    r.set_note(V2_ME, "Warm up in Deathmatch first", 1).unwrap();
+    r.dismiss_smurf(V2_NAMELESS, 1).unwrap();
+    serde_json::to_value([r.player_marks().unwrap(), v2_repo().player_marks().unwrap()]).unwrap()
+}
+
+#[test]
+fn player_marks_match_golden() {
+    check_golden("player_marks", &player_marks_value());
+}
+
+/// `[the defaults, every value changed]`.
+fn settings_value() -> Value {
+    let changed = Settings {
+        highlight: false,
+        enemy_first: true,
+        smurf: SmurfLevel::Eager,
+        saved_alert: false,
+        sound: true,
+        on_top: false,
+        boot: false,
+        tray: false,
+    };
+    // What `set_settings` stores is what `get_settings` reads back.
+    let back: Settings = serde_json::from_value(serde_json::to_value(&changed).unwrap()).unwrap();
+    assert_eq!(back, changed);
+    serde_json::to_value([Settings::default(), changed]).unwrap()
+}
+
+#[test]
+fn settings_match_golden() {
+    check_golden("settings", &settings_value());
+}
+
+/// The gallery as `ascii_list` returns it, newest first.
+fn ascii_art_value() -> Value {
+    let r = v2_repo();
+    r.ascii_save("Jett", " /\\\n/__\\", V2_T0).unwrap();
+    r.ascii_save("OPD1", "#  #\n####", V2_T0 + V2_HOUR).unwrap();
+    serde_json::to_value(r.ascii_list().unwrap()).unwrap()
+}
+
+#[test]
+fn ascii_art_matches_golden() {
+    check_golden("ascii_art", &ascii_art_value());
+}
+
+/// `[everything known, a build without git with no game seen yet]`.
+/// `AppInfo` has no builder in `opd1-core` (the shell fills it from the
+/// build, the session and the DB file), so the values are written out.
+fn app_info_value() -> Value {
+    let full = AppInfo {
+        version: "0.4.0".into(),
+        commit: Some("cb58707".into()),
+        build_ms: Some(V2_T0),
+        riot_client_version: Some("release-11.08-shipping-14-3373442".into()),
+        valorant_version: Some("release-11.08".into()),
+        db_matches: 1_234,
+        db_bytes: 3_145_728,
+    };
+    let unknown = AppInfo {
+        commit: None,
+        build_ms: None,
+        riot_client_version: None,
+        valorant_version: None,
+        db_matches: 0,
+        db_bytes: 0,
+        ..full.clone()
+    };
+    serde_json::to_value([full, unknown]).unwrap()
+}
+
+#[test]
+fn app_info_matches_golden() {
+    check_golden("app_info", &app_info_value());
+}
+
+#[test]
+fn v2_wire_keys_are_the_ones_types_ts_spells() {
+    let history = history_page_value();
+    assert_eq!(
+        keys(&history[0]),
+        spec(&["rows", "total", "competitiveTotal", "allTotal"])
+    );
+    assert_eq!(
+        keys(&history[1]["rows"][0]),
+        spec(&[
+            "matchId",
+            "mapId",
+            "queueId",
+            "startMs",
+            "durationMs",
+            "result",
+            "roundsWon",
+            "roundsLost",
+            "agentId",
+            "kills",
+            "deaths",
+            "assists",
+            "kd",
+            "acs",
+            "hsPct",
+            "rrEarned",
+            "tierAfter"
+        ])
+    );
+    let saved = saved_players_value();
+    assert_eq!(
+        keys(&saved[0]),
+        spec(&[
+            "puuid",
+            "name",
+            "agentId",
+            "tier",
+            "with",
+            "against",
+            "note",
+            "savedMs",
+            "lastSeenMs",
+            "lastSeenMapId"
+        ])
+    );
+    assert_eq!(keys(&saved[0]["with"]), spec(&["games", "wins", "losses"]));
+    assert_eq!(
+        keys(&player_marks_value()[0]),
+        spec(&["saved", "notes", "notSmurf"])
+    );
+    assert_eq!(
+        keys(&settings_value()[0]),
+        spec(&[
+            "highlight",
+            "enemyFirst",
+            "smurf",
+            "savedAlert",
+            "sound",
+            "onTop",
+            "boot",
+            "tray"
+        ])
+    );
+    assert_eq!(
+        keys(&ascii_art_value()[0]),
+        spec(&["id", "title", "raw", "createdMs"])
+    );
+    assert_eq!(
+        keys(&app_info_value()[0]),
+        spec(&[
+            "version",
+            "commit",
+            "buildMs",
+            "riotClientVersion",
+            "valorantVersion",
+            "dbMatches",
+            "dbBytes"
+        ])
+    );
+}

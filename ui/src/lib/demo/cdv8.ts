@@ -37,6 +37,7 @@ export const AG = {
   Sage: "569fdd95-4d10-43ab-ca70-79becc718b46",
   Skye: "6f2a04ca-43e0-be17-7f36-b3908627744d",
   Fade: "dade69b4-4f5a-8528-247b-219e5a1facd6",
+  Neon: "bb2a4828-46eb-8cd1-e765-15848195d751",
 } as const;
 type Agent = keyof typeof AG;
 
@@ -125,7 +126,16 @@ const THEIRS_RAW: Raw[] = [
   { id: "cypher", agent: "Cypher", lv: 198, cur: [21, 27], peak: [22, "V26 A1", "7mo"], prev: 21, kd: 1.04, hs: 20, win: [67, 2, 1], last: "WLW", hidden: true, card: 11 },
 ];
 
-const ROSTER_RAW = [...MINE_RAW, ...THEIRS_RAW];
+/**
+ * The design's flagged smurf (`wisp`, TrackerApp.dc.html 1236; board state 1c): level 41, 38% headshots, 81% wins over
+ * 16 games, no previous-act rank. Every smurf signal agrees, so the Smurf? pill, its tooltip, the drawer's chip and the
+ * SmurfPanel show at the default (Cautious) setting. On the In Game board he takes Zephyr's slot (the third enemy, where
+ * the design has him); scenes built around Zephyr ask for him with `roster("zephyr")`. Listed last, so every other
+ * player keeps the puuid it had.
+ */
+const WISP_RAW: Raw = { id: "wisp", name: "wisp", tag: "1nk", agent: "Neon", lv: 41, cur: [22, 30], peak: [22, "This Act"], prev: null, kd: 1.94, hs: 38, win: [81, 13, 3], last: "WWWLW", card: 9 };
+
+const ROSTER_RAW = [...MINE_RAW, ...THEIRS_RAW, WISP_RAW];
 const rawById = (id: string) => ROSTER_RAW.find((r) => r.id === id);
 
 /** Valid v4-shaped ids (the Rust side checks `is_uuid`), stable across runs. */
@@ -195,9 +205,13 @@ function toCard(r: Raw, team: "ally" | "enemy"): PlayerCard {
   });
 }
 
-/** The design's In Game roster: 5 allies (Fahad first), then 5 enemies. Fresh objects on every call. */
-export function roster(): PlayerCard[] {
-  return [...MINE_RAW.map((r) => toCard(r, "ally")), ...THEIRS_RAW.map((r) => toCard(r, "enemy"))];
+/**
+ * The design's In Game roster: 5 allies (Fahad first), then 5 enemies, the third of them (index 7) `wisp` (the flagged
+ * smurf) or, for the scenes built around him, Zephyr. Fresh objects on every call.
+ */
+export function roster(third: "wisp" | "zephyr" = "wisp"): PlayerCard[] {
+  const theirs = THEIRS_RAW.map((r) => (r.id === "zephyr" && third === "wisp" ? WISP_RAW : r));
+  return [...MINE_RAW.map((r) => toCard(r, "ally")), ...theirs.map((r) => toCard(r, "enemy"))];
 }
 
 // ── Player Details (v8:583-611) ────────────────────────────────────────────────
@@ -348,7 +362,7 @@ function mates(r: Raw, live?: readonly PlayerCard[]): TeammateSummary[] {
 export function detailsFor(id: string, c?: PlayerCard, live?: readonly PlayerCard[]): PlayerDetails {
   const r = rawById(id);
   if (!r) throw new Error(`demo: no roster player ${id}`);
-  const base = c ? structuredClone(c) : roster().find((x) => x.puuid === PUUID[id])!;
+  const base = c ? structuredClone(c) : [...roster(), ...roster("zephyr")].find((x) => x.puuid === PUUID[id])!;
   const rec = recentData(r).map((m): MatchSummary =>
     recent({
       matchId: rid(id, m.i), mapId: MAPS[m.map], startMs: m.startMs, letter: m.letter, rounds: m.rounds,
@@ -434,6 +448,8 @@ export function matchFor(matchId: string, live?: readonly PlayerCard[]): MatchDe
 
 function buildMatch(matchId: string): MatchDetailsView {
   if (/^mdemo:[a-z]+:dm$/.test(matchId)) return deathmatch(matchId);
+  const hm = /^mdemo:h:(\d+)$/.exec(matchId);
+  if (hm) return historyMatch(Number(hm[1]), matchId);
   const sm = SESSION_ID.exec(matchId);
   if (sm) return sessionMatch(matchId, Number(sm[1]), sm[2] as Letter, sm[3]!);
   const m = /^mdemo:([a-z]+):([re])(\d)$/.exec(matchId);
@@ -472,6 +488,55 @@ function matchOf(r: Raw, d: Recent, matchId: string): MatchDetailsView {
     matchId, mapId: MAPS[d.map], queueId: "competitive", startMs: d.startMs, durationMs: d.durationMs,
     perspective: r.self ? "self" : "focus", teams: teamsOf(a, b, d.rounds, d.letter),
   };
+}
+
+// ── Match History (design `historyRows()`, TrackerApp.dc.html 1593–1616) ──────────────────────────────────────
+/**
+ * The design's 13 History rows (plus a Swiftplay and an Unrated one): map, minutes since it ended, duration (min),
+ * W/L, rounds won, rounds lost, agent, tier after, kills, deaths, assists, ACS (0 = no stats row), HS% (null = no hit
+ * data), RR change, queue.
+ */
+export type HistoryRaw = [MapName, number, number, "W" | "L", number, number, Agent, number, number, number, number, number, number | null, number, string];
+
+export const HISTORY_RAW: HistoryRaw[] = [
+  ["Lotus", 45, 38, "W", 13, 9, "Jett", 21, 24, 14, 5, 286, 31, 18, "competitive"],
+  ["Ascent", 92, 41, "W", 13, 11, "Jett", 21, 19, 16, 7, 241, 27, 19, "competitive"],
+  ["Bind", 140, 35, "L", 8, 13, "Omen", 21, 13, 17, 9, 187, 22, -16, "competitive"],
+  ["Haven", 190, 44, "W", 14, 12, "Jett", 21, 27, 19, 4, 301, null, 21, "competitive"],
+  ["Split", 246, 39, "W", 13, 10, "Sova", 20, 17, 13, 11, 222, 25, 17, "competitive"],
+  ["Sunset", 300, 37, "L", 10, 13, "Jett", 20, 18, 18, 3, 233, 26, -19, "competitive"],
+  ["Pearl", 1500, 33, "W", 13, 6, "Jett", 20, 22, 9, 6, 312, 34, 22, "competitive"],
+  ["Icebox", 1560, 18, "W", 13, 2, "Killjoy", 20, 0, 0, 0, 0, null, 0, "swiftplay"],
+  ["Ascent", 1620, 42, "L", 11, 13, "Jett", 20, 20, 17, 5, 247, 29, -15, "competitive"],
+  ["Lotus", 2950, 40, "W", 13, 8, "Omen", 20, 16, 12, 12, 214, 21, 20, "competitive"],
+  ["Bind", 3010, 36, "L", 9, 13, "Jett", 20, 14, 16, 4, 198, 24, -17, "competitive"],
+  ["Haven", 4400, 31, "W", 13, 5, "Jett", 19, 25, 10, 3, 331, 33, 24, "unrated"],
+  ["Split", 4460, 47, "L", 12, 14, "Sova", 19, 21, 20, 9, 238, 23, -18, "competitive"],
+];
+
+/** History row `i`'s match id: its scoreboard is built from the row itself (`historyMatch`), so the two agree. */
+export const historyMatchId = (i: number): string => `mdemo:h:${i}`;
+
+/** When History row `h` started: it ended `h[1]` minutes before DEMO_NOW and lasted `h[2]`. */
+export const historyStartMs = (h: HistoryRaw): number => DEMO_NOW - (h[1] + h[2]) * MIN;
+
+/**
+ * The scoreboard behind History row `i`: the row's map, queue, start, duration, result and score, and the user's own
+ * line exactly as the row has it (K/D/A, ACS, HS%, agent, tier; every stat — when the row has no stats, R124). The
+ * other nine players come from the pool as on every demo match.
+ */
+function historyMatch(i: number, matchId: string): MatchDetailsView {
+  const h = HISTORY_RAW[i];
+  if (!h) throw new Error(`demo: no History row ${i}`);
+  const [map, , dur, res, us, them, agent, tier, k, d, a, acs, hs, rr, queueId] = h;
+  const recentRow: Recent = { i, letter: res, map, agent, tier, rounds: [us, them], kda: [k, d, a], hs: hs ?? 0, rr, startMs: historyStartMs(h), durationMs: dur * MIN };
+  const view = matchOf(rawById("fahad")!, recentRow, matchId);
+  const team = view.teams[0]!;
+  const self = team.players.find((p) => p.isSelf)!;
+  if (acs > 0) Object.assign(self, { acs, adr: Math.round(acs * 0.64), hsPct: hs === null ? null : hs / 100 });
+  else Object.assign(self, { kills: null, deaths: null, assists: null, acs: null, adr: null, hsPct: null });
+  team.players.sort(byAcs);
+  return { ...view, queueId };
 }
 
 /** A match of My Stats' demo session that is not one of the user's recent rows: `mdemo:s:<startMs>:<W|L|D>:<map uuid>`. */

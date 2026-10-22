@@ -16,8 +16,10 @@ export const SMURF_WINRATE_MIN = 0.7;
 export const SMURF_GAMES_MAX = 40;
 
 export interface SmurfSignal {
-  /** One finished English line per signal that agreed (the design's tooltip and profile panel rows). */
+  /** One finished English line per signal that agreed (the profile's smurf panel rows, prototype 1547). */
   reasons: string[];
+  /** The same signals in the board pill's tooltip wording (prototype 1323): "Level 41, lobby average 280". */
+  tips: string[];
 }
 
 /** Mean of the known values, or null when none is known. */
@@ -44,19 +46,26 @@ export function smurfSignal(
   if (level === "off" || card.isSelf || dismissed.includes(card.puuid)) return null;
   const avg = lobbyAverages(lobby.filter((c) => c.puuid !== card.puuid));
   const reasons: string[] = [];
+  const tips: string[] = [];
   if (typeof card.level === "number" && card.level < SMURF_LEVEL_MAX) {
     reasons.push(`Account level ${card.level}${avg.level !== null ? `; this lobby averages ${Math.round(avg.level)}` : ""}`);
+    tips.push(`Level ${card.level}${avg.level !== null ? `, lobby average ${Math.round(avg.level)}` : ""}`);
   }
   if (typeof card.hsPct === "number" && avg.hs !== null && card.hsPct - avg.hs >= SMURF_HS_ABOVE) {
     reasons.push(`${Math.round(card.hsPct * 100)}% headshots; this lobby averages ${Math.round(avg.hs * 100)}%`);
+    tips.push(`${Math.round(card.hsPct * 100)}% headshots, lobby average ${Math.round(avg.hs * 100)}%`);
   }
   const games = card.actGames;
   if (typeof card.actWinrate === "number" && card.actWinrate > SMURF_WINRATE_MIN && typeof games === "number" && games > 0) {
-    reasons.push(`${Math.round(card.actWinrate * 100)}% wins over only ${games} games`);
+    const line = `${Math.round(card.actWinrate * 100)}% wins over only ${games} games`;
+    reasons.push(line);
+    tips.push(line);
   }
   if (typeof games === "number" && games < SMURF_GAMES_MAX) {
-    reasons.push(`${games} ranked ${games === 1 ? "game" : "games"} this act`);
+    const line = `${games} ranked ${games === 1 ? "game" : "games"} this act`;
+    reasons.push(line);
+    tips.push(line);
   }
   const need = level === "eager" ? 2 : 3;
-  return reasons.length >= need ? { reasons } : null;
+  return reasons.length >= need ? { reasons, tips } : null;
 }

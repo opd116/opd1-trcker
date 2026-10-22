@@ -1,13 +1,16 @@
 // DEV-only (R189): the `status` the demo shows for a scene. `?variant=lost|error|loading` and `?recap=1` override it,
 // matching the design's `variant` / `stage: recap` props.
 import type { AppStatus, LiveState } from "../../types";
-import { DEMO_NOW, MAPS } from "../cdv8";
-import { sessionMatchId } from "../cdv8";
+import { DEMO_NOW, recentMatchId } from "../cdv8";
 
 const LOCKFILE = String.raw`C:\Users\you\AppData\Local\Riot Games\Riot Client\Config\lockfile`;
 
-/** The demo recap's match: a win on Haven 13–9 that ended 3 minutes ago. */
-export const RECAP_MATCH_ID = sessionMatchId(DEMO_NOW - 41 * 60_000, "W", MAPS.Haven);
+/**
+ * The demo recap's match: the user's newest match (Lotus, W 13–9, +18 RR, 38 min), as in the app, where the recap is
+ * always the match that just ended. Being `mystats.last5[0]`, it carries the RR change the recap's hero stat and rank
+ * card read (+18, the design's figure), and it is the same match as the Waiting card's LAST MATCH and History's top row.
+ */
+export const RECAP_MATCH_ID = recentMatchId("fahad", 0);
 
 export function demoStatus(live: LiveState | null, q: URLSearchParams): AppStatus {
   const variant = q.get("variant");
@@ -21,7 +24,12 @@ export function demoStatus(live: LiveState | null, q: URLSearchParams): AppStatu
     errorCode: null,
     errorAtMs: null,
     lockfilePath: LOCKFILE,
-    pregame: live?.stage === "pregame" ? { phaseEndsMs: DEMO_NOW + 42_000, locked: 3, total: 5 } : null,
+    // Locked = the allies whose agent is known (a hover is not a lock, R99), so "N OF 5 LOCKED" counts the rows that
+    // do not read "Picking…".
+    pregame:
+      live?.stage === "pregame"
+        ? { phaseEndsMs: DEMO_NOW + 42_000, locked: live.players.filter((p) => p.team === "ally" && p.agentId).length, total: 5 }
+        : null,
     queue: live?.stage === "menus" && q.get("queue") === "1" ? { queueId: "competitive", searchingSinceMs: DEMO_NOW - 84_000 } : null,
     recapMatchId: q.get("recap") === "1" ? RECAP_MATCH_ID : null,
     gameVersion: "release-11.08",

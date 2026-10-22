@@ -44,7 +44,8 @@ test("agent select: chip, countdown, lock count, your team only, the enemy place
   await openScene(page, "pregame");
   await expect(page.locator(".head .chip")).toHaveText("AGENT SELECT");
   await expect(page.locator(".head .timer")).toHaveText("0:42");
-  await expect(page.locator(".head .locked")).toHaveText("3 OF 5 LOCKED");
+  // The lock count agrees with the rows: 5 allies, 3 of them "Picking…" (a hover, an undecided ally, a hidden player).
+  await expect(page.locator(".head .locked")).toHaveText("2 OF 5 LOCKED");
   await expect(page.locator("main section.team")).toHaveCount(1);
   await expect(page.locator(".enemy-ph .ph-label")).toHaveText("ENEMY TEAM");
   await expect(page.locator("main [data-row] .agent .q")).toHaveCount(3);

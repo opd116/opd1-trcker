@@ -14,6 +14,7 @@
 import type { Writable } from "svelte/store";
 import { go, openMatch, openProfile, router, SCREENS, setGlance, type EncFrom, type MatchFrom, type Screen } from "../router.svelte";
 import type { LiveState, Meta, MyStats } from "../types";
+import { DEMO_NOW } from "./cdv8";
 import demoMeta from "./meta.json";
 import { SCENES, sceneMyStats, type DemoRoute, type SceneName } from "./scenes";
 
@@ -123,6 +124,32 @@ export function sceneMeta(m: (typeof SCENES)[SceneName]["meta"]): Meta | null {
   return m ?? (demoMeta as Meta);
 }
 
+/** A page clock within this of DEMO_NOW is already lined up with the fixtures (Playwright pins it at DEMO_NOW). */
+const CLOCK_NEAR_MS = 3_600_000;
+let clockAligned = false;
+
+/**
+ * The fixtures are anchored at DEMO_NOW while the views read `Date.now()`, so in a plain DEV browser the queue timer
+ * read 32766:13 and every "x ago" was weeks off. Unless the page clock is already near DEMO_NOW (Playwright's harness
+ * freezes it there), shift `Date.now()` and `new Date()` (no arguments) by `DEMO_NOW - realNow`: time still ticks, but
+ * from the fixtures' "now". Idempotent; never under vitest (it would move the clock of the tests in that worker).
+ * DEV-only like the rest of this file: main.ts calls it before mounting (the views read the clock as they mount), and
+ * startDemo once more in case it was not.
+ */
+export function alignDemoClock(): void {
+  if (clockAligned || import.meta.env.MODE === "test") return;
+  clockAligned = true;
+  const RealDate = Date;
+  const offset = DEMO_NOW - RealDate.now();
+  if (Math.abs(offset) <= CLOCK_NEAR_MS) return;
+  const now = () => RealDate.now() + offset;
+  globalThis.Date = new Proxy(RealDate, {
+    construct: (target, args, newTarget) => Reflect.construct(target, args.length === 0 ? [now()] : args, newTarget) as object,
+    apply: () => new RealDate(now()).toString(),
+    get: (target, key, receiver) => (key === "now" ? now : Reflect.get(target, key, receiver)),
+  });
+}
+
 let running = false;
 
 export function startDemo(
@@ -132,6 +159,7 @@ export function startDemo(
 ): void {
   if (running) return;
   running = true;
+  alignDemoClock();
 
   // Invisible marker: the dist guard (Task 16a Step 6, Task 19 CI) fails the build if this string ever reaches ui/dist.
   document.documentElement.dataset.feed = "demo-feed";

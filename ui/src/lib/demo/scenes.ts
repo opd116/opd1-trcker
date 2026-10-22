@@ -132,7 +132,7 @@ function longnames(): PlayerCard[] {
     c.peak = peak(ACT["V26 A4"], 23, SINCE["11mo"]);
   }
   p[8]!.peak = peak(ACT["E10 A3"], 23, SINCE["11mo"]); // Rook: the longer act label
-  p[7]!.encounters = { with: 70, against: 53 }; // Zephyr: a 3-digit ⟲ count, not self, no party
+  p[7]!.encounters = { with: 70, against: 53 }; // wisp: a 3-digit ⟲ count, not self, no party
   return p;
 }
 
@@ -167,7 +167,7 @@ function parties4(): PlayerCard[] {
   mark(2, 1, false);
   mark(5, 2, false); // Mara, Kilo: likely
   mark(6, 2, false);
-  mark(7, 3, true); // Zephyr, Rook: confirmed
+  mark(7, 3, true); // wisp, Rook: confirmed
   mark(8, 3, true);
   return p;
 }
@@ -191,7 +191,7 @@ function partial(): PlayerCard[] {
 }
 
 function unrankedRoster(): PlayerCard[] {
-  const p = roster();
+  const p = roster("zephyr");
   Object.assign(p[7]!, {
     level: null, rank: null, prevActTier: null, peak: null, kd: null, hsPct: null,
     actWinrate: null, actWins: null, actGames: null, last5: [],

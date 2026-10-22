@@ -206,7 +206,7 @@ export function rowView(c: PlayerCard, i: number, list: readonly PlayerCard[], c
   const picking = c.agentId === null;
   const agent = picking ? "Picking…" : (agentName(meta, c.agentId) ?? (meta === null ? undefined : DASH));
   const sig = smurfSignal(c, ctx.lobby, ctx.settings.smurf, ctx.marks.notSmurf);
-  const smurf = sig ? `Automated signal, not confirmed\n${sig.reasons.join("\n")}\nOpen the profile for the full evidence.` : null;
+  const smurf = sig ? `Automated signal, not confirmed\n${sig.tips.join("\n")}\nOpen the profile for the full evidence.` : null;
 
   const inParty = showParty(c);
   const group = inParty ? c.party!.group : null;

@@ -7,8 +7,10 @@ import { writable } from "svelte/store";
 import demoMeta from "./demo/meta.json";
 import { DEMO_NOW, detailsFor, encounterMatchId, matchFor, PUUID, recentMatchId, roster } from "./demo/cdv8";
 import * as fixtures from "./demo/fixtures";
+import { demoHistory } from "./demo/v2/history";
 import { resolveDetails, resolveMatch, resolveMyStats, SCENES, type SceneName } from "./demo/scenes";
 import { dateLong, durationMin, score, time12 } from "./format";
+import { smurfSignal } from "./smurf";
 import type { DisplayName, LiveState, MatchDetailsView, Meta, MyStats, PlayerCard, PlayerDetails } from "./types";
 
 const NAMES: SceneName[] = [
@@ -131,16 +133,16 @@ describe("live scenes", () => {
   });
 
   it("Math.round(actWinrate*100) equals the design's win[0] for all 10 players", () => {
-    expect(players("ingame").map((c) => Math.round(c.actWinrate! * 100))).toEqual([58, 52, 49, 55, 61, 63, 54, 56, 49, 67]);
+    expect(players("ingame").map((c) => Math.round(c.actWinrate! * 100))).toEqual([58, 52, 49, 55, 61, 63, 54, 81, 49, 67]);
   });
 
   it("wins and losses are the design's win[1] / win[2] for all 10 players (v8 roster)", () => {
     const p = players("ingame");
     for (const c of p) expect(c.actWins!).toBeLessThanOrEqual(c.actGames!);
     expect(p.map((c) => [c.actWins, c.actGames! - c.actWins!])).toEqual([
-      [31, 22], [22, 20], [19, 20], [27, 22], [25, 16], [41, 24], [30, 26], [28, 22], [20, 21], [2, 1],
+      [31, 22], [22, 20], [19, 20], [27, 22], [25, 16], [41, 24], [30, 26], [13, 3], [20, 21], [2, 1],
     ]);
-    expect(p.map((c) => c.actGames)).toEqual([53, 42, 39, 49, 41, 65, 56, 50, 41, 3]);
+    expect(p.map((c) => c.actGames)).toEqual([53, 42, 39, 49, 41, 65, 56, 16, 41, 3]);
   });
 
   it("the design's roster: party marks, encounters, hidden and remembered names", () => {
@@ -156,6 +158,30 @@ describe("live scenes", () => {
     expect(enc.map((c) => (c.name && "name" in c.name ? c.name.name : "?")).sort()).toEqual(["Kilo", "Mara", "Rook", "VesperUnbreakabl"]);
     // The backend marks the user's own card `isSelfParty` too (state.rs `r.is_self_party || is_self`): only Fahad here.
     expect(players("ingame").filter((c) => c.isSelfParty).map((c) => c.puuid)).toEqual([players("ingame")[0]!.puuid]);
+  });
+
+  it("every History row opens a scoreboard that agrees with it (map, queue, start, duration, score, the user's line)", () => {
+    const { rows } = demoHistory("all", 0, 100);
+    expect(rows.length).toBeGreaterThan(10);
+    for (const r of rows) {
+      const v = matchFor(r.matchId);
+      const self = v.teams[0]!.players.find((p) => p.isSelf)!;
+      expect([v.mapId, v.queueId, v.startMs, v.durationMs], r.matchId).toEqual([r.mapId, r.queueId, r.startMs, r.durationMs]);
+      expect([v.teams[0]!.roundsWon, v.teams[1]!.roundsWon, v.teams[0]!.result], r.matchId).toEqual([r.roundsWon, r.roundsLost, r.result]);
+      expect([self.kills, self.deaths, self.assists, self.acs, self.hsPct, self.agentId], r.matchId).toEqual([
+        r.kills, r.deaths, r.assists, r.acs, r.hsPct, r.agentId,
+      ]);
+    }
+  });
+
+  it("wisp, the design's flagged smurf, is the third enemy and the only card every smurf signal agrees on", () => {
+    const p = players("ingame");
+    const wisp = p[7]!;
+    expect(wisp).toMatchObject({ name: { kind: "visible", name: "wisp", tag: "1nk" }, level: 41, hsPct: 0.38, prevActTier: null, team: "enemy" });
+    expect(smurfSignal(wisp, p, "cautious")?.reasons).toHaveLength(4);
+    expect(p.filter((c) => smurfSignal(c, p, "cautious")).map((c) => c.puuid)).toEqual([PUUID.wisp]);
+    // The scenes built around Zephyr still have him in that slot.
+    expect(players("ingame-unranked")[7]!.puuid).toBe(PUUID.zephyr);
   });
 
   it("ingame-remembered (R145): one remembered card of each source, all hidden on the live screen", () => {

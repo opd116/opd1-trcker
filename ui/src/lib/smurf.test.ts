@@ -27,6 +27,10 @@ describe("smurfSignal", () => {
     const s = smurfSignal(wisp, [...lobby, wisp], "cautious");
     expect(s?.reasons).toHaveLength(4);
     expect(s?.reasons[0]).toMatch(/^Account level 41; this lobby averages \d+$/);
+    // The pill's tooltip says the same in the design's shorter words.
+    expect(s?.tips).toHaveLength(4);
+    expect(s?.tips[0]).toMatch(/^Level 41, lobby average \d+$/);
+    expect(s?.tips[1]).toMatch(/^\d+% headshots, lobby average \d+%$/);
   });
 
   it("needs 3 signals at Cautious and 2 at Eager", () => {

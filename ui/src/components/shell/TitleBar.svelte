@@ -106,6 +106,11 @@
     cursor: default;
   }
 
+  /* The buttons touch the window's top (Close also its right) edge: an inset ring, or the window cuts its sides. */
+  .wb:focus-visible {
+    outline-offset: -2px;
+  }
+
   .wb:hover {
     background: var(--chrome-hover);
     color: var(--text);

@@ -1,6 +1,7 @@
 // R106 focus ring on the v2 screens: keyboard-only (`:focus-visible`), never left behind by a mouse click, and whole on
-// every side: a row inside a clipping panel (the board, the History list, Saved, the drawer's encounter rows) draws it
-// inset (`[data-row]:focus-visible`, offset −2px), anything else 2px outside, where nothing may clip it. The probe
+// every side: a row inside a clipping panel (the board, the History list, Saved, the drawer's encounter rows) and a
+// control touching the window's edge (the nav rail items, the title bar's buttons) draw it inset (offset −2px),
+// anything else 2px outside, where nothing may clip it. The probe
 // compares the element with and without its ring and counts the pixels that differ in a 4px band along each edge
 // (inside for an inset ring, outside for an outer one): a side that is clipped has none.
 import { expect, test, type Locator, type Page } from "@playwright/test";
@@ -109,11 +110,11 @@ const titleButton = (label: string) => (page: Page) => page.locator(`#app > head
 const scoreboardRows = (page: Page) => page.getByRole("dialog").getByRole("button", { name: /Open scoreboard$/ });
 
 const TARGETS: Target[] = [
-  { name: "nav rail: Live (the first item)", scene: "ingame", el: rail("Live") },
-  { name: "nav rail: About (the last item)", scene: "ingame", el: rail("About") },
+  { name: "nav rail: Live (the first item)", scene: "ingame", el: rail("Live"), inset: true },
+  { name: "nav rail: About (the last item)", scene: "ingame", el: rail("About"), inset: true },
   { name: "nav rail: the rank widget", scene: "ingame", el: rail("Your rank: open Competitive") },
-  { name: "title bar: Minimize", scene: "ingame", el: titleButton("Minimize") },
-  { name: "title bar: Close (the window's right edge)", scene: "ingame", el: titleButton("Close") },
+  { name: "title bar: Minimize", scene: "ingame", el: titleButton("Minimize"), inset: true },
+  { name: "title bar: Close (the window's right edge)", scene: "ingame", el: titleButton("Close"), inset: true },
   { name: "board: the first row of a team", scene: "ingame", el: (p) => p.locator("main section.team").first().locator("[data-row]").first(), inset: true },
   { name: "board: the last row of a team", scene: "ingame", el: (p) => p.locator("main section.team").first().locator("[data-row]").last(), inset: true },
   { name: "history: the first row", scene: "closed", params: { screen: "history" }, el: (p) => p.locator("main .row[data-row]").first(), inset: true },
@@ -127,23 +128,8 @@ const TARGETS: Target[] = [
   { name: "scoreboard: Back", scene: "match", el: (p) => p.locator("main .match .back") },
 ];
 
-/**
- * Rings found cut in the migration to the v2 screens (2026-10-22), reported to the lead: each test is expected to fail
- * until the component is fixed, and Playwright flags it the moment it passes, so the entry goes with the fix.
- */
-const KNOWN: Record<string, string> = {
-  "nav rail: Live (the first item)": "the rail items touch the window's left edge, so the 2px-outside ring loses its left side",
-  "nav rail: About (the last item)": "the rail items touch the window's left edge, so the 2px-outside ring loses its left side",
-  "title bar: Minimize": "the window buttons touch the window's top edge, so the 2px-outside ring loses its top side",
-  "title bar: Close (the window's right edge)": "the window buttons touch the window's top (and right) edge, so the 2px-outside ring loses those sides",
-  "board: the first row of a team": "PlayerRow's gutter (position: relative) paints over the inset ring's left side on the user's own row",
-  "history: the first row": "HistoryList's result bar (position: absolute, left 0) paints over the inset ring's left side",
-  "history: the last row (below the fold)": "HistoryList's result bar (position: absolute, left 0) paints over the inset ring's left side",
-};
-
 for (const t of TARGETS) {
   test(`a whole keyboard ring: ${t.name}`, async ({ page }) => {
-    test.fail(t.name in KNOWN, KNOWN[t.name]);
     await openScene(page, t.scene, t.params);
     await page.keyboard.press("Tab"); // keyboard modality: the script focus below is a :focus-visible one
     const el = t.el(page);

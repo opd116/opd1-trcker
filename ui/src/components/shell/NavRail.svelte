@@ -103,6 +103,17 @@
     color: var(--text-muted);
   }
 
+  /* The items touch the window's left edge: an inset ring. The active item's positioned bar sits below the item's
+     content while it is focused (its own stacking context, z-index −1), so it does not paint over the ring. */
+  .item:focus-visible {
+    outline-offset: -2px;
+    isolation: isolate;
+  }
+
+  .item:focus-visible .bar {
+    z-index: -1;
+  }
+
   .item:hover {
     color: var(--text);
   }

@@ -96,15 +96,6 @@ const CASES: Case[] = [
   { name: "about", scene: "closed", params: { screen: "about" }, sizes: BOTH },
 ];
 
-/**
- * Known layout defects, reported to the lead (test-suite migration, 2026-10-22): each test is expected to fail until the
- * screen is fixed, and Playwright flags it the moment it passes, so the entry is removed with the fix.
- */
-const KNOWN: Record<string, string> = {
-  "live agent select, loading at 1180×760":
-    "MatchHeader: in Agent Select while the players load, the header (map, select chip, timer, lock count, loading bar, matchup) is wider than the 1180px window and pushes the Glance mode button out of view",
-};
-
 async function run(page: import("@playwright/test").Page, c: Case, size: Size): Promise<void> {
   await page.setViewportSize(SIZES[size]);
   const cdn = watchFontCdn(page);
@@ -121,7 +112,6 @@ for (const c of CASES) {
     const { width, height } = SIZES[size];
     const title = `${c.name} at ${width}×${height}`;
     test(`fit: ${title}`, async ({ page }) => {
-      test.fail(title in KNOWN, KNOWN[title]);
       await run(page, c, size);
     });
   }

@@ -451,6 +451,16 @@
     background: var(--row-hover);
   }
 
+  /* While focused the row is its own stacking context and the positioned result bar sits below its content (z-index −1,
+     still above its background), so it paints before the inset ring instead of over its left side. */
+  .row:focus-visible {
+    isolation: isolate;
+  }
+
+  .row:focus-visible .bar {
+    z-index: -1;
+  }
+
   .row.skel {
     cursor: default;
   }

@@ -1,7 +1,9 @@
 <!--
   The live board's header card (design v2 TrackerApp.dc.html 153–175): the map tile, the Agent Select chip with its
   countdown and lock count, LOADING PLAYERS n / m while cards are still loading, the two teams' average win rates,
-  and the Glance mode button.
+  and the Glance mode button. The design draws it at 1280 px; with every block shown at once (Agent Select while the
+  players load) it is wider than that, so the map tile and the loading bar give up width first (down to what their
+  text needs), then the matchup is cut at its right edge. The Glance mode button never shrinks.
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
@@ -64,7 +66,6 @@
       </div>
     {/each}
   </div>
-  <div class="fill"></div>
   <button type="button" class="glance" aria-label="Open glance mode" onclick={onglance}
     ><svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"
       ><rect x="1.5" y="2" width="13" height="12" rx="1.5"></rect><path d="M10 2v12"></path></svg
@@ -87,8 +88,8 @@
 
   .map {
     position: relative;
-    flex: none;
-    width: 210px;
+    flex: 0 4 210px;
+    min-width: 128px;
     height: 44px;
     border-radius: 7px;
     overflow: hidden;
@@ -123,6 +124,9 @@
     letter-spacing: 0.08em;
     text-transform: uppercase;
     white-space: nowrap;
+    max-width: calc(100% - 16px);
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .vr {
@@ -140,6 +144,7 @@
     display: flex;
     align-items: center;
     gap: 14px;
+    flex: none;
   }
 
   .chip {
@@ -150,6 +155,7 @@
     border: 1px solid rgba(157, 140, 255, 0.4);
     border-radius: 5px;
     background: rgba(157, 140, 255, 0.08);
+    white-space: nowrap;
   }
 
   .timer {
@@ -168,13 +174,15 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-    width: 180px;
-    flex: none;
+    flex: 0 2 180px;
+    min-width: 150px;
   }
 
   .ld-top {
     display: flex;
     justify-content: space-between;
+    gap: 6px;
+    white-space: nowrap;
     font: 500 10.5px/1 var(--font-mono);
     letter-spacing: 0.08em;
     color: var(--text-dim);
@@ -215,6 +223,15 @@
     display: flex;
     align-items: center;
     gap: 18px;
+    /* Shrinks only once the map tile and the loading bar are down to their minimum. */
+    flex: 0 0.01 auto;
+    min-width: 0;
+    overflow: hidden;
+  }
+
+  .vs,
+  .side {
+    flex: none;
   }
 
   .vs {
@@ -264,10 +281,6 @@
     color: var(--text-label);
   }
 
-  .fill {
-    flex: 1;
-  }
-
   .glance {
     height: 34px;
     padding: 0 12px;
@@ -281,6 +294,8 @@
     align-items: center;
     gap: 8px;
     flex: none;
+    /* Pushed to the right end (no spacer element, so a crowded header does not spend a gap on it). */
+    margin-left: auto;
   }
 
   .glance:hover {

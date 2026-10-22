@@ -204,9 +204,17 @@
     box-shadow: inset 0 0 0 1px rgba(183, 171, 255, 0.45);
   }
 
+  /* While focused the row is its own stacking context and its positioned bar and party gutter sit below its content
+     (z-index −1, still above its background), so they paint before the inset ring instead of over its left side. */
   .row:focus-visible {
     outline: 2px solid var(--focus);
     outline-offset: -2px;
+    isolation: isolate;
+  }
+
+  .row:focus-visible .bar,
+  .row:focus-visible .gutter {
+    z-index: -1;
   }
 
   .bar {

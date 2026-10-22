@@ -22,6 +22,11 @@
 >
 
 <style>
+  /* At the window's top edge: an inset ring, as on the window buttons. */
+  .pin:focus-visible {
+    outline-offset: -2px;
+  }
+
   .pin {
     width: 40px;
     height: 36px;

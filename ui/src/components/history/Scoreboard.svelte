@@ -147,7 +147,7 @@
         {#if !noTeams && t.result}
           <span class="tres" style:background={RES_BG[t.result]} style:color={RES_COLOR[t.result]}>{RESULT_LETTER[t.result]}</span>
         {/if}
-        <span class="tlabel" style:color={teamColor(i)}>{teamLabel(i)}</span>
+        <span class="tlabel" style:color={teamColor(i)} data-ellipsis>{teamLabel(i)}</span>
         {#if !noTeams}<span class="tscore">{t.roundsWon ?? "—"}</span>{/if}
       </div>
       {@render colHead()}
@@ -201,7 +201,7 @@
     <button type="button" class="back" onclick={() => backFromMatch()}>
       <svg width="7" height="12" viewBox="0 0 7 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"
         ><path d="M5.5 1.5L1.5 6l4 4.5"></path></svg
-      ><span class="blabel">{backLabel}</span>
+      ><span class="blabel" data-ellipsis>{backLabel}</span>
     </button>
     {#if crumb}<span class="crumb">{crumb}</span>{/if}
   </div>

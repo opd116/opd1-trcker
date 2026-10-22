@@ -1,6 +1,7 @@
 // The v2 shell (title bar, nav rail, glance frame, tooltip) against the DEV demo feed: sizes from the design
 // (.superpowers/design/v2/TrackerApp.dc.html 97–139), keyboard navigation, the tooltip's placement, no scrollbars.
 import { expect, test, type Page } from "@playwright/test";
+import { PUUID } from "../src/lib/demo/cdv8";
 import { openScene } from "./harness";
 
 const box = async (page: Page, sel: string) => (await page.locator(sel).first().boundingBox())!;
@@ -72,12 +73,12 @@ test("tooltip: the design's bubble, after 450 ms, flipped below the title bar an
 });
 
 test("profile drawer mounts over main from ?profile=, and closes", async ({ page }) => {
-  await openScene(page, "ingame", { profile: "x" });
-  const drawer = page.locator("main.main .drawer-stub, main.main [data-profile-drawer]").first();
+  await openScene(page, "ingame", { profile: PUUID.mara! });
+  const drawer = page.locator("main.main [role=dialog]");
   await expect(drawer).toBeVisible();
   const nav = page.locator('nav.rail button[aria-label="Saved"]');
   await nav.click(); // go() closes the drawer
-  await expect(page.locator("main.main .drawer-stub")).toHaveCount(0);
+  await expect(page.locator("main.main [role=dialog]")).toHaveCount(0);
 });
 
 test("glance mode: a 420px column with its 32px title bar; Exit glance returns to the full layout", async ({ page }) => {

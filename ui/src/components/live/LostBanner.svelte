@@ -32,7 +32,7 @@
 <div class="lost" role="status">
   <Dot color="var(--warn)" pulse />
   <span class="head">Lost connection to the Riot Client</span>
-  <span class="text">{age === null ? "" : `Showing data from ${age} ago. `}{attempt}</span>
+  <span class="text" data-ellipsis>{age === null ? "" : `Showing data from ${age} ago. `}{attempt}</span>
   <div class="fill"></div>
   <button type="button" onclick={retry}>Retry now</button>
 </div>

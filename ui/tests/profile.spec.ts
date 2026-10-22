@@ -3,7 +3,7 @@
 // the hidden and empty edge scenes, and the encounter → scoreboard hand-off. 1280×800 (playwright.config.ts).
 import { expect, test, type Page } from "@playwright/test";
 import { PUUID } from "../src/lib/demo/cdv8";
-import { routeMedia } from "./harness";
+import { gotoApp, routeMedia } from "./harness";
 
 const MARA = PUUID.mara!;
 const FAHAD = PUUID.fahad!;
@@ -13,7 +13,7 @@ const dialog = (page: Page) => page.getByRole("dialog");
 
 async function open(page: Page, query: string): Promise<void> {
   await routeMedia(page);
-  await page.goto(`/?${query}`);
+  await gotoApp(page, `/?${query}`);
   await expect(dialog(page)).toBeVisible();
 }
 
@@ -85,7 +85,7 @@ test("save + note popover: a new save's × cancels it; Escape closes the popover
 
 test("focus returns to the card that opened the drawer", async ({ page }) => {
   await routeMedia(page);
-  await page.goto("/?scene=ingame");
+  await gotoApp(page, "/?scene=ingame");
   const card = page.getByRole("button").filter({ hasText: "Sable" }).first();
   await card.focus();
   await page.keyboard.press("Enter");
@@ -100,7 +100,7 @@ test("the scrim and × close the drawer", async ({ page }) => {
   await open(page, `scene=ingame&profile=${MARA}`);
   await dialog(page).getByRole("button", { name: "Close profile" }).click();
   await expect(dialog(page)).toHaveCount(0);
-  await page.goto(`/?scene=ingame&profile=${MARA}`);
+  await gotoApp(page, `/?scene=ingame&profile=${MARA}`);
   await expect(dialog(page)).toBeVisible();
   await page.mouse.click(100, 400);
   await expect(dialog(page)).toHaveCount(0);

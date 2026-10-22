@@ -58,10 +58,10 @@ describe("palette (design v2)", () => {
     });
   });
 
-  it("every value is a colour, a gradient or a font stack; names are CSS custom properties", () => {
+  it("every value is a colour or a font stack; names are CSS custom properties", () => {
     for (const [k, val] of Object.entries(themeVars())) {
       expect(k, k).toMatch(/^--[a-z0-9-]+$/);
-      expect(val, k).toMatch(/^(#[0-9a-f]{6}|rgba\(|linear-gradient\(|none$|transparent$|1px |'[A-Z])/);
+      expect(val, k).toMatch(/^(#[0-9a-f]{6}|rgba\(|'[A-Z])/);
     }
   });
 

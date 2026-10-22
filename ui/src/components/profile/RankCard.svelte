@@ -32,7 +32,7 @@
         <div class="col">
           <span class="lbl">CURRENT RANK</span>
           <span class="nm big" style:color={cur.color}>{cur.name}</span>
-          {#if cur.sub}<span class="sub">{cur.sub}</span>{/if}
+          {#if cur.sub}<span class="sub" data-ellipsis>{cur.sub}</span>{/if}
         </div>
       {/if}
     </div>
@@ -58,7 +58,7 @@
         <div class="col">
           <span class="lbl">LAST ACT</span>
           <span class="nm" style:color={prev.color}>{prev.name}</span>
-          {#if prev.sub}<span class="sub">{prev.sub}</span>{/if}
+          {#if prev.sub}<span class="sub" data-ellipsis>{prev.sub}</span>{/if}
         </div>
       {/if}
     </div>

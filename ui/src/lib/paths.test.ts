@@ -35,7 +35,7 @@ function offenders(): string[] {
   for (const u of testCode()) {
     const lines = readFileSync(u, "utf8").split("\n");
     lines.forEach((line, i) => {
-      // An HTTP request's URL path (the design server in tests/design-ref.ts) is not a file path.
+      // An HTTP request's URL path (a Playwright route's `request().url()`) is not a file path.
       const httpPath = PATHNAME.test(line) && line.includes("request().url()");
       if ((PATHNAME.test(line) && !httpPath) || STRING_OPS.test(line) || FS_HREF.test(line)) {
         out.push(`${basename(fileURLToPath(u))}:${i + 1}  ${line.trim()}`);
@@ -48,7 +48,7 @@ function offenders(): string[] {
 describe("windows-safe paths in test code", () => {
   it("scans the unit tests, the Playwright harness and specs, and the configs", () => {
     const names = testCode().map((u) => basename(fileURLToPath(u)));
-    for (const f of ["scenes.test.ts", "fonts.test.ts", "contract.test.ts", "harness.ts", "design-ref.ts", "vite.config.ts"]) {
+    for (const f of ["scenes.test.ts", "fonts.test.ts", "contract.test.ts", "harness.ts", "fit-v2.spec.ts", "vite.config.ts"]) {
       expect(names, f).toContain(f);
     }
   });

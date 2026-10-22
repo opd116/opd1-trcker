@@ -126,7 +126,7 @@
               <img {@attach retryImg} class="art" src={assetUrl("cardSmall", p.cardId)} alt="" />
               <div class="m-col">
                 {#if nm.style === "loading"}<Shimmer w={90} h={13} />{:else}<span class="m-name"
-                    ><span class={["m-n", nm.style]}>{nm.text}</span>
+                    ><span class={["m-n", nm.style]} data-ellipsis>{nm.text}</span>
                     {#if nm.tag}<span class="m-tag">{nm.tag}</span>{/if}</span
                   >{/if}
                 <span class="mono">LV {p.level ?? "—"}{p.isSelf ? " · YOU" : ""}</span>
@@ -450,9 +450,12 @@
     color: var(--text-muted);
   }
 
+  /* The dotted underline hangs below the clipped box: widen the paint clip (as PlayerRow does). */
   .m-n.remembered {
     text-decoration: underline dotted var(--text-faint);
     text-underline-offset: 3px;
+    overflow: clip;
+    overflow-clip-margin: 6px;
   }
 
   .m-tag {

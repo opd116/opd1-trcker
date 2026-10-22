@@ -105,7 +105,7 @@
   </div>
   <div class="rankcell">
     {#if isRankedTier(v.s.tier)}<img {@attach retryImg} class="ricon" src={assetUrl("tier", v.s.tier)} alt="" />{/if}
-    <span class="rname" style:color={v.s.tier === null ? "var(--text-tag)" : tierColor(v.s.tier)}
+    <span class="rname" data-ellipsis style:color={v.s.tier === null ? "var(--text-tag)" : tierColor(v.s.tier)}
       ><span class="rlong">{rankText}</span><span class="rshort">{v.s.tier === null ? "—" : tierShort(v.s.tier, $meta)}</span></span
     >
   </div>
@@ -129,7 +129,7 @@
     {:else}
       <div class="noteline">
         {#if v.note}
-          <span class={["note", expanded && "open"]}>{v.note}</span>
+          <span class={["note", expanded && "open"]} data-ellipsis>{v.note}</span>
         {:else}
           <span class="nonote">No note yet</span>
         {/if}

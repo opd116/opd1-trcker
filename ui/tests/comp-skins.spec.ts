@@ -2,7 +2,7 @@
 // the snapshot, the RR chart's hover card / keyboard / click, the session chips opening their scoreboards, every
 // My Stats state fitting without sideways scroll at both window sizes, and the Collection's filters and empty state.
 import { expect, test, type Page } from "@playwright/test";
-import { NOW, routeMedia, settle } from "./harness";
+import { gotoApp, NOW, routeMedia, settle, type MediaOverride } from "./harness";
 
 /** DEV only: a value read from the app's own router instance (the dev server serves each module at one URL). */
 const routerState = (page: Page) =>
@@ -10,13 +10,11 @@ const routerState = (page: Page) =>
     `import("/src/lib/router.svelte.ts").then(({ router }) => ({ screen: router.screen, matchId: router.matchId, from: router.matchFrom }))`,
   ) as Promise<{ screen: string; matchId: string | null; from: string | null }>;
 
-/** `routes`: extra routes, added after the media cache so they win (Playwright tries the newest route first). */
-async function open(page: Page, query: string, routes?: () => Promise<unknown>): Promise<void> {
-  await routeMedia(page);
-  await routes?.();
+/** `override`: the media URLs a test fails on purpose (harness `routeMedia`). */
+async function open(page: Page, query: string, override?: MediaOverride): Promise<void> {
+  await routeMedia(page, override);
   await page.clock.setFixedTime(NOW);
-  await page.goto(`/?${query}`);
-  await page.waitForFunction(() => document.documentElement.dataset.feed === "demo-feed");
+  await gotoApp(page, `/?${query}`);
 }
 
 async function openComp(page: Page, scene = "mystats"): Promise<void> {
@@ -126,7 +124,7 @@ test.describe("Collection", () => {
   });
 
   test("art that cannot load shows the unavailable frame", async ({ page }) => {
-    await open(page, "scene=closed&screen=skins", () => page.route(/weaponskinlevels/, (r) => r.fulfill({ status: 404, body: "" })));
+    await open(page, "scene=closed&screen=skins", (url) => (/weaponskinlevels/.test(url) ? { status: 404 } : null));
     await expect(page.getByText("ARTWORK UNAVAILABLE")).toHaveCount(22);
   });
 

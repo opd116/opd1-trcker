@@ -150,9 +150,12 @@
     color: var(--text-muted);
   }
 
+  /* The dotted underline hangs below the clipped box: widen the paint clip (as PlayerRow does). */
   .nm.remembered {
     text-decoration: underline dotted var(--text-muted);
     text-underline-offset: 3px;
+    overflow: clip;
+    overflow-clip-margin: 6px;
   }
 
   .tg {

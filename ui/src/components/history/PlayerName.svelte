@@ -29,11 +29,11 @@
 
 <span class={["pn", `s-${size}`]} use:tip={tipArg}>
   {#if name.kind === "visible"}
-    <span class="n" dir="auto">{name.name}</span><span class="t">#{name.tag}</span>
+    <span class="n" dir="auto" data-ellipsis>{name.name}</span><span class="t">#{name.tag}</span>
   {:else if name.kind === "remembered"}
-    <i class="eye"><EyeOff size={13} /></i><span class="n rem" dir="auto">{name.name}</span><span class="t">#{name.tag}</span>
+    <i class="eye"><EyeOff size={13} /></i><span class="n rem" dir="auto" data-ellipsis>{name.name}</span><span class="t">#{name.tag}</span>
   {:else}
-    <i class="eye"><EyeOff size={13} /></i><span class="n hid">{hidden}</span>
+    <i class="eye"><EyeOff size={13} /></i><span class="n hid" data-ellipsis>{hidden}</span>
   {/if}
 </span>
 

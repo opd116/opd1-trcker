@@ -7,7 +7,7 @@
   tags would print as a stray blank line inside the bubble. Only the tip text's own `\n` may break a line.
 -->
 <script lang="ts">
-  import { TIP_ID, tipPlace, tipState, wlFill, wlRow } from "../lib/tooltip.svelte";
+  import { TIP_ID, tipPlace, tipState, wlFill } from "../lib/tooltip.svelte";
 
   const view = $derived(tipState.tip);
   let el = $state<HTMLDivElement | null>(null);
@@ -31,7 +31,7 @@
     style:left="{pos?.left ?? 0}px"
     style:top="{pos?.top ?? 0}px"
     style:opacity={pos ? 1 : 0}
-  >{#if view.kind === "img"}<div class="img-row"><img src={view.img} alt="" /><div class="img-col"><span class="img-head" style:color={view.color ?? "var(--text)"}>{view.head}</span><span class="img-sub">{view.sub}</span></div></div>{:else if view.kind === "kv"}<div class="kv-head">{view.head}</div><div class="kv">{#each view.rows as [k, v], i (i)}<span class="kv-k">{k}</span><span class="kv-v">{v}</span>{/each}</div>{:else if view.kind === "wl"}<div class="wl-row"><span class="w">{view.w}W</span><div class="bar"><div class="fill" style:width="{wlFill(view.w, view.l)}%"></div></div><span class="l">{view.l}L</span></div>{:else if view.kind === "legacyWl"}{@const [w, d1, l, d2, g] = wlRow(view)}<span class="wl"><span class="lw">{w}</span><span class="dot">{d1}</span><span class="ll">{l}</span><span class="dot">{d2}</span><span>{g}</span></span><div class="scope">{view.scope}</div>{:else}{view.text}{/if}</div>
+  >{#if view.kind === "img"}<div class="img-row"><img src={view.img} alt="" /><div class="img-col"><span class="img-head" style:color={view.color ?? "var(--text)"}>{view.head}</span><span class="img-sub">{view.sub}</span></div></div>{:else if view.kind === "kv"}<div class="kv-head">{view.head}</div><div class="kv">{#each view.rows as [k, v], i (i)}<span class="kv-k">{k}</span><span class="kv-v">{v}</span>{/each}</div>{:else if view.kind === "wl"}<div class="wl-row"><span class="w">{view.w}W</span><div class="bar"><div class="fill" style:width="{wlFill(view.w, view.l)}%"></div></div><span class="l">{view.l}L</span></div>{:else}{view.text}{/if}</div>
 {/if}
 
 <style>
@@ -133,32 +133,5 @@
   .fill {
     height: 100%;
     background: var(--win);
-  }
-
-  /* LEGACY v8 `wl:` row */
-  .wl {
-    display: flex;
-    gap: 6px;
-    align-items: baseline;
-    white-space: nowrap;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .lw {
-    color: var(--win);
-    font-weight: 600;
-  }
-
-  .ll {
-    color: var(--loss);
-    font-weight: 600;
-  }
-
-  .dot {
-    color: var(--text-ghost);
-  }
-
-  .scope {
-    color: var(--text-muted);
   }
 </style>

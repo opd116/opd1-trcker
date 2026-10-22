@@ -53,7 +53,7 @@
           {:else}
             <span class="agbox"><img {@attach retryImg} class="agent" src={assetUrl("agent", v.id)} alt="" /></span>
           {/if}
-          <span class="name">{name}</span>
+          <span class="name" data-ellipsis>{name}</span>
         </div>
         <span class="wl">{v.wl}</span>
         <span class="track"><span class="bar" style:width="{v.wrPct}%" style:background={v.bar}></span></span>

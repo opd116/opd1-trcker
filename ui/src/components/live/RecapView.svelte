@@ -129,7 +129,7 @@
                 <div class="t-row" class:bb={i < rows.length - 1} class:self={r.isSelf}>
                   <span class="t-agent">{#if r.agentId}<img {@attach retryImg} src={assetUrl("agent", r.agentId)} alt="" />{/if}</span>
                   {#if typeof r.tier === "number"}<img {@attach retryImg} class="t-rank" src={assetUrl("tier", r.tier >= 3 ? r.tier : 0)} alt="" use:tip={tierName(r.tier, $meta)} />{:else}<span class="t-rank"></span>{/if}
-                  <span class={["t-name", nm.style]} use:tip={nm.style === "remembered" ? nm.tip : ""}>{nm.text}</span>
+                  <span class={["t-name", nm.style]} data-ellipsis use:tip={nm.style === "remembered" ? nm.tip : ""}>{nm.text}</span>
                   {#if i === 0 && r.acs !== null}<span class="t-mvp">{ti === 0 ? "MVP" : "TOP"}</span>{/if}
                   <div class="fill"></div>
                   <span class="t-acs">{r.acs === null ? "—" : Math.round(r.acs)}</span>

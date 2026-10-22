@@ -1,6 +1,4 @@
 // String formatters (spec §4.3). Every missing value renders as DASH.
-import type { Peak } from "./types";
-
 /** Every missing value renders as this. */
 export const DASH = "—";
 
@@ -36,18 +34,6 @@ export function span(ms: Num): string {
 export function ago(tsMs: Num, nowMs: number = Date.now()): string {
   if (!ok(tsMs)) return DASH;
   return `${span(nowMs - tsMs)} ago`;
-}
-
-/** The backend builds act labels ("E8 A3"); the UI only passes them through. */
-export function actLabel(label: string | null | undefined): string {
-  return label ? label : DASH;
-}
-
-/** "E8 A3 · 1y" (time since that act ended), or "This Act". */
-export function peakLabel(peak: Peak | null | undefined): string {
-  if (!peak) return DASH;
-  if (peak.sinceActEndMs === null) return "This Act";
-  return `${actLabel(peak.actLabel)} · ${span(peak.sinceActEndMs)}`;
 }
 
 /** "+18", "−15", "0". */

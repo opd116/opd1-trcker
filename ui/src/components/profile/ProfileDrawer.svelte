@@ -464,10 +464,13 @@
     font-style: italic;
   }
 
+  /* The dotted underline hangs below the clipped box: widen the paint clip (as PlayerRow does). */
   .name.remembered {
     text-decoration: underline dotted var(--text-muted);
     text-underline-offset: 4px;
     text-decoration-thickness: 1.5px;
+    overflow: clip;
+    overflow-clip-margin: 6px;
   }
 
   .eye {

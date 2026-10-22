@@ -34,7 +34,7 @@
     {/if}
   </div>
   <div class="body">
-    <span class="name" use:tip={name}>{name}</span>
+    <span class="name" data-ellipsis use:tip={name}>{name}</span>
     <div class="foot" use:tip={priceTip(skin.vp)}>
       <span class="vpw">
         <span class="sw" style:background={editionColor(skin.edition)} use:tip={skin.edition ? editionLabel(skin.edition) : "No edition"}></span>

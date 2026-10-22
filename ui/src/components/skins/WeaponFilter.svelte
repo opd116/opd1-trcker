@@ -33,7 +33,7 @@
             />
           {/if}
         </span>
-        <span class="name">{w.name}</span>
+        <span class="name" data-ellipsis>{w.name}</span>
         <span class="track"><span class="bar" style:width="{w.w}%"></span></span>
         <span class="n">{w.n}</span>
       </button>

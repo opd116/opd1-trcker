@@ -182,7 +182,7 @@
                 {#if hot.result}
                   <span class="chip" style:background={resBg(hot.result)} style:color={resFg(hot.result)}>{hot.result}</span>
                 {/if}
-                {#if map}<span class="map">{map}</span>{/if}
+                {#if map}<span class="map" data-ellipsis>{map}</span>{/if}
                 {#if hot.match?.score}<span class="score">{hot.match.score}</span>{/if}
               </div>
             {/if}

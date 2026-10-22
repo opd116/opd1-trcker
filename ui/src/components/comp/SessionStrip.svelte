@@ -93,7 +93,7 @@
         onclick={() => onopen?.(c.id)}
       >
         <span class="res" style:background={c.bg} style:color={c.fg}>{c.l}</span>
-        <span class="row"><span class="map">{c.map}</span><span class="rr" style:color={c.fg}>{c.rr}</span></span>
+        <span class="row"><span class="map" data-ellipsis>{c.map}</span><span class="rr" style:color={c.fg}>{c.rr}</span></span>
       </button>
     {/each}
   </div>

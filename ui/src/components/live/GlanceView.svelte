@@ -55,7 +55,7 @@
     <div class="agent">{#if r?.agentId}<img {@attach retryImg} class="dim" src={assetUrl("agent", r.agentId)} alt="" />{/if}</div>
     <div class="names">
       <Shimmer w={70} h={13} />
-      {#if r && r.name.style !== "loading"}<span class={["n", r.name.style]}>{r.name.text}</span>{:else}<Shimmer w={96} h={11} />{/if}
+      {#if r && r.name.style !== "loading"}<span class={["n", r.name.style]} data-ellipsis>{r.name.text}</span>{:else}<Shimmer w={96} h={11} />{/if}
     </div>
     <div class="num"><Shimmer w={32} h={14} /></div>
     <div class="num"><Shimmer w={30} h={14} /></div>
@@ -132,7 +132,7 @@
                       <Shimmer w={96} h={11} />
                     {:else}
                       <span class="nm" use:tip={r.name.tip}
-                        ><span class={["n", r.name.style]} dir={r.name.style === "visible" || r.name.style === "remembered" ? "auto" : undefined}>{r.name.text}</span
+                        ><span class={["n", r.name.style]} dir={r.name.style === "visible" || r.name.style === "remembered" ? "auto" : undefined} data-ellipsis>{r.name.text}</span
                         >{#if r.name.tag}<span class="t">{r.name.tag}</span>{/if}</span
                       >
                     {/if}

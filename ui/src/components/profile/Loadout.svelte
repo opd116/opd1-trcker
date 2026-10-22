@@ -28,7 +28,7 @@
       {:else if t.state === "none"}
         <div class="tile">
           <div class="art"></div>
-          <div class="txt"><span class="skin dash">—</span><span class="wp"><span class="sw"></span>{t.weapon}</span></div>
+          <div class="txt"><span class="skin dash" data-ellipsis>—</span><span class="wp"><span class="sw"></span>{t.weapon}</span></div>
         </div>
       {:else}
         <div class="tile" use:tip={t.tip}>
@@ -40,7 +40,7 @@
             {/if}
           </div>
           <div class="txt">
-            <span class="skin">{t.skin}</span>
+            <span class="skin" data-ellipsis>{t.skin}</span>
             <span class="wp"><span class="sw" style:background={t.color}></span>{t.weapon} · {t.edition ?? "Standard"}</span>
           </div>
         </div>

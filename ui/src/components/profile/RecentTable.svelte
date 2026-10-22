@@ -55,7 +55,7 @@
     {#each m.with as w (w.puuid)}
       <span class="wchip" use:tip={w.tip}
         >{#if w.agentId}<img {@attach retryImg} src={assetUrl("agent", w.agentId)} alt="" />{:else}<span class="wx"></span>{/if}<span
-          class={["wn", w.hidden && "hid"]}>{w.name}</span
+          class={["wn", w.hidden && "hid"]} data-ellipsis>{w.name}</span
         ></span
       >
     {/each}

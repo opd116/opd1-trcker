@@ -112,7 +112,7 @@
         <span class="icon well"></span>
       {/if}
       <div class="names">
-        <span class="tier" style:color={color}>{name}</span>
+        <span class="tier" style:color={color} data-ellipsis>{name}</span>
         <span class="sub">{sub}</span>
       </div>
     </div>
@@ -138,7 +138,7 @@
           <img {@attach retryImg} class="cicon" src={assetUrl("tier", start.tier)} alt="" />
           <span class="cname">{start.name}</span>
           <span class="flex"></span>
-          <span class="ago">{start.when}</span>
+          <span class="ago" data-ellipsis>{start.when}</span>
         {:else}
           <span class="cname dim">{DASH}</span>
         {/if}
@@ -150,7 +150,7 @@
           <img {@attach retryImg} class="cicon" src={assetUrl("tier", last.tier)} alt="" />
           <span class="cname">{last.name}</span>
           <span class="flex"></span>
-          <span class="ago">{last.ago}</span>
+          <span class="ago" data-ellipsis>{last.ago}</span>
         {:else}
           <span class="arrow"></span>
           <span class="cname dim">{DASH}</span>

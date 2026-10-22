@@ -1,35 +1,33 @@
-// Test harness (spec §8.1): clock, routes, scene URLs, settling and the font check. Test-only; never shipped.
+// Test harness (spec §8.1): clock, routes, scene URLs, settling. Test-only; never shipped.
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Page, Route } from "@playwright/test";
-import { tierLabel } from "../src/lib/meta";
-import type { Meta } from "../src/lib/types";
+import type { Page, Request } from "@playwright/test";
 
-/** The page clock (spec §8.1): only at 21:59 do the design's `45m / 2h / 4h ago` agree with its clock times. */
+/** The page clock (spec §8.1): only at 21:59 do the demo's `45 min ago` / `2h` agree with its clock times. */
 export const NOW = new Date("2026-09-29T21:59:00Z");
 
-export const FONTS = ["Barlow", "IBM Plex Sans", "Archivo"] as const;
+/** The v2 design's three families (R189): Barlow for the UI, Saira Condensed for display figures, Geist Mono for labels. */
+export const FONTS = ["Barlow", "Saira Condensed", "Geist Mono"] as const;
 export type Font = (typeof FONTS)[number];
-/** `IBM Plex Sans` → `IBM-Plex-Sans`, for file names. */
-export const fontSlug = (f: string) => f.replace(/ /g, "-");
 
-export const ACCENTS = ["#e3a54f", "#4fc3ae", "#7fb1ef", "#e58a9a"] as const;
+/** The v2 design's one accent (violet, R189); there is no accent option any more. */
+export const ACCENT = "#9d8cff";
+
+/** The window sizes (R190): the default, the minimum, and the glance column (Live only). */
+export const SIZES = {
+  default: { width: 1280, height: 800 },
+  min: { width: 1180, height: 760 },
+  glance: { width: 420, height: 800 },
+} as const;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 export const UI_DIR = dirname(HERE);
-/** git-ignored (ui/tests/.cache/): valorant-api images and the design prototype's CDN scripts. */
+/** git-ignored (ui/tests/.cache/): valorant-api images. */
 export const CACHE_DIR = join(HERE, ".cache");
-export const SHOTS_DIR = join(HERE, "shots");
 
-/** The 25 ranked tier names (3 `Iron 1` … 27 `Radiant`) exactly as the card writes them, from the demo meta. */
-export const TIER_LABELS: string[] = (() => {
-  const meta = JSON.parse(readFileSync(join(UI_DIR, "src", "lib", "demo", "meta.json"), "utf8")) as Meta;
-  return Array.from({ length: 25 }, (_, i) => tierLabel(meta, i + 3)!);
-})();
-
-// ── a byte-for-byte response cache (images here, unpkg in design-ref.ts) ─────────
+// ── a byte-for-byte response cache ───────────────────────────────────────────────
 type Cached = { body: Buffer; type: string };
 
 function cachePaths(dir: string, url: string) {
@@ -55,40 +53,64 @@ export function writeCache(dir: string, url: string, c: Cached): void {
   renameSync(p.meta + tmp, p.meta);
 }
 
-/**
- * Serve `route` from the cache when the file exists, else fetch it once from the network and keep it.
- * `cors` adds `Access-Control-Allow-Origin: *` (needed by the design's SRI-checked CDN scripts).
- */
-export async function serveCached(route: Route, dir: string, cors = false): Promise<boolean> {
-  const url = route.request().url();
-  const extra: Record<string, string> = cors ? { "access-control-allow-origin": "*" } : {};
-  const hit = readCache(dir, url);
-  if (hit) {
-    await route.fulfill({ status: 200, body: hit.body, headers: { "content-type": hit.type, ...extra } });
-    return true;
-  }
+export const MEDIA_CACHE = join(CACHE_DIR, "media");
+
+/** A test's own answer for a media URL: a status to fail it with (an empty body), or null for the normal answer. */
+export type MediaOverride = (url: string) => { status: number } | null;
+
+/** The cached image, else fetched once from the network and kept; null when that fails too. */
+async function mediaFor(url: string): Promise<{ body: Buffer; type: string } | null> {
+  const hit = readCache(MEDIA_CACHE, url);
+  if (hit) return hit;
   try {
-    const res = await route.fetch();
-    if (!res.ok()) {
-      await route.abort();
-      return false;
-    }
-    const body = await res.body();
-    const type = res.headers()["content-type"] ?? "application/octet-stream";
-    writeCache(dir, url, { body, type });
-    await route.fulfill({ status: 200, body, headers: { "content-type": type, ...extra } });
-    return true;
+    const res = await fetch(url);
+    if (!res.ok) return null;
+    const got = { body: Buffer.from(await res.arrayBuffer()), type: res.headers.get("content-type") ?? "application/octet-stream" };
+    writeCache(MEDIA_CACHE, url, got);
+    return got;
   } catch {
-    await route.abort().catch(() => {});
-    return false;
+    return null;
   }
 }
 
-export const MEDIA_CACHE = join(CACHE_DIR, "media");
+/**
+ * Whether the CDN's images are served from the local cache. In CI (the pinned Playwright image, `CI` set) they are: the
+ * workflow keeps ui/tests/.cache/media between runs. On a developer machine the suite runs on the installed Chrome
+ * (`channel: "chrome"`), which with DevTools request interception on refuses some of the DEV server's module requests
+ * under load (`net::ERR_INSUFFICIENT_RESOURCES`) and now and then crashes a page; there the images come straight from
+ * the CDN unless a test overrides some of them. `MEDIA_CACHE=1` forces the cache locally.
+ */
+const INTERCEPT_MEDIA = !!process.env.CI || process.env.MEDIA_CACHE === "1";
 
-/** valorant-api images (the DEV `assetUrl` points at its CDN) come from the local cache when present. */
-export async function routeMedia(page: Page): Promise<void> {
-  await page.route("https://media.valorant-api.com/**", (route) => serveCached(route, MEDIA_CACHE).then(() => {}));
+/**
+ * valorant-api images (the DEV `assetUrl` points at its CDN) come from the local cache (git-ignored, filled from the
+ * network on a miss) when INTERCEPT_MEDIA is on. Only those requests are intercepted, through the page's own DevTools
+ * session (`Fetch.enable` with the CDN's URL pattern), never the app's own: Playwright's `page.route` would pause every
+ * request of the page, the DEV server's few hundred module requests included. `override` lets a test fail chosen URLs
+ * (and turns the interception on for that test).
+ */
+export async function routeMedia(page: Page, override?: MediaOverride): Promise<void> {
+  if (!override && !INTERCEPT_MEDIA) return;
+  const cdp = await page.context().newCDPSession(page);
+  cdp.on("Fetch.requestPaused", (e: { requestId: string; request: { url: string } }) => {
+    void (async () => {
+      const forced = override?.(e.request.url);
+      const got = forced ? null : await mediaFor(e.request.url);
+      if (got) {
+        await cdp.send("Fetch.fulfillRequest", {
+          requestId: e.requestId,
+          responseCode: 200,
+          responseHeaders: [{ name: "content-type", value: got.type }],
+          body: got.body.toString("base64"),
+        });
+      } else if (forced) {
+        await cdp.send("Fetch.fulfillRequest", { requestId: e.requestId, responseCode: forced.status, responseHeaders: [], body: "" });
+      } else {
+        await cdp.send("Fetch.failRequest", { requestId: e.requestId, errorReason: "Failed" });
+      }
+    })().catch(() => {}); // the page closed meanwhile
+  });
+  await cdp.send("Fetch.enable", { patterns: [{ urlPattern: "https://media.valorant-api.com/*", requestStage: "Request" }] });
 }
 
 /** Every request to a font CDN, recorded (the app must make none: spec §8.1). */
@@ -101,72 +123,85 @@ export function watchFontCdn(page: Page): string[] {
 }
 
 // ── scenes ─────────────────────────────────────────────────────────────────────
-export type ThemeParams = Partial<Record<"tone" | "accent" | "results" | "fill" | "font" | "last5", string>>;
-
-export function sceneUrl(scene: string, params: ThemeParams & Record<string, string> = {}): string {
+/**
+ * A demo URL (demo/feed.ts): `?scene=` plus the v2 parameters (`screen`, `profile`, `match` + `puuid`, `variant`,
+ * `recap`, `queue`, `glance`, `empty`, `fail`).
+ */
+export function sceneUrl(scene: string, params: Record<string, string> = {}): string {
   return `/?${new URLSearchParams({ scene, ...params })}`;
 }
 
 export type OpenOpts = {
   /**
    * `fixed` (default): Date.now is pinned at NOW and timers run normally.
-   * `manual`: Playwright's fake clock, installed at NOW before the page loads; once the page has settled
-   * time stops where the page's clock is then, and only `page.clock.runFor` moves it (tooltip timing tests never
-   * depend on real timers, and a slow load never matters).
+   * `manual`: Playwright's fake clock, installed at NOW before the page loads; once the page has settled time stops
+   * where the page's clock is then, and only `page.clock.runFor` moves it.
    */
   clock?: "fixed" | "manual";
+  /**
+   * Wait for the data the screen asks for after it opens (default): until nothing under #app is `aria-busy="true"`.
+   * Off for the scenes whose answer never comes (`*-loading`), which are left showing their skeleton.
+   */
+  waitData?: boolean;
 };
 
-/** Open a demo scene and wait until fonts and every image (including CSS backgrounds) have loaded. */
-export async function openScene(
-  page: Page,
-  scene: string,
-  params: ThemeParams & Record<string, string> = {},
-  opts: OpenOpts = {},
-): Promise<void> {
+/** The DEV demo feed is running (demo/feed.ts marks <html> before it applies the scene). */
+export const DEMO_READY = () => document.documentElement.dataset.feed === "demo-feed";
+/** The app mounted (main.ts mounts App into #app once every module of its static graph has loaded). */
+export const APP_READY = () => (document.getElementById("app")?.childElementCount ?? 0) > 0;
+
+/**
+ * Navigate to the app and wait until `ready` holds in the page. The DEV server serves the app as a few hundred
+ * separate modules, and with DevTools request interception on (`routeMedia`) Chrome can refuse one of them under load
+ * (`net::ERR_INSUFFICIENT_RESOURCES`): the module graph then never finishes and the app never starts. That failure is
+ * the browser's, not the app's, so the page is loaded again (up to three attempts); any other failure is reported.
+ */
+export async function gotoApp(page: Page, url: string, ready: () => boolean = DEMO_READY): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    let refused: string | null = null;
+    let wake: () => void = () => {};
+    const refusedOnce = new Promise<void>((r) => (wake = r));
+    const onFail = (req: Request) => {
+      if (/ERR_INSUFFICIENT_RESOURCES/.test(req.failure()?.errorText ?? "") && req.resourceType() !== "image") {
+        refused = req.url();
+        wake();
+      }
+    };
+    page.on("requestfailed", onFail);
+    try {
+      await page.goto(url);
+      const started = page.waitForFunction(ready);
+      started.catch(() => {}); // when the refusal wins the race, the reload below ends this wait
+      await Promise.race([started, refusedOnce]);
+    } finally {
+      page.off("requestfailed", onFail);
+    }
+    if (refused === null) return;
+    if (attempt === 3) throw new Error(`the app did not load in 3 attempts: Chrome refused ${refused} (net::ERR_INSUFFICIENT_RESOURCES)`);
+  }
+}
+
+/** Open a demo scene and wait until its data, the fonts and every image (including CSS backgrounds) have loaded. */
+export async function openScene(page: Page, scene: string, params: Record<string, string> = {}, opts: OpenOpts = {}): Promise<void> {
   await routeMedia(page);
   if (opts.clock === "manual") await page.clock.install({ time: NOW });
   else await page.clock.setFixedTime(NOW);
-  await page.goto(sceneUrl(scene, params));
-  await page.waitForFunction(() => document.documentElement.dataset.feed === "demo-feed");
-  const route =
-    params.route ??
-    (scene.startsWith("details") ? "details" : scene.startsWith("match") ? "match" : scene.startsWith("mystats") ? "mystats" : "live");
-  if (route === "details" || route === "match" || route === "mystats") await waitPage(page, scene.endsWith("-loading") ? "loading" : "loaded");
+  await gotoApp(page, sceneUrl(scene, params));
+  await page.locator("#app main.main, #app .glance").first().waitFor();
+  if (opts.waitData ?? !scene.endsWith("-loading")) await waitIdle(page);
   await settle(page);
   if (opts.clock === "manual") await pauseHere(page);
 }
 
-/**
- * Details, Match and My Stats get their data after the route opens: wait until the page shows it (`aria-busy="false"`),
- * or for a `-loading` scene until its skeleton is up (`aria-busy="true"`, the answer never comes).
- */
-export async function waitPage(page: Page, state: "loaded" | "loading"): Promise<void> {
-  await page.locator(`#app :is(.details, .match, .mystats)[aria-busy="${state === "loading"}"]`).waitFor();
+/** Every screen, drawer and scoreboard has its data: nothing under #app is `aria-busy="true"` any more. */
+export async function waitIdle(page: Page): Promise<void> {
+  await page.waitForFunction(() => document.querySelector('#app [aria-busy="true"]') === null);
 }
 
 /**
- * Screenshot a Details or Match page at its full scroll height (spec §8.1 shots): the scroll container is let out to
- * its content height for the shot (`overflow-y: hidden` keeps its stable scrollbar gutter, so nothing reflows
- * sideways), then put back. A Live page is shot as is.
- */
-export async function shotFull(page: Page, name: string): Promise<void> {
-  mkdirSync(SHOTS_DIR, { recursive: true });
-  const path = join(SHOTS_DIR, `${name}.png`);
-  if ((await page.locator("#app .scroll").count()) === 0) {
-    await page.screenshot({ path });
-    return;
-  }
-  const tall = await page.addStyleTag({ content: "#app{height:auto!important;min-height:800px} #app .scroll{flex:none!important;overflow-y:hidden!important}" });
-  await page.screenshot({ path, fullPage: true });
-  await tall.evaluate((el) => (el as Element).remove());
-}
-
-/**
- * Stop the fake clock at the page's own current time (a beat ahead, for the round trip), not at a fixed offset
- * from NOW: loading and settling take however long they take in real time. `pauseAt` stops time first, then
- * fast-forwards to its target and refuses a target in the past, so if the round trip ever outlasts the beat the
- * page's time is read again.
+ * Stop the fake clock at the page's own current time (a beat ahead, for the round trip), not at a fixed offset from
+ * NOW: loading and settling take however long they take in real time. `pauseAt` refuses a target in the past, so if
+ * the round trip ever outlasts the beat the page's time is read again.
  */
 async function pauseHere(page: Page): Promise<void> {
   for (let attempt = 0; ; attempt++) {
@@ -218,7 +253,7 @@ export function varRgb(page: Page, name: string): Promise<string> {
   }, name);
 }
 
-/** Move the pointer to a spot with no tooltip trigger (top-left of the top bar). */
+/** Move the pointer to a spot with no tooltip trigger (the logo at the title bar's left end). */
 export async function pointerAway(page: Page): Promise<void> {
   await page.mouse.move(5, 5);
 }

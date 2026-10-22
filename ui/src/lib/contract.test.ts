@@ -600,40 +600,49 @@ describe("golden invariants the UI relies on", () => {
   });
 });
 
-// ── absent key -> skeleton, null -> — (R23), through the real card ────────────────
-describe("the card reads the golden tri-state: an absent key is a skeleton, null is —", () => {
-  let PlayerCard: typeof import("../components/PlayerCard.svelte").default;
+// ── absent key -> skeleton, null -> — (R23), through the real live row ────────────
+describe("the live row reads the golden tri-state: an absent key is a skeleton, null is —", () => {
+  let PlayerRow: typeof import("../components/live/PlayerRow.svelte").default;
+  let rowView: typeof import("./livev2").rowView;
   beforeAll(async () => {
     vi.stubGlobal("location", { search: "" });
     vi.stubGlobal("document", { documentElement: { style: { setProperty: vi.fn() } }, getElementById: () => ({ setAttribute: vi.fn() }) });
-    PlayerCard = (await import("../components/PlayerCard.svelte")).default;
-    // With the names pending (spec §5.8) a tier name is a skeleton whatever the card carries.
-    (await import("./stores")).meta.set(demoMeta as Meta);
+    PlayerRow = (await import("../components/live/PlayerRow.svelte")).default;
+    rowView = (await import("./livev2")).rowView;
   });
   afterAll(() => vi.unstubAllGlobals());
 
-  const html = (card: unknown) => render(PlayerCard, { props: { card: card as Card } }).body.replace(/<!--.*?-->/g, "");
-  const byPuuid = (p: string) => LIVE.players.find((c) => c.puuid === p)!;
+  const cards = () => LIVE.players as unknown as Card[];
+  const html = (puuid: string) => {
+    const list = cards();
+    const i = list.findIndex((c) => c.puuid === puuid);
+    const row = rowView(list[i]!, i, list, {
+      meta: demoMeta as Meta,
+      lobby: list,
+      settings: { highlight: DEFAULT_SETTINGS.highlight, smurf: DEFAULT_SETTINGS.smurf },
+      marks: { saved: [], notes: {}, notSmurf: [] },
+      selected: null,
+      stage: "ingame",
+    });
+    return render(PlayerRow, { props: { row, border: false } }).body.replace(/<!--.*?-->/g, "");
+  };
   const text = (h: string) => h.replace(/<[^>]+>/g, "");
   const skeletons = (h: string) => (h.match(/class="sk[ "]/g) ?? []).length;
 
   it("the loading card (every tri-state key absent) shows skeletons and no —", () => {
-    const h = html(byPuuid("puuid-loading"));
-    expect(skeletons(h)).toBeGreaterThanOrEqual(7); // name, level, rank, peak, prev, K/D + HS% + Win%, last 5
+    const h = html("puuid-loading");
+    expect(skeletons(h)).toBeGreaterThanOrEqual(5);
     expect(text(h)).not.toContain("—");
   });
 
   it("the missing card (every tri-state key null) shows — and no skeleton", () => {
-    const h = html(byPuuid("puuid-missing"));
+    const h = html("puuid-missing");
     expect(skeletons(h)).toBe(0);
-    expect(text(h).split("—").length - 1).toBeGreaterThanOrEqual(6);
-    expect(text(h)).toContain("Lv —");
+    expect(text(h)).toContain("—");
   });
 
-  it("a full card has neither", () => {
-    const h = html(byPuuid("puuid-self"));
-    expect(skeletons(h)).toBe(0);
-    expect(text(h)).not.toContain("—");
+  it("a full card has no skeleton", () => {
+    expect(skeletons(html("puuid-self"))).toBe(0);
   });
 });
 

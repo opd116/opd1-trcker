@@ -42,7 +42,7 @@
     <Shimmer w={120} h={13} />
   {:else}
     <span class="nm" use:tip={r.name.tip}
-      ><span class={["n", r.name.style]} dir={r.name.style === "visible" || r.name.style === "remembered" ? "auto" : undefined}
+      ><span class={["n", r.name.style]} dir={r.name.style === "visible" || r.name.style === "remembered" ? "auto" : undefined} data-ellipsis
         >{r.name.text}</span
       >{#if withTag && r.name.tag}<span class="t">{r.name.tag}</span>{/if}</span
     >
@@ -131,7 +131,7 @@
         </div>
         <div class="line2">
           {@render sub(row, "")}
-          {#if row.note}<span class="note" use:tip={`Your note\n${row.note}`}><span class="vsep"></span><span class="note-t">{row.note}</span></span>{/if}
+          {#if row.note}<span class="note" use:tip={`Your note\n${row.note}`}><span class="vsep"></span><span class="note-t" data-ellipsis>{row.note}</span></span>{/if}
         </div>
       </div>
     </div>
@@ -142,7 +142,7 @@
         {#if row.rank.state === "missing"}<span class="rank-icon"></span>{:else}<img {@attach retryImg} class="rank-icon" src={assetUrl("tier", row.rank.tier)} alt="" />{/if}
         <div class="rank-col">
           <div class="rank-top">
-            <span class="rank-name" style:color={row.rank.color}>{row.rank.name}</span>
+            <span class="rank-name" style:color={row.rank.color} data-ellipsis>{row.rank.name}</span>
             {#if row.peak}<span class="peak" use:tip={{ text: row.peak.tip, img: assetUrl("tier", row.peak.icon), color: row.peak.color }}>▲{row.peak.delta}</span>{/if}
           </div>
           <div class="rr">

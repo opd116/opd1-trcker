@@ -8,8 +8,6 @@
 //   data-tip-img="<src>" [+ data-tip-color]  36px image beside a bold first line (coloured), the rest under it
 //   data-tip-kv                               "Title\nkey|value\nkey|value": a title over a two-column grid
 //   data-tip-wl="w,l"                         a W/L bar (data-tip must still be non-empty)
-//   data-tip="wl:31:22:53[|scope]"            LEGACY v8 W/L row (31W · 22L · 53 games / scope)
-import { count } from "./format";
 
 /** The trigger's box at fire time, in viewport coordinates. */
 export type TipAnchor = { left: number; top: number; width: number; bottom: number };
@@ -18,8 +16,7 @@ export type TipView =
   | { kind: "text"; text: string; anchor: TipAnchor }
   | { kind: "img"; text: string; img: string; color: string | null; head: string; sub: string; anchor: TipAnchor }
   | { kind: "kv"; text: string; head: string; rows: [string, string][]; anchor: TipAnchor }
-  | { kind: "wl"; text: string; w: number; l: number; anchor: TipAnchor }
-  | { kind: "legacyWl"; text: string; w: number; l: number; g: number; scope: string; anchor: TipAnchor };
+  | { kind: "wl"; text: string; w: number; l: number; anchor: TipAnchor };
 
 /** The tip on screen, or null. */
 export const tipState = $state<{ tip: TipView | null }>({ tip: null });
@@ -131,31 +128,11 @@ export function tipView(el: Pick<Element, "getAttribute">, text: string, anchor:
     if (!Number.isFinite(w) || !Number.isFinite(l)) return null;
     return { kind: "wl", text, w, l, anchor };
   }
-  if (text.startsWith("wl:")) {
-    const wl = parseWl(text);
-    return wl ? { kind: "legacyWl", text, w: wl.w, l: wl.l, g: wl.g, scope: wl.scope ?? "This act", anchor } : null;
-  }
   return { kind: "text", text, anchor };
 }
 
 /** The W/L bar's fill, as the design rounds it: wins / max(1, games), in whole percent. */
 export const wlFill = (w: number, l: number): number => Math.round((w / Math.max(1, w + l)) * 100);
-
-/**
- * `wl:31:22:53` → wins, losses, games. `wl:31:22:53|This act · Monday` also carries the text of the second row (My
- * Stats' weekday and time-of-day cells name their slice there); without it the row reads `This act`.
- */
-export function parseWl(text: string): { w: number; l: number; g: number; scope?: string } | null {
-  const m = /^wl:(\d+):(\d+):(\d+)(?:\|([^\n]+))?$/.exec(text);
-  if (!m) return null;
-  const wl = { w: Number(m[1]), l: Number(m[2]), g: Number(m[3]) };
-  return m[4] === undefined ? wl : { ...wl, scope: m[4] };
-}
-
-/** The spans of the structured W/L row, in order: `31W`, `·`, `22L`, `·`, `53 games`. */
-export function wlRow(wl: { w: number; l: number; g: number }): string[] {
-  return [`${wl.w}W`, "·", `${wl.l}L`, "·", count(wl.g, "game")];
-}
 
 /** `mouseover` on #app: show, keep or clear the tip for whatever the pointer is now on. */
 export function tipOver(target: Element | null, _root?: Element): void {

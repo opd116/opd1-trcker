@@ -31,9 +31,8 @@ concurrency:
 jobs:
   # Everything that does not need Windows, in one Linux job: Rust fmt / clippy / tests, the UI build + its size, Vitest,
   # svelte-check and the Playwright suite (layout, tooltips, navigation) against the DEV demo scenes. It never waits for
-  # the Windows build and the build never waits for it. The two specs that compare with the design file (visual-live,
-  # visual-details) skip themselves here: `.superpowers/` is not in the repo. A manual run that only updates the visual
-  # baselines skips it (`inputs` is empty on push and pull_request, so `!null` keeps every normal run).
+  # the Windows build and the build never waits for it. A manual run that only updates the visual baselines skips it
+  # (`inputs` is empty on push and pull_request, so `!null` keeps every normal run).
   checks:
     if: ${{ !inputs.update_baselines }}
     runs-on: ubuntu-latest

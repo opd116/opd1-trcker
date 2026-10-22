@@ -100,7 +100,7 @@ const P = PALETTE;
 
 /** Every CSS custom property, name → value. */
 export function themeVars(): Record<string, string> {
-  const vars: Record<string, string> = {
+  return {
     // surfaces
     "--bg-deep": P.bgDeep,
     "--chrome": P.chrome,
@@ -190,51 +190,6 @@ export function themeVars(): Record<string, string> {
     "--font": FONT_BODY,
     "--font-display": FONT_DISPLAY,
     "--font-mono": FONT_MONO,
-  };
-  return { ...vars, ...legacyVars() };
-}
-
-/**
- * LEGACY: the v8 card UI's variable names, mapped onto the v2 palette so the old components (PlayerCard, Last5, the
- * details/ and mystats/ parts) still render while the screens are rebuilt. Delete this block, and its test, with the
- * last old component.
- */
-function legacyVars(): Record<string, string> {
-  const ON_SOLID = P.bg;
-  return {
-    "--raised": P.rowHover,
-    "--line2": P.lineControl,
-    "--text2": P.textMuted,
-    "--text3": P.textGhost,
-    "--gray": P.textDim,
-    "--hover-row": P.rowHover,
-    "--team-bg": P.cardHead,
-    "--arrow-col": rgba(P.textMuted, 0.6),
-    "--self-frame": rgba(P.text, 0.55),
-    "--scroll": P.lineControl,
-    "--strip-fade": `linear-gradient(90deg, ${rgba(P.card, 0)} 0%, ${rgba(P.card, 0.25)} 55%, ${P.card} 100%)`,
-    "--on-solid": ON_SOLID,
-    "--r-w-bg": rgba(P.win, 0.15),
-    "--r-w-fg": P.win,
-    "--r-w-bd": "none",
-    "--r-l-bg": rgba(P.loss, 0.15),
-    "--r-l-fg": P.loss,
-    "--r-l-bd": "none",
-    "--r-d-bg": "transparent",
-    "--r-d-fg": P.textMuted,
-    "--r-d-bd": `1px solid ${P.lineStrong}`,
-    "--r-e-bg": "transparent",
-    "--r-e-fg": "transparent",
-    "--r-e-bd": `1px dashed ${P.lineControl}`,
-    "--rn-w-bg": P.win,
-    "--rn-w-fg": ON_SOLID,
-    "--rn-w-bd": "none",
-    "--rn-l-bg": P.loss,
-    "--rn-l-fg": ON_SOLID,
-    "--rn-l-bd": "none",
-    "--rn-d-bg": "transparent",
-    "--rn-d-fg": P.text,
-    "--rn-d-bd": `1px solid ${P.text}`,
   };
 }
 

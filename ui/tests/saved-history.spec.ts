@@ -86,7 +86,7 @@ test.describe("Saved players", () => {
     await page.keyboard.press("Escape");
     await expect(area).toHaveCount(0);
     // The drawer did not open, and the note shows clamped with its toggle.
-    await expect(page.locator(".drawer-stub")).toHaveCount(0);
+    await expect(page.getByRole("dialog")).toHaveCount(0);
     const kilo = page.locator(".row[data-row]", { hasText: "Kilo" });
     await expect(kilo.locator(".note")).toHaveText(long);
     const more = kilo.getByRole("button", { name: "Show full note" });
@@ -104,7 +104,7 @@ test.describe("Saved players", () => {
     const row = page.locator(".row[data-row]").first();
     await row.focus();
     await page.keyboard.press("Enter");
-    await expect(page.locator(".drawer-stub")).toHaveCount(1);
+    await expect(page.getByRole("dialog")).toHaveCount(1);
   });
 
   test("empty: Go to live match", async ({ page }) => {

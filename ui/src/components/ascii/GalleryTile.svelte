@@ -50,7 +50,7 @@
     ><pre style:font-size="{tileFontPx(raw)}px">{raw}</pre></button
   >
   <div class="foot">
-    <span class="title">{title}</span>
+    <span class="title" data-ellipsis>{title}</span>
     {#if mine}<span class="mine" use:tip={"Saved by you"}></span>{/if}
     {#if mine && ondelete}
       <button

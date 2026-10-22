@@ -328,10 +328,7 @@ pub fn notification_body(name: &str, note: &str) -> String {
 /// when `sound` (the setting), silent otherwise. Windows shows it only for
 /// the installed app (the plugin's documented limit). Failures are logged.
 ///
-/// Wiring (backend-store/live, through the hook on `AppState`):
-/// `move |name, note, sound| v2::window::notify_saved_player(&handle, name, note, sound)`
-/// with `handle = app.handle().clone()` in `lib.rs`'s setup.
-#[allow(dead_code)] // R189: called through the AppState hook (wired in lib.rs by its owner).
+/// Wired in `lib.rs` setup through `AppState::set_alert_hook`.
 pub fn notify_saved_player(app: &AppHandle, name: &str, note: &str, sound: bool) {
     use tauri_plugin_notification::NotificationExt;
     let mut toast = app

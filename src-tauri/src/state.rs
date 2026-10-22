@@ -1982,7 +1982,6 @@ impl AppState {
 
     /// R189: installs the saved-player alert (`lib.rs` wires it to the
     /// window's notification). Replaces an earlier one.
-    #[allow(dead_code)] // R189: lib.rs wires it to `v2::window::notify_saved_player` (backend-system).
     pub fn set_alert_hook(&self, hook: Box<AlertHook>) {
         *lock(&self.alert_hook) = Some(Arc::from(hook));
     }

@@ -151,6 +151,19 @@ pub fn run() {
             app.manage(st.clone());
             // R189: autostart plugin, tray, stored window settings, `--minimized`.
             v2::window::setup(app, &st)?;
+            // R189: "Saved player in my match" — the poll loop decides when
+            // (once per player per match, `savedAlert` on); the toast reads
+            // the `sound` setting when it fires. A weak handle, so the hook
+            // stored on the state does not keep the state alive.
+            let handle = app.handle().clone();
+            let weak = Arc::downgrade(&st);
+            st.set_alert_hook(Box::new(move |name, note| {
+                let sound = weak
+                    .upgrade()
+                    .and_then(|st| st.db_blocking(v2::settings::load))
+                    .is_some_and(|s| s.sound);
+                v2::window::notify_saved_player(&handle, name, note, sound);
+            }));
 
             // Asset tables (agent/map/tier names, acts) once at start —
             // from disk when valorant-api's version is unchanged.

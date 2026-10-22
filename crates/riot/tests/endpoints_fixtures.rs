@@ -8,8 +8,9 @@
 
 use opd1_riot::endpoints::{
     CompetitiveUpdatesResponse, CoreGameMatchResponse, MatchDetailsResponse, MatchHistoryResponse,
-    MatchRef, NameServiceEntry, PartyOfResponse, PartyResponse, PlayerLoadoutResponse,
-    PlayerMmrResponse, PregameLoadoutsResponse, PregameMatchResponse, PresencesResponse,
+    MatchRef, NameServiceEntry, OwnedItemsResponse, PartyOfResponse, PartyResponse,
+    PlayerLoadoutResponse, PlayerMmrResponse, PregameLoadoutsResponse, PregameMatchResponse,
+    PresencesResponse, SKIN_LEVEL_ITEM_TYPE,
 };
 
 fn fixture(name: &str) -> String {
@@ -592,4 +593,39 @@ fn content_episode_is_the_one_containing_the_acts_start() {
          "StartTime": T_APR, "EndTime": T_OCT}
     ]}));
     assert_eq!(none.active_acts().unwrap().current.episode_name, "");
+}
+
+// ---------------------------------------------------------------------
+// R189: owned items (store entitlements)
+// ---------------------------------------------------------------------
+
+#[test]
+fn owned_items_per_type_answer_gives_unique_lower_case_level_ids() {
+    // The per-type shape (`{ItemTypeID, Entitlements}`), with a repeated id,
+    // an upper-case id and one element without a `TypeID`.
+    let parsed: OwnedItemsResponse = serde_json::from_str(&fixture("owned_items.json")).unwrap();
+    assert_eq!(parsed.entitlements.len(), 4);
+    assert_eq!(
+        parsed.item_ids(SKIN_LEVEL_ITEM_TYPE),
+        [
+            "578e9077-4f88-260c-e54c-b988425c60e4",
+            "5db4e1c9-4e1d-3f9d-8f8d-5e4aab4a6f2e",
+            "0d6b0b3b-4f4e-0c2d-bd30-2d9d2d7d6d10",
+        ]
+    );
+}
+
+#[test]
+fn owned_items_by_types_answer_keeps_only_the_asked_type() {
+    let parsed: OwnedItemsResponse =
+        serde_json::from_str(&fixture("owned_items_by_types.json")).unwrap();
+    assert_eq!(
+        parsed.item_ids(SKIN_LEVEL_ITEM_TYPE),
+        ["578e9077-4f88-260c-e54c-b988425c60e4"]
+    );
+    // Another type's group is not a skin.
+    assert_eq!(
+        parsed.item_ids("dd3bf334-87f3-40bd-b043-682a57a8dc3a"),
+        ["4b5417ed-49de-7076-e0fb-12a5b43957ce"]
+    );
 }

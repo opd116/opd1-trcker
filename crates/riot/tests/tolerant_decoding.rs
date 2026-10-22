@@ -14,9 +14,9 @@ use serde_json::{json, Value};
 
 use opd1_riot::endpoints::{
     CompetitiveUpdatesResponse, CoreGameLoadoutsResponse, CoreGameMatchResponse,
-    MatchDetailsResponse, MatchHistoryResponse, MatchRef, PartyOfResponse, PartyResponse,
-    PlayerLoadoutResponse, PlayerMmrResponse, PregameLoadoutsResponse, PregameMatchResponse,
-    PresencesResponse,
+    MatchDetailsResponse, MatchHistoryResponse, MatchRef, OwnedItemsResponse, PartyOfResponse,
+    PartyResponse, PlayerLoadoutResponse, PlayerMmrResponse, PregameLoadoutsResponse,
+    PregameMatchResponse, PresencesResponse, SKIN_LEVEL_ITEM_TYPE,
 };
 use opd1_riot::to_core::{
     comp_update_rows_from_response, current_rank_from_mmr, seasonal_map_from_mmr,
@@ -712,5 +712,50 @@ fn match_details_keeps_what_a_stored_match_cannot_do_without() {
                 "{field} {how} must fail the answer"
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// owned items (R189)
+// ---------------------------------------------------------------------
+
+#[test]
+fn owned_items_tolerate_missing_fields_and_drop_bad_elements() {
+    const L1: &str = "aaaaaaaa-1111-0000-0000-000000000001";
+    const L2: &str = "aaaaaaaa-1111-0000-0000-000000000002";
+    let body = json!({"ItemTypeID": SKIN_LEVEL_ITEM_TYPE, "Entitlements": [
+        {"TypeID": SKIN_LEVEL_ITEM_TYPE, "ItemID": L1},
+        {"TypeID": SKIN_LEVEL_ITEM_TYPE, "ItemID": L2},
+    ]});
+    for (how, b) in absent_and_null(&body, "/ItemTypeID") {
+        let r: OwnedItemsResponse = decode(&format!("ItemTypeID {how}"), &b);
+        assert_eq!(r.item_ids(SKIN_LEVEL_ITEM_TYPE), [L1, L2], "{how}");
+    }
+    for (how, b) in absent_and_null(&body, "/Entitlements/0/TypeID") {
+        let r: OwnedItemsResponse = decode(&format!("TypeID {how}"), &b);
+        assert_eq!(r.item_ids(SKIN_LEVEL_ITEM_TYPE), [L1, L2], "{how}");
+    }
+    // An element without its item id is dropped, never invented.
+    for (how, b) in absent_and_null(&body, "/Entitlements/0/ItemID") {
+        let r: OwnedItemsResponse = decode(&format!("ItemID {how}"), &b);
+        assert_eq!(r.item_ids(SKIN_LEVEL_ITEM_TYPE), [L2], "{how}");
+    }
+    for (how, b) in absent_and_null(&body, "/Entitlements") {
+        let r: OwnedItemsResponse = decode(&format!("Entitlements {how}"), &b);
+        assert!(r.item_ids(SKIN_LEVEL_ITEM_TYPE).is_empty(), "{how}");
+    }
+    // Wrong kinds and shapes: no ids, never a failed answer; ids that are
+    // not uuids (a path, a number) are never kept.
+    for odd in [
+        json!({}),
+        json!({"Entitlements": "x"}),
+        json!({"Entitlements": [1, "x", {"ItemID": 5}, {"ItemID": "../x"}]}),
+        json!({"EntitlementsByTypes": null}),
+        json!({"EntitlementsByTypes": [{"ItemTypeID": null, "Entitlements": null}]}),
+        json!({"ItemTypeID": "other-type", "Entitlements": [{"ItemID": L1}]}),
+        json!({"Entitlements": [{"TypeID": "other-type", "ItemID": L1}]}),
+    ] {
+        let r: OwnedItemsResponse = decode(&format!("{odd}"), &odd);
+        assert!(r.item_ids(SKIN_LEVEL_ITEM_TYPE).is_empty(), "{odd}");
     }
 }

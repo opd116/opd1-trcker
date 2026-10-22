@@ -315,7 +315,13 @@ describe("the walker can fail (a check that cannot fail proves nothing)", () => 
 // ── the goldens ──────────────────────────────────────────────────────────────────
 describe("the goldens match the descriptors", () => {
   it("these are all the goldens: a new one on the Rust side needs a descriptor and a test here", () => {
-    expect(readdirSync(GOLDEN_DIR).sort()).toEqual(["live_state.json", "match_details_view.json", "my_stats.json", "player_details.json"]);
+    expect(readdirSync(GOLDEN_DIR).sort()).toEqual([
+      "collection.json",
+      "live_state.json",
+      "match_details_view.json",
+      "my_stats.json",
+      "player_details.json",
+    ]);
   });
 
   it("live_state.json is a LiveState", () => {
@@ -658,5 +664,37 @@ describe("the demo fixtures follow the golden contract", () => {
       const flag = m.perspective === "self" ? "isSelf" : "isFocus";
       expect(m.teams[0]!.players.some((p) => p[flag]), n).toBe(true);
     }
+  });
+});
+
+// ── R189 (backend-system): the Skins screen (`collection`) ──
+describe("collection.json", () => {
+  const COLLECTION = golden("collection") as {
+    items: { name: string; weaponId: string; edition: string | null; vp: number | null }[];
+    weapons: { id: string; name: string }[];
+  };
+
+  it("is a Collection", () => {
+    expect(problems(COLLECTION, "Collection", "collection")).toEqual([]);
+  });
+
+  it("a skin with no edition has no price; every item names a listed weapon; names drop the weapon word", () => {
+    expect(COLLECTION.items.some((s) => s.edition === null && s.vp === null)).toBe(true);
+    for (const s of COLLECTION.items) {
+      expect(s.edition === null, s.name).toBe(s.vp === null);
+      const weapon = COLLECTION.weapons.find((w) => w.id === s.weaponId);
+      expect(weapon, s.name).toBeDefined();
+      if (weapon!.name !== "Melee") expect(s.name.endsWith(` ${weapon!.name}`), s.name).toBe(false);
+    }
+  });
+
+  it("the demo collection is a Collection too", async () => {
+    const { demoCollection } = await import("./demo/v2/collection");
+    expect(problems(demoCollection(), "Collection", "demo")).toEqual([]);
+  });
+
+  it("the walker catches an edition outside its set", () => {
+    const bad = { ...COLLECTION, items: [{ ...COLLECTION.items[0], edition: "legendary" }] };
+    expect(problems(bad, "Collection", "c").join("\n")).toContain("edition");
   });
 });

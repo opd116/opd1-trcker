@@ -11,6 +11,8 @@ const KINDS: AssetKind[] = [
   "cardSmall",
   "cardWide",
   "mapSplash",
+  "weaponIcon",
+  "skinLevel",
 ];
 const MAC_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15";
 const WIN_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Edg/140.0";
@@ -75,6 +77,9 @@ describe("assetUrl in the DEV browser", () => {
     expect(assetUrl("chroma", "C")).toBe(`${CDN}/weaponskinchromas/C/fullrender.png`);
     expect(assetUrl("cardLarge", "P")).toBe(`${CDN}/playercards/P/largeart.png`);
     expect(assetUrl("contentTier", "T")).toBe(`${CDN}/contenttiers/T/displayicon.png`);
+    // R189: the Skins screen.
+    expect(assetUrl("weaponIcon", "W")).toBe(`${CDN}/weapons/W/displayicon.png`);
+    expect(assetUrl("skinLevel", "L")).toBe(`${CDN}/weaponskinlevels/L/displayicon.png`);
   });
 
   it("keeps the older kinds", () => {

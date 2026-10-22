@@ -10,6 +10,7 @@
 //  - `Desc` has two optional fields beyond `{ kinds, optional?, shape? }`: `enum` (a closed string set) and
 //    `fraction` (a 0..1 number). Both are additive, and the type tests pin them.
 import type {
+  Collection,
   DisplayName,
   EncounterCount,
   EncounterDetailRow,
@@ -21,6 +22,7 @@ import type {
   MatchSummary,
   MatchTeamView,
   MyStats,
+  OwnedSkin,
   PartyMark,
   Peak,
   PlayerCard,
@@ -49,6 +51,8 @@ export const enums = {
   rememberedSource: ["ownMatch", "otherMatch", "seen"],
   streakMark: ["W", "L", "D"],
   insightKind: ["bestMap", "worstMap", "timeOfDay", "weekdayWeekend", "rrEconomy", "last7Days"],
+  // R189 (backend-system): the Skins screen.
+  edition: ["select", "deluxe", "premium", "exclusive", "ultra"],
 } as const satisfies Record<string, readonly string[]>;
 
 export type Desc = {
@@ -281,6 +285,24 @@ export const shapes = {
     byDaypart: { kinds: ["array"], shape: "WinCell" },
     insights: { kinds: ["array"], shape: "Insight" },
   } satisfies ShapeOf<MyStats>,
+
+  // ── R189 (backend-system): the Skins screen (`collection`) ──
+  OwnedSkin: {
+    skinId: str,
+    levelId: str,
+    name: str,
+    weaponId: str,
+    edition: { kinds: ["string", "null"], enum: "edition" },
+    vp: numOrNull,
+  } satisfies ShapeOf<OwnedSkin>,
+
+  WeaponInfo: { id: str, name: str } satisfies ShapeOf<Collection["weapons"][number]>,
+
+  Collection: {
+    items: { kinds: ["array"], shape: "OwnedSkin" },
+    weapons: { kinds: ["array"], shape: "WeaponInfo" },
+    fetchedMs: num,
+  } satisfies ShapeOf<Collection>,
 };
 
 /** One descriptor per `DisplayName` variant, keyed by its `kind` tag. */

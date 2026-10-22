@@ -13,3 +13,21 @@ The UI bundles latin-subset woff2 files of three typefaces, at the weights it us
 | Archivo | SIL OFL 1.1 |
 
 The fonts are bundled as latin subsets and are not sold on their own.
+
+## Rust crates added with R189 (tray, launch with Windows, notifications)
+
+Tauri's `tray-icon` feature and two official Tauri plugins, approved by the user on 2026-10-22, plus the crates they pull into the Windows build:
+
+| Crate | Version | Licence |
+|---|---|---|
+| tauri-plugin-autostart | 2.7.0 | Apache-2.0 OR MIT |
+| tauri-plugin-notification | 2.7.0 | Apache-2.0 OR MIT |
+| auto-launch | 0.6.0 | MIT |
+| notify-rust | 4.18.2 | MIT OR Apache-2.0 |
+| tauri-winrt-notification | 0.8.1 | MIT OR Apache-2.0 |
+| windows-registry | 0.6.1 | MIT OR Apache-2.0 |
+| os_info | 3.15.0 | MIT |
+| dirs | 7.0.0 | MIT OR Apache-2.0 |
+| rand, rand_chacha, rand_core | 0.9.x | MIT OR Apache-2.0 |
+| ppv-lite86 | 0.2.21 | MIT OR Apache-2.0 |
+| zerocopy | 0.8.63 | BSD-2-Clause OR Apache-2.0 OR MIT |

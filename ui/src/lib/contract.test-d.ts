@@ -3,7 +3,9 @@
 import { expectTypeOf, test } from "vitest";
 import { displayNameShapes, enums, shapes, type ShapeOf } from "./contract.shape";
 import type {
+  Collection,
   DisplayName,
+  Edition,
   EncounterCount,
   EncounterDetailRow,
   Insight,
@@ -15,6 +17,7 @@ import type {
   MatchSummary,
   MatchTeamView,
   MyStats,
+  OwnedSkin,
   PartyMark,
   Peak,
   PlayerCard,
@@ -204,4 +207,19 @@ test("the guard can fail: a descriptor missing a key, or with an extra one, does
   expectTypeOf<DescKinds<AsObject>>().not.toEqualTypeOf<Kinds<LiveState>>();
   // And a TS type that drifts the other way: a result that may be null where the descriptor says it never is.
   expectTypeOf<DescKinds<typeof shapes.Last5Entry>>().not.toEqualTypeOf<Kinds<Omit<Last5Entry, "result"> & { result: Last5Entry["result"] | null }>>();
+});
+
+// ── R189 (backend-system): the Skins screen (`collection`) ──
+test("the collection descriptors agree with types.ts", () => {
+  type Weapon = Collection["weapons"][number];
+  expectTypeOf<(typeof enums.edition)[number]>().toEqualTypeOf<Edition>();
+  expectTypeOf<keyof typeof shapes.OwnedSkin>().toEqualTypeOf<keyof OwnedSkin>();
+  expectTypeOf<keyof typeof shapes.WeaponInfo>().toEqualTypeOf<keyof Weapon>();
+  expectTypeOf<keyof typeof shapes.Collection>().toEqualTypeOf<keyof Collection>();
+  expectTypeOf<DescFlags<typeof shapes.OwnedSkin>>().toEqualTypeOf<Flags<OwnedSkin>>();
+  expectTypeOf<DescFlags<typeof shapes.WeaponInfo>>().toEqualTypeOf<Flags<Weapon>>();
+  expectTypeOf<DescFlags<typeof shapes.Collection>>().toEqualTypeOf<Flags<Collection>>();
+  expectTypeOf<DescKinds<typeof shapes.OwnedSkin>>().toEqualTypeOf<Kinds<OwnedSkin>>();
+  expectTypeOf<DescKinds<typeof shapes.WeaponInfo>>().toEqualTypeOf<Kinds<Weapon>>();
+  expectTypeOf<DescKinds<typeof shapes.Collection>>().toEqualTypeOf<Kinds<Collection>>();
 });

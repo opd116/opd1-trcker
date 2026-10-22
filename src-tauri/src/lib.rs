@@ -93,6 +93,10 @@ pub fn run() {
     log::info!("OPD1 TRCKER {} starting", env!("CARGO_PKG_VERSION"));
 
     tauri::Builder::default()
+        // R189: saved-player toasts (`v2::window::notify_saved_player`).
+        .plugin(tauri_plugin_notification::init())
+        // R189: the title bar's × hides to the tray or quits.
+        .on_window_event(v2::window::on_window_event)
         .register_asynchronous_uri_scheme_protocol("img", |ctx, request, responder| {
             let Some(st) = ctx.app_handle().try_state::<Arc<AppState>>() else {
                 responder.respond(
@@ -145,6 +149,8 @@ pub fn run() {
             let st = init_state(app).inspect_err(|e| log::error!("setup failed: {e}"))?;
             log::info!("setup: state ready in {} ms", started.elapsed().as_millis());
             app.manage(st.clone());
+            // R189: autostart plugin, tray, stored window settings, `--minimized`.
+            v2::window::setup(app, &st)?;
 
             // Asset tables (agent/map/tier names, acts) once at start —
             // from disk when valorant-api's version is unchanged.

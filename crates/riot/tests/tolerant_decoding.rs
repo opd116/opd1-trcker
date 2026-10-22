@@ -325,6 +325,7 @@ fn pregame_body() -> Value {
              "PlayerIdentity": identity()},
         ]},
         "EnemyTeam": null,
+        "PhaseTimeRemainingNS": 45_000_000_000i64,
     })
 }
 
@@ -343,6 +344,7 @@ fn pregame_match_tolerates_a_missing_or_null_field_everywhere() {
         "/Teams/0/Players/0/CharacterSelectionState",
         "/Teams/0/Players/0/PlayerIdentity",
         "/Teams/0/Players/0/CompetitiveTier",
+        "/PhaseTimeRemainingNS",
     ] {
         for (how, body) in absent_and_null(&pregame_body(), field) {
             let _: PregameMatchResponse = decode(&format!("{field} {how}"), &body);
@@ -350,6 +352,26 @@ fn pregame_match_tolerates_a_missing_or_null_field_everywhere() {
     }
     let r: PregameMatchResponse = decode("EnemyTeam null", &pregame_body());
     assert!(r.enemy_team.is_none());
+}
+
+/// R189: the Agent Select timer is read when it is a number and is "unknown"
+/// (never zero, never a failed answer) otherwise.
+#[test]
+fn the_pregame_phase_timer_is_read_or_unknown() {
+    let r: PregameMatchResponse = decode("timer", &pregame_body());
+    assert_eq!(r.phase_time_remaining_ns, Some(45_000_000_000));
+    for (how, body) in absent_and_null(&pregame_body(), "/PhaseTimeRemainingNS") {
+        let r: PregameMatchResponse = decode(&format!("timer {how}"), &body);
+        assert_eq!(r.phase_time_remaining_ns, None, "{how}");
+    }
+    let mut body = pregame_body();
+    body["PhaseTimeRemainingNS"] = json!("soon");
+    let r: PregameMatchResponse = decode("timer string", &body);
+    assert_eq!(r.phase_time_remaining_ns, None);
+    assert_eq!(r.teams.len(), 1, "the rest of the answer is kept");
+    body["PhaseTimeRemainingNS"] = json!(12_500_000_000.0);
+    let r: PregameMatchResponse = decode("timer float", &body);
+    assert_eq!(r.phase_time_remaining_ns, Some(12_500_000_000));
 }
 
 #[test]

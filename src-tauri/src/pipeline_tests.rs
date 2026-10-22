@@ -60,6 +60,8 @@ struct Recorder {
     my_stats: Mutex<Vec<opd1_core::model::MyStats>>,
     /// The next `"mystats"` emission panics (once): a push task that dies.
     panic_on_my_stats: std::sync::atomic::AtomicBool,
+    /// R189: every `"status"` emission.
+    statuses: Mutex<Vec<opd1_core::wire::AppStatus>>,
 }
 
 struct Sink(Arc<Recorder>);
@@ -86,6 +88,9 @@ impl EventSink for Sink {
             panic!("the sink panicked");
         }
         self.0.my_stats.lock().unwrap().push(stats.clone());
+    }
+    fn status(&self, status: &opd1_core::wire::AppStatus) {
+        self.0.statuses.lock().unwrap().push(status.clone());
     }
 }
 
@@ -272,6 +277,11 @@ impl Harness {
     /// Every `"live"` event the sink has received, oldest first.
     pub(crate) fn live_events(&self) -> Vec<LiveState> {
         self.rec.live.lock().unwrap().clone()
+    }
+
+    /// R189: every `"status"` event the sink has received, oldest first.
+    pub(crate) fn status_events(&self) -> Vec<opd1_core::wire::AppStatus> {
+        self.rec.statuses.lock().unwrap().clone()
     }
 }
 
@@ -1285,6 +1295,11 @@ pub(crate) async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
     .await;
     assert!(waited.is_ok(), "never happened: {what}");
 }
+
+/// R189's status feed, saved-player alert and profile extras tests (their
+/// own file; same harness).
+#[cfg(test)]
+mod status;
 
 /// R163's keyed close and late-open tests (their own file; same harness).
 #[cfg(test)]

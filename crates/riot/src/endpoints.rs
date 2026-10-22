@@ -128,6 +128,18 @@ where
     Ok(tier)
 }
 
+/// R189: an optional integer (a timer) — anything but an integer is `None`,
+/// never a failed answer (R166). A float is truncated (Riot has sent both).
+fn lenient_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(value
+        .as_i64()
+        .or_else(|| value.as_f64().filter(|f| f.is_finite()).map(|f| f as i64)))
+}
+
 /// Whether the odd-`CompetitiveTier` line was logged this run.
 static TIER_TYPE_LOGGED: AtomicBool = AtomicBool::new(false);
 
@@ -294,6 +306,15 @@ pub struct PregameMatchResponse {
     pub ally_team: Option<PregameTeam>,
     #[serde(rename = "EnemyTeam", default, deserialize_with = "lenient_opt")]
     pub enemy_team: Option<PregameTeam>,
+    /// R189: what is left of the current Agent Select phase, in nanoseconds
+    /// (`PhaseTimeRemainingNS`). `None` when absent, `null` or not an
+    /// integer (R166): the timer is then unknown, never zero.
+    #[serde(
+        rename = "PhaseTimeRemainingNS",
+        default,
+        deserialize_with = "lenient_i64"
+    )]
+    pub phase_time_remaining_ns: Option<i64>,
 }
 
 /// Skins/sprays for a pregame match. Riot's payload nulls out most of this

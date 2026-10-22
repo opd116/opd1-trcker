@@ -1938,3 +1938,94 @@ fn r189_live_wire_keys() {
     );
     assert_eq!(keys(&extras["liveMates"][0]), spec(&["matchId", "puuids"]));
 }
+
+// ---------------------------------------------------------------------
+// R189 (backend-system): the Skins screen's `collection`
+// ---------------------------------------------------------------------
+
+/// `collection` as the backend sends it (`AssetCache::collection` builds
+/// it from the skin catalog): a priced skin, a Champions skin, a melee at
+/// twice its edition, and a skin with no content tier (no edition, no
+/// price). Names drop their own weapon's name; melee names stay whole.
+fn collection_value() -> Value {
+    use opd1_core::wire::{Collection, Edition, OwnedSkin, WeaponInfo};
+    const VANDAL: &str = "9c82e19d-4575-0200-1a81-3eacf00cf872";
+    const MELEE: &str = "2f59173c-4bed-b6c3-2191-dea9b58be9c7";
+    let skin =
+        |skin_id: &str, level_id: &str, name: &str, weapon_id: &str, edition, vp| OwnedSkin {
+            skin_id: skin_id.into(),
+            level_id: level_id.into(),
+            name: name.into(),
+            weapon_id: weapon_id.into(),
+            edition,
+            vp,
+        };
+    serde_json::to_value(Collection {
+        items: vec![
+            skin(
+                "30388628-42f0-606c-82c0-73ad43de997f",
+                "578e9077-4f88-260c-e54c-b988425c60e4",
+                "Reaver",
+                VANDAL,
+                Some(Edition::Premium),
+                Some(1775),
+            ),
+            skin(
+                "11111111-0000-0000-0000-000000000002",
+                "22222222-0000-0000-0000-000000000002",
+                "Champions 2025",
+                VANDAL,
+                Some(Edition::Exclusive),
+                Some(2675),
+            ),
+            skin(
+                "11111111-0000-0000-0000-000000000003",
+                "22222222-0000-0000-0000-000000000003",
+                "Battle Pass",
+                VANDAL,
+                None,
+                None,
+            ),
+            skin(
+                "11111111-0000-0000-0000-000000000004",
+                "22222222-0000-0000-0000-000000000004",
+                "Reaver Karambit",
+                MELEE,
+                Some(Edition::Premium),
+                Some(3550),
+            ),
+        ],
+        weapons: vec![
+            WeaponInfo {
+                id: VANDAL.into(),
+                name: "Vandal".into(),
+            },
+            WeaponInfo {
+                id: MELEE.into(),
+                name: "Melee".into(),
+            },
+        ],
+        fetched_ms: SEEN_MS,
+    })
+    .unwrap()
+}
+
+#[test]
+fn collection_matches_its_golden() {
+    check_golden("collection", &collection_value());
+}
+
+#[test]
+fn collection_wire_keys() {
+    let c = collection_value();
+    assert_eq!(keys(&c), spec(&["items", "weapons", "fetchedMs"]));
+    assert_eq!(
+        keys(&c["items"][0]),
+        spec(&["skinId", "levelId", "name", "weaponId", "edition", "vp"])
+    );
+    assert_eq!(keys(&c["weapons"][0]), spec(&["id", "name"]));
+    // No tier: both `null`, never absent.
+    assert_eq!(c["items"][2]["edition"], Value::Null);
+    assert_eq!(c["items"][2]["vp"], Value::Null);
+    assert_eq!(c["items"][0]["edition"], json!("premium"));
+}

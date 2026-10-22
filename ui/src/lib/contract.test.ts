@@ -340,6 +340,7 @@ describe("the goldens match the descriptors", () => {
       "app_info.json",
       "app_status.json",
       "ascii_art.json",
+      "collection.json",
       "history_page.json",
       "live_state.json",
       "match_details_view.json",
@@ -823,5 +824,37 @@ describe("R189: the status feed and the profile extras follow the golden contrac
       expect(m.puuids).not.toContain(PROFILE_EXTRAS.puuid);
       for (const p of m.puuids) expect(p).toMatch(UUID);
     }
+  });
+});
+
+// ── R189 (backend-system): the Skins screen (`collection`) ──
+describe("collection.json", () => {
+  const COLLECTION = golden("collection") as {
+    items: { name: string; weaponId: string; edition: string | null; vp: number | null }[];
+    weapons: { id: string; name: string }[];
+  };
+
+  it("is a Collection", () => {
+    expect(problems(COLLECTION, "Collection", "collection")).toEqual([]);
+  });
+
+  it("a skin with no edition has no price; every item names a listed weapon; names drop the weapon word", () => {
+    expect(COLLECTION.items.some((s) => s.edition === null && s.vp === null)).toBe(true);
+    for (const s of COLLECTION.items) {
+      expect(s.edition === null, s.name).toBe(s.vp === null);
+      const weapon = COLLECTION.weapons.find((w) => w.id === s.weaponId);
+      expect(weapon, s.name).toBeDefined();
+      if (weapon!.name !== "Melee") expect(s.name.endsWith(` ${weapon!.name}`), s.name).toBe(false);
+    }
+  });
+
+  it("the demo collection is a Collection too", async () => {
+    const { demoCollection } = await import("./demo/v2/collection");
+    expect(problems(demoCollection(), "Collection", "demo")).toEqual([]);
+  });
+
+  it("the walker catches an edition outside its set", () => {
+    const bad = { ...COLLECTION, items: [{ ...COLLECTION.items[0], edition: "legendary" }] };
+    expect(problems(bad, "Collection", "c").join("\n")).toContain("edition");
   });
 });

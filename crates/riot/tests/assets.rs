@@ -1475,3 +1475,217 @@ async fn a_failed_table_fetch_with_no_disk_tables_is_still_an_error() {
     assert!(cache.refresh_tables().await.is_err());
     assert!(!cache.tables_stale(), "no tables at all is not 'stale'");
 }
+
+// ---------------------------------------------------------------------
+// R189: the skin catalog, the collection and the Skins screen's images
+// ---------------------------------------------------------------------
+
+const VANDAL: &str = "9c82e19d-4575-0200-1a81-3eacf00cf872";
+/// Reaver Vandal's first level (the live API's).
+const REAVER_LEVEL: &str = "578e9077-4f88-260c-e54c-b988425c60e4";
+const NO_ICON_LEVEL: &str = "eeee5555-0000-0000-0000-000000000001";
+const NO_ICON_SKIN: &str = "eeee5555-0000-0000-0000-000000000002";
+
+/// `/v1/weapons` with one weapon, its default skin, the Reaver (Premium)
+/// and a tierless skin without a level icon. `times`: how often it may be
+/// asked.
+async fn mount_weapons(server: &MockServer, times: Option<u64>) {
+    let body = json!({"status": 200, "data": [{
+        "uuid": VANDAL, "displayName": "Vandal", "category": "EEquippableCategory::Rifle",
+        "defaultSkinUuid": "27f21d97-4c4b-bd1c-1f08-31830ab0be84",
+        "displayIcon": format!("{}/img/vandal.png", server.uri()),
+        "skins": [
+            {"uuid": "27f21d97-4c4b-bd1c-1f08-31830ab0be84", "displayName": "Standard Vandal",
+             "contentTierUuid": null,
+             "levels": [{"uuid": "bbbb0000-0000-0000-0000-000000000001", "displayIcon": null}]},
+            {"uuid": SKIN_UUID, "displayName": "Reaver Vandal", "contentTierUuid": CONTENT_TIER_UUID,
+             "chromas": [{"uuid": RED_CHROMA, "displayName": "Reaver Vandal (Variant 1 Red)"}],
+             "levels": [{"uuid": REAVER_LEVEL,
+                         "displayIcon": format!("{}/weaponskinlevels/{REAVER_LEVEL}/displayicon.png", server.uri())}]},
+            {"uuid": NO_ICON_SKIN, "displayName": "Bare Vandal", "contentTierUuid": null,
+             "levels": [{"uuid": NO_ICON_LEVEL, "displayIcon": null}]}
+        ]
+    }]});
+    let mut mock = Mock::given(method("GET"))
+        .and(path("/v1/weapons"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body));
+    if let Some(n) = times {
+        mock = mock.up_to_n_times(n);
+    }
+    mock.mount(server).await;
+}
+
+async fn weapons_requests(server: &MockServer) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/v1/weapons")
+        .count()
+}
+
+#[tokio::test]
+async fn the_skin_catalog_needs_the_tables_version_first() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_weapons(&server, None).await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    assert!(matches!(
+        cache.collection(&[REAVER_LEVEL.to_string()], 1).await,
+        Err(AssetError::TablesNotLoaded)
+    ));
+    assert_eq!(weapons_requests(&server).await, 0);
+}
+
+#[tokio::test]
+async fn the_collection_maps_owned_levels_and_the_catalog_is_fetched_once_per_version() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    mount_weapons(&server, None).await;
+
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    cache.refresh_tables().await.unwrap();
+    let owned = [
+        REAVER_LEVEL.to_string(),
+        NO_ICON_LEVEL.to_string(),
+        "bbbb0000-0000-0000-0000-000000000001".to_string(), // the default skin
+        "ffffffff-0000-0000-0000-000000000000".to_string(), // unknown
+    ];
+    let got = cache.collection(&owned, 42).await.unwrap();
+    assert_eq!(got.fetched_ms, 42);
+    assert_eq!(got.weapons.len(), 1);
+    assert_eq!(
+        (got.weapons[0].id.as_str(), got.weapons[0].name.as_str()),
+        (VANDAL, "Vandal")
+    );
+    let items: Vec<_> = got
+        .items
+        .iter()
+        .map(|s| {
+            (
+                s.skin_id.as_str(),
+                s.level_id.as_str(),
+                s.name.as_str(),
+                s.edition,
+                s.vp,
+            )
+        })
+        .collect();
+    assert_eq!(
+        items,
+        [
+            (NO_ICON_SKIN, NO_ICON_LEVEL, "Bare", None, None),
+            (
+                SKIN_UUID,
+                REAVER_LEVEL,
+                "Reaver",
+                Some(opd1_core::wire::Edition::Premium),
+                Some(1775)
+            ),
+        ]
+    );
+
+    // A compact derived file is cached, not the raw answer.
+    let file = dir.path().join("skincatalog.json");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(!text.contains("chromas") && !text.contains("Standard Vandal"));
+
+    // Same version: neither the network nor (from memory) the disk again,
+    // and a fresh cache over the same dir reads the file.
+    cache.collection(&owned, 43).await.unwrap();
+    let again = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    again.refresh_tables().await.unwrap();
+    assert_eq!(again.collection(&owned, 44).await.unwrap().items.len(), 2);
+    assert_eq!(weapons_requests(&server).await, 1);
+}
+
+#[tokio::test]
+async fn a_new_version_rebuilds_the_catalog_and_a_failed_rebuild_keeps_the_old_one() {
+    let dir = tempdir();
+    let first = MockServer::start().await;
+    mount_all_tables(&first, "v1").await;
+    mount_weapons(&first, None).await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), first.uri());
+    cache.refresh_tables().await.unwrap();
+    cache.skin_catalog().await.unwrap();
+
+    // v2's tables answer, its /v1/weapons does not (no mock: 404).
+    let second = MockServer::start().await;
+    mount_all_tables(&second, "v2").await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), second.uri());
+    cache.refresh_tables().await.unwrap();
+    let got = cache
+        .collection(&[REAVER_LEVEL.to_string()], 1)
+        .await
+        .unwrap();
+    assert_eq!(got.items.len(), 1, "the v1 catalog stands in");
+
+    // Once /v1/weapons answers, the next call rebuilds for v2.
+    mount_weapons(&second, None).await;
+    cache.skin_catalog().await.unwrap();
+    assert_eq!(weapons_requests(&second).await, 2);
+    cache.skin_catalog().await.unwrap();
+    assert_eq!(weapons_requests(&second).await, 2);
+}
+
+#[tokio::test]
+async fn skin_level_and_weapon_icons_are_served_downscaled_and_unknown_ones_are_not_found() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    mount_weapons(&server, Some(1)).await;
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/weaponskinlevels/{REAVER_LEVEL}/displayicon.png"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(512, 128)))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/img/vandal.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(480, 120)))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    cache.refresh_tables().await.unwrap();
+
+    let skin = cache
+        .ensure_image(AssetKind::SkinLevel, REAVER_LEVEL)
+        .await
+        .unwrap();
+    assert_eq!(png_dimensions(&std::fs::read(&skin).unwrap()), (256, 64));
+    let weapon = cache
+        .ensure_image(AssetKind::WeaponIcon, VANDAL)
+        .await
+        .unwrap();
+    assert_eq!(png_dimensions(&std::fs::read(&weapon).unwrap()), (160, 40));
+    // Cached: the second ask touches nothing remote (`expect(1)` above).
+    cache
+        .ensure_image(AssetKind::SkinLevel, REAVER_LEVEL)
+        .await
+        .unwrap();
+
+    for (kind, id) in [
+        (AssetKind::SkinLevel, NO_ICON_LEVEL), // no displayIcon
+        (AssetKind::SkinLevel, "ffffffff-0000-0000-0000-000000000000"), // unknown level
+        (AssetKind::SkinLevel, SKIN_UUID),     // a skin, not a level
+        (
+            AssetKind::WeaponIcon,
+            "ffffffff-0000-0000-0000-000000000000",
+        ),
+        (AssetKind::SkinLevel, "../../etc/passwd"),
+    ] {
+        assert!(
+            matches!(
+                cache.ensure_image(kind, id).await,
+                Err(AssetError::NotFound)
+            ),
+            "{kind:?} {id}"
+        );
+    }
+}

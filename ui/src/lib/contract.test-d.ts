@@ -14,7 +14,9 @@ import type { AppStatus, ConnState, ProfileExtras } from "./types";
 import type {
   AppInfo,
   AsciiArt,
+  Collection,
   DisplayName,
+  Edition,
   EncounterCount,
   EncounterDetailRow,
   HistoryPage,
@@ -28,6 +30,7 @@ import type {
   MatchSummary,
   MatchTeamView,
   MyStats,
+  OwnedSkin,
   PartyMark,
   Peak,
   PlayerCard,
@@ -270,4 +273,19 @@ test("R189: the status and profile-extras descriptors agree with types.ts", () =
   expectTypeOf<DescKinds<typeof liveShapes.LiveMates>>().toEqualTypeOf<Kinds<LiveMatesRow>>();
 
   expectTypeOf<(typeof CONN_STATES)[number]>().toEqualTypeOf<ConnState>();
+});
+
+// ── R189 (backend-system): the Skins screen (`collection`) ──
+test("the collection descriptors agree with types.ts", () => {
+  type Weapon = Collection["weapons"][number];
+  expectTypeOf<(typeof enums.edition)[number]>().toEqualTypeOf<Edition>();
+  expectTypeOf<keyof typeof shapes.OwnedSkin>().toEqualTypeOf<keyof OwnedSkin>();
+  expectTypeOf<keyof typeof shapes.WeaponInfo>().toEqualTypeOf<keyof Weapon>();
+  expectTypeOf<keyof typeof shapes.Collection>().toEqualTypeOf<keyof Collection>();
+  expectTypeOf<DescFlags<typeof shapes.OwnedSkin>>().toEqualTypeOf<Flags<OwnedSkin>>();
+  expectTypeOf<DescFlags<typeof shapes.WeaponInfo>>().toEqualTypeOf<Flags<Weapon>>();
+  expectTypeOf<DescFlags<typeof shapes.Collection>>().toEqualTypeOf<Flags<Collection>>();
+  expectTypeOf<DescKinds<typeof shapes.OwnedSkin>>().toEqualTypeOf<Kinds<OwnedSkin>>();
+  expectTypeOf<DescKinds<typeof shapes.WeaponInfo>>().toEqualTypeOf<Kinds<Weapon>>();
+  expectTypeOf<DescKinds<typeof shapes.Collection>>().toEqualTypeOf<Kinds<Collection>>();
 });

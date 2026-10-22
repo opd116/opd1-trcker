@@ -52,3 +52,15 @@
     Pop $0
   ${EndIf}
 !macroend
+
+!macro NSIS_HOOK_POSTUNINSTALL
+  ; --- Launch with Windows (R189) ---
+  ; The app's "Launch with Windows" setting writes a Run value named after
+  ; the product (tauri-plugin-autostart's app name, set to "OPD1 TRCKER"
+  ; in src-tauri/src/v2/window.rs) plus Task Manager's StartupApproved
+  ; entry. Remove both so an uninstalled app never starts a missing exe.
+  ; An update that runs the old uninstaller loses them too; the new app
+  ; writes them again at its first start while the setting is on.
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "OPD1 TRCKER"
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "OPD1 TRCKER"
+!macroend

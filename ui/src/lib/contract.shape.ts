@@ -12,6 +12,7 @@
 import type {
   AppInfo,
   AsciiArt,
+  Collection,
   DisplayName,
   EncounterCount,
   EncounterDetailRow,
@@ -25,6 +26,7 @@ import type {
   MatchSummary,
   MatchTeamView,
   MyStats,
+  OwnedSkin,
   PartyMark,
   Peak,
   PlayerCard,
@@ -58,6 +60,8 @@ export const enums = {
   streakMark: ["W", "L", "D"],
   insightKind: ["bestMap", "worstMap", "timeOfDay", "weekdayWeekend", "rrEconomy", "last7Days"],
   smurfLevel: ["off", "cautious", "eager"],
+  // R189 (backend-system): the Skins screen.
+  edition: ["select", "deluxe", "premium", "exclusive", "ultra"],
 } as const satisfies Record<string, readonly string[]>;
 
 export type Desc = {
@@ -366,6 +370,24 @@ export const shapes = {
     dbMatches: num,
     dbBytes: num,
   } satisfies ShapeOf<AppInfo>,
+
+  // ── R189 (backend-system): the Skins screen (`collection`) ──
+  OwnedSkin: {
+    skinId: str,
+    levelId: str,
+    name: str,
+    weaponId: str,
+    edition: { kinds: ["string", "null"], enum: "edition" },
+    vp: numOrNull,
+  } satisfies ShapeOf<OwnedSkin>,
+
+  WeaponInfo: { id: str, name: str } satisfies ShapeOf<Collection["weapons"][number]>,
+
+  Collection: {
+    items: { kinds: ["array"], shape: "OwnedSkin" },
+    weapons: { kinds: ["array"], shape: "WeaponInfo" },
+    fetchedMs: num,
+  } satisfies ShapeOf<Collection>,
 };
 
 /** One descriptor per `DisplayName` variant, keyed by its `kind` tag. */

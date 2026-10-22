@@ -373,6 +373,99 @@ pub struct PlayerLoadoutResponse {
 }
 
 // ---------------------------------------------------------------------
+// Owned items (store entitlements, R189)
+// ---------------------------------------------------------------------
+
+/// The store's item type id for weapon skin *levels* (techchrism's
+/// valapidocs, "Owned Items": `e7c63390-…` = Skins). Owning a skin means
+/// owning its first level; upgrades add the later levels.
+pub const SKIN_LEVEL_ITEM_TYPE: &str = "e7c63390-eda7-46e0-bb7a-a6abdacd2433";
+
+/// The most item ids [`OwnedItemsResponse::item_ids`] keeps: far above any
+/// real account (there are ~1400 skins in the game), so a runaway answer
+/// cannot grow the stored copy without bound.
+const MAX_OWNED_ITEMS: usize = 10_000;
+
+/// One owned item.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Entitlement {
+    /// The item's type id (the type asked for); `""` when absent.
+    #[serde(rename = "TypeID", default, deserialize_with = "null_to_default")]
+    pub type_id: String,
+    /// The item itself (for skins: the skin level uuid). Required: an
+    /// element without one is dropped (R166).
+    #[serde(rename = "ItemID")]
+    pub item_id: String,
+}
+
+/// One type's group in the all-types answer.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EntitlementGroup {
+    #[serde(rename = "ItemTypeID", default, deserialize_with = "null_to_default")]
+    pub item_type_id: String,
+    #[serde(rename = "Entitlements", default, deserialize_with = "lenient_list")]
+    pub entitlements: Vec<Entitlement>,
+}
+
+/// `pd …/store/v1/entitlements/{puuid}/{ItemTypeID}`. The community docs
+/// show two shapes: the per-type answer `{ItemTypeID, Entitlements: […]}`
+/// (HeyM1ke's ValorantClientAPI capture) and the all-types one
+/// `{EntitlementsByTypes: [{ItemTypeID, Entitlements}]}` (techchrism's
+/// zod schema). Both decode; [`Self::item_ids`] reads either (R166:
+/// lenient lists, `null` is empty).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct OwnedItemsResponse {
+    #[serde(rename = "ItemTypeID", default, deserialize_with = "null_to_default")]
+    pub item_type_id: String,
+    #[serde(rename = "Entitlements", default, deserialize_with = "lenient_list")]
+    pub entitlements: Vec<Entitlement>,
+    #[serde(
+        rename = "EntitlementsByTypes",
+        default,
+        deserialize_with = "lenient_list"
+    )]
+    pub by_types: Vec<EntitlementGroup>,
+}
+
+impl OwnedItemsResponse {
+    /// The owned item ids of `item_type`, from either shape: lower-case,
+    /// uuid-shaped only, each once, in answer order, at most
+    /// [`MAX_OWNED_ITEMS`]. A group or element that names another type is
+    /// skipped; one that names none is taken as the asked type (the per-type
+    /// answer omits it).
+    pub fn item_ids(&self, item_type: &str) -> Vec<String> {
+        let same = |t: &str| t.is_empty() || t.eq_ignore_ascii_case(item_type);
+        let top = same(&self.item_type_id).then_some(&self.entitlements);
+        let groups = self
+            .by_types
+            .iter()
+            .filter(|g| same(&g.item_type_id))
+            .map(|g| &g.entitlements);
+        let mut seen = std::collections::HashSet::new();
+        top.into_iter()
+            .chain(groups)
+            .flatten()
+            .filter(|e| same(&e.type_id))
+            .map(|e| e.item_id.trim().to_ascii_lowercase())
+            .filter(|id| is_uuid(id) && seen.insert(id.clone()))
+            .take(MAX_OWNED_ITEMS)
+            .collect()
+    }
+}
+
+/// `8-4-4-4-12` hex digits.
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.char_indices().all(|(i, c)| {
+            if matches!(i, 8 | 13 | 18 | 23) {
+                c == '-'
+            } else {
+                c.is_ascii_hexdigit()
+            }
+        })
+}
+
+// ---------------------------------------------------------------------
 // Core game (In Game)
 // ---------------------------------------------------------------------
 
@@ -887,6 +980,17 @@ impl RiotSession {
         let puuid = self.self_puuid();
         self.pd(&format!(
             "/personalization/v3/players/{puuid}/playerloadout"
+        ))
+        .await
+    }
+
+    /// R189: the user's owned weapon skin levels — a read-only pd `GET`
+    /// (`other` throttle family), always for the session's own puuid (the
+    /// method takes none, like [`Self::player_loadout`]).
+    pub async fn owned_skin_levels(&self) -> Result<OwnedItemsResponse, RiotError> {
+        let puuid = self.self_puuid();
+        self.pd(&format!(
+            "/store/v1/entitlements/{puuid}/{SKIN_LEVEL_ITEM_TYPE}"
         ))
         .await
     }

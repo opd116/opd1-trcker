@@ -1695,3 +1695,42 @@ async fn fan_out(session: RiotSession, n: usize) -> Vec<Result<Value, RiotError>
     }
     out
 }
+
+#[tokio::test]
+async fn owned_skin_levels_asks_the_skins_type_for_the_sessions_own_puuid() {
+    // R189: the store's entitlements, skin levels only, the user's own.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+    let session = connect_against(tmp.path(), &server).await;
+
+    let own = format!(
+        "/store/v1/entitlements/{SELF_PUUID}/{}",
+        opd1_riot::endpoints::SKIN_LEVEL_ITEM_TYPE
+    );
+    Mock::given(method("GET"))
+        .and(path(own.clone()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ItemTypeID": opd1_riot::endpoints::SKIN_LEVEL_ITEM_TYPE,
+            "Entitlements": [{"ItemID": "578e9077-4f88-260c-e54c-b988425c60e4"}]
+        })))
+        .mount(&server)
+        .await;
+
+    let owned = session.owned_skin_levels().await.expect("own skins");
+    assert_eq!(
+        owned.item_ids(opd1_riot::endpoints::SKIN_LEVEL_ITEM_TYPE),
+        ["578e9077-4f88-260c-e54c-b988425c60e4"]
+    );
+    let asked: Vec<String> = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|r| r.url.path().to_string())
+        .filter(|p| p.starts_with("/store/"))
+        .collect();
+    assert_eq!(asked, [own]);
+}

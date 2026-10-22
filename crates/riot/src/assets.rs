@@ -18,6 +18,19 @@
 //!   its name, content tier and chroma names (~300 bytes) and kept on disk
 //!   and in memory forever after. The five content tiers *are* a bulk table
 //!   (`/v1/contenttiers`, a few hundred bytes).
+//! - **Exception, R189 (user 2026-10-22: the Skins screen shows the user's
+//!   full owned collection):** `/v1/weapons` *is* fetched once per
+//!   valorant-api version, by [`AssetCache::skin_catalog`] only — the first
+//!   time the Skins screen (or one of its images) is opened, never at
+//!   startup. Mapping owned skin levels to skins, weapons and editions
+//!   needs every skin, and one bulk call is far lighter than ~100 per-skin
+//!   calls. The ~3.6MB answer is decoded into typed rows that skip every
+//!   unread field (chromas, videos, asset paths) on the blocking pool, and
+//!   only a compact derived file is kept (`skincatalog.json`, ~200KB:
+//!   per weapon its uuid/name/icon/melee flag, per skin its uuid, name,
+//!   first level, content tier and weapon). Default ("Standard", the
+//!   weapon's `defaultSkinUuid`) and "Random Favorite Skin" entries are
+//!   dropped while building it. It stays in memory only after first use.
 //! - `playercards` (1016 entries) are likewise never bulk-fetched — only
 //!   `/v1/playercards/{uuid}` for cards actually seen in a roster. A
 //!   playercard json cached before `largeArt` was read has no
@@ -85,6 +98,7 @@ use serde_json::Value;
 
 use opd1_core::model::WeaponSkin;
 use opd1_core::stats::Act;
+use opd1_core::wire::{Collection, Edition, OwnedSkin, WeaponInfo};
 
 use crate::locks::{locked, read_lock, write_lock};
 use crate::to_core::{self, SeasonEntry};
@@ -103,6 +117,9 @@ const JSON_TIMEOUT: Duration = Duration::from_secs(8);
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
 
 const DEFAULT_BASE: &str = "https://valorant-api.com";
+/// Where valorant-api serves its images (R189: the skin level icons'
+/// URL is built from it, see [`CatalogSkin::icon`]).
+const DEFAULT_MEDIA_BASE: &str = "https://media.valorant-api.com";
 
 /// The highest tier [`AssetKind::Tier`] will accept as *shaped* like a
 /// real tier (fix-round item 4: this is a structural check, not an
@@ -208,6 +225,14 @@ pub enum AssetKind {
     /// Exclusive / Ultra badge), downscaled to 32px. `id` = content-tier
     /// uuid (a skin's `contentTierUuid`).
     ContentTier,
+    /// `/v1/weapons`' `displayIcon` (the weapon's silhouette), downscaled
+    /// to 160px wide. `id` = weapon uuid, from the skin catalog (R189).
+    WeaponIcon,
+    /// A skin level's `displayIcon` (the Skins screen's artwork),
+    /// downscaled to 256px wide. `id` = skin level uuid (an `OwnedSkin`'s
+    /// `levelId`). A level the skin catalog doesn't know, or one without an
+    /// icon, is `NotFound` (R189).
+    SkinLevel,
 }
 
 impl AssetKind {
@@ -222,6 +247,8 @@ impl AssetKind {
             AssetKind::MapSplash => "mapSplash",
             AssetKind::Chroma => "chroma",
             AssetKind::ContentTier => "contentTier",
+            AssetKind::WeaponIcon => "weaponIcon",
+            AssetKind::SkinLevel => "skinLevel",
         }
     }
 
@@ -236,6 +263,10 @@ impl AssetKind {
             AssetKind::MapSplash => Some(1000), // 1920px source, shown <=1000px wide
             AssetKind::Chroma => Some(256),     // wide render, shown <=108x38 (R79)
             AssetKind::ContentTier => Some(32), // 256px source, shown 13x13
+            // R189: weapon silhouettes (~500px wide sources) shown as small
+            // filter/tile icons; skin artwork (~512px wide) shown on tiles.
+            AssetKind::WeaponIcon => Some(160),
+            AssetKind::SkinLevel => Some(256),
             // 456x100 source (two maps: 3840x2160), shown cover-cropped at
             // 116x32 (top bar), 64x36 / 56x32 (rows) and 150x56 (match header).
             // The 150x56 box binds on height: 56 css px x 1.5 DPR = 84 device
@@ -262,7 +293,9 @@ fn validate_id(kind: AssetKind, id: &str) -> Result<(), AssetError> {
         | AssetKind::MapList
         | AssetKind::MapSplash
         | AssetKind::Chroma
-        | AssetKind::ContentTier => is_valid_uuid(id),
+        | AssetKind::ContentTier
+        | AssetKind::WeaponIcon
+        | AssetKind::SkinLevel => is_valid_uuid(id),
     };
     if ok {
         Ok(())
@@ -346,6 +379,13 @@ struct TierEntry {
 struct ContentTierEntry {
     uuid: String,
     display_icon: String,
+    /// `Select` / `Deluxe` / … (R189: the edition). Absent in a file cached
+    /// before it was read: [`edition_for`] then falls back to the known uuids.
+    #[serde(default)]
+    dev_name: Option<String>,
+    /// 0 (Select) … 4 (Ultra).
+    #[serde(default)]
+    rank: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -494,6 +534,363 @@ fn chroma_variant_name(display: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------
+// Skin catalog (R189: the Skins screen)
+// ---------------------------------------------------------------------
+
+/// The standard store prices per edition (VP), as the design's Skins screen
+/// shows them: Select 875, Deluxe 1275, Premium 1775, Exclusive 2175, Ultra
+/// 2475; a melee costs twice its edition. Riot's entitlements answer has no
+/// price, so these are the edition's usual prices, not what the user paid.
+pub fn edition_vp(edition: Edition) -> u32 {
+    match edition {
+        Edition::Select => 875,
+        Edition::Deluxe => 1275,
+        Edition::Premium => 1775,
+        Edition::Exclusive => 2175,
+        Edition::Ultra => 2475,
+    }
+}
+
+/// An estimate: the Champions bundles' skins (`Champions 2021 …` onward)
+/// have sold at 2675 VP; the design applies it to their melee too.
+pub const CHAMPIONS_VP: u32 = 2675;
+
+/// The standard price of a skin named `name` (valorant-api's display name)
+/// of `edition`, on a melee or not: [`CHAMPIONS_VP`] for a Champions skin,
+/// else [`edition_vp`] (doubled on a melee).
+pub fn standard_vp(edition: Edition, melee: bool, name: &str) -> u32 {
+    if is_champions(name) {
+        CHAMPIONS_VP
+    } else if melee {
+        edition_vp(edition) * 2
+    } else {
+        edition_vp(edition)
+    }
+}
+
+fn is_champions(name: &str) -> bool {
+    name.trim()
+        .get(..10)
+        .is_some_and(|p| p.eq_ignore_ascii_case("champions "))
+}
+
+/// valorant-api's five content tiers, for a cached `contenttiers.json`
+/// that predates `devName` (checked against `/v1/contenttiers`,
+/// 2026-10-22).
+const KNOWN_TIERS: [(&str, Edition); 5] = [
+    ("12683d76-48d7-84a3-4e09-6985794f0445", Edition::Select),
+    ("0cebb8be-46d7-c12a-d306-e9907bfc5a25", Edition::Deluxe),
+    ("60bca009-4182-7998-dee7-b8a2558dc369", Edition::Premium),
+    ("e046854e-406c-37f4-6607-19a9ba8426fc", Edition::Exclusive),
+    ("411e4a55-4e59-7757-41f0-86a53f101bb5", Edition::Ultra),
+];
+
+/// The edition of content tier `uuid`: by its `devName`, else its `rank`
+/// (0 Select … 4 Ultra), else the known uuid table; `None` when unknown.
+fn edition_for(tiers: &[ContentTierEntry], uuid: &str) -> Option<Edition> {
+    let by_name = |name: &str| match name.trim().to_ascii_lowercase().as_str() {
+        "select" => Some(Edition::Select),
+        "deluxe" => Some(Edition::Deluxe),
+        "premium" => Some(Edition::Premium),
+        "exclusive" => Some(Edition::Exclusive),
+        "ultra" => Some(Edition::Ultra),
+        _ => None,
+    };
+    let by_rank = |rank: u64| match rank {
+        0 => Some(Edition::Select),
+        1 => Some(Edition::Deluxe),
+        2 => Some(Edition::Premium),
+        3 => Some(Edition::Exclusive),
+        4 => Some(Edition::Ultra),
+        _ => None,
+    };
+    tiers
+        .iter()
+        .find(|t| t.uuid.eq_ignore_ascii_case(uuid))
+        .and_then(|t| {
+            t.dev_name
+                .as_deref()
+                .and_then(by_name)
+                .or_else(|| t.rank.and_then(by_rank))
+        })
+        .or_else(|| {
+            KNOWN_TIERS
+                .iter()
+                .find(|(id, _)| id.eq_ignore_ascii_case(uuid))
+                .map(|&(_, e)| e)
+        })
+}
+
+/// A skin's display name minus its weapon's name (`"Reaver Vandal"` on the
+/// Vandal -> `"Reaver"`), as the design names skins (the weapon is shown
+/// beside it). Kept whole when it doesn't end in the weapon's name (every
+/// melee: `"Reaver Karambit"`) or nothing would be left.
+fn strip_weapon_name(display: &str, weapon: &str) -> String {
+    let name = display.trim();
+    let weapon = weapon.trim();
+    if !weapon.is_empty() {
+        if let Some(split) = name.len().checked_sub(weapon.len() + 1) {
+            if name.is_char_boundary(split)
+                && name[split..].starts_with(' ')
+                && name[split + 1..].eq_ignore_ascii_case(weapon)
+            {
+                let rest = name[..split].trim_end();
+                if !rest.is_empty() {
+                    return rest.to_string();
+                }
+            }
+        }
+    }
+    name.to_string()
+}
+
+/// One weapon of the catalog.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CatalogWeapon {
+    /// Lower-case uuid.
+    uuid: String,
+    name: String,
+    melee: bool,
+    /// Its `displayIcon` (the [`AssetKind::WeaponIcon`] source).
+    icon: Option<String>,
+}
+
+/// One sellable skin of the catalog (defaults already dropped).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CatalogSkin {
+    /// First level uuid, lower-case: what Riot's entitlements list, and the
+    /// key the skins are sorted by.
+    level: String,
+    /// Skin uuid, lower-case.
+    uuid: String,
+    /// The full display name (`"Reaver Vandal"`).
+    name: String,
+    /// Index into [`SkinCatalog::tiers`]; `None` without a content tier.
+    tier: Option<u8>,
+    /// Index into [`SkinCatalog::weapons`].
+    weapon: u8,
+    /// Whether the first level has a `displayIcon`. valorant-api serves it
+    /// at `{media}/weaponskinlevels/{level}/displayicon.png` (all 1432 skins
+    /// on 2026-10-22), so the URL itself isn't kept.
+    icon: bool,
+}
+
+/// valorant-api's weapons and skins reduced to what the Skins screen uses,
+/// for one valorant-api version (`skincatalog.json`). Built by
+/// [`AssetCache::skin_catalog`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkinCatalog {
+    version: String,
+    weapons: Vec<CatalogWeapon>,
+    /// Distinct content tier uuids, lower-case.
+    tiers: Vec<String>,
+    /// Sorted by `level`.
+    skins: Vec<CatalogSkin>,
+}
+
+/// `/v1/weapons`, typed so that only the read fields are kept while
+/// decoding (every other key is skipped, never built into a `Value`).
+/// Everything is optional: a malformed entry is dropped, not the catalog.
+#[derive(Deserialize)]
+struct RawWeapons {
+    #[serde(default, deserialize_with = "null_vec")]
+    data: Vec<RawWeapon>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawWeapon {
+    uuid: Option<String>,
+    display_name: Option<String>,
+    category: Option<String>,
+    default_skin_uuid: Option<String>,
+    display_icon: Option<String>,
+    #[serde(default, deserialize_with = "null_vec")]
+    skins: Vec<RawSkin>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawSkin {
+    uuid: Option<String>,
+    display_name: Option<String>,
+    content_tier_uuid: Option<String>,
+    #[serde(default, deserialize_with = "null_vec")]
+    levels: Vec<RawLevel>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawLevel {
+    uuid: Option<String>,
+    display_icon: Option<String>,
+}
+
+/// A list that is empty when `null`.
+fn null_vec<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Ok(Option::<Vec<T>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// A default skin: the weapon's `defaultSkinUuid`, or a tierless
+/// `Standard …` / `Random Favorite Skin` entry.
+fn is_default_skin(tier: Option<&str>, uuid: &str, default_uuid: Option<&str>, name: &str) -> bool {
+    default_uuid.is_some_and(|d| d.eq_ignore_ascii_case(uuid))
+        || (tier.is_none_or(str::is_empty)
+            && (name.starts_with("Standard ") || name.starts_with("Random Favorite")))
+}
+
+impl SkinCatalog {
+    /// Builds the catalog from a `/v1/weapons` body. A weapon or skin
+    /// without a uuid-shaped id or a name is dropped, and so is a skin with
+    /// no levels; at most 256 weapons (there are 21) and 256 content tiers
+    /// (there are 5) are kept.
+    fn from_weapons_json(version: String, bytes: &[u8]) -> Result<Self, AssetError> {
+        let raw: RawWeapons =
+            serde_json::from_slice(bytes).map_err(|e| AssetError::Decode(e.to_string()))?;
+        let mut weapons = Vec::new();
+        let mut tiers: Vec<String> = Vec::new();
+        let mut skins = Vec::new();
+        for w in raw.data {
+            let (Some(uuid), Some(name)) = (w.uuid, w.display_name) else {
+                continue;
+            };
+            let uuid = uuid.to_ascii_lowercase();
+            if !is_valid_uuid(&uuid) || name.trim().is_empty() || weapons.len() > u8::MAX as usize {
+                continue;
+            }
+            let index = weapons.len() as u8;
+            let default_uuid = w.default_skin_uuid.as_deref();
+            for skin in &w.skins {
+                let (Some(skin_uuid), Some(skin_name)) = (&skin.uuid, &skin.display_name) else {
+                    continue;
+                };
+                let skin_uuid = skin_uuid.to_ascii_lowercase();
+                let skin_name = skin_name.trim();
+                let Some(first) = skin.levels.first() else {
+                    continue;
+                };
+                let Some(level) = first.uuid.as_deref().map(str::to_ascii_lowercase) else {
+                    continue;
+                };
+                let tier_uuid = skin.content_tier_uuid.as_deref();
+                if !is_valid_uuid(&skin_uuid)
+                    || !is_valid_uuid(&level)
+                    || skin_name.is_empty()
+                    || is_default_skin(tier_uuid, &skin_uuid, default_uuid, skin_name)
+                {
+                    continue;
+                }
+                let tier = match tier_uuid
+                    .map(str::to_ascii_lowercase)
+                    .filter(|t| is_valid_uuid(t))
+                {
+                    None => None,
+                    Some(t) => match tiers.iter().position(|x| *x == t) {
+                        Some(i) => Some(i as u8),
+                        None if tiers.len() <= u8::MAX as usize => {
+                            tiers.push(t);
+                            Some((tiers.len() - 1) as u8)
+                        }
+                        None => None,
+                    },
+                };
+                skins.push(CatalogSkin {
+                    level,
+                    uuid: skin_uuid,
+                    name: skin_name.to_string(),
+                    tier,
+                    weapon: index,
+                    icon: first.display_icon.as_deref().is_some_and(|i| !i.is_empty()),
+                });
+            }
+            weapons.push(CatalogWeapon {
+                uuid,
+                name: name.trim().to_string(),
+                melee: w
+                    .category
+                    .as_deref()
+                    .is_some_and(|c| c.ends_with("::Melee")),
+                icon: w.display_icon.filter(|i| !i.is_empty()),
+            });
+        }
+        if weapons.is_empty() {
+            return Err(AssetError::Decode("no weapons in /v1/weapons".into()));
+        }
+        skins.sort_by(|a, b| a.level.cmp(&b.level));
+        skins.dedup_by(|a, b| a.level == b.level);
+        Ok(Self {
+            version,
+            weapons,
+            tiers,
+            skins,
+        })
+    }
+
+    fn skin_by_level(&self, level: &str) -> Option<&CatalogSkin> {
+        let level = level.to_ascii_lowercase();
+        self.skins
+            .binary_search_by(|s| s.level.as_str().cmp(level.as_str()))
+            .ok()
+            .map(|i| &self.skins[i])
+    }
+
+    fn weapon(&self, uuid: &str) -> Option<&CatalogWeapon> {
+        self.weapons
+            .iter()
+            .find(|w| w.uuid.eq_ignore_ascii_case(uuid))
+    }
+
+    /// Every weapon, in valorant-api's order.
+    pub fn weapons(&self) -> Vec<WeaponInfo> {
+        self.weapons
+            .iter()
+            .map(|w| WeaponInfo {
+                id: w.uuid.clone(),
+                name: w.name.clone(),
+            })
+            .collect()
+    }
+
+    /// The skins whose first level is in `owned_levels` (Riot's owned skin
+    /// levels; an upgrade level or an unknown id matches nothing), each
+    /// once, in weapon order then by name. `edition` names a content tier.
+    fn owned_with(
+        &self,
+        owned_levels: &[String],
+        edition: impl Fn(&str) -> Option<Edition>,
+    ) -> Vec<OwnedSkin> {
+        let mut found: Vec<&CatalogSkin> = owned_levels
+            .iter()
+            .filter_map(|l| self.skin_by_level(l))
+            .collect();
+        found.sort_by(|a, b| (a.weapon, &a.name, &a.uuid).cmp(&(b.weapon, &b.name, &b.uuid)));
+        found.dedup_by(|a, b| a.uuid == b.uuid);
+        found
+            .into_iter()
+            .filter_map(|s| {
+                let weapon = self.weapons.get(s.weapon as usize)?;
+                let edition = s
+                    .tier
+                    .and_then(|t| self.tiers.get(t as usize))
+                    .and_then(|t| edition(t));
+                Some(OwnedSkin {
+                    skin_id: s.uuid.clone(),
+                    level_id: s.level.clone(),
+                    name: strip_weapon_name(&s.name, &weapon.name),
+                    weapon_id: weapon.uuid.clone(),
+                    edition,
+                    vp: edition.map(|e| standard_vp(e, weapon.melee, &s.name)),
+                })
+            })
+            .collect()
+    }
+}
+
+// ---------------------------------------------------------------------
 // AssetCache
 // ---------------------------------------------------------------------
 
@@ -505,6 +902,8 @@ pub struct AssetCache {
     json_client: reqwest::Client,
     image_client: reqwest::Client,
     base: String,
+    /// [`DEFAULT_MEDIA_BASE`]; the mock server's base in tests.
+    media_base: String,
     dir: PathBuf,
     tables: RwLock<Tables>,
     image_locks: ImageLocks,
@@ -518,6 +917,9 @@ pub struct AssetCache {
     /// Set when a newer table set failed to download and the old disk copy
     /// stands in ([`AssetCache::tables_stale`]).
     stale: AtomicBool,
+    /// R189: the skin catalog once used ([`AssetCache::skin_catalog`]);
+    /// the async lock also coalesces concurrent builds into one download.
+    catalog: tokio::sync::Mutex<Option<Arc<SkinCatalog>>>,
 }
 
 impl AssetCache {
@@ -555,16 +957,23 @@ impl AssetCache {
             .gzip(true)
             .build()
             .expect("building the valorant-api image HTTP client should never fail");
+        let media_base = if base == DEFAULT_BASE {
+            DEFAULT_MEDIA_BASE.to_string()
+        } else {
+            base.clone()
+        };
         Self {
             json_client,
             image_client,
             base,
+            media_base,
             dir: cache_dir,
             tables: RwLock::new(Tables::default()),
             image_locks: Mutex::new(HashMap::new()),
             skins: RwLock::new(HashMap::new()),
             skin_locks: Mutex::new(HashMap::new()),
             stale: AtomicBool::new(false),
+            catalog: tokio::sync::Mutex::new(None),
         }
     }
 
@@ -844,6 +1253,8 @@ impl AssetCache {
                 Some(ContentTierEntry {
                     uuid: str_field(t, "uuid")?.to_ascii_lowercase(),
                     display_icon: str_field(t, "displayIcon")?,
+                    dev_name: str_field(t, "devName"),
+                    rank: t.get("rank").and_then(Value::as_u64),
                 })
             })
             .collect())
@@ -1027,6 +1438,22 @@ impl AssetCache {
             AssetKind::CardWide => Ok(self.fetch_or_load_playercard(id).await?.wide_art),
             AssetKind::CardLarge => self.large_art_url(id).await,
             AssetKind::Chroma => Ok(self.fetch_or_load_chroma(id).await?.full_render),
+            AssetKind::WeaponIcon => self
+                .skin_catalog()
+                .await?
+                .weapon(id)
+                .and_then(|w| w.icon.clone())
+                .ok_or(AssetError::NotFound),
+            AssetKind::SkinLevel => {
+                let catalog = self.skin_catalog().await?;
+                match catalog.skin_by_level(id) {
+                    Some(skin) if skin.icon => Ok(format!(
+                        "{}/weaponskinlevels/{}/displayicon.png",
+                        self.media_base, skin.level
+                    )),
+                    _ => Err(AssetError::NotFound),
+                }
+            }
             AssetKind::ContentTier => {
                 let tables = self.tables_snapshot()?;
                 tables
@@ -1215,6 +1642,95 @@ impl AssetCache {
             .clone()
     }
 
+    // -- skin catalog (R189) ---------------------------------------------
+
+    /// The skin catalog for the current valorant-api version (the one in
+    /// the tables' manifest): from memory, else `skincatalog.json`, else
+    /// built from one `/v1/weapons` download (see the module docs) and
+    /// written there. When the download fails, an older catalog (memory or
+    /// disk) stands in until the next call tries again. `TablesNotLoaded`
+    /// while no table set was ever stored (the version is unknown).
+    pub async fn skin_catalog(&self) -> Result<Arc<SkinCatalog>, AssetError> {
+        let version = blocking({
+            let path = self.dir.join("manifest.json");
+            move || Ok(read_json::<Manifest>(&path).ok().map(|m| m.version))
+        })
+        .await?
+        .ok_or(AssetError::TablesNotLoaded)?;
+
+        let mut slot = self.catalog.lock().await;
+        if let Some(cat) = slot.as_ref().filter(|c| c.version == version) {
+            return Ok(cat.clone());
+        }
+        let path = self.dir.join("skincatalog.json");
+        let on_disk: Option<SkinCatalog> = blocking({
+            let path = path.clone();
+            move || Ok(read_json(&path).ok())
+        })
+        .await?;
+        if let Some(cat) = on_disk.as_ref().filter(|c| c.version == version) {
+            let cat = Arc::new(cat.clone());
+            *slot = Some(cat.clone());
+            return Ok(cat);
+        }
+
+        // The longer-timeout client: the answer is ~3.6MB before gzip.
+        let built = async {
+            let bytes = self.download(&format!("{}/v1/weapons", self.base)).await?;
+            let version = version.clone();
+            blocking(move || SkinCatalog::from_weapons_json(version, &bytes)).await
+        }
+        .await;
+        match built {
+            Ok(cat) => {
+                blocking({
+                    let cat = cat.clone();
+                    move || write_json(&path, &cat)
+                })
+                .await?;
+                let cat = Arc::new(cat);
+                *slot = Some(cat.clone());
+                Ok(cat)
+            }
+            Err(e) => {
+                // An older catalog is better than none; the next call asks
+                // again (the version still differs).
+                let older = slot.clone().or_else(|| on_disk.map(Arc::new));
+                match older {
+                    Some(cat) => {
+                        log::warn!("skin catalog fetch failed, using an older one: {e}");
+                        *slot = Some(cat.clone());
+                        Ok(cat)
+                    }
+                    None => Err(e),
+                }
+            }
+        }
+    }
+
+    /// The edition of a content tier, from the cached `/v1/contenttiers`
+    /// (or the known uuids when it isn't loaded).
+    pub fn edition(&self, tier_uuid: &str) -> Option<Edition> {
+        edition_for(&read_lock(&self.tables).content_tiers, tier_uuid)
+    }
+
+    /// The Skins screen's collection (R189): the skins of `owned_levels`
+    /// (Riot's owned skin level ids) with their editions and standard
+    /// prices, and every weapon. `fetched_ms` is when Riot answered.
+    pub async fn collection(
+        &self,
+        owned_levels: &[String],
+        fetched_ms: i64,
+    ) -> Result<Collection, AssetError> {
+        let catalog = self.skin_catalog().await?;
+        let tiers = read_lock(&self.tables).content_tiers.clone();
+        Ok(Collection {
+            items: catalog.owned_with(owned_levels, |t| edition_for(&tiers, t)),
+            weapons: catalog.weapons(),
+            fetched_ms,
+        })
+    }
+
     /// Downloads image bytes via the longer-timeout `image_client`
     /// (fix-round item 10 / R37).
     async fn download(&self, url: &str) -> Result<Vec<u8>, AssetError> {
@@ -1398,6 +1914,8 @@ mod tests {
             AssetKind::ContentTier,
             AssetKind::MapList,
             AssetKind::MapSplash,
+            AssetKind::WeaponIcon,
+            AssetKind::SkinLevel,
         ] {
             assert!(matches!(
                 validate_id(kind, "../../../etc/passwd"),
@@ -1467,6 +1985,8 @@ mod tests {
             (AssetKind::Chroma, Some(256)),
             (AssetKind::ContentTier, Some(32)),
             (AssetKind::MapList, Some(384)),
+            (AssetKind::WeaponIcon, Some(160)),
+            (AssetKind::SkinLevel, Some(256)),
             (AssetKind::CardSmall, None),
             (AssetKind::CardWide, None),
         ];
@@ -1500,5 +2020,208 @@ mod tests {
             validate_id(AssetKind::Tier, "not-a-number"),
             Err(AssetError::NotFound)
         ));
+    }
+
+    // -- skin catalog (R189) ------------------------------------------------
+
+    const VANDAL: &str = "9c82e19d-4575-0200-1a81-3eacf00cf872";
+    const MELEE: &str = "2f59173c-4bed-b6c3-2191-dea9b58be9c7";
+    const PREMIUM: &str = "60bca009-4182-7998-dee7-b8a2558dc369";
+    const EXCLUSIVE: &str = "e046854e-406c-37f4-6607-19a9ba8426fc";
+
+    fn uuid(n: u32) -> String {
+        format!("{n:08x}-0000-0000-0000-000000000000")
+    }
+
+    fn weapons_body() -> Value {
+        serde_json::json!({"status": 200, "data": [
+            {"uuid": VANDAL, "displayName": "Vandal", "category": "EEquippableCategory::Rifle",
+             "defaultSkinUuid": uuid(1), "displayIcon": "https://x/weapons/v.png", "skins": [
+                {"uuid": uuid(1), "displayName": "Standard Vandal", "contentTierUuid": null,
+                 "levels": [{"uuid": uuid(101), "displayIcon": "i"}]},
+                {"uuid": uuid(2), "displayName": "Random Favorite Skin", "contentTierUuid": null,
+                 "levels": [{"uuid": uuid(102), "displayIcon": null}]},
+                {"uuid": uuid(3), "displayName": "Reaver Vandal", "contentTierUuid": PREMIUM,
+                 "chromas": [{"uuid": uuid(9), "displayName": "x"}],
+                 "levels": [{"uuid": uuid(103), "displayIcon": "i"}, {"uuid": uuid(203), "displayIcon": "i"}]},
+                {"uuid": uuid(4), "displayName": "Champions 2025 Vandal", "contentTierUuid": EXCLUSIVE,
+                 "levels": [{"uuid": uuid(104), "displayIcon": "i"}]},
+                {"uuid": uuid(5), "displayName": "Battle Pass Vandal", "contentTierUuid": null,
+                 "levels": [{"uuid": uuid(105), "displayIcon": null}]},
+                // Malformed: no levels, no uuid, a non-uuid level.
+                {"uuid": uuid(6), "displayName": "No Levels", "levels": null},
+                {"displayName": "No Id", "levels": [{"uuid": uuid(107)}]},
+                {"uuid": uuid(8), "displayName": "Bad Level", "levels": [{"uuid": "../x"}]}
+            ]},
+            {"uuid": MELEE, "displayName": "Melee", "category": "EEquippableCategory::Melee",
+             "defaultSkinUuid": uuid(20), "displayIcon": null, "skins": [
+                {"uuid": uuid(20), "displayName": "Melee", "contentTierUuid": null,
+                 "levels": [{"uuid": uuid(120)}]},
+                {"uuid": uuid(21), "displayName": "Reaver Karambit", "contentTierUuid": PREMIUM,
+                 "levels": [{"uuid": uuid(121), "displayIcon": "i"}]},
+                {"uuid": uuid(22), "displayName": "Champions 2021 Karambit", "contentTierUuid": EXCLUSIVE,
+                 "levels": [{"uuid": uuid(122), "displayIcon": "i"}]}
+            ]},
+            {"displayName": "No Uuid Weapon", "skins": []}
+        ]})
+    }
+
+    fn catalog() -> SkinCatalog {
+        let bytes = serde_json::to_vec(&weapons_body()).unwrap();
+        SkinCatalog::from_weapons_json("v1".into(), &bytes).unwrap()
+    }
+
+    #[test]
+    fn the_catalog_drops_default_placeholder_and_malformed_skins() {
+        let cat = catalog();
+        assert_eq!(cat.weapons.len(), 2);
+        assert!(cat.weapons[1].melee && !cat.weapons[0].melee);
+        assert_eq!(cat.weapons[1].icon, None);
+        let names: Vec<&str> = cat.skins.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names.len(), 5, "{names:?}");
+        for dropped in [
+            "Standard Vandal",
+            "Random Favorite Skin",
+            "Melee",
+            "No Levels",
+            "No Id",
+            "Bad Level",
+        ] {
+            assert!(!names.contains(&dropped), "{dropped}");
+        }
+        // Sorted by first level, two content tiers kept once each.
+        assert!(cat.skins.windows(2).all(|w| w[0].level < w[1].level));
+        assert_eq!(cat.tiers, [PREMIUM, EXCLUSIVE]);
+        // The battle-pass skin has no tier and no icon.
+        let bp = cat.skin_by_level(&uuid(105)).unwrap();
+        assert!(bp.tier.is_none() && !bp.icon);
+        // Only the first level is a key.
+        assert!(cat.skin_by_level(&uuid(203)).is_none());
+        assert!(cat.skin_by_level(&uuid(103).to_ascii_uppercase()).is_some());
+    }
+
+    #[test]
+    fn a_body_without_weapons_is_a_decode_error() {
+        for body in [r#"{"data": []}"#, r#"{"data": null}"#, r#"{}"#, "not json"] {
+            assert!(matches!(
+                SkinCatalog::from_weapons_json("v".into(), body.as_bytes()),
+                Err(AssetError::Decode(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn owned_levels_map_to_skins_with_editions_and_standard_prices() {
+        let cat = catalog();
+        let owned: Vec<String> = [103, 203, 104, 105, 121, 122, 101, 999, 103]
+            .iter()
+            .map(|&n| uuid(n))
+            .collect();
+        let items = cat.owned_with(&owned, |t| edition_for(&[], t));
+        let got: Vec<(&str, &str, Option<Edition>, Option<u32>)> = items
+            .iter()
+            .map(|s| (s.name.as_str(), s.weapon_id.as_str(), s.edition, s.vp))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                // Weapon order, then name; the weapon word is dropped.
+                ("Battle Pass", VANDAL, None, None),
+                (
+                    "Champions 2025",
+                    VANDAL,
+                    Some(Edition::Exclusive),
+                    Some(2675)
+                ),
+                ("Reaver", VANDAL, Some(Edition::Premium), Some(1775)),
+                // Melee: x2, except the Champions flat price.
+                (
+                    "Champions 2021 Karambit",
+                    MELEE,
+                    Some(Edition::Exclusive),
+                    Some(2675)
+                ),
+                ("Reaver Karambit", MELEE, Some(Edition::Premium), Some(3550)),
+            ]
+        );
+        assert_eq!(items[2].skin_id, uuid(3));
+        assert_eq!(items[2].level_id, uuid(103));
+        assert_eq!(cat.weapons().len(), 2);
+    }
+
+    #[test]
+    fn editions_come_from_dev_name_then_rank_then_the_known_uuids() {
+        let entry = |uuid: &str, dev: Option<&str>, rank: Option<u64>| ContentTierEntry {
+            uuid: uuid.into(),
+            display_icon: String::new(),
+            dev_name: dev.map(str::to_string),
+            rank,
+        };
+        let tiers = [
+            entry(
+                "aaaaaaaa-0000-0000-0000-000000000001",
+                Some("Ultra"),
+                Some(0),
+            ),
+            entry("aaaaaaaa-0000-0000-0000-000000000002", None, Some(1)),
+            entry("aaaaaaaa-0000-0000-0000-000000000003", Some("?"), Some(9)),
+        ];
+        assert_eq!(
+            edition_for(&tiers, "AAAAAAAA-0000-0000-0000-000000000001"),
+            Some(Edition::Ultra)
+        );
+        assert_eq!(
+            edition_for(&tiers, "aaaaaaaa-0000-0000-0000-000000000002"),
+            Some(Edition::Deluxe)
+        );
+        assert_eq!(
+            edition_for(&tiers, "aaaaaaaa-0000-0000-0000-000000000003"),
+            None
+        );
+        // A cache from before `devName` was read: the known uuids.
+        for (uuid, edition) in KNOWN_TIERS {
+            assert_eq!(edition_for(&[], uuid), Some(edition));
+        }
+        assert_eq!(
+            edition_for(&[], "bbbbbbbb-0000-0000-0000-000000000000"),
+            None
+        );
+    }
+
+    #[test]
+    fn standard_prices_follow_the_design() {
+        for (edition, vp) in [
+            (Edition::Select, 875),
+            (Edition::Deluxe, 1275),
+            (Edition::Premium, 1775),
+            (Edition::Exclusive, 2175),
+            (Edition::Ultra, 2475),
+        ] {
+            assert_eq!(standard_vp(edition, false, "Skin Vandal"), vp);
+            assert_eq!(standard_vp(edition, true, "Skin Knife"), vp * 2);
+            assert_eq!(standard_vp(edition, false, "Champions 2023 Vandal"), 2675);
+            assert_eq!(standard_vp(edition, true, "champions 2024 Blade"), 2675);
+        }
+        // Not the Champions series: only a name that starts with it.
+        assert_eq!(standard_vp(Edition::Premium, false, "Champions"), 1775);
+        assert_eq!(
+            standard_vp(Edition::Premium, false, "VCT Champions Vandal"),
+            1775
+        );
+    }
+
+    #[test]
+    fn skin_names_drop_their_own_weapon_name_only() {
+        for (display, weapon, want) in [
+            ("Reaver Vandal", "Vandal", "Reaver"),
+            ("RGX 11z Pro Vandal\r\n", "Vandal", "RGX 11z Pro"),
+            ("Reaver Karambit", "Melee", "Reaver Karambit"),
+            ("Oni Phantom", "Vandal", "Oni Phantom"),
+            ("Vandal", "Vandal", "Vandal"),
+            ("Ion Odin", "odin", "Ion"),
+            ("", "Vandal", ""),
+        ] {
+            assert_eq!(strip_weapon_name(display, weapon), want, "{display:?}");
+        }
     }
 }

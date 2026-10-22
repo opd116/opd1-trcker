@@ -1,0 +1,21 @@
+{
+  "ItemTypeID": "e7c63390-eda7-46e0-bb7a-a6abdacd2433",
+  "Entitlements": [
+    {
+      "TypeID": "e7c63390-eda7-46e0-bb7a-a6abdacd2433",
+      "ItemID": "578e9077-4f88-260c-e54c-b988425c60e4"
+    },
+    {
+      "TypeID": "e7c63390-eda7-46e0-bb7a-a6abdacd2433",
+      "ItemID": "5DB4E1C9-4E1D-3F9D-8F8D-5E4AAB4A6F2E",
+      "InstanceID": "a95b9f3b-4e7b-4b24-8fba-d9fad9d4da34"
+    },
+    {
+      "ItemID": "0d6b0b3b-4f4e-0c2d-bd30-2d9d2d7d6d10"
+    },
+    {
+      "TypeID": "e7c63390-eda7-46e0-bb7a-a6abdacd2433",
+      "ItemID": "578e9077-4f88-260c-e54c-b988425c60e4"
+    }
+  ]
+}

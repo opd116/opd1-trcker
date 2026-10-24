@@ -59,10 +59,12 @@ fn launch() -> Result<(), String> {
 }
 
 /// The Riot Client's arguments that start VALORANT on the live patchline.
+#[cfg_attr(not(windows), allow(dead_code))] // Windows only; the tests use it everywhere.
 pub const LAUNCH_ARGS: [&str; 2] = ["--launch-product=valorant", "--launch-patchline=live"];
 
 /// `RiotClientServices.exe` from Riot's install list (`rc_default`, else
 /// `rc_live`), when that file exists.
+#[cfg_attr(not(windows), allow(dead_code))] // Windows only; the tests use it everywhere.
 pub fn riot_client_exe(installs: &Path) -> Result<PathBuf, String> {
     let text = std::fs::read_to_string(installs)
         .map_err(|_| "The Riot Client isn't installed on this PC.".to_string())?;
@@ -74,6 +76,7 @@ pub fn riot_client_exe(installs: &Path) -> Result<PathBuf, String> {
 
 /// The paths `RiotClientInstalls.json` names, in the order tried
 /// (`rc_default`, then `rc_live`); none for a file that is not JSON.
+#[cfg_attr(not(windows), allow(dead_code))] // Windows only; the tests use it everywhere.
 fn candidates(text: &str) -> Vec<PathBuf> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
         return Vec::new();

@@ -28,6 +28,7 @@ pub const MAIN_WINDOW: &str = "main";
 pub const MINIMIZED_ARG: &str = "--minimized";
 /// The autostart entry's name (the `HKCU\…\Run` value; `nsis/hooks.nsh`
 /// removes it on uninstall).
+#[cfg_attr(not(windows), allow(dead_code))] // Only the Windows autostart reads it.
 const AUTOSTART_NAME: &str = "OPD1 TRCKER";
 const TRAY_ID: &str = "main";
 
@@ -241,6 +242,7 @@ fn set_autostart(app: &AppHandle, on: bool) {
 }
 
 /// The `Run` value's command line: the quoted exe path, then [`MINIMIZED_ARG`].
+#[cfg_attr(not(windows), allow(dead_code))] // Windows only; the tests use it everywhere.
 pub fn autostart_command(exe: &std::path::Path) -> (String, [&'static str; 1]) {
     (format!("\"{}\"", exe.display()), [MINIMIZED_ARG])
 }

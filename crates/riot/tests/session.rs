@@ -1768,6 +1768,12 @@ async fn a_fresh_token_for_another_account_ends_the_session() {
     let session = connect_with_age(&tmp, &server, None).await;
     let err = session.pd::<Value>(&mmr_path()).await.unwrap_err();
     assert!(matches!(err, RiotError::ClientGone), "{err:?}");
+    // The poll loop's own reads (local, no token) see it too, so it reconnects.
+    let err = session
+        .local::<Value>("/chat/v4/presences")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RiotError::ClientGone), "{err:?}");
 }
 
 /// `n` overlapping calls of the `/mmr` path on one session.

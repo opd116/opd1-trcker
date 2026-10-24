@@ -10,6 +10,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -250,6 +251,10 @@ enum RemoteKind {
 pub struct RiotSession {
     local_app_data: PathBuf,
     lockfile_snapshot: LockfileSnapshot,
+    /// A token refresh answered for another account: every later call, local
+    /// ones included (the poll loop's presence read), is `ClientGone`, so the
+    /// poll loop reconnects for the new account at its next tick.
+    account_changed: AtomicBool,
     local_base: String,
     basic_auth: String,
     local_client: Client,
@@ -468,6 +473,7 @@ impl RiotSession {
 
         Ok(Self {
             local_app_data: local_app_data.to_path_buf(),
+            account_changed: AtomicBool::new(false),
             lockfile_snapshot: LockfileSnapshot {
                 port: lockfile.port,
                 password: lockfile.password,
@@ -699,6 +705,9 @@ impl RiotSession {
     /// local/pd/glz call so a closed or restarted Riot client is caught
     /// immediately instead of failing on a dead connection.
     fn check_alive(&self) -> Result<(), RiotError> {
+        if self.account_changed.load(Ordering::Acquire) {
+            return Err(RiotError::ClientGone);
+        }
         let raw = std::fs::read_to_string(lockfile_path(&self.local_app_data))
             .map_err(|_| RiotError::ClientGone)?;
         let lockfile = parse_lockfile(&raw).map_err(|_| RiotError::ClientGone)?;
@@ -963,6 +972,7 @@ impl RiotSession {
         // Reconnecting rebuilds the session for the new account.
         if entitlements.subject != self.puuid {
             log::info!("the Riot Client now answers for another account");
+            self.account_changed.store(true, Ordering::Release);
             return Err(RiotError::ClientGone);
         }
         let mut auth = locked(&self.auth);

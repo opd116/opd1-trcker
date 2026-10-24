@@ -18,7 +18,7 @@
   import { byAcs, endMs, halvesLine, heroMeta, kdaText, kdOf, mvpOf, RESULT_LETTER, RESULT_WORD_BIG, stamp } from "../../lib/historyv2";
   import { retryImg } from "../../lib/imgRetry";
   import { isRankedTier, mapName } from "../../lib/meta";
-  import { backFromMatch, router, scrollHost } from "../../lib/router.svelte";
+  import { backFromMatch, matchOpenedByKeyboard, router, scrollHost } from "../../lib/router.svelte";
   import { nameParts } from "../../lib/savedv2";
   import { live, meta, mystats, now, openMatch } from "../../lib/stores";
   import { tierColor, tierName } from "../../lib/theme";
@@ -40,6 +40,15 @@
   const settledEmpty = $derived(view !== null && teams.length === 0);
 
   // ── Back ──
+  /**
+   * Opening the scoreboard from the keyboard destroyed the row that had the focus: it starts on Back instead of on
+   * nothing. (A click leaves the focus alone, so no ring appears for the mouse.)
+   */
+  let backBtn = $state<HTMLButtonElement | null>(null);
+  $effect(() => {
+    if (backBtn && matchOpenedByKeyboard()) backBtn.focus({ preventScroll: true });
+  });
+
   function nameOf(puuid: string): DisplayName | null {
     for (const t of teams) for (const p of t.players) if (p.puuid === puuid) return p.name;
     return $live?.players.find((p) => p.puuid === puuid)?.name ?? null;
@@ -198,7 +207,7 @@
 
 <div class="match" aria-busy={view === null} use:scrollHost>
   <div class="top">
-    <button type="button" class="back" onclick={() => backFromMatch()}>
+    <button type="button" class="back" bind:this={backBtn} onclick={() => backFromMatch()}>
       <svg width="7" height="12" viewBox="0 0 7 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"
         ><path d="M5.5 1.5L1.5 6l4 4.5"></path></svg
       ><span class="blabel" data-ellipsis>{backLabel}</span>

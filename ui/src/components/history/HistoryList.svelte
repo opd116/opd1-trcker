@@ -208,7 +208,7 @@
           {@const hs = hsCell(r)}
           {@const rr = rrCell(r)}
           {@const tone = kdTone(r.kd)}
-          <div class="row" data-row="1" tabindex="0" role="button" aria-label={rowAria(r, map ?? null)} onclick={() => open(r)} onkeydown={(e) => onKey(e, r)}>
+          <div class="row" data-row="1" data-match-id={r.matchId} tabindex="0" role="button" aria-label={rowAria(r, map ?? null)} onclick={() => open(r)} onkeydown={(e) => onKey(e, r)}>
             <div class="bar" style:background={RES_COLOR[r.result]}></div>
             <div class="res">
               <span class="badge" style:background={RES_BG[r.result]} style:color={RES_COLOR[r.result]}>{RESULT_LETTER[r.result]}</span>

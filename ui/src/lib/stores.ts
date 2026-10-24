@@ -44,6 +44,12 @@ export { openDetails };
 export { openMatch };
 
 /**
+ * The latest `match` event (R150: the open match rebuilt with names that arrived). The recap is not the router's open
+ * match, so it takes its own match's updates from here.
+ */
+export const matchEvents = writable<MatchDetailsView | null>(null);
+
+/**
  * Wall clock for "time since" labels; one tick every 30s is plenty. A subscription starting sets the clock at once:
  * `readable` keeps the last value, so with no subscriber for hours (VALORANT closed, no card mounted) the first
  * card to mount would otherwise read module-load time until the first tick.
@@ -117,7 +123,10 @@ export async function startFeeds(): Promise<void> {
       .catch(failed("details event")),
     // R150: Rust emits the open match again when names arrived for it (`MatchDetailsView`, same shape as `match_details`).
     tauriBridge
-      .listen<MatchDetailsView>("match", (e) => openMatch.event(e.payload))
+      .listen<MatchDetailsView>("match", (e) => {
+        openMatch.event(e.payload);
+        matchEvents.set(e.payload);
+      })
       .catch(failed("match event")),
   ]);
 }

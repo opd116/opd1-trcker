@@ -179,6 +179,34 @@ export async function retryOnce<T>(call: () => Promise<T>, delayMs: number, want
   }
 }
 
+/**
+ * The recap's `match_details` retries (R189): Riot publishes a match some seconds after it ends, so the first read
+ * at the match end usually misses. The waits follow the poll loop's own re-syncs (`POST_MATCH_DELAYS`, +10 s … +80 s),
+ * after which the match is stored and a read finds it.
+ */
+export const RECAP_RETRY_MS = [10_000, 10_000, 20_000, 40_000, 80_000] as const;
+
+/**
+ * `call()`, asked again after each wait in `delaysMs` while it rejects; the last rejection is the answer. `wanted` is
+ * asked after every wait: when it says no, the latest error is thrown and nothing more is asked. An `invalid …`
+ * rejection is never repeated (R163).
+ */
+export async function retryWithDelays<T>(
+  call: () => Promise<T>,
+  delaysMs: readonly number[],
+  wanted: () => boolean = () => true,
+): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await call();
+    } catch (err) {
+      if (i >= delaysMs.length || isInvalidRejection(err)) throw err;
+      await new Promise<void>((resolve) => setTimeout(resolve, delaysMs[i]));
+      if (!wanted()) throw err;
+    }
+  }
+}
+
 /** The open page's payload (Player Details, Match Details): the payload on screen, and the three ways it changes. */
 export interface OpenOptions<T = PlayerDetails> {
   /** A rejected call is retried once after this many ms; skipped when anything wrote the slot during the wait. */

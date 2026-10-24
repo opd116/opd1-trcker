@@ -8,7 +8,9 @@
   scoreboard took it over.
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import { closeMatch, getMatchDetails } from "../../lib/api";
+  import { RECAP_RETRY_MS, retryWithDelays } from "../../lib/boot";
   import { marks, toggleSaved } from "../../lib/appdata.svelte";
   import { assetUrl } from "../../lib/assets";
   import { queueLabel } from "../../lib/historyv2";
@@ -17,7 +19,7 @@
   import { byAcs, kdaText, nameView, nextTierText, recapModel, rrColor, SESSION_CHIPS, sessionChip } from "../../lib/livev2";
   import { mapName } from "../../lib/meta";
   import { openMatch, router } from "../../lib/router.svelte";
-  import { meta, mystats } from "../../lib/stores";
+  import { matchEvents, meta, mystats } from "../../lib/stores";
   import { tierColor, tierName } from "../../lib/theme";
   import { tip } from "../../lib/tooltip.svelte";
   import type { LiveState, MatchDetailsView } from "../../lib/types";
@@ -37,7 +39,8 @@
     failed = false;
     if (!focus) return;
     let alive = true;
-    getMatchDetails(id, focus)
+    // Riot publishes the match some seconds after it ends: the skeleton stays while the read is asked again.
+    retryWithDelays(() => getMatchDetails(id, focus), RECAP_RETRY_MS, () => alive)
       .then((v) => {
         if (alive) view = v;
       })
@@ -53,6 +56,14 @@
     };
   });
 
+  // R150: names that arrived after the match (the names fill) come as a `match` event for the open match.
+  $effect(() => {
+    const e = $matchEvents;
+    if (e && e.matchId === matchId && untrack(() => view) !== null) view = e;
+  });
+
+  /** Deathmatch: one block of every player, no sides (as the scoreboard shows it). */
+  const noTeams = $derived(view !== null && view.teams.length < 2);
   const ms = $derived($mystats ?? null);
   const model = $derived(view ? recapModel(view, ms) : null);
   const rank = $derived(ms && typeof ms.rank.tier === "number" ? ms.rank : null);
@@ -116,7 +127,7 @@
             {@const rows = byAcs(t.players)}
             <div class="team">
               <div class="t-head">
-                <span class="t-label" style:color={ti === 0 ? "var(--ally)" : "var(--enemy)"}>{ti === 0 ? "YOUR TEAM" : "ENEMY TEAM"}</span>
+                <span class="t-label" style:color={ti === 0 ? "var(--ally)" : "var(--enemy)"}>{noTeams ? "PLAYERS" : ti === 0 ? "YOUR TEAM" : "ENEMY TEAM"}</span>
                 <span class="t-score">{t.roundsWon ?? "—"}</span>
                 <div class="fill"></div>
                 <span class="mono col acs">ACS</span>
@@ -130,7 +141,7 @@
                   <span class="t-agent">{#if r.agentId}<img {@attach retryImg} src={assetUrl("agent", r.agentId)} alt="" />{/if}</span>
                   {#if typeof r.tier === "number"}<img {@attach retryImg} class="t-rank" src={assetUrl("tier", r.tier >= 3 ? r.tier : 0)} alt="" use:tip={tierName(r.tier, $meta)} />{:else}<span class="t-rank"></span>{/if}
                   <span class={["t-name", nm.style]} data-ellipsis use:tip={nm.style === "remembered" ? nm.tip : ""}>{nm.text}</span>
-                  {#if i === 0 && r.acs !== null}<span class="t-mvp">{ti === 0 ? "MVP" : "TOP"}</span>{/if}
+                  {#if i === 0 && r.acs !== null && !noTeams}<span class="t-mvp">{ti === 0 ? "MVP" : "TOP"}</span>{/if}
                   <div class="fill"></div>
                   <span class="t-acs">{r.acs === null ? "—" : Math.round(r.acs)}</span>
                   <span class="t-kda">{kdaText(r.kills, r.deaths, r.assists, " / ")}</span>

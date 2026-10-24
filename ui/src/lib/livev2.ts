@@ -501,7 +501,8 @@ export function recapModel(v: MatchDetailsView, mystats: MyStats | null | undefi
     ours: ours?.roundsWon ?? null,
     theirs: theirs?.roundsWon ?? null,
     stats,
-    mvp: !!self && !!top && top.puuid === self.puuid,
+    // Deathmatch has one block and no team: no TEAM MVP.
+    mvp: v.teams.length >= 2 && !!self && !!top && top.puuid === self.puuid,
     rr,
   };
 }

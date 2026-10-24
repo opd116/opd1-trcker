@@ -331,6 +331,15 @@ describe("recap", () => {
     expect(recapModel(view, null).stats.map((s) => s.l)).toEqual(["K / D / A", "ACS", "ADR", "HS%"]);
   });
 
+  it("a Deathmatch (one block, no sides) has no TEAM MVP", () => {
+    const dm: MatchDetailsView = {
+      ...view,
+      queueId: "deathmatch",
+      teams: [{ teamId: "", result: null, roundsWon: null, firstHalf: null, players: [row({ puuid: "me", isSelf: true, acs: 400 }), row({ acs: 100 })] }],
+    };
+    expect(recapModel(dm, null).mvp).toBe(false);
+  });
+
   it("rows by ACS, the ones without stats last", () => {
     expect(byAcs([row({ puuid: "a", acs: null }), row({ puuid: "b", acs: 150 }), row({ puuid: "c", acs: 250 })]).map((r) => r.puuid)).toEqual(["c", "b", "a"]);
   });

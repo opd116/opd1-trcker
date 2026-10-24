@@ -28,8 +28,10 @@
 
   const MIN_CHIP = 64;
   const GAP = 6;
+  /** `.chips`' padding-left: `clientWidth` includes it, the chips can't use it. */
+  const PAD = 22;
   let chipsW = $state(0);
-  const fit = $derived(Math.max(1, Math.floor((chipsW + GAP) / (MIN_CHIP + GAP))));
+  const fit = $derived(Math.max(1, Math.floor((chipsW - PAD + GAP) / (MIN_CHIP + GAP))));
 
   const chips = $derived.by(() => {
     const all = session?.matches ?? [];

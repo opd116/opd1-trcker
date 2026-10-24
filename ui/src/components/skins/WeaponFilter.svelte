@@ -5,12 +5,11 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { retryImg } from "../../lib/imgRetry";
   import { ALL, type WeaponRow } from "../../lib/skins";
 
   let { rows, selected, onselect }: { rows: WeaponRow[]; selected: string; onselect: (id: string) => void } = $props();
 
-  /** Weapon art that failed to load: the slot stays empty. */
-  let broken = $state<Record<string, true>>({});
 </script>
 
 <section class="card" aria-label="By weapon">
@@ -23,14 +22,9 @@
       {@const on = selected === w.id}
       <button type="button" class="row" class:on aria-pressed={on} onclick={() => onselect(w.id)}>
         <span class="art">
-          {#if w.id !== ALL && !broken[w.id]}
-            <img
-              src={assetUrl("weaponIcon", w.id)}
-              alt=""
-              onerror={() => {
-                broken = { ...broken, [w.id]: true };
-              }}
-            />
+          {#if w.id !== ALL}
+            <!-- R163: a failed load is asked again (`retryImg`); until it loads the slot looks empty (no alt text). -->
+            <img {@attach retryImg} src={assetUrl("weaponIcon", w.id)} alt="" />
           {/if}
         </span>
         <span class="name" data-ellipsis>{w.name}</span>

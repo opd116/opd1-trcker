@@ -123,9 +123,20 @@ test.describe("Collection", () => {
     await expect(cards).toHaveCount(4);
   });
 
-  test("art that cannot load shows the unavailable frame", async ({ page }) => {
-    await open(page, "scene=closed&screen=skins", (url) => (/weaponskinlevels/.test(url) ? { status: 404 } : null));
-    await expect(page.getByText("ARTWORK UNAVAILABLE")).toHaveCount(22);
+  test("art that cannot load is asked again, then shows the unavailable frame", async ({ page }) => {
+    await routeMedia(page, (url) => (/weaponskinlevels/.test(url) ? { status: 404 } : null));
+    await page.clock.install({ time: NOW });
+    await gotoApp(page, "/?scene=closed&screen=skins");
+    const frames = page.getByText("ARTWORK UNAVAILABLE");
+    // R163: the first failures are retried (2 s, 5 s, 15 s), not given up on.
+    await page.locator(".art img[alt]").first().waitFor({ state: "attached" });
+    await page.waitForTimeout(500);
+    await expect(frames).toHaveCount(0);
+    for (let i = 0; i < 12 && (await frames.count()) < 22; i++) {
+      await page.clock.runFor(5_000);
+      await page.waitForTimeout(150);
+    }
+    await expect(frames).toHaveCount(22);
   });
 
   test("a collection never fetched: the empty state, no figures", async ({ page }) => {

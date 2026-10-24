@@ -106,7 +106,7 @@ jobs:
       # The specs fetch the valorant-api images once and keep them here (ui/tests/.cache/media); a cold cache only costs
       # the first run those downloads. Keyed by the demo data that names the images.
       - name: Cache test images
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ui/tests/.cache/media
           key: ui-test-media-${{ hashFiles('ui/src/lib/demo/*.ts', 'ui/src/lib/demo/meta.json') }}
@@ -265,7 +265,7 @@ jobs:
 
       # The same image cache as `checks` (same key), so the scenes render with the same pictures.
       - name: Cache test images
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ui/tests/.cache/media
           key: ui-test-media-${{ hashFiles('ui/src/lib/demo/*.ts', 'ui/src/lib/demo/meta.json') }}

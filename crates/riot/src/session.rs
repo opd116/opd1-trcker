@@ -1069,8 +1069,10 @@ fn parse_json<T: DeserializeOwned>(resp: &CapturedResponse) -> Result<T, RiotErr
         .map_err(|e| RiotError::Decode(excerpt(e.to_string().as_bytes(), LOG_EXCERPT_CHARS)))
 }
 
-/// Parses `Retry-After` as a plain number of seconds (Riot doesn't use the
-/// HTTP-date form). Returns `None` for anything non-finite or negative
+/// Parses `Retry-After`: a number of seconds (what Riot sends), or the
+/// HTTP-date form the header also allows (the seconds left until then, so a
+/// proxy or a changed Riot answer still gets its full hold, R160). Returns
+/// `None` for anything non-finite or negative
 /// (`"inf"`, `"nan"`, a malformed header) so the caller falls back to its
 /// own escalating backoff instead of feeding a bogus value to
 /// [`Hold::hold_for`](crate::throttle::Hold::hold_for) — which
@@ -1078,13 +1080,18 @@ fn parse_json<T: DeserializeOwned>(resp: &CapturedResponse) -> Result<T, RiotErr
 /// become a valid `Duration`. A huge-but-finite value is clamped to
 /// [`MAX_RETRY_AFTER_SECS`] rather than trusted outright.
 fn retry_after_seconds(headers: &HeaderMap) -> Option<f64> {
-    let raw: f64 = headers
-        .get(RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    let raw: f64 = match value.parse() {
+        Ok(seconds) => seconds,
+        Err(_) => {
+            let at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs_f64();
+            (at.timestamp() as f64 - now).max(0.0)
+        }
+    };
     if !raw.is_finite() || raw < 0.0 {
         return None;
     }
@@ -1231,6 +1238,25 @@ mod tests {
             retry_after_seconds(&headers_with_retry_after("86400")),
             Some(120.0),
             "garbage is capped at the ceiling"
+        );
+        // The HTTP-date form: the seconds left until then.
+        let in_90s = chrono::DateTime::from_timestamp(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                + 90,
+            0,
+        )
+        .unwrap()
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
+        let left = retry_after_seconds(&headers_with_retry_after(&in_90s)).unwrap();
+        assert!((88.0..=90.0).contains(&left), "{in_90s}: {left}");
+        assert_eq!(
+            retry_after_seconds(&headers_with_retry_after("Wed, 21 Oct 2015 07:28:00 GMT")),
+            Some(0.0),
+            "a date in the past: no wait"
         );
         for bad in ["inf", "nan", "-3", "soon"] {
             assert_eq!(

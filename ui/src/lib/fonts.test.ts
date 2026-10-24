@@ -7,21 +7,25 @@ import { PALETTE } from "./theme";
 const SRC = new URL("../", import.meta.url);
 const FONTS = new URL("assets/fonts/", SRC);
 
-/** [family, file slug, weight, style]: exactly what design v2 uses. */
-const FACES: [string, string, number, "normal" | "italic"][] = [
-  ...[400, 500, 600, 700].map((w) => ["Barlow", "barlow", w, "normal"] as [string, string, number, "normal"]),
-  ["Barlow", "barlow", 500, "italic"],
-  ...[500, 600, 700].map((w) => ["Saira Condensed", "saira-condensed", w, "normal"] as [string, string, number, "normal"]),
-  ...[400, 500, 600].map((w) => ["Geist Mono", "geist-mono", w, "normal"] as [string, string, number, "normal"]),
+type Face = [family: string, slug: string, weight: number, style: "normal" | "italic", subset: string];
+
+/** Exactly what design v2 uses. Cascadia Mono (the ASCII studio) also ships its block-element subset. */
+const FACES: Face[] = [
+  ...[400, 500, 600, 700].map((w): Face => ["Barlow", "barlow", w, "normal", "latin"]),
+  ["Barlow", "barlow", 500, "italic", "latin"],
+  ...[500, 600, 700].map((w): Face => ["Saira Condensed", "saira-condensed", w, "normal", "latin"]),
+  ...[400, 500, 600].map((w): Face => ["Geist Mono", "geist-mono", w, "normal", "latin"]),
+  ["Cascadia Mono", "cascadia-mono", 400, "normal", "latin"],
+  ["Cascadia Mono", "cascadia-mono", 400, "normal", "symbols2"],
 ];
-const FILES = FACES.map(([, slug, w, st]) => `${slug}-latin-${w}-${st}.woff2`);
+const FILES = FACES.map(([, slug, w, st, sub]) => `${slug}-${sub}-${w}-${st}.woff2`);
 
 const walk = (dir: URL): URL[] =>
   readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(new URL(`${e.name}/`, dir)) : [new URL(e.name, dir)]));
 
 describe("bundled fonts (design v2)", () => {
-  it("the 11 woff2 files exist and total at most 250 KB", () => {
-    expect(FILES).toHaveLength(11);
+  it("the 13 woff2 files exist and total at most 250 KB", () => {
+    expect(FILES).toHaveLength(13);
     let total = 0;
     for (const f of FILES) {
       const u = new URL(f, FONTS);
@@ -42,11 +46,11 @@ describe("bundled fonts (design v2)", () => {
     for (const f of FILES) expect(readFileSync(new URL(f, FONTS)).subarray(0, 4).toString("latin1"), f).toBe("wOF2");
   });
 
-  it("OFL.txt carries all three families' licence texts", () => {
+  it("OFL.txt carries all four families' licence texts", () => {
     const ofl = readFileSync(new URL("OFL.txt", FONTS), "utf8");
-    for (const name of ["Barlow", "Saira", "Geist"]) expect(ofl, name).toContain(name);
+    for (const name of ["Barlow", "Saira", "Geist", "Cascadia"]) expect(ofl, name).toContain(name);
     expect(ofl).not.toMatch(/IBM Plex|Archivo/);
-    expect((ofl.match(/SIL OPEN FONT LICENSE Version 1\.1/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    expect((ofl.match(/SIL OPEN FONT LICENSE Version 1\.1/g) ?? []).length).toBeGreaterThanOrEqual(4);
   });
 });
 

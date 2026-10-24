@@ -1700,6 +1700,44 @@ async fn concurrent_calls_share_one_refresh() {
     );
 }
 
+#[tokio::test]
+async fn rejected_calls_behind_a_failed_refresh_give_up_at_once() {
+    // The token expired and the local endpoint fails: the first rejected call
+    // asks once; the seven queued behind it get the error without asking again.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "access-token-1", "entitlements": [], "issuer": "i",
+            "subject": SELF_PUUID, "token": "jwt-1",
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(bad_claims())
+        .mount(&server)
+        .await;
+    let session = connect_with_age(&tmp, &server, None).await;
+    for result in fan_out(session, 8).await {
+        assert!(result.is_err());
+    }
+    assert_eq!(
+        count(&server, "/entitlements/v1/token").await,
+        2,
+        "connect + the one failed refresh"
+    );
+}
+
 /// `n` overlapping calls of the `/mmr` path on one session.
 async fn fan_out(session: RiotSession, n: usize) -> Vec<Result<Value, RiotError>> {
     let session = std::sync::Arc::new(session);

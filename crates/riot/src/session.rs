@@ -61,6 +61,11 @@ const TOKEN_MAX_AGE: Duration = Duration::from_secs(50 * 60);
 /// is not asked by every call in turn.
 const PROACTIVE_RETRY_PAUSE: Duration = Duration::from_secs(60);
 
+/// After a refresh that a rejected call asked for fails, the callers queued
+/// behind it for the same token give up at once for this long instead of
+/// each waiting out its own local timeout in turn (a hung local client).
+const REACTIVE_FAIL_PAUSE: Duration = Duration::from_secs(10);
+
 /// R160: the longest an `other`-family call waits in the call for a hold, or
 /// for a 429's `Retry-After` before retrying. A hold with more left makes the
 /// call return [`RiotError::Held`] at once (a 429 asking for more:
@@ -195,6 +200,9 @@ struct AuthState {
     fetched_at: Instant,
     /// The earliest the next *proactive* refresh may be tried after one failed.
     proactive_retry_at: Instant,
+    /// The generation a refresh failed for, and when (see
+    /// [`REACTIVE_FAIL_PAUSE`]).
+    refresh_failed: Option<(u64, Instant)>,
 }
 
 /// Where the `X-Riot-ClientVersion` a session sends came from (R158): logged
@@ -481,6 +489,7 @@ impl RiotSession {
                 generation: 0,
                 fetched_at: Instant::now(),
                 proactive_retry_at: Instant::now(),
+                refresh_failed: None,
             }),
             global_throttle: Throttle::new(GLOBAL_BURST, GLOBAL_RPS),
             mmr_throttle: Throttle::new(MMR_BURST, MMR_RPS),
@@ -896,8 +905,8 @@ impl RiotSession {
             Ok(()) => Ok(()),
             Err(RiotError::ClientGone) => Err(RiotError::ClientGone),
             Err(e) => {
+                // `refresh_entitlements_after` has put the next try off already.
                 log::warn!("fresh token not fetched ({e}); going on with the cached one");
-                locked(&self.auth).proactive_retry_at = Instant::now() + PROACTIVE_RETRY_PAUSE;
                 Ok(())
             }
         }
@@ -908,9 +917,11 @@ impl RiotSession {
     /// another caller already did since `seen_generation` was read: one refresh
     /// at a time, and a burst of rejected calls costs one fetch (R166).
     ///
-    /// `proactive` callers also re-check, once they hold the gate, that no
-    /// failed attempt put the next one off meanwhile: with a hung local client
-    /// the first failure spares the callers queued behind it their own timeout.
+    /// Callers also re-check, once they hold the gate, that no attempt for the
+    /// same token failed meanwhile: with a hung local client the first failure
+    /// spares the callers queued behind it their own timeout (a proactive one
+    /// goes on with the cached token, a rejected call gets the error). Both
+    /// marks are set before the gate is released.
     async fn refresh_entitlements_after(
         &self,
         seen_generation: u64,
@@ -924,11 +935,31 @@ impl RiotSession {
             {
                 return Ok(());
             }
+            let failed_just_now = auth.refresh_failed.is_some_and(|(generation, at)| {
+                generation == seen_generation && at.elapsed() < REACTIVE_FAIL_PAUSE
+            });
+            if failed_just_now && !proactive {
+                return Err(RiotError::AuthFailed(
+                    "a fresh token could not be fetched moments ago".into(),
+                ));
+            }
         }
         self.check_alive()?;
-        let entitlements =
-            fetch_entitlements(&self.local_client, &self.local_base, &self.basic_auth).await?;
+        let fetched =
+            fetch_entitlements(&self.local_client, &self.local_base, &self.basic_auth).await;
+        let entitlements = match fetched {
+            Ok(e) => e,
+            Err(e) => {
+                let mut auth = locked(&self.auth);
+                auth.refresh_failed = Some((seen_generation, Instant::now()));
+                if proactive {
+                    auth.proactive_retry_at = Instant::now() + PROACTIVE_RETRY_PAUSE;
+                }
+                return Err(e);
+            }
+        };
         let mut auth = locked(&self.auth);
+        auth.refresh_failed = None;
         auth.access_token = entitlements.access_token;
         auth.entitlements_jwt = entitlements.token;
         auth.generation += 1;

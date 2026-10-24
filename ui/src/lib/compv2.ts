@@ -368,7 +368,7 @@ export function weekdayTile(c: WinCell | undefined, i: number): WeekdayTile {
     bg: low ? `${HATCH},${tint === "transparent" ? "var(--card-head)" : tint}` : tint,
     dashed: low || wr === null,
     empty: wr === null,
-    tip: `${full}: ` + (g ? `${wr}% · ${w}W – ${g - w}L over ${plural(g, "game")}` : "no games played") + (low ? `\n${LOW_SAMPLE_TIP}` : ""),
+    tip: `${full}: ` + (g ? `${wr}% · ${w}W – ${c?.losses ?? 0}L over ${plural(g, "game")}` : "no games played") + (low ? `\n${LOW_SAMPLE_TIP}` : ""),
   };
 }
 
@@ -397,7 +397,7 @@ export function daypartRow(c: WinCell | undefined, i: number): DaypartRow {
     bar: wr === null ? "transparent" : wrBarVar(wr),
     empty: wr === null,
     g: g ? plural(g, "game") : "No games",
-    tip: `${v.d} (${v.h}): ` + (g ? `${wr}% · ${w}W – ${g - w}L` : "no games played, so no win rate") + (low ? `\n${LOW_SAMPLE_TIP}` : ""),
+    tip: `${v.d} (${v.h}): ` + (g ? `${wr}% · ${w}W – ${c?.losses ?? 0}L` : "no games played, so no win rate") + (low ? `\n${LOW_SAMPLE_TIP}` : ""),
   };
 }
 

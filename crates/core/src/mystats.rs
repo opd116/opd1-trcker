@@ -256,6 +256,7 @@ impl Tally {
         WinCell {
             games: self.games,
             wins: self.wins,
+            losses: self.losses,
             winrate: stats::winrate(self.wins.into(), self.games.into()),
         }
     }

@@ -724,6 +724,8 @@ pub struct StatRow {
 pub struct WinCell {
     pub games: u32,
     pub wins: u32,
+    /// Not `games - wins`: a draw is neither.
+    pub losses: u32,
     /// `None` when the bucket has no games.
     pub winrate: Option<f32>,
 }

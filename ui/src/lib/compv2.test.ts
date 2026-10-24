@@ -220,18 +220,21 @@ describe("tables and best times", () => {
   });
 
   it("weekday tiles: tint, hatch under 8 games, dashed with none", () => {
-    expect(weekdayTile({ games: 0, wins: 0, winrate: null }, 0)).toMatchObject({ wr: "—", g: "none", dashed: true, empty: true });
-    const low = weekdayTile({ games: 6, wins: 6, winrate: 1 }, 6);
+    expect(weekdayTile({ games: 0, wins: 0, losses: 0, winrate: null }, 0)).toMatchObject({ wr: "—", g: "none", dashed: true, empty: true });
+    const low = weekdayTile({ games: 6, wins: 6, losses: 0, winrate: 1 }, 6);
     expect(low.dashed).toBe(true);
     expect(low.bg).toContain("repeating-linear-gradient");
     expect(low.tip).toBe("Sunday: 100% · 6W – 0L over 6 games\nUnder 8 games: limited evidence");
-    expect(weekdayTile({ games: 11, wins: 5, winrate: 5 / 11 }, 3).bg).toMatch(/^rgba\(239,106,91/);
-    expect(weekdayTile({ games: 10, wins: 5, winrate: 0.5 }, 1).bg).toBe("#1c1f24");
+    // A draw is neither a win nor a loss.
+    expect(weekdayTile({ games: 9, wins: 5, losses: 3, winrate: 5 / 9 }, 0).tip).toContain("5W – 3L over 9 games");
+    expect(daypartRow({ games: 9, wins: 5, losses: 3, winrate: 5 / 9 }, 0).tip).toContain("5W – 3L");
+    expect(weekdayTile({ games: 11, wins: 5, losses: 6, winrate: 5 / 11 }, 3).bg).toMatch(/^rgba\(239,106,91/);
+    expect(weekdayTile({ games: 10, wins: 5, losses: 5, winrate: 0.5 }, 1).bg).toBe("#1c1f24");
   });
 
   it("daypart rows", () => {
-    expect(daypartRow({ games: 0, wins: 0, winrate: null }, 0)).toMatchObject({ d: "Morning", wr: "—", g: "No games", empty: true });
-    expect(daypartRow({ games: 34, wins: 23, winrate: 23 / 34 }, 2)).toMatchObject({ wr: "68%", g: "34 games", bar: "var(--win)" });
+    expect(daypartRow({ games: 0, wins: 0, losses: 0, winrate: null }, 0)).toMatchObject({ d: "Morning", wr: "—", g: "No games", empty: true });
+    expect(daypartRow({ games: 34, wins: 23, losses: 11, winrate: 23 / 34 }, 2)).toMatchObject({ wr: "68%", g: "34 games", bar: "var(--win)" });
   });
 });
 

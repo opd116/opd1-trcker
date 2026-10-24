@@ -323,6 +323,8 @@ export interface StatRow {
 export interface WinCell {
   games: number;
   wins: number;
+  /** Not `games - wins`: a draw is neither. */
+  losses: number;
   /** Fraction 0..1; null when the bucket has no games. */
   winrate: number | null;
 }

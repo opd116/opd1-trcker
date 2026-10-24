@@ -1380,7 +1380,7 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
     );
     assert_eq!(
         keys(&stats["byWeekday"][0]),
-        spec(&["games", "wins", "winrate"])
+        spec(&["games", "wins", "losses", "winrate"])
     );
     assert_eq!(stats["byWeekday"].as_array().map(Vec::len), Some(7));
     assert_eq!(stats["byDaypart"].as_array().map(Vec::len), Some(4));

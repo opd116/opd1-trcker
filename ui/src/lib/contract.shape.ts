@@ -279,7 +279,7 @@ export const shapes = {
     acs: numOrNull,
   } satisfies ShapeOf<StatRow>,
 
-  WinCell: { games: num, wins: num, winrate: { kinds: ["number", "null"], fraction: true } } satisfies ShapeOf<WinCell>,
+  WinCell: { games: num, wins: num, losses: num, winrate: { kinds: ["number", "null"], fraction: true } } satisfies ShapeOf<WinCell>,
 
   Insight: {
     kind: { kinds: ["string"], enum: "insightKind" },

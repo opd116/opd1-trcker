@@ -350,6 +350,7 @@ fn daypart_buckets() {
         row("evening-end", at(21, 59), R::L),
         row("night-late", at(22, 0), R::L),
         row("midnight", at(24, 0), R::L),
+        row("evening-draw", at(19, 0), R::D),
     ];
     let a = act();
     let n = names();
@@ -359,9 +360,12 @@ fn daypart_buckets() {
     });
 
     let games: Vec<u32> = s.by_daypart.iter().map(|c| c.games).collect();
-    assert_eq!(games, [2, 2, 2, 3], "Morning, Afternoon, Evening, Night");
+    assert_eq!(games, [2, 2, 3, 3], "Morning, Afternoon, Evening, Night");
     let wins: Vec<u32> = s.by_daypart.iter().map(|c| c.wins).collect();
     assert_eq!(wins, [1, 2, 0, 0]);
+    // A draw is neither: the evening's 3 games are 0 W and 2 L.
+    let losses: Vec<u32> = s.by_daypart.iter().map(|c| c.losses).collect();
+    assert_eq!(losses, [1, 0, 2, 3]);
     assert_eq!(s.by_daypart[0].winrate, Some(0.5));
     assert_eq!(s.by_daypart[1].winrate, Some(1.0));
     // A counted zero stays a zero.
@@ -878,7 +882,7 @@ fn json_is_camel_case_with_nulls_for_unknowns() {
     assert_eq!(empty["agents"], json!([]));
     assert_eq!(empty["insights"], json!([]));
     assert_eq!(empty["byWeekday"].as_array().unwrap().len(), 7);
-    let no_games = json!({"games": 0, "wins": 0, "winrate": null});
+    let no_games = json!({"games": 0, "wins": 0, "losses": 0, "winrate": null});
     assert_eq!(empty["byDaypart"], json!(vec![no_games; 4]));
 
     let matches = vec![row("m1", ACT_START + DAY, R::W)];

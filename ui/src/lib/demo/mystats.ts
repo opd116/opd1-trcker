@@ -189,7 +189,8 @@ function cells(sims: Sim[], n: number, index: (s: Sim) => number): WinCell[] {
   return Array.from({ length: n }, (_, i): WinCell => {
     const g = sims.filter((s) => index(s) === i);
     const wins = g.filter((s) => s.res === "win").length;
-    return { games: g.length, wins, winrate: g.length ? wins / g.length : null };
+    const losses = g.filter((s) => s.res === "loss").length;
+    return { games: g.length, wins, losses, winrate: g.length ? wins / g.length : null };
   });
 }
 
@@ -381,7 +382,8 @@ export function myStatsUnranked(): MyStats {
     Array.from({ length: n }, (_, i): WinCell => {
       const g = recent.filter((m) => index(m.startMs) === i);
       const wins = g.reduce((a, m) => a + isWin(m), 0);
-      return { games: g.length, wins, winrate: g.length ? wins / g.length : null };
+      const losses = g.reduce((a, m) => a + isLoss(m), 0);
+      return { games: g.length, wins, losses, winrate: g.length ? wins / g.length : null };
     });
   const wins = recent.reduce((a, m) => a + isWin(m), 0);
   const losses = recent.reduce((a, m) => a + isLoss(m), 0);

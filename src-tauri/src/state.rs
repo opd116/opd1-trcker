@@ -1950,10 +1950,18 @@ impl AppState {
     /// R189: the local API just answered. The exact time is kept for
     /// `app_status`; a `"status"` event goes out for it alone only when the
     /// last emitted time is [`STATUS_DATA_EVERY_MS`] old (the presence is read
-    /// every 2 s, which must not mean an event every 2 s).
+    /// every 2 s, which must not mean an event every 2 s). Only while the pill
+    /// shows it (`ok`, `lost`): waiting for VALORANT, nothing reads the time,
+    /// and the next state change carries the exact one anyway (`set_status`).
     pub fn note_local_data(&self, now: i64) {
         self.last_data_ms.store(now, Ordering::Release);
         self.set_status(|s| {
+            if !matches!(
+                s.conn,
+                opd1_core::wire::ConnState::Ok | opd1_core::wire::ConnState::Lost
+            ) {
+                return;
+            }
             let stale = s
                 .last_data_ms
                 .is_none_or(|t| now < t || now - t >= STATUS_DATA_EVERY_MS);

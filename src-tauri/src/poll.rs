@@ -503,6 +503,7 @@ impl Poller {
                 live.synced.clear();
                 live.party_ready.clear();
                 live.names_attempted.clear();
+                live.known_names.clear();
                 live.self_roster = None;
                 live.self_name = None;
                 live.self_loadout = None;
@@ -985,6 +986,10 @@ impl Poller {
                 live.synced.clear();
                 live.party_ready.clear();
                 live.names_attempted.clear();
+                // And the answers: the next match asks its visible players
+                // again (one name-service call), so a renamed player is not
+                // shown by an old name for the app's lifetime.
+                live.known_names.clear();
                 // R165: the failure counts went with it; so does the wake-up.
                 live.clear_names_retry_wake();
                 // R161: a match is over or VALORANT closed.

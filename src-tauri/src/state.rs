@@ -468,7 +468,9 @@ pub struct LiveModel {
     /// Select, emptied on every Lobby fetch, on the transition to Menus or
     /// Closed, and when VALORANT closes or the account changes.
     pub match_tiers: MatchTiers,
-    /// Names from `names()` this run (visible, non-self players only).
+    /// Names from `names()` since the last match ended (visible, non-self
+    /// players only); emptied with `names_attempted` there and on an account
+    /// switch.
     pub known_names: HashMap<String, (String, String)>,
     /// Players whose card showed them hidden the last time they were on
     /// screen this run, with the agent it showed (once locked, R99) — see

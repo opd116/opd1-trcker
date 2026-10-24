@@ -573,6 +573,27 @@ async fn wait_until_async(h: &Harness, match_id: &str) {
 }
 
 #[tokio::test]
+async fn a_match_end_forgets_this_matchs_name_answers() {
+    let h = harness().await;
+    mock_coregame(&h).await;
+    let (cell, _) = presence(&h, blob("INGAME", "unrated")).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.ingame_loadouts_timeout = Duration::from_millis(50);
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Ingame);
+    lock(&h.st.live)
+        .known_names
+        .insert(OTHER.into(), ("Old".into(), "NAME".into()));
+
+    // Back in the menus: the next match asks name-service again, so a
+    // renamed player shows the new name.
+    *cell.lock().unwrap() = Some(blob("MENUS", "unrated"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert!(lock(&h.st.live).known_names.is_empty());
+}
+
+#[tokio::test]
 async fn the_game_closing_in_game_points_the_recap_at_the_match_too() {
     let h = harness().await;
     mock_coregame(&h).await;

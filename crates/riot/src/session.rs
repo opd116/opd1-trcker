@@ -958,6 +958,13 @@ impl RiotSession {
                 return Err(e);
             }
         };
+        // The local client signed into another account meanwhile: this
+        // session's puuid (every own call's subject) is no longer its user.
+        // Reconnecting rebuilds the session for the new account.
+        if entitlements.subject != self.puuid {
+            log::info!("the Riot Client now answers for another account");
+            return Err(RiotError::ClientGone);
+        }
         let mut auth = locked(&self.auth);
         auth.refresh_failed = None;
         auth.access_token = entitlements.access_token;

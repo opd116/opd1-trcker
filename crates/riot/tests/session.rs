@@ -1738,6 +1738,38 @@ async fn rejected_calls_behind_a_failed_refresh_give_up_at_once() {
     );
 }
 
+#[tokio::test]
+async fn a_fresh_token_for_another_account_ends_the_session() {
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    for (subject, once) in [
+        (SELF_PUUID, true),
+        ("bbbbbbbb-0000-0000-0000-000000000002", false),
+    ] {
+        let m = Mock::given(method("GET"))
+            .and(path("/entitlements/v1/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "accessToken": "a", "entitlements": [], "issuer": "i",
+                "subject": subject, "token": "t",
+            })));
+        if once {
+            m.up_to_n_times(1).mount(&server).await;
+        } else {
+            m.mount(&server).await;
+        }
+    }
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let session = connect_with_age(&tmp, &server, None).await;
+    let err = session.pd::<Value>(&mmr_path()).await.unwrap_err();
+    assert!(matches!(err, RiotError::ClientGone), "{err:?}");
+}
+
 /// `n` overlapping calls of the `/mmr` path on one session.
 async fn fan_out(session: RiotSession, n: usize) -> Vec<Result<Value, RiotError>> {
     let session = std::sync::Arc::new(session);

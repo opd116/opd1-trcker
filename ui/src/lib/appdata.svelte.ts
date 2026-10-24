@@ -58,11 +58,34 @@ export async function toggleSaved(puuid: string, on?: boolean): Promise<void> {
 
 const noteTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+/**
+ * Notes typed here that Rust has not confirmed yet (waiting for the 400ms timer, or written and not answered). A
+ * `marks` event can carry an older copy of such a note (the echo of an earlier write): the typed text wins until its
+ * own write has answered, so a keystroke is never undone.
+ */
+const typedNotes = new Map<string, string>();
+
+function withNote(m: PlayerMarks, puuid: string, note: string): void {
+  if (note.trim() === "") delete m.notes[puuid];
+  else m.notes[puuid] = note;
+}
+
+/** A `marks` snapshot or event from Rust, with the notes still being typed laid over it. */
+export function applyMarks(m: PlayerMarks): void {
+  if (typedNotes.size === 0) {
+    marks.set(m);
+    return;
+  }
+  const next: PlayerMarks = { ...m, notes: { ...m.notes } };
+  for (const [puuid, note] of typedNotes) withNote(next, puuid, note);
+  marks.set(next);
+}
+
 /** "Saves as you type": the store changes at once, the write goes out 400ms after the last keystroke. */
 export function setNote(puuid: string, note: string, delayMs = 400): void {
+  typedNotes.set(puuid, note);
   optimistic((m) => {
-    if (note.trim() === "") delete m.notes[puuid];
-    else m.notes[puuid] = note;
+    withNote(m, puuid, note);
     return m;
   });
   clearTimeout(noteTimers.get(puuid));
@@ -70,7 +93,13 @@ export function setNote(puuid: string, note: string, delayMs = 400): void {
     puuid,
     setTimeout(() => {
       noteTimers.delete(puuid);
-      api.setNote(puuid, note).catch((err) => reportError("set_note", err));
+      api
+        .setNote(puuid, note)
+        .catch((err) => reportError("set_note", err))
+        .finally(() => {
+          // Answered: Rust's copy is this text now, unless more was typed meanwhile.
+          if (typedNotes.get(puuid) === note) typedNotes.delete(puuid);
+        });
     }, delayMs),
   );
 }
@@ -84,15 +113,42 @@ export async function dismissSmurf(puuid: string): Promise<void> {
   }
 }
 
-/** Changes one setting; the store changes at once and the stored copy follows. */
-export async function updateSettings(patch: Partial<Settings>): Promise<void> {
-  const next = { ...get(settings), ...patch };
-  settings.set(next);
-  try {
-    settings.set(await api.saveSettings(next));
-  } catch (err) {
-    reportError("set_settings", err);
-  }
+/** Setting changes not stored yet: laid over every stored copy that arrives, until their own save answers. */
+let pendingSettings: Partial<Settings> = {};
+let settingsLoaded!: () => void;
+/** Resolves once the stored copy has been applied (or could not be read): a save before it would store defaults. */
+const settingsReady = new Promise<void>((resolve) => (settingsLoaded = resolve));
+/** Saves go out one at a time, in order, so an older write never lands over a newer one. */
+let saving: Promise<void> = Promise.resolve();
+
+/** The stored settings from Rust (snapshot, event or a save's answer), with the changes not stored yet on top. */
+export function applyStoredSettings(s: Settings): void {
+  settings.set({ ...s, ...pendingSettings });
+  settingsLoaded();
+}
+
+/**
+ * Changes one setting; the store changes at once and the stored copy follows. Before the stored copy has loaded the
+ * change waits for it (it is laid over it, never over the defaults); quick changes are saved in order.
+ */
+export function updateSettings(patch: Partial<Settings>): Promise<void> {
+  pendingSettings = { ...pendingSettings, ...patch };
+  settings.update((s) => ({ ...s, ...patch }));
+  saving = saving.then(async () => {
+    await settingsReady;
+    const sent = pendingSettings;
+    if (Object.keys(sent).length === 0) return; // an earlier save in the queue carried it
+    try {
+      const stored = await api.saveSettings(get(settings));
+      const rest = { ...pendingSettings };
+      for (const k of Object.keys(sent) as (keyof Settings)[]) if (rest[k] === sent[k]) delete rest[k];
+      pendingSettings = rest;
+      applyStoredSettings(stored);
+    } catch (err) {
+      reportError("set_settings", err);
+    }
+  });
+  return saving;
 }
 
 /** listen → snapshot, the snapshot only when no event came first. */
@@ -121,26 +177,28 @@ async function follow<T>(
 
 let started = false;
 
-/** Connects the three stores. Call once at startup, after `startFeeds`. */
+/** Connects the three stores. Call once at startup (with `startFeeds`, which it does not wait for). */
 export async function startAppData(): Promise<void> {
   if (started) return;
   started = true;
 
   if (import.meta.env.DEV && !isTauri()) {
     const demo = await import("./demo/v2");
-    demo.listenMarks((m) => marks.set(m));
-    demo.listenSettings((s) => settings.set(s));
+    demo.listenMarks(applyMarks);
+    demo.listenSettings(applyStoredSettings);
     demo.listenStatus((s) => appStatus.set(s));
     // The demo's status follows its scene.
     live.subscribe((l) => demo.pushStatus(l));
-    marks.set(demo.v2Marks());
-    settings.set(demo.v2GetSettings());
+    applyMarks(demo.v2Marks());
+    applyStoredSettings(demo.v2GetSettings());
     return;
   }
 
   await Promise.all([
     follow<AppStatus>((cb) => listen<AppStatus>("status", (e) => cb(e.payload)), () => api.appStatus(), (s) => appStatus.set(s), "status"),
-    follow<PlayerMarks>((cb) => listen<PlayerMarks>("marks", (e) => cb(e.payload)), api.playerMarks, (m) => marks.set(m), "marks"),
-    follow<Settings>((cb) => listen<Settings>("settings", (e) => cb(e.payload)), api.getSettings, (s) => settings.set(s), "settings"),
+    follow<PlayerMarks>((cb) => listen<PlayerMarks>("marks", (e) => cb(e.payload)), api.playerMarks, applyMarks, "marks"),
+    follow<Settings>((cb) => listen<Settings>("settings", (e) => cb(e.payload)), api.getSettings, applyStoredSettings, "settings"),
   ]);
+  // Unreadable settings: changes are saved over the defaults, as before.
+  settingsLoaded();
 }

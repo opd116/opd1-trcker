@@ -33,6 +33,25 @@ async fn session_connects_and_exposes_self_puuid() {
 }
 
 #[tokio::test]
+async fn a_game_log_with_an_invalid_utf8_byte_still_gives_the_shards() {
+    let tmp = TempDir::new();
+    let log_dir = tmp.path().join("VALORANT").join("Saved").join("Logs");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    let mut log = b"[0000] LogInit: caf\xe9 \xff\n".to_vec();
+    log.extend_from_slice(
+        b"[0001] LogPlatform: Info: https://pd.eu.a.pvp.net/account-xp/v1/players/abc\n\
+          [0002] LogPlatform: Info: https://glz-eu-1.eu.a.pvp.net/pregame/v1/players/abc\n",
+    );
+    std::fs::write(log_dir.join("ShooterGame.log"), log).unwrap();
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+
+    let session = connect_against(tmp.path(), &server).await;
+    assert_eq!(session.self_puuid(), SELF_PUUID);
+}
+
+#[tokio::test]
 async fn session_connect_fails_when_lockfile_missing() {
     let tmp = TempDir::new();
     write_shooter_log(tmp.path());

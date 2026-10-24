@@ -386,7 +386,10 @@ impl RiotSession {
             .map_err(|_| RiotError::ClientGone)?;
         let lockfile = parse_lockfile(&raw_lockfile).map_err(|_| RiotError::ClientGone)?;
 
-        let raw_log = std::fs::read_to_string(shooter_log_path(local_app_data))
+        // Bytes, decoded lossily: one invalid UTF-8 byte anywhere in the game's
+        // log (a localized line, a crash dump) must not hide the shard lines.
+        let raw_log = std::fs::read(shooter_log_path(local_app_data))
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
             .map_err(|_| RiotError::ShardsUnavailable)?;
         let shards = parse_shards(&raw_log).ok_or(RiotError::ShardsUnavailable)?;
 

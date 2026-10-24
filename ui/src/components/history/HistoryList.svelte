@@ -62,8 +62,23 @@
     } catch (err) {
       reportError("match_history", err);
     } finally {
-      if (g === gen) busy = false;
+      if (g === gen) {
+        busy = false;
+        recheck();
+      }
     }
+  }
+
+  /**
+   * The observer only fires when the list's end crosses into range: a `more()` skipped while a load was running, or a
+   * page too short to push the end out of range, would leave the list stuck. After each load (once the rows are
+   * drawn) the end is measured, and the next page asked while it is still within 400px.
+   */
+  function recheck() {
+    requestAnimationFrame(() => {
+      if (!scroller || !sentinel) return;
+      if (sentinel.getBoundingClientRect().top <= scroller.getBoundingClientRect().bottom + 400) void more();
+    });
   }
 
   async function more() {
@@ -72,14 +87,19 @@
     const q = queue;
     const g = gen;
     busy = true;
+    let added = 0;
     try {
       const p = await matchHistory(q, d.rows.length, PAGE);
-      if (g === gen && q === queue) put(q, { ...p, rows: [...d.rows, ...p.rows.filter((r) => !d.rows.some((x) => x.matchId === r.matchId))] });
+      const fresh = p.rows.filter((r) => !d.rows.some((x) => x.matchId === r.matchId));
+      added = fresh.length;
+      if (g === gen && q === queue) put(q, { ...p, rows: [...d.rows, ...fresh] });
     } catch (err) {
       reportError("match_history", err);
     } finally {
       if (g === gen) busy = false;
     }
+    // A page that brought nothing new (or failed) asks no further: no request loop.
+    if (g === gen && added > 0) recheck();
   }
 
   function pick(q: HistoryQueue) {

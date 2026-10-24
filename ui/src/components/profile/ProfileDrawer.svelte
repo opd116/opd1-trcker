@@ -188,11 +188,24 @@
     }
   }
 
+  /**
+   * Escape with the focus outside the panel (a title bar button was clicked, or focus fell to the page): the panel's
+   * own handler never hears it, so the window's closes the drawer too. Inside the panel that handler stops it first.
+   */
+  function windowKey(e: KeyboardEvent) {
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    e.preventDefault();
+    if (noteOpen) closeNote();
+    else closeProfile();
+  }
+
   function onScroll(e: Event) {
     const s = (e.currentTarget as HTMLElement).scrollTop > 4;
     if (s !== scrolled) scrolled = s;
   }
 </script>
+
+<svelte:window onkeydown={windowKey} />
 
 <div class="overlay">
   <button type="button" class="scrim" tabindex="-1" aria-label="Close profile" onclick={closeProfile}></button>

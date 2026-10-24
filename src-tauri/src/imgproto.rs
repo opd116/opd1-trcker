@@ -89,16 +89,39 @@ pub async fn serve(st: Arc<AppState>, method: String, path: String) -> Response<
     };
     Response::builder()
         .status(StatusCode::OK)
-        // AssetCache re-encodes every kind to PNG.
-        .header(header::CONTENT_TYPE, "image/png")
+        // From the bytes: AssetCache re-encodes a downscaled image to PNG but
+        // keeps one that needs no downscale as valorant-api served it.
+        .header(header::CONTENT_TYPE, image_type(&bytes))
         .header(header::CACHE_CONTROL, CACHE_FOREVER)
         .body(bytes)
         .unwrap_or_else(|_| empty(StatusCode::INTERNAL_SERVER_ERROR))
 }
 
+/// The image's media type from its first bytes (PNG when unknown).
+fn image_type(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(b"\xFF\xD8\xFF") {
+        "image/jpeg"
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else {
+        "image/png"
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_media_type_follows_the_bytes() {
+        assert_eq!(image_type(b"\x89PNG\r\n\x1a\n...."), "image/png");
+        assert_eq!(image_type(b"\xFF\xD8\xFF\xE0...."), "image/jpeg");
+        assert_eq!(image_type(b"RIFF\x00\x00\x00\x00WEBPVP8 "), "image/webp");
+        assert_eq!(image_type(b"GIF89a"), "image/gif");
+        assert_eq!(image_type(b""), "image/png");
+    }
 
     const UUID: &str = "e370fa57-4757-3604-3648-499e1f642d3f";
 

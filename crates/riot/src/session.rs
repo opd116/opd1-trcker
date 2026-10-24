@@ -1089,7 +1089,13 @@ fn retry_after_seconds(headers: &HeaderMap) -> Option<f64> {
                 .duration_since(std::time::UNIX_EPOCH)
                 .ok()?
                 .as_secs_f64();
-            (at.timestamp() as f64 - now).max(0.0)
+            // A date already past (or a clock ahead of Riot's) says nothing
+            // about how long to wait: the caller's own backoff applies.
+            let left = at.timestamp() as f64 - now;
+            if left <= 0.0 {
+                return None;
+            }
+            left
         }
     };
     if !raw.is_finite() || raw < 0.0 {
@@ -1255,8 +1261,8 @@ mod tests {
         assert!((88.0..=90.0).contains(&left), "{in_90s}: {left}");
         assert_eq!(
             retry_after_seconds(&headers_with_retry_after("Wed, 21 Oct 2015 07:28:00 GMT")),
-            Some(0.0),
-            "a date in the past: no wait"
+            None,
+            "a date in the past: the caller's backoff, not no wait at all"
         );
         for bad in ["inf", "nan", "-3", "soon"] {
             assert_eq!(

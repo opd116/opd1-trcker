@@ -148,12 +148,15 @@ export interface Canvas {
 /** The editor font: the canvas fills about 770px, clamped to 7–20px. */
 export const canvasFontPx = (W: number): number => Math.max(7, Math.min(20, Math.floor(770 / (W * 0.6))));
 
-/** The text art centred on the canvas, with the paint strokes on top. */
-export function composeCanvas(text: string, ch: string, fx: Effect, paint: PaintMap): Canvas {
+/**
+ * The text art centred on the canvas, with the paint strokes on top. `minW`: a drawing loaded from the gallery keeps
+ * the width it was drawn on (`rawCanvasW`), so its edges are not cut off.
+ */
+export function composeCanvas(text: string, ch: string, fx: Effect, paint: PaintMap, minW = CANVAS_MIN_W): Canvas {
   const ag = asciiGrid(text, ch, fx);
   const aw = ag.length ? ag[0]!.length : 0;
   const ah = ag.length;
-  const W = Math.max(CANVAS_MIN_W, aw + 8);
+  const W = Math.max(minW, aw + 8);
   const H = CANVAS_H;
   const cx = Math.floor(W / 2);
   const cy = Math.floor(H / 2);
@@ -192,14 +195,22 @@ export function paintAt(map: PaintMap, x: number, y: number, c: Pick<Canvas, "W"
 }
 
 /**
- * A drawing loaded into the editor as paint (the text goes empty): centred on the 64 × 15 canvas the empty text
- * gives, so it shows where it was drawn.
+ * The canvas width a loaded drawing needs: what its text would have had (its width + 8, at least 64), so a wide
+ * saved art (CLUTCH with Shadow is 71 columns) comes back whole.
+ */
+export function rawCanvasW(raw: string): number {
+  return Math.max(CANVAS_MIN_W, Math.max(...raw.split("\n").map((l) => l.length)) + 8);
+}
+
+/**
+ * A drawing loaded into the editor as paint (the text goes empty): centred on a canvas `rawCanvasW` wide (64 × 15
+ * for anything that fits it), so it shows where it was drawn. Compose it with that width as `minW`.
  */
 export function loadRaw(raw: string): PaintMap {
   const ls = raw.split("\n");
   const w = Math.max(...ls.map((l) => l.length));
   const h = ls.length;
-  const W = CANVAS_MIN_W;
+  const W = rawCanvasW(raw);
   const H = CANVAS_H;
   const cx = Math.floor(W / 2);
   const cy = Math.floor(H / 2);

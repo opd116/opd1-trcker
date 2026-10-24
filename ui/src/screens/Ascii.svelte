@@ -13,6 +13,7 @@
   import {
     artSize,
     BRUSHES,
+    CANVAS_MIN_W,
     composeCanvas,
     EFFECTS,
     type Effect,
@@ -24,6 +25,7 @@
     type PaintMap,
     paintAt,
     PRESETS,
+    rawCanvasW,
     type Tool,
   } from "../lib/ascii";
   import { scrollHost } from "../lib/router.svelte";
@@ -42,6 +44,8 @@
   let tool = $state<Tool>(INITIAL.tool);
   let brush = $state(INITIAL.brush);
   let paint = $state<PaintMap>({});
+  /** The canvas width a drawing loaded from the gallery needs (`rawCanvasW`); applies while there is paint. */
+  let paintW = $state(CANVAS_MIN_W);
   let saved = $state<AsciiArt[]>([]);
 
   /**
@@ -51,8 +55,8 @@
   let flash = $state<{ key: string; ok: boolean; msg: string } | null>(null);
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const canvas = $derived(composeCanvas(text, char, fx, paint));
   const noPaint = $derived(Object.keys(paint).length === 0);
+  const canvas = $derived(composeCanvas(text, char, fx, paint, noPaint ? CANVAS_MIN_W : paintW));
 
   const CLIPBOARD_FAIL = "Couldn’t reach the clipboard.";
 
@@ -141,6 +145,7 @@
 
   function loadPaint(raw: string) {
     text = "";
+    paintW = rawCanvasW(raw);
     paint = loadRaw(raw);
   }
 

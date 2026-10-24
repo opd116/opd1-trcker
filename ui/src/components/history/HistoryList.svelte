@@ -52,13 +52,25 @@
     if (q === queue) data = p;
   }
 
-  /** Fetch the first `n` rows of `q` again (at least one page), replacing what is shown. */
+  /** Rust's page ceiling (`HISTORY_MAX_LIMIT`): one call never returns more rows. */
+  const MAX_PAGE = 200;
+
+  /**
+   * Fetch the first `n` rows of `q` again (at least one page), replacing what is shown. Past `MAX_PAGE` rows only the
+   * newest `MAX_PAGE` come back, so the older rows already loaded are kept after them instead of being dropped.
+   */
   async function refresh(q: HistoryQueue, n = PAGE) {
     const g = ++gen;
     busy = true;
     try {
-      const p = await matchHistory(q, 0, Math.max(PAGE, n));
-      if (g === gen) put(q, p);
+      const p = await matchHistory(q, 0, Math.min(MAX_PAGE, Math.max(PAGE, n)));
+      const had = historyCache.pages[q]?.rows ?? [];
+      if (g === gen) {
+        if (n > MAX_PAGE && had.length > p.rows.length) {
+          const fresh = new Set(p.rows.map((r) => r.matchId));
+          put(q, { ...p, rows: [...p.rows, ...had.filter((r) => !fresh.has(r.matchId))] });
+        } else put(q, p);
+      }
     } catch (err) {
       reportError("match_history", err);
     } finally {

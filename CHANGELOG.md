@@ -18,6 +18,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - The window is resizable now (1280×800 by default, at least 1180×760), with its own title bar.
 
+### Fixed
+
+- Reinstalling into a folder you picked by hand (say `D:\Games`) no longer deletes everything else in that folder; the installer also asks to close a running copy before it removes anything.
+- A rank Riot sends without its RR now shows (with the RR from your stored matches when they have it) instead of `—`.
+- A player who changed their Riot ID shows the new name after the next match, not the old one until the app restarts.
+- Switching Riot accounts in a Riot Client that stays open reconnects for the new account.
+- A Riot Client that hangs while renewing its login no longer stalls the app for about a minute.
+- One unreadable character in the game's log no longer stops the app from finding your region.
+- If the app cannot start (its database cannot open), it leaves its log in `%APPDATA%\com.opd1.trcker\startup-error.log`.
+- "12mo" reads "1y".
+
+### Security
+
+- The debug dump (Ctrl+Shift+D) hides the game server's address and your match join key.
+- The TLS library is updated for six published advisories (rustls, rustls-webpki, webpki-root-certs).
+
 ## [0.3.1] - 2026-10-04
 
 Filled from `git log` (`493d4f9..da61be2`). The five features picked for v0.4.0 and the act-change work are not in this release (see `docs/next-session-prompt.md`).

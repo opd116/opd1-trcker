@@ -9,17 +9,36 @@
 ; memory and must survive every reinstall.
 
 !macro NSIS_HOOK_PREINSTALL
+  ; --- A running copy first ---
+  ; The app usually sits in the tray (close to tray and launch with Windows
+  ; are on by default). The template asks to close it only after this hook,
+  ; so the clean-up below would run against locked files, and a Cancel at
+  ; that prompt would leave the old install half deleted (no uninstaller).
+  ; Asking here first makes a Cancel leave everything as it was.
+  !insertmacro CheckIfAppIsRunning "$INSTDIR\${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+
   ; --- Program files ($INSTDIR) ---
-  ; Only wipe $INSTDIR when it provably already holds a previous install of
-  ; this app (our main binary is present there). Never recursively delete a
-  ; directory just because the installer happened to be pointed at it -- an
-  ; empty/unrelated $INSTDIR is left completely alone.
+  ; Only when $INSTDIR provably holds a previous install of this app (our
+  ; main binary is there), and recursively only when the folder is the app's
+  ; own (named after the product, the default). A folder the installer was
+  ; pointed at by hand (say D:\Games) loses only the files this app puts
+  ; there (Section Install: the exe, THIRD-PARTY-NOTICES.md, uninstall.exe);
+  ; anything else in it stays (R4).
   ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
-    RMDir /r "$INSTDIR"
-    ; Section Install already called SetOutPath "$INSTDIR" before this hook
-    ; runs and is about to `File` the new binary into it, so recreate the
-    ; directory we just removed.
-    CreateDirectory "$INSTDIR"
+    Push $0
+    ${GetFileName} "$INSTDIR" $0
+    ${If} $0 == "${PRODUCTNAME}"
+      RMDir /r "$INSTDIR"
+      ; Section Install already called SetOutPath "$INSTDIR" before this hook
+      ; runs and is about to `File` the new binary into it, so recreate the
+      ; directory we just removed.
+      CreateDirectory "$INSTDIR"
+    ${Else}
+      Delete "$INSTDIR\${MAINBINARYNAME}.exe"
+      Delete "$INSTDIR\THIRD-PARTY-NOTICES.md"
+      Delete "$INSTDIR\uninstall.exe"
+    ${EndIf}
+    Pop $0
   ${EndIf}
 
   ; --- Image / WebView2 cache ($LOCALAPPDATA\${BUNDLEID}) ---
@@ -59,8 +78,13 @@
   ; the product (tauri-plugin-autostart's app name, set to "OPD1 TRCKER"
   ; in src-tauri/src/v2/window.rs) plus Task Manager's StartupApproved
   ; entry. Remove both so an uninstalled app never starts a missing exe.
-  ; An update that runs the old uninstaller loses them too; the new app
-  ; writes them again at its first start while the setting is on.
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "OPD1 TRCKER"
-  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "OPD1 TRCKER"
+  ; Not in an update (/UPDATE): the app stays installed, and Task Manager's
+  ; StartupApproved entry is the user's own on/off switch, which the next
+  ; version must keep. A reinstall that uninstalls first loses them; the new
+  ; app writes the Run value again at its first start while the setting is
+  ; on (v2::window::autostart_at_start), without touching StartupApproved.
+  ${If} $UpdateMode <> 1
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "OPD1 TRCKER"
+    DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" "OPD1 TRCKER"
+  ${EndIf}
 !macroend

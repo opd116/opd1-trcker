@@ -220,31 +220,51 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     }
 }
 
-/// Startup: with `boot` on, the autostart entry is written only when the
-/// `Run` value is missing (the first start, or an update whose old
-/// uninstaller removed it). An entry that is there is left alone:
-/// `AutoLaunch::enable` also marks it enabled in Task Manager's
-/// `StartupApproved`, which would undo the user switching it off there.
+/// Startup: with `boot` on, only the current user's `Run` value is made
+/// right (written when missing, after a first install or a reinstall, or
+/// when it names another exe path); Task Manager's `StartupApproved` entry
+/// is never touched here. `AutoLaunch::enable` would also mark it enabled,
+/// undoing the user switching the app off in Task Manager at every start.
 /// With `boot` off the entry is removed.
 pub fn autostart_at_start(on: bool) {
-    if on && autostart_registered() {
+    if !on {
+        set_autostart(false);
         return;
     }
-    set_autostart(on);
+    if cfg!(debug_assertions) {
+        return;
+    }
+    if let Err(e) = refresh_run_value() {
+        log::warn!("autostart refresh: {e}");
+    }
 }
 
-/// Whether the current user's `Run` key holds the autostart value.
 #[cfg(windows)]
-fn autostart_registered() -> bool {
-    windows_registry::CURRENT_USER
-        .open(r"Software\Microsoft\Windows\CurrentVersion\Run")
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Writes the `Run` value (the same command line `AutoLaunch` writes) unless
+/// it already holds it.
+#[cfg(windows)]
+fn refresh_run_value() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let (path, args) = autostart_command(&exe);
+    let want = format!("{} {}", path, args.join(" "));
+    let have = windows_registry::CURRENT_USER
+        .open(RUN_KEY)
         .and_then(|key| key.get_string(AUTOSTART_NAME))
-        .is_ok()
+        .ok();
+    if have.as_deref() == Some(want.as_str()) {
+        return Ok(());
+    }
+    windows_registry::CURRENT_USER
+        .create(RUN_KEY)
+        .and_then(|key| key.set_string(AUTOSTART_NAME, &want))
+        .map_err(|e| e.to_string())
 }
 
 #[cfg(not(windows))]
-fn autostart_registered() -> bool {
-    false
+fn refresh_run_value() -> Result<(), String> {
+    Ok(())
 }
 
 /// The `boot` setting: the autostart entry written (it also refreshes the

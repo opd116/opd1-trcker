@@ -109,8 +109,33 @@ fn show_main(app: &AppHandle) {
     if let Some(w) = main_window(app) {
         let _ = w.unminimize();
         let _ = w.show();
+        set_webview_visible(&w, true);
         let _ = w.set_focus();
     }
+}
+
+/// Tells WebView2 whether the page is on screen. Hiding the native window
+/// (close to tray) or minimizing it does not: WebView2 keeps the page
+/// "visible" until its controller hears otherwise, so the waiting screen's
+/// radar, the pulsing dots and the 1 s clocks kept rendering in the tray for
+/// days. Hidden, the page reads `document.hidden` and Chromium stops drawing
+/// and throttles its timers; Rust (the poll loop, the toasts) is unaffected.
+fn set_webview_visible(w: &WebviewWindow, visible: bool) {
+    #[cfg(windows)]
+    {
+        let done = w.with_webview(move |wv| {
+            // SAFETY: a plain COM call on the live controller WebView2 handed
+            // Tauri, made on the main thread `with_webview` runs it on.
+            if let Err(e) = unsafe { wv.controller().SetIsVisible(visible) } {
+                log::debug!("webview visibility ({visible}): {e}");
+            }
+        });
+        if let Err(e) = done {
+            log::debug!("webview visibility ({visible}): {e}");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (w, visible);
 }
 
 /// Startup: the tray, the stored settings applied
@@ -138,8 +163,11 @@ pub fn setup(app: &tauri::App, st: &AppState) -> tauri::Result<()> {
         } else if !settings.tray {
             w.show()?;
             w.minimize()?;
+            set_webview_visible(&w, false);
+        } else {
+            // Hidden in the tray until "Show" or a click on the icon.
+            set_webview_visible(&w, false);
         }
-        // else: hidden in the tray until "Show" or a click on the icon.
     }
     Ok(())
 }
@@ -177,20 +205,31 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 /// `on_window_event`: the main window's close request (the title bar's ×)
 /// hides it to the tray when the `tray` setting is on; otherwise the app
-/// quits.
+/// quits. A resize tells WebView2 whether the page is on screen (minimized
+/// or restored, from the title bar, the taskbar or Win+D).
 pub fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
-    let tauri::WindowEvent::CloseRequested { api, .. } = event else {
-        return;
-    };
     if window.label() != MAIN_WINDOW {
         return;
     }
+    if let tauri::WindowEvent::Resized(_) = event {
+        if let Some(w) = main_window(window.app_handle()) {
+            let on_screen = !w.is_minimized().unwrap_or(false) && w.is_visible().unwrap_or(true);
+            set_webview_visible(&w, on_screen);
+        }
+        return;
+    }
+    let tauri::WindowEvent::CloseRequested { api, .. } = event else {
+        return;
+    };
     let to_tray = window
         .try_state::<WindowFlags>()
         .is_some_and(|f| f.close_to_tray.load(Ordering::Relaxed));
     if to_tray {
         api.prevent_close();
         let _ = window.hide();
+        if let Some(w) = main_window(window.app_handle()) {
+            set_webview_visible(&w, false);
+        }
     } else {
         window.app_handle().exit(0);
     }

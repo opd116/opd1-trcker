@@ -232,6 +232,36 @@ async fn failing_polls_while_the_game_runs_are_lost_with_attempts_then_the_lockf
 }
 
 #[tokio::test]
+async fn a_reconnect_whose_presence_still_fails_is_unreachable_not_waiting() {
+    let h = harness().await;
+    let (_, fail) = presence(&h, blob("MENUS", "unrated")).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    for _ in 1..LOST_MAX_ATTEMPTS {
+        poller.presence_tick(&h.session).await.unwrap();
+    }
+    assert!(poller.presence_tick(&h.session).await.is_err());
+    poller.note_session_lost("presence keeps failing");
+    poller.drop_session().await;
+
+    // The client answers a connect, but its presence still fails: the game
+    // may be running, so the pill never says "waiting for VALORANT".
+    poller.on_connected(h.session.clone()).await;
+    assert_eq!(status(&h).conn, ConnState::Lost);
+    poller.presence_tick(&h.session).await.unwrap();
+    let s = status(&h);
+    assert_eq!(s.conn, ConnState::Error);
+    assert_eq!(s.error_code.as_deref(), Some(CLIENT_UNREACHABLE));
+
+    // A presence answers again: the pill follows the game.
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(status(&h).conn, ConnState::Ok);
+}
+
+#[tokio::test]
 async fn a_lost_client_counts_its_reconnects_then_falls_to_unreachable() {
     let h = harness().await;
     presence(&h, blob("MENUS", "unrated")).await;
@@ -557,6 +587,26 @@ async fn the_game_closing_in_game_points_the_recap_at_the_match_too() {
     assert_eq!(h.st.live_state().stage, Stage::Closed);
     assert_eq!(status(&h).recap_match_id, Some(entry_id(0)));
     assert_eq!(status(&h).conn, ConnState::Waiting);
+}
+
+#[tokio::test]
+async fn an_account_switch_ends_the_previous_accounts_recap() {
+    let h = harness().await;
+    lock(&h.st.live).self_puuid = Some("previous-account".into());
+    h.st.set_status(|s| s.recap_match_id = Some("old-match".into()));
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    assert_eq!(status(&h).recap_match_id, None);
+}
+
+#[tokio::test]
+async fn a_reconnect_of_the_same_account_keeps_its_recap() {
+    let h = harness().await;
+    lock(&h.st.live).self_puuid = Some(ME.into());
+    h.st.set_status(|s| s.recap_match_id = Some("my-match".into()));
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    assert_eq!(status(&h).recap_match_id.as_deref(), Some("my-match"));
 }
 
 // ---------------------------------------------------------------------

@@ -324,6 +324,11 @@ pub(crate) struct Poller {
     /// lost). Counts the presence failures while VALORANT runs, then the
     /// reconnects after that session was lost, up to [`LOST_MAX_ATTEMPTS`].
     pub(crate) lost_attempt: u32,
+    /// Sessions dropped in a row because their presence kept failing, with
+    /// no presence answered since. While above 0 the game's state is
+    /// unknown, so a reconnect does not claim "waiting": the pill stays
+    /// lost, then says the client is unreachable.
+    presence_drops: u32,
     /// R189: when this poller first saw the party matchmaking (the queue
     /// timer's start when the presence carries no entry time).
     queue_seen_ms: Option<i64>,
@@ -387,6 +392,7 @@ impl Poller {
             next_connect: Instant::now(),
             lockfile_mtime: None,
             lost_attempt: 0,
+            presence_drops: 0,
             queue_seen_ms: None,
             alerts: SavedAlerts::default(),
         }
@@ -442,6 +448,7 @@ impl Poller {
             self.connect_failures = 0;
             self.lockfile_mtime = None;
             self.lost_attempt = 0;
+            self.presence_drops = 0;
             self.status_error(LOCKFILE_NOT_FOUND, CLOSED_CHECK);
             self.idle(CLOSED_CHECK).await;
             return;
@@ -527,6 +534,8 @@ impl Poller {
             // once (DB only), not after the asset tables are re-checked below
             // and not after the push's trailing wait either.
             crate::my_stats::notify_now(&self.st);
+            // R189: nor is the previous account's match this one's recap.
+            self.st.set_status(|s| s.recap_match_id = None);
         }
         let key_value = me.clone();
         self.st
@@ -546,7 +555,9 @@ impl Poller {
         // R189: the Riot Client answers; whether VALORANT runs is the first
         // presence's to say.
         self.lost_attempt = 0;
-        self.status_session(&session, false);
+        if self.presence_drops == 0 {
+            self.status_session(&session, false);
+        }
         self.game = GameWatch::default();
         // R90: asked at this session's first presence showing VALORANT.
         self.self_loadout_asked = false;
@@ -725,6 +736,7 @@ impl Poller {
             Ok(p) => {
                 self.presence_errors = 0;
                 self.lost_attempt = 0;
+                self.presence_drops = 0;
                 // R189: the local API answered.
                 self.st.note_local_data(now_ms());
                 p
@@ -743,8 +755,13 @@ impl Poller {
                         PRESENCE_EVERY
                     };
                     self.status_lost(next);
+                } else if self.presence_drops > 0 {
+                    // The previous session was dropped for this too: the
+                    // client is there but does not answer.
+                    self.status_error(CLIENT_UNREACHABLE, PRESENCE_EVERY);
                 }
                 if reconnect {
+                    self.presence_drops = self.presence_drops.saturating_add(1);
                     return Err(Stop::Reconnect("presence keeps failing"));
                 }
                 return Ok(());

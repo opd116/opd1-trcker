@@ -21,7 +21,12 @@
     return () => clearInterval(id);
   });
 
-  const view = $derived($appStatus ? pillView($appStatus, $live?.stage ?? null, nowMs) : null);
+  /** When the current status arrived (its retry wait counts from then). */
+  const arrivedMs = $derived.by(() => {
+    void $appStatus;
+    return Date.now();
+  });
+  const view = $derived($appStatus ? pillView($appStatus, $live?.stage ?? null, nowMs, arrivedMs) : null);
 </script>
 
 {#if view}

@@ -423,6 +423,10 @@ pub struct TeammateSummary {
     pub puuid: String,
     pub name: DisplayName,
     pub count: u32,
+    /// Of those `count` shared matches, the ones the profile's owner won /
+    /// lost (a draw is neither), so `wins + losses <= count`.
+    pub wins: u32,
+    pub losses: u32,
 }
 
 /// One equipped weapon skin, named (R97/R83): `skin_name` is the skin's

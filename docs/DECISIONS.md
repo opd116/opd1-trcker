@@ -1323,6 +1323,41 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** Until it is built, at the act change on 2026-10-14 a player whose rank snapshot has no entry for the new act shows `—` for the current rank until they play, the act switch may reach the screen only at the next publish or the 15-minute My Stats tick, and a backfill already running pages back to the old act's start (more requests, nothing lost).
 - **Status:** parked (user, 2026-10-04)
 
+### R189 — The v2 design (TrackerApp) replaces the v8 design
+
+- **What:** User decision 2026-10-22: implement the new Claude Design handoff (`TrackerApp.dc.html`, kept locally in `.superpowers/design/v2/`) in the existing app, wired to real data. It replaces the v8 card UI: a custom title bar and a nav rail with Live, Saved, History, Comp, Skins, ASCII, Settings and About; a profile drawer instead of the Details page; the scoreboard under History instead of the Match page; Competitive instead of My Stats; a post-match recap; Glance mode. The design's one theme replaces the six v8 options (tone, accent, results, fill, font, last-5); fonts are Barlow, Saira Condensed and Geist Mono, bundled locally. Existing data rules (Hidden names, Smart data, Hard limits, the CSP and the img cache) are unchanged.
+- **Why:** The user's words (`docs/requirements-raw.md`, 2026-10-22).
+- **Cost:** The v8 geometry tests and visual baselines are replaced; new commands and events (`src-tauri/src/v2/`, `crates/core/src/wire.rs`).
+- **Status:** active
+
+### R190 — The window: custom title bar, resizable, Glance mode
+
+- **What:** User decision 2026-10-22 (overrides CLAUDE.md "Window"): no native frame (`decorations: false`); the app draws the title bar with Pin (always on top), Minimize, Maximize and Close; default 1280×800, minimum 1180×760, resizable and maximizable. Glance mode shrinks the window to a 420px-wide column on top of other windows.
+- **Why:** The v2 design is built for it.
+- **Cost:** Window permissions in `capabilities/default.json`; Glance needs a Rust resize command.
+- **Status:** active
+
+### R191 — Status text is allowed where the v2 design shows it
+
+- **What:** User decision 2026-10-22 (overrides "No status text"): the title-bar connection pill (Waiting for VALORANT / Connected / Reconnecting… / Riot Client unreachable), the lost-connection banner, the error screen, the waiting screen's checks list and the queue timer are shown as designed, fed by a real `status` event. Elsewhere loading still uses skeletons and missing values `—`.
+- **Why:** The user chose the design over the old rule.
+- **Cost:** The poll loop reports its connection state.
+- **Status:** active
+
+### R192 — Full skins collection
+
+- **What:** User decision 2026-10-22: the Skins screen shows the user's whole owned collection (Riot's store entitlements for skin levels) mapped through a valorant-api skin catalog fetched once per valorant-api version and cached on disk, with standard VP prices per edition (an estimate, never a resale value) and the SAR conversion the design shows.
+- **Why:** The user picked it over "equipped loadout only".
+- **Cost:** One new Riot request (throttled, at most every 10 minutes) and one larger cached valorant-api table, an exception to the lightness note in `assets.rs`.
+- **Status:** active
+
+### R193 — Tray, launch with Windows, notifications
+
+- **What:** User decision 2026-10-22 (overrides "No tray. No autostart"): add the Tauri `tray-icon` feature, `tauri-plugin-autostart` and `tauri-plugin-notification`, so Settings' "Close to tray", "Launch with Windows" and "Saved player in my match" (with optional sound) work. `tauri-plugin-dialog` is not approved; the error screen's "Choose Riot Client folder…" waits for it.
+- **Why:** The user approved the new dependencies.
+- **Cost:** Three dependencies; settings are stored in `app_state` (`ui_settings`) and survive updates (R177).
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.
@@ -1340,3 +1375,4 @@ Each row is a dated block of `docs/requirements-raw.md`, in file order. That fil
 | 2026-09-28 | `ملاحظات المستخدم على تصميم v7.1` | Nine points: the card is crowded, secondary text is too faint, each statistic's scope must be clear (shown without hovering: superseded, see the marker), long names truncate but the tag never does, one meaning per indicator, last 5 must be clearer, Peak names the tier, shared-match results read `Your result`, hidden means the name only. |
 | 2026-09-28 | `ملاحظات المستخدم على v8` | Remove the printed scope headings (tooltip only); numbers and last-5 results look off; the palette looks AI-made; the user said the design pleases them (to confirm). |
 | 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. Later 2026-09-29 line: Player Details hero K/D and HS% from the last 20 act matches (R116). Later 2026-09-30 lines: names Riot returns for matches the user did not play may show off the live screen (R143); a hidden player's name shows in the remembered style from any source the DB knows (R145); name-service may be asked off the live stages (R150); names are captured after each match because the game's own Match History shows them; Encounters count competitive matches only (R156); friends' names come like everyone else's (R157, withdrawn); when the rank request fails the rank shows from the player's matches (R154); build the requests the way Scout does (R159). Later line, 2026-10-01: after testing, "there is still a delay or a bug in the requests"; holds per family, full Retry-After, mmr never blocks (R160). Later line, 2026-10-03: v0.3.0 = fixes plus My Stats (R168). Later line, 2026-10-04: v0.3.0 tested fine; v0.4.0 = the brief plus five picked features (encounter tooltip, Match History, Settings as a fourth tab whose choices survive updates, hide hotkey, notes) (R177). Same day: the rank carries over into a new act (R188); then anything about the new act is postponed for now (R188, parked). |
+| 2026-10-22 | `قرارات تصميم v2` | Implement the new TrackerApp design on the real app (R189); custom title bar, resizable 1280×800 / min 1180×760, Glance (R190); the design's status text wins over "No status text" (R191); full skins collection (R192); tray, autostart and notification plugins approved (R193). |

@@ -8,11 +8,24 @@ import { readdirSync, readFileSync } from "node:fs";
 import { render } from "svelte/server";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { displayNameShapes, enums, shapes, type Desc, type Kind } from "./contract.shape";
+import { CONN_STATES, liveShapes } from "./contract.shape"; // R189 (backend-live)
 import { detailsFor, encounterMatchId, matchFor, PUUID, recentMatchId, roster } from "./demo/cdv8";
 import { resolveMyStats } from "./demo/scenes";
 import demoMeta from "./demo/meta.json";
 import { SCENES } from "./demo/scenes";
-import type { Meta, MyStats, PlayerCard as Card, PlayerDetails } from "./types";
+import { DEFAULT_SETTINGS } from "./demo/v2/store";
+import type {
+  AppInfo,
+  AsciiArt,
+  HistoryPage,
+  Meta,
+  MyStats,
+  PlayerCard as Card,
+  PlayerDetails,
+  PlayerMarks,
+  SavedPlayer,
+  Settings,
+} from "./types";
 
 // ── goldens ──────────────────────────────────────────────────────────────────────
 const GOLDEN_DIR = new URL("../../../crates/core/tests/fixtures/contract/", import.meta.url);
@@ -22,6 +35,13 @@ const LIVE = golden("live_state") as { players: Record<string, unknown>[] } & Re
 const DETAILS = golden("player_details") as Record<string, unknown>;
 const MATCHES = golden("match_details_view") as Record<string, unknown>[];
 const MY_STATS = golden("my_stats") as Record<string, unknown>[];
+// v2 redesign (R189).
+const HISTORY = golden("history_page") as HistoryPage[];
+const SAVED = golden("saved_players") as SavedPlayer[];
+const MARKS = golden("player_marks") as PlayerMarks[];
+const SETTINGS = golden("settings") as Settings[];
+const ASCII = golden("ascii_art") as AsciiArt[];
+const APP_INFO = golden("app_info") as AppInfo[];
 
 // ── the walker ───────────────────────────────────────────────────────────────────
 type Shape = Record<string, Desc>;
@@ -315,7 +335,22 @@ describe("the walker can fail (a check that cannot fail proves nothing)", () => 
 // ── the goldens ──────────────────────────────────────────────────────────────────
 describe("the goldens match the descriptors", () => {
   it("these are all the goldens: a new one on the Rust side needs a descriptor and a test here", () => {
-    expect(readdirSync(GOLDEN_DIR).sort()).toEqual(["live_state.json", "match_details_view.json", "my_stats.json", "player_details.json"]);
+    // R189: the v2 goldens (backend-store, backend-live); their tests are at the end of this file.
+    expect(readdirSync(GOLDEN_DIR).sort()).toEqual([
+      "app_info.json",
+      "app_status.json",
+      "ascii_art.json",
+      "collection.json",
+      "history_page.json",
+      "live_state.json",
+      "match_details_view.json",
+      "my_stats.json",
+      "player_details.json",
+      "player_marks.json",
+      "profile_extras.json",
+      "saved_players.json",
+      "settings.json",
+    ]);
   });
 
   it("live_state.json is a LiveState", () => {
@@ -349,6 +384,89 @@ describe("the goldens match the descriptors", () => {
         `${key} is never null`,
       ).toBe(true);
     }
+  });
+});
+
+describe("the v2 goldens match the descriptors (R189)", () => {
+  it("history_page.json holds two HistoryPages (the competitive tab and the all tab)", () => {
+    expect(HISTORY).toHaveLength(2);
+    HISTORY.forEach((p, i) => expect(problems(p, "HistoryPage", `history_page[${i}]`)).toEqual([]));
+  });
+
+  it("saved_players.json is a list of SavedPlayers", () => {
+    expect(SAVED.length).toBeGreaterThan(0);
+    SAVED.forEach((p, i) => expect(problems(p, "SavedPlayer", `saved_players[${i}]`)).toEqual([]));
+  });
+
+  it("player_marks.json holds two PlayerMarks (some marks, none)", () => {
+    expect(MARKS).toHaveLength(2);
+    MARKS.forEach((m, i) => expect(problems(m, "PlayerMarks", `player_marks[${i}]`)).toEqual([]));
+  });
+
+  it("settings.json holds two Settings (the defaults, every value changed)", () => {
+    expect(SETTINGS).toHaveLength(2);
+    SETTINGS.forEach((s, i) => expect(problems(s, "Settings", `settings[${i}]`)).toEqual([]));
+  });
+
+  it("ascii_art.json is a list of AsciiArt", () => {
+    expect(ASCII.length).toBeGreaterThan(0);
+    ASCII.forEach((a, i) => expect(problems(a, "AsciiArt", `ascii_art[${i}]`)).toEqual([]));
+  });
+
+  it("app_info.json holds two AppInfos (everything known, a build without git and no game)", () => {
+    expect(APP_INFO).toHaveLength(2);
+    APP_INFO.forEach((a, i) => expect(problems(a, "AppInfo", `app_info[${i}]`)).toEqual([]));
+  });
+});
+
+describe("v2 golden invariants the UI relies on (R189)", () => {
+  it("history: newest first, the tab's rows in its queue, the counts consistent, a null stat line null as a whole (R102)", () => {
+    const [comp, all] = HISTORY as [HistoryPage, HistoryPage];
+    for (const p of HISTORY) {
+      expect(desc(p.rows.map((r) => r.startMs))).toBe(true);
+      expect(p.rows.length).toBeLessThanOrEqual(p.total);
+      expect(p.competitiveTotal).toBeLessThanOrEqual(p.allTotal);
+      for (const r of p.rows) {
+        if (r.kills === null) expect([r.deaths, r.assists, r.kd, r.acs, r.hsPct]).toEqual([null, null, null, null, null]);
+        expect(r.mapId === null || UUID.test(r.mapId)).toBe(true);
+      }
+    }
+    expect(comp.rows.every((r) => r.queueId === "competitive")).toBe(true);
+    expect(comp.total).toBe(comp.competitiveTotal);
+    expect(all.total).toBe(all.allTotal);
+    expect(all.rows.some((r) => r.queueId !== "competitive")).toBe(true);
+    expect(all.rows.some((r) => r.kills === null)).toBe(true);
+    expect(all.rows.some((r) => r.mapId === null)).toBe(true);
+    expect(strings(HISTORY).filter((s) => s.includes("/Game/"))).toEqual([]);
+  });
+
+  it("saved players: newest saved first, every name style, records that add up, map ids uuids", () => {
+    expect(desc(SAVED.map((p) => p.savedMs))).toBe(true);
+    expect(SAVED.map((p) => p.name.kind).sort()).toEqual(["hiddenAgent", "hiddenPlayer", "remembered", "visible"]);
+    for (const p of SAVED) {
+      for (const r of [p.with, p.against]) expect(r.wins + r.losses).toBeLessThanOrEqual(r.games);
+      expect(p.lastSeenMapId === null || UUID.test(p.lastSeenMapId)).toBe(true);
+      if (p.lastSeenMs === null) expect(p.lastSeenMapId).toBeNull();
+    }
+    expect(SAVED.some((p) => p.note !== "")).toBe(true);
+    expect(strings(SAVED).filter((s) => s.includes("/Game/"))).toEqual([]);
+  });
+
+  it("marks: saved and notSmurf are puuid lists, every note is non-empty", () => {
+    for (const m of MARKS) {
+      for (const p of [...m.saved, ...m.notSmurf]) expect(typeof p).toBe("string");
+      for (const note of Object.values(m.notes)) expect(typeof note === "string" && note.trim() !== "").toBe(true);
+    }
+    expect(MARKS[1]).toEqual({ saved: [], notes: {}, notSmurf: [] });
+  });
+
+  it("settings: the backend's defaults are the UI's", () => {
+    expect(SETTINGS[0]).toEqual(DEFAULT_SETTINGS);
+    expect(SETTINGS[1]).not.toEqual(DEFAULT_SETTINGS);
+  });
+
+  it("the ASCII gallery comes newest first", () => {
+    expect(desc(ASCII.map((a) => a.createdMs))).toBe(true);
   });
 });
 
@@ -482,40 +600,49 @@ describe("golden invariants the UI relies on", () => {
   });
 });
 
-// ── absent key -> skeleton, null -> — (R23), through the real card ────────────────
-describe("the card reads the golden tri-state: an absent key is a skeleton, null is —", () => {
-  let PlayerCard: typeof import("../components/PlayerCard.svelte").default;
+// ── absent key -> skeleton, null -> — (R23), through the real live row ────────────
+describe("the live row reads the golden tri-state: an absent key is a skeleton, null is —", () => {
+  let PlayerRow: typeof import("../components/live/PlayerRow.svelte").default;
+  let rowView: typeof import("./livev2").rowView;
   beforeAll(async () => {
     vi.stubGlobal("location", { search: "" });
     vi.stubGlobal("document", { documentElement: { style: { setProperty: vi.fn() } }, getElementById: () => ({ setAttribute: vi.fn() }) });
-    PlayerCard = (await import("../components/PlayerCard.svelte")).default;
-    // With the names pending (spec §5.8) a tier name is a skeleton whatever the card carries.
-    (await import("./stores")).meta.set(demoMeta as Meta);
+    PlayerRow = (await import("../components/live/PlayerRow.svelte")).default;
+    rowView = (await import("./livev2")).rowView;
   });
   afterAll(() => vi.unstubAllGlobals());
 
-  const html = (card: unknown) => render(PlayerCard, { props: { card: card as Card } }).body.replace(/<!--.*?-->/g, "");
-  const byPuuid = (p: string) => LIVE.players.find((c) => c.puuid === p)!;
+  const cards = () => LIVE.players as unknown as Card[];
+  const html = (puuid: string) => {
+    const list = cards();
+    const i = list.findIndex((c) => c.puuid === puuid);
+    const row = rowView(list[i]!, i, list, {
+      meta: demoMeta as Meta,
+      lobby: list,
+      settings: { highlight: DEFAULT_SETTINGS.highlight, smurf: DEFAULT_SETTINGS.smurf },
+      marks: { saved: [], notes: {}, notSmurf: [] },
+      selected: null,
+      stage: "ingame",
+    });
+    return render(PlayerRow, { props: { row, border: false } }).body.replace(/<!--.*?-->/g, "");
+  };
   const text = (h: string) => h.replace(/<[^>]+>/g, "");
   const skeletons = (h: string) => (h.match(/class="sk[ "]/g) ?? []).length;
 
   it("the loading card (every tri-state key absent) shows skeletons and no —", () => {
-    const h = html(byPuuid("puuid-loading"));
-    expect(skeletons(h)).toBeGreaterThanOrEqual(7); // name, level, rank, peak, prev, K/D + HS% + Win%, last 5
+    const h = html("puuid-loading");
+    expect(skeletons(h)).toBeGreaterThanOrEqual(5);
     expect(text(h)).not.toContain("—");
   });
 
   it("the missing card (every tri-state key null) shows — and no skeleton", () => {
-    const h = html(byPuuid("puuid-missing"));
+    const h = html("puuid-missing");
     expect(skeletons(h)).toBe(0);
-    expect(text(h).split("—").length - 1).toBeGreaterThanOrEqual(6);
-    expect(text(h)).toContain("Lv —");
+    expect(text(h)).toContain("—");
   });
 
-  it("a full card has neither", () => {
-    const h = html(byPuuid("puuid-self"));
-    expect(skeletons(h)).toBe(0);
-    expect(text(h)).not.toContain("—");
+  it("a full card has no skeleton", () => {
+    expect(skeletons(html("puuid-self"))).toBe(0);
   });
 });
 
@@ -658,5 +785,85 @@ describe("the demo fixtures follow the golden contract", () => {
       const flag = m.perspective === "self" ? "isSelf" : "isFocus";
       expect(m.teams[0]!.players.some((p) => p[flag]), n).toBe(true);
     }
+  });
+});
+
+// ── R189 (backend-live): AppStatus and ProfileExtras ────────────────────────────────────────────────────────────────
+// Their descriptors are a block of their own in contract.shape.ts (`liveShapes`); the walker resolves nested shapes by
+// name through `registry`, so they join it here.
+Object.assign(registry, liveShapes);
+
+const APP_STATUS = golden("app_status") as Record<string, unknown>[];
+const PROFILE_EXTRAS = golden("profile_extras") as Record<string, unknown>;
+
+describe("R189: the status feed and the profile extras follow the golden contract", () => {
+  it("app_status.json holds the pills: ok in Agent Select, queueing, after a match, ok without a timer, lost, error", () => {
+    expect(APP_STATUS).toHaveLength(6);
+    APP_STATUS.forEach((s, i) => expect(problems(s, "AppStatus", `app_status[${i}]`)).toEqual([]));
+    expect(APP_STATUS.map((s) => s.conn)).toEqual(["ok", "ok", "ok", "ok", "lost", "error"]);
+    for (const s of APP_STATUS) expect(CONN_STATES as readonly unknown[]).toContain(s.conn);
+  });
+
+  it("each status keeps what the UI relies on: one live line at a time, an error has a code, lost counts attempts", () => {
+    for (const [i, s] of APP_STATUS.entries()) {
+      const here = `app_status[${i}]`;
+      expect(s.pregame !== null && s.queue !== null, `${here}: Agent Select and a queue at once`).toBe(false);
+      if (s.conn === "error") expect(["LOCKFILE_NOT_FOUND", "CLIENT_UNREACHABLE"], here).toContain(s.errorCode);
+      else expect(s.errorCode, here).toBeNull();
+      if (s.conn === "lost") expect((s.attempt as number) >= 1 && (s.attempt as number) <= (s.maxAttempts as number), here).toBe(true);
+      else expect(s.attempt, here).toBe(0);
+      if (s.recapMatchId !== null) expect(s.queue, `${here}: queueing clears the recap`).toBeNull();
+    }
+  });
+
+  it("the walker catches a status with a dropped key or a pill sent as a number", () => {
+    const { gameVersion: _dropped, ...rest } = APP_STATUS[0]!;
+    expect(problems(rest, "AppStatus", "s")).toEqual(["s.gameVersion: required key of AppStatus is missing"]);
+    expect(problems({ ...APP_STATUS[0], conn: 1 }, "AppStatus", "s")).toEqual(["s.conn: number is not one of string"]);
+  });
+
+  it("profile_extras.json is a ProfileExtras; its maps are My Stats rows with uuid ids, most played first", () => {
+    expect(problems(PROFILE_EXTRAS, "ProfileExtras", "profile_extras")).toEqual([]);
+    const maps = PROFILE_EXTRAS.maps as { id: string; games: number }[];
+    for (const m of maps) expect(m.id).toMatch(UUID);
+    expect(desc(maps.map((m) => m.games))).toBe(true);
+    const mates = PROFILE_EXTRAS.liveMates as { matchId: string; puuids: string[] }[];
+    for (const m of mates) {
+      expect(m.puuids.length).toBeGreaterThan(0);
+      expect(m.puuids).not.toContain(PROFILE_EXTRAS.puuid);
+      for (const p of m.puuids) expect(p).toMatch(UUID);
+    }
+  });
+});
+
+// ── R189 (backend-system): the Skins screen (`collection`) ──
+describe("collection.json", () => {
+  const COLLECTION = golden("collection") as {
+    items: { name: string; weaponId: string; edition: string | null; vp: number | null }[];
+    weapons: { id: string; name: string }[];
+  };
+
+  it("is a Collection", () => {
+    expect(problems(COLLECTION, "Collection", "collection")).toEqual([]);
+  });
+
+  it("a skin with no edition has no price; every item names a listed weapon; names drop the weapon word", () => {
+    expect(COLLECTION.items.some((s) => s.edition === null && s.vp === null)).toBe(true);
+    for (const s of COLLECTION.items) {
+      expect(s.edition === null, s.name).toBe(s.vp === null);
+      const weapon = COLLECTION.weapons.find((w) => w.id === s.weaponId);
+      expect(weapon, s.name).toBeDefined();
+      if (weapon!.name !== "Melee") expect(s.name.endsWith(` ${weapon!.name}`), s.name).toBe(false);
+    }
+  });
+
+  it("the demo collection is a Collection too", async () => {
+    const { demoCollection } = await import("./demo/v2/collection");
+    expect(problems(demoCollection(), "Collection", "demo")).toEqual([]);
+  });
+
+  it("the walker catches an edition outside its set", () => {
+    const bad = { ...COLLECTION, items: [{ ...COLLECTION.items[0], edition: "legendary" }] };
+    expect(problems(bad, "Collection", "c").join("\n")).toContain("edition");
   });
 });

@@ -1,31 +1,52 @@
-// Visual regression baselines (spec §8.7): the main scenes against committed PNGs in ui/tests/baselines/, at 1000×800,
-// DPR 1, Barlow, the fixed page clock, the default theme. Pixels depend on the browser build and its fonts, so the PNGs are
-// made only in the pinned Playwright image (the manual `Build` run with `update_baselines`, job `baselines-render`) and
-// compared only there (CI sets VISUAL_BASELINES=1). On a developer machine the whole file skips: this container's Chromium
-// differs from the image's, and a local run must never write or compare the committed PNGs.
+// Visual regression baselines (spec §8.7) for the v2 screens: the main states against committed PNGs in
+// ui/tests/baselines/, at 1280×800 (the glance column at 420×800), DPR 1, the fixed page clock. Pixels depend on the
+// browser build and its fonts, so the PNGs are made only in the pinned Playwright image (the manual `Build` run with
+// `update_baselines`, job `baselines-render`) and compared only there (CI sets VISUAL_BASELINES=1). On a developer
+// machine the whole file skips: a local Chrome differs from the image's, and a local run must never write or compare
+// the committed PNGs. A state whose PNG has not been generated yet skips too (it is not a failure): the v2 set is
+// generated once by that manual run, and a state added later skips until the next one.
+import { existsSync } from "node:fs";
 import { expect, test, type Page } from "@playwright/test";
-import { checkFont } from "./checks";
-import { openScene, pointerAway } from "./harness";
+import { PUUID } from "../src/lib/demo/cdv8";
+import { RECAP_MATCH_ID } from "../src/lib/demo/v2/status";
+import { checkFonts } from "./checks";
+import { openScene, pointerAway, SIZES } from "./harness";
 
 test.skip(process.env.VISUAL_BASELINES !== "1", "visual baselines are rendered and compared only in the pinned Playwright image (VISUAL_BASELINES=1)");
 
 type Baseline = {
-  /** The DEV demo scene (`?scene=`, spec §8.2); the PNG is `<scene>.png`. */
-  scene: string;
-  /** What the scene shows (the test title). */
+  /** The PNG is `<name>.png`. */
+  name: string;
+  /** What the state shows (the test title). */
   what: string;
-  /** At least this many images (`<img>` plus CSS background pictures) must be on screen and loaded: the check is never vacuous. */
+  scene: string;
+  params?: Record<string, string>;
+  size?: keyof typeof SIZES;
+  /** At least this many images (`<img>` plus CSS background pictures) must be on screen and loaded: never vacuous. */
   images: number;
 };
 
 const BASELINES: Baseline[] = [
-  { scene: "ingame", what: "Live, In Game (the design's roster: 10 cards)", images: 40 },
-  { scene: "pregame", what: "Live, Agent Select (5 cards, 5 empty slots)", images: 15 },
-  { scene: "lobby3", what: "Live, Lobby with 3 players", images: 8 },
-  { scene: "details", what: "Player Details (Mara)", images: 30 },
-  { scene: "match", what: "Match Details (from a recent row)", images: 15 },
-  { scene: "mystats", what: "My Stats, full", images: 12 },
-  { scene: "mystats-new", what: "My Stats, new account", images: 0 },
+  { name: "live-ingame", what: "Live, in game (two teams of five)", scene: "ingame", images: 22 },
+  { name: "live-pregame", what: "Live, Agent Select (your team, the enemy placeholder)", scene: "pregame", images: 9 },
+  { name: "live-waiting", what: "Live, waiting for VALORANT (closed)", scene: "closed", images: 3 },
+  { name: "live-lobby", what: "Live, in the lobby with a party of 3, in queue", scene: "lobby3", params: { queue: "1" }, images: 8 },
+  { name: "live-recap", what: "Live, the recap of the user's last match", scene: "closed", params: { recap: "1" }, images: 23 },
+  { name: "live-glance", what: "Live, glance mode (420px column)", scene: "ingame", params: { glance: "1" }, size: "glance", images: 23 },
+  { name: "profile", what: "the profile drawer (Mara) over Live", scene: "ingame", params: { profile: PUUID.mara! }, images: 71 },
+  { name: "saved", what: "Saved players", scene: "closed", params: { screen: "saved" }, images: 5 },
+  { name: "history", what: "Match history", scene: "closed", params: { screen: "history" }, images: 34 },
+  {
+    name: "scoreboard",
+    what: "a scoreboard opened from History",
+    scene: "closed",
+    params: { screen: "history", match: RECAP_MATCH_ID, puuid: PUUID.fahad! },
+    images: 22,
+  },
+  { name: "comp", what: "Competitive", scene: "mystats", images: 18 },
+  { name: "skins", what: "Collection", scene: "closed", params: { screen: "skins" }, images: 33 },
+  { name: "ascii", what: "ASCII studio", scene: "closed", params: { screen: "ascii" }, images: 1 },
+  { name: "settings", what: "Settings", scene: "closed", params: { screen: "settings" }, images: 1 },
 ];
 
 /**
@@ -64,21 +85,27 @@ async function imageReport(page: Page): Promise<{ bad: string[]; count: number }
   });
 }
 
-for (const { scene, what, images } of BASELINES) {
-  test(`baseline: ${scene} (${what})`, async ({ page }) => {
-    await openScene(page, scene, { font: "Barlow" });
-    expect(await checkFont(page, "Barlow")).toEqual([]);
+for (const b of BASELINES) {
+  test(`baseline: ${b.name} (${b.what})`, async ({ page }, testInfo) => {
+    // Not generated yet: skipped, not failed. A run with --update-snapshots (the `update_baselines` job) writes it.
+    const png = testInfo.snapshotPath(`${b.name}.png`, { kind: "screenshot" });
+    const updating = testInfo.config.updateSnapshots === "all" || testInfo.config.updateSnapshots === "changed";
+    test.skip(!existsSync(png) && !updating, `${b.name}.png has not been generated yet (run the Build workflow with update_baselines)`);
 
-    // All pictures are in before the shot: a card whose art or icon is still on its way would be a different image.
+    await page.setViewportSize(SIZES[b.size ?? "default"]);
+    await openScene(page, b.scene, b.params);
+    expect(await checkFonts(page)).toEqual([]);
+
+    // All pictures are in before the shot: a row whose icon is still on its way would be a different image.
     const { bad, count } = await imageReport(page);
     expect(bad, "images that did not load").toEqual([]);
-    expect(count, "images on screen").toBeGreaterThanOrEqual(images);
+    expect(count, "images on screen").toBeGreaterThanOrEqual(b.images);
 
     // No tooltip, no hover colour, no focus ring: the pointer rests where nothing reacts.
     await pointerAway(page);
-    await expect(page.locator("#app [role=tooltip]")).toHaveCount(0);
+    await expect(page.locator("#tooltip")).toHaveCount(0);
 
-    // The viewport only (1000×800), never the full page: Details, Match and My Stats scroll inside it.
-    await expect(page).toHaveScreenshot(`${scene}.png`);
+    // The viewport only, never the full page: the scrolling screens scroll inside it.
+    await expect(page).toHaveScreenshot(`${b.name}.png`);
   });
 }

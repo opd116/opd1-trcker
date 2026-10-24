@@ -1,94 +1,16 @@
-// Player Details and Match Details helpers (spec §6, Task 18). Pure functions; the screens only render them.
+// The profile drawer and scoreboard helpers (spec §6). Pure functions; the screens only render them.
 import { describe, expect, it, vi } from "vitest";
 import {
   CONTENT_TIERS,
   emptyMatch,
-  halvesText,
   liveTeammate,
   pmText,
-  queueLabel,
-  recentShown,
   rowKeydown,
   settledDetails,
-  shortName,
-  teamLabel,
-  weaponState,
-  whenText,
 } from "./details";
-import type { DisplayName, LiveState, MatchDetailsView, MatchSummary, MatchTeamView, Meta, PlayerCard, WeaponSkin } from "./types";
+import type { LiveState, PlayerCard } from "./types";
 
 const JETT = "add6443a-41bd-e414-f6ad-e58d267f4e95";
-const meta: Meta = { agents: { [JETT]: { name: "Jett" } }, maps: {}, tiers: {} };
-
-const row = (i: number): MatchSummary => ({
-  matchId: `m${i}`,
-  mapId: "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
-  startMs: 1_000_000 - i,
-  result: "win",
-  roundsWon: 13,
-  roundsLost: 9,
-  agentId: JETT,
-  kills: 20,
-  deaths: 10,
-  assists: 4,
-  kd: 2,
-  acs: 240,
-  hsPct: 0.25,
-  rrEarned: 18,
-  tier: 21,
-});
-const rows = (n: number) => Array.from({ length: n }, (_, i) => row(i));
-
-describe("recentShown (spec §6.4, §6.5)", () => {
-  it("recentShown 3 then 8 and hides the button", () => {
-    // Collapsed: the newest 3, and a button only when there is more to show.
-    expect(recentShown(rows(8), false)).toEqual({ rows: rows(3), showMore: true });
-    expect(recentShown(rows(4), false)).toEqual({ rows: rows(3), showMore: true });
-    expect(recentShown(rows(3), false)).toEqual({ rows: rows(3), showMore: false });
-    expect(recentShown(rows(1), false)).toEqual({ rows: rows(1), showMore: false });
-    expect(recentShown([], false)).toEqual({ rows: [], showMore: false });
-    // After Show more: up to 8, newest first, and never a button again (no "show less").
-    expect(recentShown(rows(8), true)).toEqual({ rows: rows(8), showMore: false });
-    expect(recentShown(rows(10), true)).toEqual({ rows: rows(8), showMore: false });
-    expect(recentShown(rows(5), true)).toEqual({ rows: rows(5), showMore: false });
-  });
-});
-
-describe("shortName (spec §6.6, §5.8, R95)", () => {
-  const visible: DisplayName = { kind: "visible", name: "Mara", tag: "7788" };
-  const remembered: DisplayName = { kind: "remembered", name: "Rook", tag: "4413", source: "ownMatch", fromMapId: null, fromStartMs: null };
-
-  it("shortName per variant", () => {
-    expect(shortName(visible, meta)).toBe("Mara");
-    expect(shortName(remembered, meta)).toBe("Rook");
-    expect(shortName({ kind: "hiddenPlayer" }, meta)).toBe("Hidden Player");
-    expect(shortName({ kind: "hiddenAgent", agentId: JETT }, meta)).toBe("Jett");
-    // Meta pending: only the agent name waits (the caller draws the 60×10 bar); a miss in loaded meta is —.
-    expect(shortName({ kind: "hiddenAgent", agentId: JETT }, null)).toBeUndefined();
-    expect(shortName({ kind: "hiddenAgent", agentId: "not-in-meta" }, meta)).toBe("—");
-    // Visible, remembered and hiddenPlayer never wait for meta.
-    expect(shortName(visible, null)).toBe("Mara");
-    expect(shortName(remembered, null)).toBe("Rook");
-    expect(shortName({ kind: "hiddenPlayer" }, null)).toBe("Hidden Player");
-  });
-
-  it("a hidden kind never yields a tag or a real name", () => {
-    for (const m of [meta, null]) {
-      expect(shortName({ kind: "hiddenAgent", agentId: JETT }, m) ?? "").not.toContain("#");
-      expect(shortName({ kind: "hiddenPlayer" }, m)).not.toContain("#");
-    }
-  });
-});
-
-describe("weaponState (spec §6.8, R97)", () => {
-  const skin: WeaponSkin = { chromaId: "c", skinName: "Reaver", chromaName: "Red", tierId: null };
-
-  it("weaponState: absent → loading, null → none, value → the skin", () => {
-    expect(weaponState(undefined)).toBe("loading");
-    expect(weaponState(null)).toBe("none");
-    expect(weaponState(skin)).toBe(skin);
-  });
-});
 
 describe("liveTeammate (spec §6.7)", () => {
   const card = (puuid: string, name: PlayerCard["name"], extra: Partial<PlayerCard> = {}): PlayerCard => ({
@@ -138,102 +60,6 @@ describe("liveTeammate (spec §6.7)", () => {
     expect(liveTeammate("loadingrank", live)).toEqual({ agentId: JETT, tier: null });
     expect(liveTeammate("nobody", live)).toBeNull();
     expect(liveTeammate("vis", null)).toBeNull();
-  });
-});
-
-describe("queueLabel (spec §6.10)", () => {
-  it("queueLabel table incl. '' → Custom and unknown → title case", () => {
-    const table: Record<string, string> = {
-      competitive: "Competitive",
-      unrated: "Unrated",
-      swiftplay: "Swiftplay",
-      spikerush: "Spike Rush",
-      deathmatch: "Deathmatch",
-      hurm: "Team Deathmatch",
-      ggteam: "Escalation",
-      onefa: "Replication",
-      premier: "Premier",
-      "": "Custom",
-    };
-    for (const [id, label] of Object.entries(table)) expect(queueLabel(id), id).toBe(label);
-    expect(queueLabel("snowball")).toBe("Snowball");
-    expect(queueLabel("new_mode")).toBe("New Mode");
-    expect(queueLabel("newmap-test")).toBe("Newmap Test");
-  });
-});
-
-// ── match views ─────────────────────────────────────────────────────────────────
-const team = (t: Partial<MatchTeamView>): MatchTeamView => ({ teamId: "Blue", result: "win", roundsWon: 13, firstHalf: 7, players: [], ...t });
-const view = (v: Partial<MatchDetailsView> = {}): MatchDetailsView => ({
-  matchId: "m",
-  mapId: "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
-  queueId: "competitive",
-  startMs: Date.UTC(2026, 8, 29, 21, 14),
-  durationMs: 38 * 60_000,
-  perspective: "focus",
-  teams: [team({}), team({ teamId: "Red", result: "loss", roundsWon: 9, firstHalf: 4 })],
-  ...v,
-});
-const dm = () =>
-  view({ queueId: "deathmatch", teams: [team({ teamId: "", result: null, roundsWon: null, firstHalf: null })], durationMs: 9 * 60_000 });
-
-describe("whenText (spec §6.10, R140)", () => {
-  // The page clock: Sep 30, 2026, so `view()` (Sep 29, 2026) is a current-year match.
-  const NOW = Date.UTC(2026, 8, 30, 12);
-
-  it("a match opened from a recent row: '{queueLabel} · {dateLong} · {time12} · {durationMin}'", () => {
-    expect(whenText(view(), "recent", NOW)).toBe("Competitive · Sep 29, 2026 · 9:14 PM · 38 min");
-    expect(whenText(dm(), "recent", NOW)).toBe("Deathmatch · Sep 29, 2026 · 9:14 PM · 9 min");
-    expect(whenText(view({ queueId: "" }), "recent", NOW)).toBe("Custom · Sep 29, 2026 · 9:14 PM · 38 min");
-  });
-
-  it("a match opened from an encounter row in the current year drops the year (v8:642, v8:685)", () => {
-    expect(whenText(view(), "encounter", NOW)).toBe("Competitive · Sep 29 · 9:14 PM · 38 min");
-    expect(whenText(dm(), "encounter", NOW)).toBe("Deathmatch · Sep 29 · 9:14 PM · 9 min");
-    expect(whenText(view({ startMs: Date.UTC(2026, 8, 12, 23, 18), durationMs: 41 * 60_000 }), "encounter", NOW)).toBe(
-      "Competitive · Sep 12 · 11:18 PM · 41 min",
-    );
-  });
-
-  it("a match opened from an encounter row in a previous year keeps the year", () => {
-    expect(whenText(view({ startMs: Date.UTC(2025, 11, 31, 10, 5) }), "encounter", NOW)).toBe("Competitive · Dec 31, 2025 · 10:05 AM · 38 min");
-    // The same match a year later: the current year moved on, so the year comes back.
-    expect(whenText(view(), "encounter", Date.UTC(2027, 0, 2))).toBe("Competitive · Sep 29, 2026 · 9:14 PM · 38 min");
-  });
-
-  it("the recent entry always has the year, whatever the clock", () => {
-    expect(whenText(view(), "recent", Date.UTC(2027, 0, 2))).toBe("Competitive · Sep 29, 2026 · 9:14 PM · 38 min");
-  });
-
-  it("whenText drops the duration when unknown", () => {
-    expect(whenText(view({ durationMs: null }), "recent", NOW)).toBe("Competitive · Sep 29, 2026 · 9:14 PM");
-    expect(whenText(view({ durationMs: null }), "encounter", NOW)).toBe("Competitive · Sep 29 · 9:14 PM");
-  });
-});
-
-describe("halvesText (spec §6.10, v8:651, v8:659)", () => {
-  it("halvesText a1–b1 · a2–b2 incl. overtime in the second", () => {
-    expect(halvesText(view())).toBe("7–4 · 6–5");
-    // 14–12 after overtime: 7–5 at the half, so the second part (overtime included) is 7–7.
-    expect(halvesText(view({ teams: [team({ roundsWon: 14, firstHalf: 7 }), team({ roundsWon: 12, firstHalf: 5 })] }))).toBe("7–5 · 7–7");
-  });
-
-  it("null when a half is unknown, a score is unknown, or in a no-team mode", () => {
-    expect(halvesText(view({ teams: [team({ firstHalf: null }), team({ firstHalf: 4, roundsWon: 9 })] }))).toBeNull();
-    expect(halvesText(view({ teams: [team({}), team({ firstHalf: null, roundsWon: 9 })] }))).toBeNull();
-    expect(halvesText(view({ teams: [team({ roundsWon: null }), team({ firstHalf: 4, roundsWon: 9 })] }))).toBeNull();
-    expect(halvesText(dm())).toBeNull();
-  });
-});
-
-describe("teamLabel (spec §6.10)", () => {
-  it("teamLabel self / focus / dm", () => {
-    expect(teamLabel(view({ perspective: "self" }), 0, "Mara")).toBe("Your team");
-    expect(teamLabel(view({ perspective: "self" }), 1, "Mara")).toBe("Opponents");
-    expect(teamLabel(view({ perspective: "focus" }), 0, "Mara")).toBe("Mara's team");
-    expect(teamLabel(view({ perspective: "focus" }), 1, "Mara")).toBe("Opponents");
-    expect(teamLabel(view({ perspective: "focus" }), 0, "Hidden Player")).toBe("Hidden Player's team");
-    expect(teamLabel(dm(), 0, "Mara")).toBe("Players");
   });
 });
 
@@ -355,6 +181,5 @@ describe("emptyMatch (a match_details that failed twice)", () => {
     expect(v.mapId).toBe("");
     expect(v.teams).toEqual([]);
     expect(v.durationMs).toBeNull();
-    expect(halvesText(v)).toBeNull();
   });
 });

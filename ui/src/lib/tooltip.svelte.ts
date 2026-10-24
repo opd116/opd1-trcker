@@ -1,10 +1,22 @@
-// The one tooltip engine (spec §4.1, v8:516-532). Triggers carry `data-tip` (set by the `tip` action);
-// one delegated `mouseover` on #app finds the trigger with `closest('[data-tip]')`. A trigger that takes keyboard focus
-// (`:focus-visible`) shows its tip the same way, and Escape hides it. The bubble is drawn by components/Tooltip.svelte
-// from `tipState`.
-import { count } from "./format";
+// The one tooltip engine (design v2 `attachTips`, TrackerApp.dc.html 1138-1188). Triggers carry `data-tip` (set by
+// the `tip` action, or written by hand); one delegated `mouseover` on #app finds the trigger with
+// `closest('[data-tip]')`. A trigger that takes keyboard focus (`:focus-visible`) shows its tip the same way, after the
+// same 450 ms, and Escape hides it. The bubble is drawn by components/Tooltip.svelte from `tipState`, which measures it
+// and places it with `tipPlace` (above the trigger, flipped below when there is no room, clamped to the viewport).
+//
+// Variants, by attribute (as in the design):
+//   data-tip-img="<src>" [+ data-tip-color]  36px image beside a bold first line (coloured), the rest under it
+//   data-tip-kv                               "Title\nkey|value\nkey|value": a title over a two-column grid
+//   data-tip-wl="w,l"                         a W/L bar (data-tip must still be non-empty)
 
-export type TipView = { text: string; x: number; top: number; transform: string };
+/** The trigger's box at fire time, in viewport coordinates. */
+export type TipAnchor = { left: number; top: number; width: number; bottom: number };
+
+export type TipView =
+  | { kind: "text"; text: string; anchor: TipAnchor }
+  | { kind: "img"; text: string; img: string; color: string | null; head: string; sub: string; anchor: TipAnchor }
+  | { kind: "kv"; text: string; head: string; rows: [string, string][]; anchor: TipAnchor }
+  | { kind: "wl"; text: string; w: number; l: number; anchor: TipAnchor };
 
 /** The tip on screen, or null. */
 export const tipState = $state<{ tip: TipView | null }>({ tip: null });
@@ -14,7 +26,16 @@ export const tipState = $state<{ tip: TipView | null }>({ tip: null });
  * `ifCut`: the tip always shows, and this line is added under it only while that span is cut off (a remembered name:
  * its own tip, then the full `Name#TAG`).
  */
-export type TipArg = string | { text: string; overflowOnly: true } | { text: string; ifCut: string };
+export type TipArg =
+  | string
+  | { text: string; overflowOnly: true }
+  | { text: string; ifCut: string }
+  /** Image variant: `img` beside the bold first line of `text` (in `color`), the other lines under it. */
+  | { text: string; img: string; color?: string | null }
+  /** Key/value variant: "Title\nkey|value\nkey|value". */
+  | { kv: string }
+  /** W/L bar variant: wins and losses. `text` is what a screen reader hears (default "{w} wins, {l} losses"). */
+  | { wl: readonly [number, number] | string; text?: string };
 
 const DELAY_MS = 450;
 
@@ -66,33 +87,55 @@ export function hideTip(): void {
   if (tipState.tip) tipState.tip = null;
 }
 
-/** Where the bubble goes, relative to #app (`r` = trigger rect, `R` = app rect). */
-export function tipPosition(r: DOMRectReadOnly, R: DOMRectReadOnly): { x: number; top: number; transform: string } {
-  const x = Math.max(136, Math.min(864, r.left + r.width / 2 - R.left));
-  const below = r.bottom - R.top + 8;
-  return below > 720
-    ? { x, top: r.top - R.top - 8, transform: "translate(-50%,-100%)" }
-    : { x, top: below, transform: "translate(-50%,0)" };
-}
+/** The gap between the trigger and the bubble, and the bubble's minimum distance from the viewport edges. */
+export const TIP_GAP = 8;
+export const TIP_EDGE = 6;
 
 /**
- * `wl:31:22:53` → wins, losses, games. `wl:31:22:53|This act · Monday` also carries the text of the second row (My
- * Stats' weekday and time-of-day cells name their slice there); without it the row reads `This act`.
+ * Where the bubble goes (viewport px): centred above the trigger, 8px off; below it when the top would come closer
+ * than 6px to the viewport's top; `left` clamped 6px inside the viewport (`vw` = its width).
  */
-export function parseWl(text: string): { w: number; l: number; g: number; scope?: string } | null {
-  const m = /^wl:(\d+):(\d+):(\d+)(?:\|([^\n]+))?$/.exec(text);
-  if (!m) return null;
-  const wl = { w: Number(m[1]), l: Number(m[2]), g: Number(m[3]) };
-  return m[4] === undefined ? wl : { ...wl, scope: m[4] };
+export function tipPlace(a: TipAnchor, w: number, h: number, vw: number): { left: number; top: number } {
+  let top = a.top - h - TIP_GAP;
+  if (top < TIP_EDGE) top = a.bottom + TIP_GAP;
+  const left = Math.max(TIP_EDGE, Math.min(vw - w - TIP_EDGE, a.left + a.width / 2 - w / 2));
+  return { left, top };
 }
 
-/** The spans of the structured W/L row, in order: `31W`, `·`, `22L`, `·`, `53 games`. */
-export function wlRow(wl: { w: number; l: number; g: number }): string[] {
-  return [`${wl.w}W`, "·", `${wl.l}L`, "·", count(wl.g, "game")];
+/** The view for a trigger's attributes (read at fire time), or null when it must show nothing. */
+export function tipView(el: Pick<Element, "getAttribute">, text: string, anchor: TipAnchor): TipView | null {
+  const img = el.getAttribute("data-tip-img");
+  if (img) {
+    const [head = "", ...rest] = text.split("\n");
+    return { kind: "img", text, img, color: el.getAttribute("data-tip-color") || null, head, sub: rest.join("\n"), anchor };
+  }
+  if (el.getAttribute("data-tip-kv") !== null) {
+    const [head = "", ...rows] = text.split("\n");
+    return {
+      kind: "kv",
+      text,
+      head,
+      rows: rows.map((r) => {
+        const i = r.indexOf("|");
+        return (i < 0 ? [r, ""] : [r.slice(0, i), r.slice(i + 1)]) as [string, string];
+      }),
+      anchor,
+    };
+  }
+  const wlAttr = el.getAttribute("data-tip-wl");
+  if (wlAttr) {
+    const [w = NaN, l = NaN] = wlAttr.split(",").map(Number);
+    if (!Number.isFinite(w) || !Number.isFinite(l)) return null;
+    return { kind: "wl", text, w, l, anchor };
+  }
+  return { kind: "text", text, anchor };
 }
+
+/** The W/L bar's fill, as the design rounds it: wins / max(1, games), in whole percent. */
+export const wlFill = (w: number, l: number): number => Math.round((w / Math.max(1, w + l)) * 100);
 
 /** `mouseover` on #app: show, keep or clear the tip for whatever the pointer is now on. */
-export function tipOver(target: Element | null, root: Element): void {
+export function tipOver(target: Element | null, _root?: Element): void {
   const el = target?.closest?.("[data-tip]") ?? null;
   if (el && el === current) return;
   hideTip();
@@ -111,10 +154,13 @@ export function tipOver(target: Element | null, root: Element): void {
     // Read at fire time, as the design does (v8:525): a trigger whose text changed during the delay shows the
     // new string, and one that went empty or malformed shows nothing.
     let text = el.getAttribute("data-tip");
-    if (!text || (text.startsWith("wl:") && !parseWl(text))) return;
+    if (!text) return;
     const more = el.getAttribute("data-tip-cut");
     if (more && cut()) text = `${text}\n${more}`;
-    tipState.tip = { text, ...tipPosition(el.getBoundingClientRect(), root.getBoundingClientRect()) };
+    const r = el.getBoundingClientRect();
+    const view = tipView(el, text, { left: r.left, top: r.top, width: r.width, bottom: r.bottom });
+    if (!view) return;
+    tipState.tip = view;
     if (focusOwner && describeOwner) describe(focusOwner);
   }, DELAY_MS);
 }
@@ -124,9 +170,9 @@ export function tipOver(target: Element | null, root: Element): void {
  * its tip as a hover would, after the same delay and placed by the same rules. A focused element that is not a
  * trigger leaves the tip alone (the `focusout` of the one before it already cleared it).
  */
-export function tipFocus(target: Element | null, root: Element): void {
+export function tipFocus(target: Element | null, _root?: Element): void {
   if (!target?.hasAttribute?.("data-tip") || !target.matches(":focus-visible")) return;
-  tipOver(target, root);
+  tipOver(target);
   if (current !== target) return;
   focusOwner = target;
   describeOwner = true;
@@ -155,14 +201,14 @@ export function tipKey(e: Pick<KeyboardEvent, "key">): void {
 export function retip(trigger: Element, owner?: Element, announce = true): void {
   if (!appRoot) return;
   hideTip();
-  tipOver(trigger, appRoot);
+  tipOver(trigger);
   if (!owner || current !== trigger) return;
   focusOwner = owner;
   describeOwner = announce;
 }
 
 /**
- * Wire the engine to #app. Leaving the app, a click, or scrolling a Details/Match container hides the tip
+ * Wire the engine to #app. Leaving the app, a mouse press or click, or scrolling any container hides the tip
  * (scroll does not bubble, so it is caught in the capture phase). A scroll does not cancel a keyboard focus's tip that
  * has not shown yet: moving focus scrolls its target into view, and the tip is placed when it shows. Keyboard focus
  * shows a tip and Escape hides it (`tipFocus`, `tipBlur`, `tipKey`). Returns the cleanup.
@@ -179,6 +225,7 @@ export function attachTooltips(root: HTMLElement): () => void {
   };
   root.addEventListener("mouseover", over);
   root.addEventListener("mouseleave", hideTip);
+  root.addEventListener("mousedown", hideTip);
   root.addEventListener("click", hideTip);
   root.addEventListener("scroll", scroll, true);
   root.addEventListener("focusin", focusin);
@@ -187,6 +234,7 @@ export function attachTooltips(root: HTMLElement): () => void {
   return () => {
     root.removeEventListener("mouseover", over);
     root.removeEventListener("mouseleave", hideTip);
+    root.removeEventListener("mousedown", hideTip);
     root.removeEventListener("click", hideTip);
     root.removeEventListener("scroll", scroll, true);
     root.removeEventListener("focusin", focusin);
@@ -197,26 +245,44 @@ export function attachTooltips(root: HTMLElement): () => void {
   };
 }
 
+const TIP_ATTRS = ["data-tip", "data-tip-ov", "data-tip-cut", "data-tip-img", "data-tip-color", "data-tip-kv", "data-tip-wl"];
+
 /**
- * `use:tip={text}`, `use:tip={{ text, overflowOnly: true }}` or `use:tip={{ text, ifCut }}`. It only sets attributes;
- * the engine does the rest. An empty text leaves an empty `data-tip`, which shows nothing (and, as in the design,
- * shadows an outer trigger).
+ * `use:tip={text}`, or an options form: `{ text, overflowOnly: true }`, `{ text, ifCut }`, `{ text, img, color }`,
+ * `{ kv }`, `{ wl: [w, l] }`. It only sets attributes; the engine does the rest. An empty text leaves an empty
+ * `data-tip`, which shows nothing (and, as in the design, shadows an outer trigger).
  */
 export function tip(node: Element, arg: TipArg): { update(a: TipArg): void; destroy(): void } {
   const set = (a: TipArg) => {
-    node.setAttribute("data-tip", typeof a === "string" ? a : a.text);
-    if (typeof a !== "string" && "overflowOnly" in a) node.setAttribute("data-tip-ov", "1");
-    else node.removeAttribute("data-tip-ov");
-    if (typeof a !== "string" && "ifCut" in a) node.setAttribute("data-tip-cut", a.ifCut);
-    else node.removeAttribute("data-tip-cut");
+    const attrs: Record<string, string> = {};
+    if (typeof a === "string") attrs["data-tip"] = a;
+    else if ("kv" in a) {
+      attrs["data-tip"] = a.kv;
+      attrs["data-tip-kv"] = "";
+    } else if ("wl" in a) {
+      const [w, l] = typeof a.wl === "string" ? a.wl.split(",").map(Number) : a.wl;
+      attrs["data-tip"] = a.text ?? `${w} wins, ${l} losses`;
+      attrs["data-tip-wl"] = `${w},${l}`;
+    } else {
+      attrs["data-tip"] = a.text;
+      if ("overflowOnly" in a) attrs["data-tip-ov"] = "1";
+      if ("ifCut" in a) attrs["data-tip-cut"] = a.ifCut;
+      if ("img" in a) {
+        attrs["data-tip-img"] = a.img;
+        if (a.color) attrs["data-tip-color"] = a.color;
+      }
+    }
+    for (const k of TIP_ATTRS) {
+      const v = attrs[k];
+      if (v === undefined) node.removeAttribute(k);
+      else node.setAttribute(k, v);
+    }
   };
   set(arg);
   return {
     update: set,
     destroy() {
-      node.removeAttribute("data-tip");
-      node.removeAttribute("data-tip-ov");
-      node.removeAttribute("data-tip-cut");
+      for (const k of TIP_ATTRS) node.removeAttribute(k);
       if (current === node) hideTip();
     },
   };

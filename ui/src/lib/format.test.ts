@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   actDates,
-  actLabel,
   actTitle,
+  ageShort,
   ago,
   count,
   DASH,
@@ -12,11 +12,11 @@ import {
   kd2,
   level,
   pct0,
-  peakLabel,
   plural,
   rr,
   rrDelta,
   score,
+  shortLockfilePath,
   span,
   tierName,
   time12,
@@ -56,29 +56,6 @@ describe("ago", () => {
 
   it("uses the wall clock by default", () => {
     expect(ago(Date.now() - 3 * HOUR)).toBe("3h ago");
-  });
-});
-
-describe("actLabel and peakLabel", () => {
-  it("passes the backend label through", () => {
-    expect(actLabel("E8 A3")).toBe("E8 A3");
-    expect(actLabel("V25 A6")).toBe("V25 A6");
-  });
-
-  const base = {
-    tier: 21,
-    actLabel: "E8 A3",
-    actName: "EPISODE 8 ACT III",
-    actStartMs: Date.parse("2024-04-30T00:00:00Z"),
-    actEndMs: Date.parse("2024-06-26T00:00:00Z"),
-  };
-
-  it("joins the act label and the time since that act ended", () => {
-    expect(peakLabel({ ...base, sinceActEndMs: 400 * DAY })).toBe("E8 A3 · 1y");
-  });
-
-  it("says This Act when the peak is in the current act", () => {
-    expect(peakLabel({ ...base, sinceActEndMs: null })).toBe("This Act");
   });
 });
 
@@ -214,8 +191,6 @@ describe("missing values", () => {
     expect(DASH).toBe("—");
     expect(span(null)).toBe("—");
     expect(ago(null)).toBe("—");
-    expect(actLabel(null)).toBe("—");
-    expect(peakLabel(null)).toBe("—");
     expect(rrDelta(null)).toBe("—");
     expect(pct0(null)).toBe("—");
     expect(kd2(null)).toBe("—");
@@ -237,5 +212,36 @@ describe("missing values", () => {
     expect(kd2(Number.POSITIVE_INFINITY)).toBe("—");
     expect(rrDelta(Number.NaN)).toBe("—");
     expect(time12(Number.NaN)).toBe("—");
+  });
+});
+
+describe("ageShort (lost banner, status pill)", () => {
+  it("steps up s → min → h → d", () => {
+    expect(ageShort(0)).toBe("0 s");
+    expect(ageShort(-5_000)).toBe("0 s");
+    expect(ageShort(42_000)).toBe("42 s");
+    expect(ageShort(59_400)).toBe("59 s");
+    expect(ageShort(60_000)).toBe("1 min");
+    expect(ageShort(59 * MIN + 59_000)).toBe("59 min");
+    expect(ageShort(HOUR)).toBe("1 h");
+    expect(ageShort(23 * HOUR + 59 * MIN)).toBe("23 h");
+    expect(ageShort(DAY)).toBe("1 d");
+    expect(ageShort(9 * DAY + 5 * HOUR)).toBe("9 d");
+  });
+});
+
+describe("shortLockfilePath (error card)", () => {
+  const SHORT = String.raw`%LOCALAPPDATA%\Riot Games\Riot Client\Config\lockfile`;
+  it("the standard path under LocalAppData reads in the design's short form", () => {
+    expect(shortLockfilePath(String.raw`C:\Users\Fahad\AppData\Local\Riot Games\Riot Client\Config\lockfile`)).toBe(SHORT);
+    expect(shortLockfilePath(String.raw`D:\Profiles\x\Local\riot games\Riot Client\Config\lockfile`)).toBe(
+      String.raw`%LOCALAPPDATA%\riot games\Riot Client\Config\lockfile`,
+    );
+    expect(shortLockfilePath(SHORT)).toBe(SHORT);
+  });
+  it("any other path as given", () => {
+    expect(shortLockfilePath(String.raw`D:\Riot\lockfile`)).toBe(String.raw`D:\Riot\lockfile`);
+    expect(shortLockfilePath(String.raw`\Riot Games\Riot Client\Config\lockfile`)).toBe(String.raw`\Riot Games\Riot Client\Config\lockfile`);
+    expect(shortLockfilePath("")).toBe("");
   });
 });

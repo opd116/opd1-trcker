@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- A new look for the whole app (the v2 design): a slim title bar with a connection light and a side menu with Live, Saved, History, Comp, Skins, ASCII, Settings and About.
+- Live: team tables with rank, win rate, K/D, HS%, streaks, parties, past encounters and a smurf warning; an Agent Select timer; a waiting screen with your last match, today's session and rank; a lost-connection banner and an error screen with Retry; a match recap after each game; a narrow Glance mode that stays on top.
+- A player profile that slides in from the side, with your private note on any player and a Save button.
+- Saved players, Match History with a full scoreboard, your Competitive stats, your skins collection with its estimated VP value, an ASCII art studio, Settings and About.
+- Settings: highlight standout stats, enemy team first, smurf warning level, a Windows notification (and optional sound) when a saved player is in your match, keep on top, launch with Windows, close to tray.
+
+### Changed
+
+- The window is resizable now (1280×800 by default, at least 1180×760), with its own title bar.
+
 ## [0.3.1] - 2026-10-04
 
 Filled from `git log` (`493d4f9..da61be2`). The five features picked for v0.4.0 and the act-change work are not in this release (see `docs/next-session-prompt.md`).

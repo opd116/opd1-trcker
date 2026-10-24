@@ -8,8 +8,8 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Reference screenshots (content only, never copy their styling): `docs/refs/`
 - Asset lookup table: `docs/refs/valorant-api-assets.md`
 - Implementation plan: `docs/plan.md`
-- Visual design (source of truth): the user's Claude Design file `.superpowers/design/cd-v8/project/OPD1 Tracker v8.dc.html` + `support.js` (project https://claude.ai/design/p/f22fa2f6-6e0d-4aad-ade4-7dda498b5c0a; original zip in the repo root). Rebuild it in Svelte; match its layout, sizes, colours and tooltips. The HTML/JS is the truth; its screens/*.png may be stale. Earlier rounds (local v1–v8, ارشيف/, the Lovable zip) are history only.
-- Precedence: a newer dated user decision (requirements-raw.md or the design file) beats an older rule here; update this file in the same change. The design never overrides Window, Hidden names, Smart data, Hard limits or "No status text". Take any other clash to the user.
+- Visual design (source of truth, R189, 2026-10-22): the v2 handoff `.superpowers/design/v2/TrackerApp.dc.html` + `support.js` + `README.md` (the state board is `OPD1 Tracker.dc.html`). It replaces the v8 file `.superpowers/design/cd-v8/project/OPD1 Tracker v8.dc.html`, which is history now (project https://claude.ai/design/p/f22fa2f6-6e0d-4aad-ade4-7dda498b5c0a; original zip in the repo root). Rebuild it in Svelte; match its layout, sizes, colours and tooltips. The HTML/JS is the truth; its screens/*.png may be stale. Earlier rounds (local v1–v8, ارشيف/, the Lovable zip) are history only.
+- Precedence: a newer dated user decision (requirements-raw.md or the design file) beats an older rule here; update this file in the same change. The design never overrides Hidden names, Smart data or Hard limits (the user let v2 override Window and "No status text", R190/R191). Take any other clash to the user.
 - Build spec: `docs/design-spec.md` (sizes, states, tokens and tests derived from the design; its [C]/[bound] items are Claude calls R74–R86 in `docs/DECISIONS.md`). Keep it in step with the code. It outranks the design file only for those [C]/[bound] gap-fills; if it disagrees with the design on something the design covers, the design wins and the spec is fixed, and any change to a visual the design covers goes to the user first (R92).
 
 ## Working with the user
@@ -44,12 +44,12 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 
 ## Window
 
-- Fixed **1000×800**. Not resizable, no maximize, always on top.
-- Close button quits the app. No tray. No autostart with Windows.
+- (R190, user 2026-10-22) No native frame: the app's own title bar has Pin (always on top), Minimize, Maximize and Close. Default **1280×800**, minimum **1180×760**, resizable and maximizable. Glance mode shrinks it to a 420px-wide column on top.
+- (R193) Close goes to the tray when Settings' "Close to tray" is on (default), otherwise it quits. "Launch with Windows" (default on) starts minimized in the tray. "Saved player in my match" sends a Windows notification.
 
 ## Screens
 
-**Tabs:** `Live` and `My Stats`. The app auto-switches to `Live` when a match is found (Agent Select).
+**Nav rail (R189):** Live, Saved, History, Comp, Skins, ASCII, Settings, About. The app auto-switches to `Live` when a match is found (Agent Select). The v2 design (`.superpowers/design/v2/`) is the reference for every screen below; where this section's older v8 wording disagrees with it (Lobby layout, no post-match screen, the Details page, the Match page, My Stats as a tab), the v2 design wins: the profile drawer replaces Details, the History scoreboard replaces Match, Competitive replaces My Stats, and a recap follows the user's match until they queue again.
 
 **When VALORANT is closed:**
 - The app opens on `My Stats` with the last saved data (decided by the first live state the app receives; any other stage opens `Live`). R71's "open on Live until My Stats exists" ended when My Stats was built; the page is `docs/design-spec.md` §9.
@@ -102,21 +102,21 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 7. Win rate by weekday and by time of day
 8. Auto insights (best/worst map, time of day, weekday vs weekend, RR economy, last 7 days)
 
-**Later (build only when the user asks):** Match History page, Settings page. Tabs stay `Live` / `My Stats` until then.
+Match History, Settings, Saved players with notes, Skins, ASCII and About are built in v2 (R189).
 
 ## Design rules
 
 - English UI only. Dark, calm, low-glare palette with one accent. No bright white surfaces, and body text is off-white.
-- Follow the design file's type scale (12–28px; tabular numerals for stats). Never below 12px, never shrink fonts to fit. Card size follows the design; only the 1000×800 window is fixed.
+- Follow the v2 design's type scale exactly (its uppercase Geist Mono micro-labels are 10.5px and its badges 9–10px; body text stays ≥12px; tabular numerals for stats; R189). Never shrink fonts to fit. Sizes follow the design.
 - **No text may overlap or crowd numbers.** Every label/value pair gets its own space and a consistent alignment.
-- **No status text or badges anywhere:** no "Offline", "Last updated", "BETA", "Saved data", "refresh unavailable".
+- **No status text or badges** beyond what the v2 design shows (R191: the connection pill, the lost banner, the error and waiting screens, the queue timer). No "BETA", "Saved data", "refresh unavailable".
 - Loading uses neutral skeleton shapes with no text. Missing values show `—`.
 - Put extra detail behind hover tooltips instead of adding visible text.
 - Stat scope is not printed on screen (no "Last 5 comp" / "This Act" headings). Each stat's tooltip names its scope: K/D and HS% → "Last 5 competitive"; Win% → "This act · W · L · games"; last 5 → per-match tooltip. The Peak label `This Act` stays.
 - The `docs/refs/` screenshots are the *content* reference only. The user dislikes their fonts and number/label arrangement.
-- **Verify every screen before showing the user.** Render it at exactly 1000×800 in a headless browser, screenshot it, and check for overlap, clipping, and scrollbars on the no-scroll stages.
+- **Verify every screen before showing the user.** Render it at 1280×800, 1180×760 and (Live) Glance 420 wide in a headless browser, screenshot it, and check for overlap, clipping, and unwanted scrollbars.
 - Fonts are bundled locally (latin-subset woff2, only weights used). No runtime requests to Google Fonts or any CDN; images go through the Rust img cache (CSP stays strict).
-- The app ships the design file's options at their defaults (tone Neutral, accent #e3a54f, results Green / Red, fill Tinted, font Barlow, last-5 Arrow). Switching them belongs to the later Settings page.
+- The v2 design has one theme (violet accent `#9d8cff`, Barlow / Saira Condensed / Geist Mono); the v8 options are gone (R189).
 
 ## Hidden names (incognito)
 

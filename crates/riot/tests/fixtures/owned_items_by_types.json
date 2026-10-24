@@ -1,0 +1,23 @@
+{
+  "EntitlementsByTypes": [
+    {
+      "ItemTypeID": "dd3bf334-87f3-40bd-b043-682a57a8dc3a",
+      "Entitlements": [
+        {
+          "TypeID": "dd3bf334-87f3-40bd-b043-682a57a8dc3a",
+          "ItemID": "4b5417ed-49de-7076-e0fb-12a5b43957ce",
+          "InstanceID": "a95b9f3b-4e7b-4b24-8fba-d9fad9d4da34"
+        }
+      ]
+    },
+    {
+      "ItemTypeID": "e7c63390-eda7-46e0-bb7a-a6abdacd2433",
+      "Entitlements": [
+        {
+          "TypeID": "e7c63390-eda7-46e0-bb7a-a6abdacd2433",
+          "ItemID": "578e9077-4f88-260c-e54c-b988425c60e4"
+        }
+      ]
+    }
+  ]
+}

@@ -1,6 +1,6 @@
 import { isTauri } from "@tauri-apps/api/core";
 
-/** Image kinds served by the backend's `img` scheme (rulings R11/R21; spec §7.3 adds cardLarge and contentTier). */
+/** Image kinds served by the backend's `img` scheme (rulings R11/R21; spec §7.3 adds cardLarge and contentTier; R189 adds weaponIcon and skinLevel for the Skins screen). */
 export type AssetKind =
   | "agent"
   | "tier"
@@ -10,7 +10,9 @@ export type AssetKind =
   | "contentTier"
   | "cardSmall"
   | "cardWide"
-  | "mapSplash";
+  | "mapSplash"
+  | "weaponIcon"
+  | "skinLevel";
 
 let base: string | undefined;
 
@@ -51,5 +53,9 @@ function devCdnUrl(kind: AssetKind, id: string | number): string {
       return `${DEV_CDN}/weaponskinchromas/${id}/fullrender.png`;
     case "contentTier":
       return `${DEV_CDN}/contenttiers/${id}/displayicon.png`;
+    case "weaponIcon":
+      return `${DEV_CDN}/weapons/${id}/displayicon.png`;
+    case "skinLevel":
+      return `${DEV_CDN}/weaponskinlevels/${id}/displayicon.png`;
   }
 }

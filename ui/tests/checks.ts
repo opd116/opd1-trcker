@@ -1,186 +1,316 @@
-// Spec §8.3 global assertions as functions. Each returns a list of problems (empty = pass), so a failing test
-// prints what is wrong and where. Selectors are the components' own class names (Svelte keeps them).
+// The v2 global layout assertions (fit-v2.spec.ts, visual-baseline.spec.ts) as functions. Each returns a list of
+// problems (empty = pass), so a failing test prints what is wrong and where. Selectors are the components' own class
+// names (Svelte keeps them; its `svelte-…` scoping classes are dropped from the labels).
 import type { Page } from "@playwright/test";
 
-/** 1. #app is exactly 0,0,1000,800 and the document never scrolls. */
+// ── the type scale ───────────────────────────────────────────────────────────────────────────────────────────────
+/**
+ * Every font size the v2 design file sets (`.superpowers/design/v2/TrackerApp.dc.html`, its `font:` shorthands and
+ * `font-size` overrides), in px. Nothing on screen may use a size the design does not have.
+ */
+export const DESIGN_SIZES = [
+  9, 10, 10.5, 11, 11.5, 12, 12.5, 13, 13.5, 14, 14.5, 15, 15.5, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 28, 30, 32, 34, 36, 46, 54, 76,
+] as const;
+
+/**
+ * The sizes under the 12px body floor, by family, exactly as the design uses them (CLAUDE.md "Design rules": the
+ * uppercase Geist Mono micro-labels are 10.5px, the badges 9–10px):
+ *   Geist Mono  9 (the nav rail's count badge), 10 (YOU / MVP badges, W/L chips, the compact table heads), 10.5 (the
+ *               micro-labels), 11 and 11.5 (small figures)
+ *   Barlow      11 and 11.5 (chips, sub-captions, the nav labels); 10 only for a bare arrow glyph (the sort and RR
+ *               arrows: no letter or digit)
+ *   Saira Condensed never below 12 (it is the display face)
+ */
+export const SMALL_SIZES: Record<string, readonly number[]> = {
+  "Geist Mono": [9, 10, 10.5, 11, 11.5],
+  Barlow: [11, 11.5],
+  "Saira Condensed": [],
+};
+/** The one Barlow size below 11 the design uses, for glyph-only text. */
+export const GLYPH_SIZE = 10;
+
+/** The three bundled families (fonts.test.ts checks the files; this checks what renders). */
+export const FAMILIES = ["Barlow", "Saira Condensed", "Geist Mono"] as const;
+/**
+ * The design's ASCII art face (TrackerApp.dc.html 895: `'Cascadia Mono', Consolas, … 'Geist Mono'`), a Windows system
+ * font: allowed for the art, never loaded by the app.
+ */
+export const ART_FAMILY = "Cascadia Mono";
+/** The ASCII art itself: sized to fit its frame (`canvasFontPx`, `tileFontPx`), so it is artwork, not type. */
+export const ART_SELECTOR = "pre.canvas, .art pre";
+
+/**
+ * Every rendered text under #app: its size is one the design uses; below 12px only the design's small sizes for that
+ * family (see SMALL_SIZES); never below 9px; and its family is one of the three bundled ones (or the ASCII studio's
+ * art face). The ASCII art itself (ART_SELECTOR) is scaled to its frame and is not type.
+ */
+export async function checkType(page: Page): Promise<string[]> {
+  return page.evaluate(
+    ({ sizes, small, glyph, families, art }) => {
+      const out = new Set<string>();
+      const app = document.getElementById("app")!;
+      const walker = document.createTreeWalker(app, NodeFilter.SHOW_TEXT);
+      for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+        const text = n.textContent?.trim();
+        if (!text) continue;
+        const el = n.parentElement!;
+        if (el.getClientRects().length === 0 || el.closest(art)) continue;
+        const s = getComputedStyle(el);
+        if (s.visibility === "hidden") continue;
+        const px = parseFloat(s.fontSize);
+        const family = s.fontFamily.split(",")[0]!.replace(/["']/g, "").trim();
+        const short = text.length > 40 ? `${text.slice(0, 40)}…` : text;
+        if (!families.includes(family)) out.add(`"${short}" is in ${family}`);
+        if (!sizes.some((d) => Math.abs(d - px) < 0.01)) out.add(`"${short}" is ${px}px (not in the design's scale)`);
+        if (px < 9) out.add(`"${short}" is ${px}px (under the 9px badge floor)`);
+        else if (px < 12) {
+          const okSizes = small[family] ?? [];
+          const glyphOnly = !/[\p{L}\p{N}]/u.test(text);
+          const ok = okSizes.some((d) => Math.abs(d - px) < 0.01) || (family === "Barlow" && glyphOnly && Math.abs(px - glyph) < 0.01);
+          if (!ok) out.add(`"${short}" is ${px}px ${family} (the design has no such small text)`);
+        }
+      }
+      return [...out];
+    },
+    { sizes: [...DESIGN_SIZES], small: SMALL_SIZES, glyph: GLYPH_SIZE, families: [...FAMILIES, ART_FAMILY] as string[], art: ART_SELECTOR },
+  );
+}
+
+/** #app uses Barlow, and the three families are loaded (bundled woff2, never a CDN). */
+export async function checkFonts(page: Page): Promise<string[]> {
+  return page.evaluate((families) => {
+    const out: string[] = [];
+    const ff = getComputedStyle(document.getElementById("app")!).fontFamily;
+    if (!ff.replace(/["']/g, "").startsWith("Barlow")) out.push(`#app font-family is ${ff}`);
+    for (const f of families) {
+      const loaded = [...document.fonts].some((face) => face.family.replace(/["']/g, "") === f && face.status === "loaded");
+      if (!loaded) out.push(`${f} is not loaded`);
+    }
+    return out;
+  }, [...FAMILIES] as string[]);
+}
+
+// ── the window ───────────────────────────────────────────────────────────────────────────────────────────────────
+/** #app fills the viewport exactly and the document never scrolls (either axis). */
 export async function checkAppBox(page: Page): Promise<string[]> {
   return page.evaluate(() => {
     const out: string[] = [];
+    const [w, h] = [window.innerWidth, window.innerHeight];
     const r = document.getElementById("app")!.getBoundingClientRect();
-    if (r.x !== 0 || r.y !== 0 || r.width !== 1000 || r.height !== 800) out.push(`#app is ${r.x},${r.y} ${r.width}×${r.height}`);
+    if (r.x !== 0 || r.y !== 0 || r.width !== w || r.height !== h) out.push(`#app is ${r.x},${r.y} ${r.width}×${r.height} in ${w}×${h}`);
     const se = document.scrollingElement!;
-    if (se.scrollWidth > 1000) out.push(`document scrollWidth ${se.scrollWidth}`);
-    if (se.scrollHeight > 800) out.push(`document scrollHeight ${se.scrollHeight}`);
+    if (se.scrollWidth > w) out.push(`document scrollWidth ${se.scrollWidth} > ${w}`);
+    if (se.scrollHeight > h) out.push(`document scrollHeight ${se.scrollHeight} > ${h}`);
     return out;
   });
 }
 
 /**
- * 2. Live scenes: nothing inside the Live grid overflows its box (name spans excepted); no scrollbar anywhere.
- * The Underline style's bar is left out of the measurement: the design hangs it 6px below the newest tile
- * (v8:125, spec §3.8), so it overflows its tile by construction. It is decoration inside the card, never
- * clipped (fit-live's Underline geometry test asserts it stays inside the card).
+ * Scroll containers the design itself lets scroll sideways: the ASCII studio's canvas backdrop (TrackerApp.dc.html 904,
+ * `overflow:auto`: art wider than the panel scrolls).
  */
-export async function checkLiveNoOverflow(page: Page): Promise<string[]> {
-  return page.evaluate(() => {
-    const out: string[] = [];
-    const grid = document.querySelector(".live");
-    if (!grid) return ["no .live grid"];
-    const hide = document.createElement("style");
-    hide.textContent = ".uline{display:none!important}";
-    document.head.appendChild(hide);
-    const label = (el: Element) => `${el.tagName.toLowerCase()}.${[...el.classList].filter((c) => !/^s(velte)?-/.test(c)).join(".")}`;
-    for (const el of [grid, ...grid.querySelectorAll("*")]) {
-      if (!(el instanceof HTMLElement)) continue;
-      if (el.closest("[data-ellipsis]")) continue;
-      if (el.scrollHeight > el.clientHeight + 1 || el.scrollWidth > el.clientWidth + 1) {
-        out.push(`${label(el)} overflows: ${el.scrollWidth}×${el.scrollHeight} in ${el.clientWidth}×${el.clientHeight}`);
-      }
-    }
-    for (const el of document.querySelectorAll<HTMLElement>("#app, #app *")) {
-      const s = getComputedStyle(el);
-      const scrolls = (v: string) => v === "scroll" || v === "auto";
-      if ((scrolls(s.overflowY) && el.scrollHeight > el.clientHeight) || (scrolls(s.overflowX) && el.scrollWidth > el.clientWidth)) {
-        out.push(`${label(el)} scrolls`);
-      }
-    }
-    hide.remove();
-    return out;
-  });
-}
-
-/** 4. Every rendered text is at least 12px. */
-export async function checkFontFloor(page: Page): Promise<string[]> {
-  return page.evaluate(() => {
-    const out: string[] = [];
-    const walker = document.createTreeWalker(document.getElementById("app")!, NodeFilter.SHOW_TEXT);
-    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-      if (!n.textContent?.trim()) continue;
-      const px = parseFloat(getComputedStyle(n.parentElement!).fontSize);
-      if (px < 12) out.push(`"${n.textContent.trim()}" is ${px}px`);
-    }
-    return out;
-  });
-}
+export const SIDEWAYS_SCROLLERS = [".backdrop"];
 
 /**
- * 5. Nothing clips except the `data-ellipsis` spans. A truncated allowed span ends in an ellipsis, and a truncated
- * Riot-ID name keeps its tag fully visible. The Peak and Prev rows are strict.
- * Vertically, nothing clips at all, the allowed spans included: every text's glyph box (its font's ascent to
- * descent) lies inside each clipping ancestor's paint box (`overflow-clip-margin` counted), and every text
- * decoration paints whole (`checkDecorations`: the underline hangs below the glyph box, where no DOM rect reaches).
+ * Nothing scrolls sideways (SIDEWAYS_SCROLLERS aside): no element that can scroll horizontally has content wider than
+ * itself. With `noScroll` nothing scrolls vertically either (the Live board at the design's 1280×800 baseline).
  */
-export async function checkClipping(page: Page): Promise<string[]> {
-  return [...(await checkHorizontal(page)), ...(await checkVertical(page)), ...(await checkDecorations(page))];
+export async function checkScrolling(page: Page, noScroll = false): Promise<string[]> {
+  return page.evaluate(
+    ({ noScroll, sideways }) => {
+      const label = (el: Element) => el.tagName.toLowerCase() + [...el.classList].filter((c) => !/^s(velte)?-/.test(c)).map((c) => `.${c}`).join("");
+      const out: string[] = [];
+      const can = (v: string) => v === "auto" || v === "scroll";
+      for (const el of document.querySelectorAll<HTMLElement>("#app, #app *")) {
+        const s = getComputedStyle(el);
+        if (can(s.overflowX) && el.scrollWidth > el.clientWidth && !sideways.some((sel) => el.matches(sel))) {
+          out.push(`${label(el)} scrolls sideways (${el.scrollWidth} > ${el.clientWidth})`);
+        }
+        if (noScroll && can(s.overflowY) && el.scrollHeight > el.clientHeight) out.push(`${label(el)} scrolls (${el.scrollHeight} > ${el.clientHeight})`);
+      }
+      return out;
+    },
+    { noScroll, sideways: SIDEWAYS_SCROLLERS },
+  );
 }
 
-async function checkVertical(page: Page): Promise<string[]> {
+// ── clipping and overlap, from the text's own geometry ──────────────────────────────────────────────────────────
+/**
+ * The text checks, measured on the glyphs rather than on boxes (the design sets most text at `line-height: 1`, so a
+ * line box is smaller than the font's content area and a box measurement would cut every name):
+ *
+ * - every text node's ink box: horizontally its laid-out extent (range rects, one per line), vertically the actual ink
+ *   (`measureText`'s actual ascent / descent around the baseline), so a cut descender counts and empty leading does not;
+ * - clipping: walking up from the text to the nearest scroll container (what lies past its edge is reached by
+ *   scrolling), every ancestor that clips (`overflow` not `visible`, `overflow-clip-margin` counted) holds the ink box.
+ *   The one exception is a truncation the design asks for: the clipping element elides with an ellipsis
+ *   (`text-overflow: ellipsis`) or clamps its lines (`line-clamp`), and it, or an element around or inside it on the
+ *   text's path, is marked `data-ellipsis`. Such a box may cut the text sideways (behind its ellipsis), hide the lines
+ *   past its clamp, and trim the descender tails below the baseline (the design's truncating text is `line-height: 1`,
+ *   so its own clip box does exactly that), but never the letters' bodies: above, no more than the half-leading;
+ * - overlap: the visible parts of two different texts (ink box ∩ every clipping ancestor ∩ the viewport) never meet.
+ *   Texts on different layers (inside a different positioned, z-indexed overlay: the profile drawer over the screen,
+ *   a popover) are not compared.
+ */
+export async function checkText(page: Page): Promise<{ clip: string[]; overlap: string[] }> {
   return page.evaluate(() => {
-    const out: string[] = [];
+    const label = (el: Element) => el.tagName.toLowerCase() + [...el.classList].filter((c) => !/^s(velte)?-/.test(c)).map((c) => `.${c}`).join("");
     const app = document.getElementById("app")!;
-    /**
-     * The page's one scroll container (the Details/Match `.scroll`, App.svelte's child of #app) does not clip its
-     * content: what lies past its edge is reached by scrolling. Its ancestors clip the container's own box, never that
-     * content, so the walk up from a text stops there (task 17 re-review: `auto` used to count as a clip, and every
-     * text below the fold of a Details page was reported as cut by `.scroll`, then by `#app`). Only that element: an
-     * element with only `overflow-x: hidden` computes `overflow-y: auto` too, and a cut under it must still count
-     * (Task 18 review, Minor 9; check 3 reports any other element that scrolls).
-     */
-    const host = app.querySelector(":scope > .scroll");
-    const scrolls = (el: HTMLElement) => {
-      if (el !== host) return false;
-      const y = getComputedStyle(el).overflowY;
-      return y === "auto" || y === "scroll"; // made non-scrolling (a test does), it clips like any box
+    const ctx = document.createElement("canvas").getContext("2d")!;
+    type Box = { left: number; right: number; top: number; bottom: number };
+    const meet = (a: Box, b: Box): Box => ({
+      left: Math.max(a.left, b.left),
+      right: Math.min(a.right, b.right),
+      top: Math.max(a.top, b.top),
+      bottom: Math.min(a.bottom, b.bottom),
+    });
+    const empty = (b: Box) => b.right - b.left <= 0.5 || b.bottom - b.top <= 0.5;
+    const clip: string[] = [];
+    const texts: Array<{ node: Node; el: Element; text: string; layer: Element | null; boxes: Box[] }> = [];
+
+    /** The nearest positioned ancestor with a z-index: the overlay layer the text paints in (null: the page). */
+    const layerOf = (el: Element): Element | null => {
+      for (let a: Element | null = el; a && a !== app; a = a.parentElement) {
+        const s = getComputedStyle(a);
+        if ((s.position === "absolute" || s.position === "fixed") && s.zIndex !== "auto") return a;
+      }
+      return null;
     };
-    /** Where `el` stops painting its content, or null when it does not clip in y. */
-    const clipBox = (el: HTMLElement): { top: number; bottom: number } | null => {
-      const s = getComputedStyle(el);
-      if (s.overflowY === "visible") return null;
-      const r = el.getBoundingClientRect();
-      // overflow:clip may paint past the padding box by overflow-clip-margin; hidden/auto/scroll never do.
-      const m = s.overflowY === "clip" ? parseFloat(s.getPropertyValue("overflow-clip-margin")) || 0 : 0;
-      return { top: r.top + parseFloat(s.borderTopWidth) - m, bottom: r.bottom - parseFloat(s.borderBottomWidth) + m };
-    };
+    const transform = (t: string, how: string) =>
+      how === "uppercase" ? t.toUpperCase() : how === "lowercase" ? t.toLowerCase() : how === "capitalize" ? t.replace(/\b\p{L}/gu, (c) => c.toUpperCase()) : t;
+
     const walker = document.createTreeWalker(app, NodeFilter.SHOW_TEXT);
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-      if (!n.textContent?.trim()) continue;
+      const raw = n.textContent ?? "";
+      const text = raw.trim();
+      if (!text) continue;
+      const el = n.parentElement!;
+      const s = getComputedStyle(el);
+      if (s.visibility === "hidden" || el.getClientRects().length === 0) continue;
+      ctx.font = `${s.fontStyle} ${s.fontWeight} ${s.fontSize} ${s.fontFamily}`;
+      const m = ctx.measureText(transform(text, s.textTransform));
       const range = document.createRange();
       range.selectNodeContents(n);
-      const g = range.getBoundingClientRect();
-      if (g.height === 0) continue;
-      for (let el = n.parentElement; el && el !== app.parentElement; el = el.parentElement) {
-        if (scrolls(el)) break;
-        const c = clipBox(el);
-        if (c && (g.top < c.top - 0.5 || g.bottom > c.bottom + 0.5)) {
-          out.push(`"${n.textContent.trim()}" is cut vertically by ${el.tagName.toLowerCase()}.${[...el.classList].filter((k) => !/^s(velte)?-/.test(k)).join(".")}`);
-          break;
+      const rects = [...range.getClientRects()].filter((r) => r.width > 0 && r.height > 0);
+      if (rects.length === 0) continue;
+      const ellipsisEl = el.closest("[data-ellipsis]");
+      /** A truncation the design asks for: `a` elides with an ellipsis or clamps its lines, and is marked. */
+      const truncates = (a: HTMLElement, as: CSSStyleDeclaration) =>
+        !!ellipsisEl && (ellipsisEl.contains(a) || a.contains(ellipsisEl)) && (as.textOverflow === "ellipsis" || clamps(as));
+      const clamps = (as: CSSStyleDeclaration) => (as.webkitLineClamp || "none") !== "none";
+      // The design sets truncating text at `line-height: 1`: its line box is shorter than the font's content area by
+      // this much on each side, and the truncating box clips there (descender tails included), as the design's own does.
+      const lh = parseFloat(s.lineHeight);
+      const leading = Number.isFinite(lh) ? Math.max(0, (m.fontBoundingBoxAscent + m.fontBoundingBoxDescent - lh) / 2) : 0;
+      const boxes: Box[] = [];
+      let reported = false;
+      for (const r of rects) {
+        const baseline = r.top + m.fontBoundingBoxAscent;
+        const ink: Box = { left: r.left, right: r.right, top: baseline - m.actualBoundingBoxAscent, bottom: baseline + m.actualBoundingBoxDescent };
+        let visible: Box = meet(ink, { left: 0, top: 0, right: window.innerWidth, bottom: window.innerHeight });
+        let stopX = false;
+        let stopY = false;
+        let hiddenLine = false;
+        for (let a: HTMLElement | null = el as HTMLElement; a && a !== app.parentElement; a = a.parentElement) {
+          const as = getComputedStyle(a);
+          if (as.display === "inline" || as.display === "contents") continue;
+          const b = a.getBoundingClientRect();
+          // overflow:clip paints past the box by overflow-clip-margin (room for an underline), but an ellipsis still
+          // elides the glyphs at the box itself.
+          const mx = as.overflowX === "clip" && as.textOverflow !== "ellipsis" ? parseFloat(as.getPropertyValue("overflow-clip-margin")) || 0 : 0;
+          const my = as.overflowY === "clip" ? parseFloat(as.getPropertyValue("overflow-clip-margin")) || 0 : 0;
+          const box: Box = {
+            left: as.overflowX === "visible" ? -Infinity : b.left + parseFloat(as.borderLeftWidth) - mx,
+            right: as.overflowX === "visible" ? Infinity : b.right - parseFloat(as.borderRightWidth) + mx,
+            top: as.overflowY === "visible" ? -Infinity : b.top + parseFloat(as.borderTopWidth) - my,
+            bottom: as.overflowY === "visible" ? Infinity : b.bottom - parseFloat(as.borderBottomWidth) + my,
+          };
+          visible = meet(visible, box);
+          const scrollX = (as.overflowX === "auto" || as.overflowX === "scroll") && a.scrollWidth > a.clientWidth;
+          const scrollY = (as.overflowY === "auto" || as.overflowY === "scroll") && a.scrollHeight > a.clientHeight;
+          const ok = truncates(a, as);
+          // A line a clamp hides altogether is the truncation itself.
+          if (ok && clamps(as) && ink.top + leading >= box.bottom - 0.5) hiddenLine = true;
+          if (!reported && !hiddenLine && !stopX && !scrollX && (ink.left < box.left - 0.5 || ink.right > box.right + 0.5) && !ok) {
+            clip.push(`"${text}" is cut sideways by ${label(a)}${as.textOverflow === "ellipsis" || clamps(as) ? " (a truncation without data-ellipsis)" : ""}`);
+            reported = true;
+          }
+          // A truncating box may trim what hangs below the baseline (descender tails) and, above, no more than the
+          // half-leading its `line-height` takes off; the letters' bodies stay whole.
+          const cutTop = ink.top < box.top - (ok ? leading + 0.5 : 0.5);
+          const cutBottom = ink.bottom > box.bottom + 0.5 && !(ok && box.bottom >= baseline - 0.5);
+          if (!reported && !hiddenLine && !stopY && !scrollY && (cutTop || cutBottom)) {
+            const by = Math.max(box.top - ink.top, ink.bottom - box.bottom).toFixed(1);
+            clip.push(`"${text}" is cut vertically by ${label(a)} (${by}px)${!ok && (as.textOverflow === "ellipsis" || clamps(as)) ? " (a truncation without data-ellipsis)" : ""}`);
+            reported = true;
+          }
+          if (scrollX) stopX = true;
+          if (scrollY) stopY = true;
+        }
+        if (!empty(visible)) boxes.push(visible);
+      }
+      if (boxes.length > 0) texts.push({ node: n, el, text, layer: layerOf(el), boxes });
+    }
+
+    const overlap: string[] = [];
+    for (let i = 0; i < texts.length; i++) {
+      for (let j = i + 1; j < texts.length; j++) {
+        const [a, b] = [texts[i]!, texts[j]!];
+        if (a.layer !== b.layer) continue;
+        if (a.boxes.some((x) => b.boxes.some((y) => !empty(meet(x, y))))) {
+          overlap.push(`"${a.text.slice(0, 30)}" (${label(a.el)}) overlaps "${b.text.slice(0, 30)}" (${label(b.el)})`);
         }
       }
     }
-    return out;
+    return { clip, overlap };
   });
 }
 
-/**
- * Every element that draws a text decoration (today: the remembered name's dotted underline, R128) paints it
- * whole: `decorationInk` below, once per element, tagged for the probe and untagged after.
- */
+/** Text clipping (`checkText`) and the text decorations (`checkDecorations`). */
+export async function checkClipping(page: Page): Promise<string[]> {
+  return [...(await checkText(page)).clip, ...(await checkDecorations(page))];
+}
+
+/** Every element that draws a text decoration paints it whole (`decorationInk`), once per element. */
 async function checkDecorations(page: Page): Promise<string[]> {
   const labels = await page.evaluate(() => {
+    const label = (el: Element) => el.tagName.toLowerCase() + [...el.classList].filter((c) => !/^s(velte)?-/.test(c)).map((c) => `.${c}`).join("");
     const found: string[] = [];
+    /** Fully on screen: inside the viewport (with the 10px band the probe shoots under it) and every scroll container. */
+    const shown = (el: HTMLElement) => {
+      const r = el.getBoundingClientRect();
+      if (r.top < 0 || r.bottom + 12 > window.innerHeight) return false;
+      for (let a = el.parentElement; a; a = a.parentElement) {
+        const s = getComputedStyle(a);
+        if (s.overflowY !== "auto" && s.overflowY !== "scroll") continue;
+        const b = a.getBoundingClientRect();
+        if (r.top < b.top || r.bottom + 12 > b.bottom) return false;
+      }
+      return true;
+    };
     for (const el of document.querySelectorAll<HTMLElement>("#app *")) {
       if (getComputedStyle(el).textDecorationLine === "none" || !el.textContent?.trim() || el.getClientRects().length === 0) continue;
+      if (!shown(el)) continue; // scrolled out of view: nothing to shoot
       el.dataset.decoProbe = String(found.length);
-      found.push(el.textContent.trim());
+      found.push(`"${el.textContent.trim()}" (${label(el)})`);
     }
     return found;
   });
   const out: string[] = [];
-  for (const [i, text] of labels.entries()) {
+  for (const [i, what] of labels.entries()) {
     const { ink, unclipped, width } = await decorationInk(page, `[data-deco-probe="${i}"]`);
     // A 1px dotted line lights about half the pixels under the span; a quarter is a safe floor.
-    if (unclipped < Math.floor(width / 4)) out.push(`"${text}": its text decoration does not paint (${unclipped}px of ink)`);
-    else if (ink < unclipped) out.push(`"${text}": a clip eats ${unclipped - ink} of ${unclipped} decoration pixels`);
+    if (unclipped < Math.floor(width / 4)) out.push(`${what}: its text decoration does not paint (${unclipped}px of ink)`);
+    else if (ink < unclipped) out.push(`${what}: a clip eats ${unclipped - ink} of ${unclipped} decoration pixels`);
   }
   await page.evaluate(() => document.querySelectorAll("[data-deco-probe]").forEach((el) => el.removeAttribute("data-deco-probe")));
   return out;
 }
 
-async function checkHorizontal(page: Page): Promise<string[]> {
-  return page.evaluate(() => {
-    const out: string[] = [];
-    const seen = new Set<Element>();
-    const walker = document.createTreeWalker(document.getElementById("app")!, NodeFilter.SHOW_TEXT);
-    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-      if (!n.textContent?.trim()) continue;
-      // The nearest box that can be measured (inline spans report 0×0).
-      let el: HTMLElement | null = n.parentElement;
-      while (el && getComputedStyle(el).display === "inline") el = el.parentElement;
-      if (!el || seen.has(el) || el.getClientRects().length === 0) continue;
-      seen.add(el);
-      if (el.scrollWidth <= el.clientWidth) continue;
-      const text = el.textContent!.trim();
-      if (!el.hasAttribute("data-ellipsis")) {
-        out.push(`"${text}" clips: ${el.scrollWidth} > ${el.clientWidth}`);
-        continue;
-      }
-      if (getComputedStyle(el).textOverflow !== "ellipsis") out.push(`"${text}" is cut without an ellipsis`);
-      const tag = el.nextElementSibling as HTMLElement | null;
-      if (el.classList.contains("n") && tag?.classList.contains("t")) {
-        const wrap = el.parentElement!.getBoundingClientRect();
-        const t = tag.getBoundingClientRect();
-        if (tag.scrollWidth > tag.clientWidth || t.right > wrap.right + 0.5) out.push(`tag "${tag.textContent}" is cut`);
-      }
-    }
-    return out;
-  });
-}
-
 /**
  * Make the next frame a full re-raster of the viewport, so a screenshot shows what a first paint draws and never a
- * tile patched up from the previous state. A change of the root's background invalidates the whole viewport; it is
- * set and put back in one task (no frame in between, so no timer or animation frame is needed, which also keeps it
- * safe under the fake clock), and the dirty flag it leaves is what the next frame paints from.
+ * tile patched up from the previous state (a background change of the root invalidates the whole viewport; set and
+ * put back in one task, so it is safe under the fake clock).
  */
 async function repaintFully(page: Page): Promise<void> {
   await page.evaluate(() => {
@@ -194,34 +324,17 @@ async function repaintFully(page: Page): Promise<void> {
 }
 
 /**
- * Ink probe for a text decoration that hangs below its text (fix round 1, F7; check 5 runs it on every decorated
- * element). Ink outside an `overflow:hidden` box never shows up in `scrollHeight` or in any DOM rect, so a clipped
- * underline passes every box measurement. For the first match of `sel` this screenshots the box plus a 10px band under it twice, with and
- * without `text-decoration`, and counts the pixels that differ: that is the decoration's ink. It counts once as
- * rendered and once with the clip pushed 14px out (`overflow:clip` + `overflow-clip-margin`, which keeps the
- * text-overflow ellipsis, so the decoration's extent is the same in both), so `ink < unclipped` means the clip is
- * eating part of the decoration (a font that puts the underline half inside the box still shows some ink, which
- * is why a plain "some ink" floor is not enough). The caller keeps the pointer away so no tooltip is in the crop.
- *
- * Every screenshot is taken from a from-scratch raster (`repaintFully`). Turning the decoration off and the clip
- * margin up on the live element only repaints what Chromium's incremental paint invalidation marks dirty, and that
- * rect can stop one pixel short of the underline's antialiased bottom row: the old row then stays in the tile,
- * "without decoration" still shows a row of it, and `unclipped` comes out 10-30 pixels low (so `ink > unclipped`, or
- * a bogus "the clip eats ..."). Which frames the compositor produced between the style edits decides whether that
- * happens, so it came and went with CPU load (1 run in 400 in a parallel suite, and a stale row stays for the life
- * of the page once it is in). Waiting for frames does not help; a full repaint does.
+ * Ink probe for a text decoration that hangs below its text. Ink outside an `overflow:hidden` box shows up in no DOM
+ * rect, so a clipped underline passes every box measurement. For the first match of `sel` this screenshots the box
+ * plus a 10px band under it with and without `text-decoration` and counts the pixels that differ: once as rendered
+ * (`ink`) and once with the clip pushed 14px out (`unclipped`); `ink < unclipped` means a clip eats part of it.
+ * Every shot is a from-scratch raster (`repaintFully`): an incremental repaint can leave a stale antialiased row.
  */
 export async function decorationInk(page: Page, sel: string): Promise<{ ink: number; unclipped: number; width: number }> {
   const loc = page.locator(sel).first();
-  // Details and Match scroll: bring the element (and the 10px band under it) into the viewport first, since a
-  // screenshot clip can't reach past it. Only when it is outside: a Live page never scrolls.
-  await loc.evaluate((el) => {
-    const r = el.getBoundingClientRect();
-    if (r.top < 0 || r.bottom + 12 > window.innerHeight) el.scrollIntoView({ block: "center" });
-  });
   const r = await loc.boundingBox();
   if (!r) throw new Error(`no box for ${sel}`);
-  const clip = { x: Math.floor(r.x) - 1, y: Math.floor(r.y) - 2, width: Math.ceil(r.width) + 2, height: Math.ceil(r.height) + 12 };
+  const clip = { x: Math.max(0, Math.floor(r.x) - 1), y: Math.max(0, Math.floor(r.y) - 2), width: Math.ceil(r.width) + 2, height: Math.ceil(r.height) + 12 };
   const count = async (extra: string): Promise<number> => {
     const base = await page.addStyleTag({ content: extra || "/* as rendered */" });
     await repaintFully(page);
@@ -256,124 +369,56 @@ export async function decorationInk(page: Page, sel: string): Promise<{ ink: num
   return { ink, unclipped, width: r.width };
 }
 
+// ── overlap ──────────────────────────────────────────────────────────────────────────────────────────────────────
 /**
- * R125/R126 (spec §3.6 Prev): the widest Prev row must fit its 158px column unclipped. For every card's Prev row
- * that shows a tier name, each of `labels` is written into the name in turn and the name and the row are measured
- * (the icon is a fixed 18px, so the text is all that varies). The rows' own text is put back afterwards.
+ * No text sits on another (CLAUDE.md: "No text may overlap or crowd numbers"): in every row-like box (a flex row or a
+ * grid) the in-flow children that hold text are pairwise disjoint, and no two texts' visible glyphs meet (`checkText`:
+ * this also catches a label that spills out of its column onto the next one).
  */
-export async function checkPrevNames(page: Page, labels: string[]): Promise<string[]> {
-  return page.evaluate((names) => {
-    const out: string[] = [];
-    const rows = [...document.querySelectorAll<HTMLElement>(".live .card .prev")].filter((r) => r.querySelector(".pname"));
-    if (rows.length === 0) return ["no Prev row with a tier name"];
-    rows.forEach((row, ri) => {
-      const name = row.querySelector<HTMLElement>(".pname")!;
-      const own = name.textContent;
-      for (const n of names) {
-        name.textContent = n;
-        if (name.scrollWidth > name.clientWidth || row.scrollWidth > row.clientWidth) {
-          out.push(`row ${ri}: "Prev ${n}" clips (${name.scrollWidth} > ${name.clientWidth})`);
-        }
-      }
-      name.textContent = own;
-    });
-    return out;
-  }, labels);
+export async function checkOverlap(page: Page): Promise<string[]> {
+  return [...(await checkRowBoxes(page)), ...(await checkText(page)).overlap];
 }
 
-/**
- * 6. Within each card the name wrapper, ⟲ slot, Lv line, rank text, Peak row, Prev row, the 3 stat blocks and the
- * last-5 block are pairwise disjoint, and the party tab touches no text.
- */
-export async function checkCardOverlap(page: Page): Promise<string[]> {
+async function checkRowBoxes(page: Page): Promise<string[]> {
   return page.evaluate(() => {
+    const label = (el: Element) => el.tagName.toLowerCase() + [...el.classList].filter((c) => !/^s(velte)?-/.test(c)).map((c) => `.${c}`).join("");
     const out: string[] = [];
-    const cards = [...document.querySelectorAll(".live .card")];
     const hit = (a: DOMRect, b: DOMRect) =>
       Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0.5 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0.5;
-    cards.forEach((card, ci) => {
-      const parts: Array<[string, DOMRect]> = [];
-      const need = (sel: string, n = 1) => {
-        const els = [...card.querySelectorAll(sel)];
-        if (els.length !== n) out.push(`card ${ci}: ${els.length} × ${sel}, want ${n}`);
-        els.forEach((e, i) => parts.push([n > 1 ? `${sel}[${i}]` : sel, e.getBoundingClientRect()]));
-      };
-      need(".nm");
-      need(".encslot");
-      need(".lv");
-      need(".rtext");
-      need(".peak");
-      need(".prev");
-      need(".stat", 3);
-      need(".l5");
-      for (let i = 0; i < parts.length; i++)
-        for (let j = i + 1; j < parts.length; j++)
-          if (hit(parts[i]![1], parts[j]![1])) out.push(`card ${ci}: ${parts[i]![0]} overlaps ${parts[j]![0]}`);
-      const tab = card.querySelector(".ptab");
-      if (tab) {
-        const tr = tab.getBoundingClientRect();
-        const walker = document.createTreeWalker(card, NodeFilter.SHOW_TEXT);
-        for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-          if (!n.textContent?.trim()) continue;
-          const range = document.createRange();
-          range.selectNodeContents(n);
-          for (const r of range.getClientRects()) if (hit(tr, r)) out.push(`card ${ci}: party tab covers "${n.textContent.trim()}"`);
-        }
-      }
-    });
+    for (const box of document.querySelectorAll<HTMLElement>("#app *")) {
+      const s = getComputedStyle(box);
+      const rowish = (s.display.endsWith("flex") && !s.flexDirection.startsWith("column")) || s.display.endsWith("grid");
+      if (!rowish) continue;
+      const kids = [...box.children]
+        .filter((k): k is HTMLElement => k instanceof HTMLElement && !!k.textContent?.trim())
+        .filter((k) => {
+          const ks = getComputedStyle(k);
+          return ks.position !== "absolute" && ks.position !== "fixed" && ks.visibility !== "hidden" && ks.display !== "none";
+        })
+        .map((k) => [k, k.getBoundingClientRect()] as const)
+        .filter(([, r]) => r.width > 0 && r.height > 0);
+      for (let i = 0; i < kids.length; i++)
+        for (let j = i + 1; j < kids.length; j++)
+          if (hit(kids[i]![1], kids[j]![1])) out.push(`in ${label(box)}: ${label(kids[i]![0])} "${kids[i]![0].textContent!.trim().slice(0, 30)}" overlaps ${label(kids[j]![0])} "${kids[j]![0].textContent!.trim().slice(0, 30)}"`);
+    }
     return out;
   });
 }
 
-/** 7. No status words anywhere. */
-export async function checkNoStatusText(page: Page): Promise<string[]> {
-  const text = await page.locator("#app").innerText();
-  const m = text.match(/offline|last updated|beta|saved data|loading|unavailable|searching|queue/i);
-  return m ? [`status text "${m[0]}"`] : [];
-}
-
-/** 8. #app uses the selected family and that family is loaded. */
-export async function checkFont(page: Page, family: string): Promise<string[]> {
-  return page.evaluate((f) => {
-    const out: string[] = [];
-    const ff = getComputedStyle(document.getElementById("app")!).fontFamily;
-    if (!ff.replace(/["']/g, "").startsWith(f)) out.push(`font-family is ${ff}`);
-    if (!document.fonts.check(`600 16px "${f}"`)) out.push(`${f} 600 is not loaded`);
-    return out;
-  }, family);
-}
-
+// ── hidden names ─────────────────────────────────────────────────────────────────────────────────────────────────
 /**
- * 9. Hidden-name integrity (regression check only, R96): a card drawn in the hidden style carries no real name
- * anywhere in its DOM, attributes included. `real` = the fixture names hidden in this scene. A hidden card is one
- * whose name has the eye-off icon and no tag: that covers `Hidden Player`, the agent name, and an agent name that
- * is still a meta-pending bar (no `.hid` yet). A remembered name has the eye too, but keeps its tag.
+ * Hidden-name integrity (R96, a regression check): with `real` the fixture names a scene hides, nothing under #app
+ * (text or attributes: aria labels, tooltips, data attributes) carries any of them, and no name drawn in the hidden
+ * style (the italic agent name / `Hidden player`) has a `#tag` beside it.
  */
 export async function checkHiddenIntegrity(page: Page, real: string[]): Promise<string[]> {
   return page.evaluate((names) => {
     const out: string[] = [];
-    for (const card of document.querySelectorAll(".live .card")) {
-      const nm = card.querySelector(".nm");
-      if (!nm?.querySelector("svg") || nm.querySelector(".t")) continue;
-      const html = card.outerHTML;
-      if (/#[A-Za-z0-9]/.test(card.textContent ?? "")) out.push("a hidden card shows a #tag");
-      for (const n of names) if (html.includes(n)) out.push(`a hidden card contains "${n}"`);
-    }
-    // Details and Match (R93, R18): every name drawn in a hidden style (eye-off, no tag) shows no tag and no real name
-    // in its own unit: the hero, a Top 3 row, a scoreboard row. A player hidden on the live screen is hidden on every
-    // page, so the whole Details or Match DOM (attributes included) must not carry any of `real`.
-    const page = document.querySelector("#app .details, #app .match");
-    if (page) {
-      const what = page.classList.contains("details") ? "Details" : "Match";
-      for (const nm of page.querySelectorAll(".nm")) {
-        if (!nm.querySelector("svg") || nm.querySelector(".t")) continue;
-        const unit = nm.closest(".hero, .mate, .srow") ?? nm;
-        const label = `a hidden ${unit === nm ? "name" : (unit.classList[0] ?? "unit")} in ${what}`;
-        const own = unit.classList.contains("hero") ? nm : unit; // the hero also holds the rank and stats
-        if (/#[A-Za-z0-9]/.test(own.textContent ?? "")) out.push(`${label} shows a #tag`);
-        for (const n of names) if (unit.outerHTML.includes(n)) out.push(`${label} contains "${n}"`);
-      }
-      for (const n of names) if (page.outerHTML.includes(n)) out.push(`the ${what} page contains "${n}"`);
+    const html = document.getElementById("app")!.outerHTML;
+    for (const n of names) if (html.includes(n)) out.push(`the page contains the hidden name "${n}"`);
+    for (const el of document.querySelectorAll("#app .hidden, #app .hid")) {
+      const unit = el.parentElement!;
+      if (/#[A-Za-z0-9]/.test(unit.textContent ?? "")) out.push(`a hidden name "${el.textContent?.trim()}" shows a #tag`);
     }
     return out;
   }, real);
@@ -384,128 +429,20 @@ export function hiddenRealNames(scene: string): string[] {
   return scene.startsWith("pregame") ? ["Nova", "3341"] : [];
 }
 
+// ── the full set ─────────────────────────────────────────────────────────────────────────────────────────────────
 /**
- * 3. Details / Match: the one scroll container scrolls vertically only. Its scrollWidth fits its width, and nothing
- * inside it is a scroll container of its own (no nested scrollbar, in either axis).
+ * Every check, each problem prefixed with its check's name. `noScroll`: nothing may scroll vertically either (the Live
+ * board at the design's baseline size).
  */
-export async function checkScrollX(page: Page): Promise<string[]> {
-  return page.evaluate(() => {
-    const out: string[] = [];
-    const sc = document.querySelectorAll<HTMLElement>("#app .scroll");
-    if (sc.length !== 1) return [`${sc.length} scroll containers, want 1`];
-    const el = sc[0]!;
-    // overflow-y:auto makes overflow-x compute to auto too: fine as long as nothing is wider than the container.
-    if (el.scrollWidth > el.clientWidth) out.push(`.scroll scrollWidth ${el.scrollWidth} > ${el.clientWidth}`);
-    for (const d of el.querySelectorAll<HTMLElement>("*")) {
-      const s = getComputedStyle(d);
-      const can = (v: string) => v === "auto" || v === "scroll";
-      if ((can(s.overflowY) && d.scrollHeight > d.clientHeight) || (can(s.overflowX) && d.scrollWidth > d.clientWidth)) {
-        out.push(`${d.tagName.toLowerCase()}.${[...d.classList].filter((c) => !/^s(velte)?-/.test(c)).join(".")} scrolls inside .scroll`);
-      }
-    }
-    return out;
-  });
-}
-
-/** Checks 1, 3, 4, 5, 7, 8, 9 (the Details / Match set; spec §8.3, check 9 a regression check only, R96). */
-export async function detailsChecks(page: Page, scene: string, family: string): Promise<string[]> {
-  const scroller = page.locator("#app .scroll");
-  const top = await scroller.evaluate((el) => el.scrollTop);
-  const out = [
-    ...(await checkAppBox(page)).map((p) => `1: ${p}`),
-    ...(await checkScrollX(page)).map((p) => `3: ${p}`),
-    ...(await checkFontFloor(page)).map((p) => `4: ${p}`),
-    ...(await checkClipping(page)).map((p) => `5: ${p}`),
-    ...(await checkNoStatusText(page)).map((p) => `7: ${p}`),
-    ...(await checkFont(page, family)).map((p) => `8: ${p}`),
-    ...(await checkHiddenIntegrity(page, hiddenRealNames(scene))).map((p) => `9: ${p}`),
-  ];
-  // The decoration probe scrolls its target into view; leave the page where it was.
-  await scroller.evaluate((el, t) => (el.scrollTop = t), top);
-  return out;
-}
-
-/** Checks 1, 2, 4, 5, 6, 7, 8, 9 (the Live set). */
-export async function liveChecks(page: Page, scene: string, family: string): Promise<string[]> {
+export async function fitChecks(page: Page, scene: string, opts: { noScroll?: boolean } = {}): Promise<string[]> {
+  const text = await checkText(page);
   return [
-    ...(await checkAppBox(page)).map((p) => `1: ${p}`),
-    ...(await checkLiveNoOverflow(page)).map((p) => `2: ${p}`),
-    ...(await checkFontFloor(page)).map((p) => `4: ${p}`),
-    ...(await checkClipping(page)).map((p) => `5: ${p}`),
-    ...(await checkCardOverlap(page)).map((p) => `6: ${p}`),
-    ...(await checkNoStatusText(page)).map((p) => `7: ${p}`),
-    ...(await checkFont(page, family)).map((p) => `8: ${p}`),
-    ...(await checkHiddenIntegrity(page, hiddenRealNames(scene))).map((p) => `9: ${p}`),
+    ...(await checkAppBox(page)).map((p) => `app: ${p}`),
+    ...(await checkScrolling(page, opts.noScroll)).map((p) => `scroll: ${p}`),
+    ...[...text.clip, ...(await checkDecorations(page))].map((p) => `clip: ${p}`),
+    ...[...(await checkRowBoxes(page)), ...text.overlap].map((p) => `overlap: ${p}`),
+    ...(await checkType(page)).map((p) => `type: ${p}`),
+    ...(await checkFonts(page)).map((p) => `fonts: ${p}`),
+    ...(await checkHiddenIntegrity(page, hiddenRealNames(scene))).map((p) => `hidden: ${p}`),
   ];
-}
-
-/**
- * My Stats, no overlap and no crowding (spec §9.7, the page's version of check 6): inside each row-like group of the
- * page, the direct children that are on screen do not overlap, and two on the same line keep at least 8px between them
- * (the grids use 12px; a number that widened its column would eat into it). Text that overflows its own box is check 5.
- */
-export async function checkMyStatsLayout(page: Page): Promise<string[]> {
-  return page.evaluate(() => {
-    const out: string[] = [];
-    const groups = [
-      ".rank .head",
-      ".rank .name",
-      ".rank .cell",
-      ".rank .crow",
-      ".session .cell",
-      ".last5 .rhead",
-      ".last5 .rrow",
-      ".last5 .rmap",
-      ".last5 .rscore",
-      ".maps .thead",
-      ".maps .trow",
-      ".agents .thead",
-      ".agents .trow",
-      ".weekday .cell",
-      ".daypart .cell",
-      ".insights .irow",
-    ];
-    // Cells that sit edge to edge by design (the K / D / A grid, the session's padded cells, the rank card's three
-    // figures apart by hairlines, the columns of the two cell panels) only must not overlap: their padding keeps the
-    // content apart.
-    const butting = [".last5 .kda", ".session .sess", ".rank .cells", ".weekday .cells", ".daypart .cells"];
-    const label = (el: Element) => `${el.tagName.toLowerCase()}.${[...el.classList].filter((c) => !/^s(velte)?-/.test(c)).join(".")}`;
-    for (const sel of [...groups, ...butting]) {
-      const gap = !butting.includes(sel);
-      document.querySelectorAll(sel).forEach((group, gi) => {
-        const kids = [...group.children]
-          .map((el) => [el, el.getBoundingClientRect()] as const)
-          .filter(([, r]) => r.width > 0 && r.height > 0);
-        for (let i = 0; i < kids.length; i++) {
-          for (let j = i + 1; j < kids.length; j++) {
-            const [a, ra] = kids[i]!;
-            const [b, rb] = kids[j]!;
-            const x = Math.min(ra.right, rb.right) - Math.max(ra.left, rb.left); // > 0: they overlap horizontally
-            const y = Math.min(ra.bottom, rb.bottom) - Math.max(ra.top, rb.top);
-            if (x > 0.5 && y > 0.5) out.push(`${sel}[${gi}]: ${label(a)} overlaps ${label(b)}`);
-            else if (gap && y > 0.5 && x <= 0 && -x < 7.5) out.push(`${sel}[${gi}]: ${label(a)} is ${(-x).toFixed(1)}px from ${label(b)}`);
-          }
-        }
-      });
-    }
-    return out;
-  });
-}
-
-/** Checks 1, 3, 4, 5, 7, 8 and the My Stats layout check (9, spec §9.7). */
-export async function myStatsChecks(page: Page, family: string): Promise<string[]> {
-  const scroller = page.locator("#app .scroll");
-  const top = await scroller.evaluate((el) => el.scrollTop);
-  const out = [
-    ...(await checkAppBox(page)).map((p) => `1: ${p}`),
-    ...(await checkScrollX(page)).map((p) => `3: ${p}`),
-    ...(await checkFontFloor(page)).map((p) => `4: ${p}`),
-    ...(await checkClipping(page)).map((p) => `5: ${p}`),
-    ...(await checkNoStatusText(page)).map((p) => `7: ${p}`),
-    ...(await checkFont(page, family)).map((p) => `8: ${p}`),
-    ...(await checkMyStatsLayout(page)).map((p) => `9: ${p}`),
-  ];
-  // The decoration probe scrolls its target into view; leave the page where it was.
-  await scroller.evaluate((el, t) => (el.scrollTop = t), top);
-  return out;
 }

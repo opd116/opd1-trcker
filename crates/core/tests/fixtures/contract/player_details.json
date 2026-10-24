@@ -163,15 +163,18 @@
   "topTeammates": [
     {
       "count": 5,
+      "losses": 2,
       "name": {
         "kind": "visible",
         "name": "Mate",
         "tag": "ONE"
       },
-      "puuid": "puuid-mate-1"
+      "puuid": "puuid-mate-1",
+      "wins": 3
     },
     {
       "count": 3,
+      "losses": 1,
       "name": {
         "fromMapId": "d960549e-485c-e861-8d71-aa9d1aed12a2",
         "fromStartMs": 1758970000000,
@@ -180,15 +183,18 @@
         "source": "ownMatch",
         "tag": "ENEMY"
       },
-      "puuid": "puuid-mate-2"
+      "puuid": "puuid-mate-2",
+      "wins": 1
     },
     {
       "count": 1,
+      "losses": 0,
       "name": {
         "agentId": "agent-sova",
         "kind": "hiddenAgent"
       },
-      "puuid": "puuid-mate-3"
+      "puuid": "puuid-mate-3",
+      "wins": 0
     }
   ]
 }

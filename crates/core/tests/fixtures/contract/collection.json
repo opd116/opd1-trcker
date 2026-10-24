@@ -1,0 +1,47 @@
+{
+  "fetchedMs": 1758970000000,
+  "items": [
+    {
+      "edition": "premium",
+      "levelId": "578e9077-4f88-260c-e54c-b988425c60e4",
+      "name": "Reaver",
+      "skinId": "30388628-42f0-606c-82c0-73ad43de997f",
+      "vp": 1775,
+      "weaponId": "9c82e19d-4575-0200-1a81-3eacf00cf872"
+    },
+    {
+      "edition": "exclusive",
+      "levelId": "22222222-0000-0000-0000-000000000002",
+      "name": "Champions 2025",
+      "skinId": "11111111-0000-0000-0000-000000000002",
+      "vp": 2675,
+      "weaponId": "9c82e19d-4575-0200-1a81-3eacf00cf872"
+    },
+    {
+      "edition": null,
+      "levelId": "22222222-0000-0000-0000-000000000003",
+      "name": "Battle Pass",
+      "skinId": "11111111-0000-0000-0000-000000000003",
+      "vp": null,
+      "weaponId": "9c82e19d-4575-0200-1a81-3eacf00cf872"
+    },
+    {
+      "edition": "premium",
+      "levelId": "22222222-0000-0000-0000-000000000004",
+      "name": "Reaver Karambit",
+      "skinId": "11111111-0000-0000-0000-000000000004",
+      "vp": 3550,
+      "weaponId": "2f59173c-4bed-b6c3-2191-dea9b58be9c7"
+    }
+  ],
+  "weapons": [
+    {
+      "id": "9c82e19d-4575-0200-1a81-3eacf00cf872",
+      "name": "Vandal"
+    },
+    {
+      "id": "2f59173c-4bed-b6c3-2191-dea9b58be9c7",
+      "name": "Melee"
+    }
+  ]
+}

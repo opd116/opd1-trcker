@@ -13,6 +13,6 @@
   svg {
     flex: none;
     align-self: center;
-    color: var(--text2);
+    color: var(--text-muted);
   }
 </style>

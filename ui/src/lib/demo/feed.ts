@@ -2,17 +2,21 @@
 // `import.meta.env.DEV && !isTauri()`, so `vite build` never includes it.
 //
 // Scene selection:
-//   URL  ?scene=<any SceneName>            (Playwright; spec §8.2)
-//        &route=mystats                    open My Stats
-//        &route=details&puuid=…[&more=1]   open Player Details
-//        &route=match&match=…&puuid=…&from=recent|encounter
+//   URL  ?scene=<any SceneName>                      (Playwright; spec §8.2)
+//        &screen=live|saved|history|comp|skins|ascii|settings|about
+//        &profile=<puuid>                            open the profile drawer
+//        &match=<id>&puuid=<focus>[&from=<MatchFrom>] open the History scoreboard (from defaults to history)
+//        &glance=1                                   glance mode
+//   v8 names, still accepted: &route=mystats (→ comp), &route=details&puuid=… (→ drawer),
+//        &route=match&match=…&puuid=…&from=recent|encounter (→ scoreboard, Back reopens the drawer)
 //   keys 1–5 lobby with n players · 6 pregame · 7 ingame · 8 ingame-longnames · 0 closed
-// Theme options (?tone= …) are read by themeStore. No on-screen control, so layout is never affected.
+// No on-screen control, so layout is never affected.
 import type { Writable } from "svelte/store";
-import { go, type Route } from "../router.svelte";
+import { go, openMatch, openProfile, router, SCREENS, setGlance, type EncFrom, type MatchFrom, type Screen } from "../router.svelte";
 import type { LiveState, Meta, MyStats } from "../types";
+import { DEMO_NOW } from "./cdv8";
 import demoMeta from "./meta.json";
-import { SCENES, sceneMyStats, type SceneName } from "./scenes";
+import { SCENES, sceneMyStats, type DemoRoute, type SceneName } from "./scenes";
 
 const KEYS: Record<string, SceneName> = {
   "0": "closed",
@@ -30,30 +34,87 @@ const DEFAULT_SCENE: SceneName = "lobby1";
 
 const isScene = (v: string | null): v is SceneName => v !== null && Object.hasOwn(SCENES, v);
 
-/** `&route=…` overrides the scene's own route; anything incomplete keeps `fallback`. */
-export function routeFromSearch(q: URLSearchParams, fallback: Route): Route {
+/** Where the demo opens the app: a screen, maybe the drawer or a scoreboard over it, maybe glance mode. */
+export type DemoNav = {
+  screen: Screen;
+  profile: string | null;
+  match: { matchId: string; focusPuuid: string; from: MatchFrom; encFrom?: EncFrom } | null;
+  glance: boolean | null;
+};
+
+const MATCH_FROM: readonly MatchFrom[] = ["history", "recap", "lastMatch", "encounter", "profile", "comp"];
+
+/** A scene's v8 route on the v2 router: mystats → Competitive, details → the drawer, match → the scoreboard. */
+export function navFromRoute(r: DemoRoute): DemoNav {
+  const base: DemoNav = { screen: "live", profile: null, match: null, glance: null };
+  switch (r.name) {
+    case "live":
+      return base;
+    case "mystats":
+      return { ...base, screen: "comp" };
+    case "details":
+      return { ...base, profile: r.puuid };
+    case "match":
+      return r.back === "mystats"
+        ? { ...base, screen: "comp", match: { matchId: r.matchId, focusPuuid: r.focusPuuid, from: "comp" } }
+        : {
+            ...base,
+            match: {
+              matchId: r.matchId,
+              focusPuuid: r.focusPuuid,
+              from: r.from === "encounter" ? "encounter" : "profile",
+              encFrom: { puuid: r.back.puuid, screen: "live" },
+            },
+          };
+  }
+}
+
+/** The URL's overrides on top of `fallback` (the scene's own). Anything incomplete keeps the fallback's part. */
+export function navFromSearch(q: URLSearchParams, fallback: DemoNav): DemoNav {
   const puuid = q.get("puuid");
+  let nav: DemoNav = { ...fallback };
+  // v8 names first, so the v2 parameters can refine them.
   switch (q.get("route")) {
     case "live":
-      return { name: "live" };
+      nav = navFromRoute({ name: "live" });
+      break;
     case "mystats":
-      return { name: "mystats" };
+      nav = navFromRoute({ name: "mystats" });
+      break;
     case "details":
-      return puuid ? { name: "details", puuid, more: q.get("more") === "1" } : fallback;
+      if (puuid) nav = navFromRoute({ name: "details", puuid, more: false });
+      break;
     case "match": {
       const matchId = q.get("match");
-      if (!matchId || !puuid) return fallback;
-      return {
-        name: "match",
-        matchId,
-        focusPuuid: puuid,
-        from: q.get("from") === "encounter" ? "encounter" : "recent",
-        back: { puuid, more: false },
-      };
+      if (matchId && puuid) {
+        const from = q.get("from") === "encounter" ? "encounter" : "recent";
+        nav = navFromRoute({ name: "match", matchId, focusPuuid: puuid, from, back: { puuid, more: false } });
+      }
+      break;
     }
-    default:
-      return fallback;
   }
+  if (!q.has("route")) {
+    const screen = q.get("screen");
+    if (screen && (SCREENS as readonly string[]).includes(screen)) nav = { ...nav, screen: screen as Screen, profile: null, match: null };
+    const profile = q.get("profile");
+    if (profile) nav = { ...nav, profile };
+    const matchId = q.get("match");
+    if (matchId && puuid) {
+      const f = q.get("from");
+      const from = MATCH_FROM.find((m) => m === f) ?? "history";
+      nav = { ...nav, match: { matchId, focusPuuid: puuid, from } };
+    }
+  }
+  if (q.has("glance")) nav = { ...nav, glance: q.get("glance") === "1" };
+  return nav;
+}
+
+/** Put the router where `nav` says. */
+export function applyNav(nav: DemoNav): void {
+  go(nav.screen);
+  if (nav.match) openMatch(nav.match.matchId, nav.match);
+  if (nav.profile) openProfile(nav.profile, null);
+  if (nav.glance !== null && nav.glance !== router.glance) setGlance(nav.glance);
 }
 
 /** What the scene's `meta` field means: pending (null), the demo meta, a copy edited by the scene, or its own. */
@@ -61,6 +122,32 @@ export function sceneMeta(m: (typeof SCENES)[SceneName]["meta"]): Meta | null {
   if (m === "pending") return null;
   if (typeof m === "function") return m(demoMeta as Meta);
   return m ?? (demoMeta as Meta);
+}
+
+/** A page clock within this of DEMO_NOW is already lined up with the fixtures (Playwright pins it at DEMO_NOW). */
+const CLOCK_NEAR_MS = 3_600_000;
+let clockAligned = false;
+
+/**
+ * The fixtures are anchored at DEMO_NOW while the views read `Date.now()`, so in a plain DEV browser the queue timer
+ * read 32766:13 and every "x ago" was weeks off. Unless the page clock is already near DEMO_NOW (Playwright's harness
+ * freezes it there), shift `Date.now()` and `new Date()` (no arguments) by `DEMO_NOW - realNow`: time still ticks, but
+ * from the fixtures' "now". Idempotent; never under vitest (it would move the clock of the tests in that worker).
+ * DEV-only like the rest of this file: main.ts calls it before mounting (the views read the clock as they mount), and
+ * startDemo once more in case it was not.
+ */
+export function alignDemoClock(): void {
+  if (clockAligned || import.meta.env.MODE === "test") return;
+  clockAligned = true;
+  const RealDate = Date;
+  const offset = DEMO_NOW - RealDate.now();
+  if (Math.abs(offset) <= CLOCK_NEAR_MS) return;
+  const now = () => RealDate.now() + offset;
+  globalThis.Date = new Proxy(RealDate, {
+    construct: (target, args, newTarget) => Reflect.construct(target, args.length === 0 ? [now()] : args, newTarget) as object,
+    apply: () => new RealDate(now()).toString(),
+    get: (target, key, receiver) => (key === "now" ? now : Reflect.get(target, key, receiver)),
+  });
 }
 
 let running = false;
@@ -72,31 +159,33 @@ export function startDemo(
 ): void {
   if (running) return;
   running = true;
+  alignDemoClock();
 
   // Invisible marker: the dist guard (Task 16a Step 6, Task 19 CI) fails the build if this string ever reaches ui/dist.
   document.documentElement.dataset.feed = "demo-feed";
 
-  const show = (name: SceneName, route?: Route) => {
+  const show = (name: SceneName, nav?: DemoNav) => {
     const scene = SCENES[name];
     meta.set(sceneMeta(scene.meta));
     mystats.set(sceneMyStats(scene));
     apply(scene.live);
     // An `autoRoute` scene (VALORANT closed at startup) leaves the route to the app's own start-page rule, unless the
     // URL names one.
-    if (route || !scene.autoRoute) go(route ?? scene.route);
+    if (nav || !scene.autoRoute) applyNav(nav ?? navFromRoute(scene.route));
   };
   // A key press changes the scene: keep the address bar honest and drop the route overrides of the old one.
   const syncUrl = (name: SceneName) => {
     const url = new URL(location.href);
     url.searchParams.set("scene", name);
-    for (const k of ["route", "puuid", "match", "from", "more"]) url.searchParams.delete(k);
+    for (const k of ["route", "puuid", "match", "from", "more", "screen", "profile", "glance"]) url.searchParams.delete(k);
     history.replaceState(null, "", url);
   };
 
   const q = new URLSearchParams(location.search);
   const fromUrl = q.get("scene");
   const first = isScene(fromUrl) ? fromUrl : DEFAULT_SCENE;
-  show(first, q.has("route") ? routeFromSearch(q, SCENES[first].route) : undefined);
+  const overrides = ["route", "screen", "profile", "match", "glance"].some((k) => q.has(k));
+  show(first, overrides ? navFromSearch(q, navFromRoute(SCENES[first].route)) : undefined);
   if (first !== fromUrl) syncUrl(first);
 
   window.addEventListener("keydown", (e) => {

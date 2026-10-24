@@ -6,6 +6,8 @@ use std::path::Path;
 
 use rusqlite::{Connection, Result};
 
+pub mod history;
+pub mod marks;
 pub mod repo;
 
 /// Ordered, append-only list of migrations. Each entry is applied exactly
@@ -18,6 +20,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("schema.sql"),
     include_str!("migration2.sql"),
     include_str!("migration3.sql"),
+    include_str!("migration4.sql"),
 ];
 
 /// Opens (creating if needed) the SQLite database at `path`, sets its

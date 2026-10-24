@@ -7,7 +7,8 @@
 //! # Names (R74, R93, R145)
 //!
 //! For every row, in this order:
-//! 1. the user → their own name (from the local chat session), shown as is;
+//! 1. the user → their own name (from the local chat session, else the
+//!    stored or `players`-table name), shown as is;
 //! 2. a puuid that is hidden on the live screen now (`hidden_now`) → what its
 //!    card shows: the remembered name (the DB knows it from any source,
 //!    R145), else the row's agent, else "Hidden Player" — in every view,
@@ -111,8 +112,15 @@ fn hidden_style(input: &MatchViewInput, p: &MatchPlayer) -> DisplayName {
 
 fn row_name(input: &MatchViewInput, p: &MatchPlayer) -> DisplayName {
     if input.self_puuid == Some(p.puuid.as_str()) {
-        // The user's own name: the chat session's, else the stored one.
-        if let Some(name) = input.self_name.clone().or_else(|| stored_name(p)) {
+        // The user's own name: the chat session's, else the stored one, else
+        // the `players`-table one (rule 4: with VALORANT closed there is no
+        // chat session, and match-details may have blanked the row).
+        if let Some(name) = input
+            .self_name
+            .clone()
+            .or_else(|| stored_name(p))
+            .or_else(|| input.seen.get(&p.puuid).cloned())
+        {
             return display_name(false, Some(name), None, None);
         }
         return hidden_style(input, p);

@@ -1086,16 +1086,23 @@ pub struct TeammateRow {
     pub game_name: Option<String>,
     pub tag_line: Option<String>,
     pub count: u32,
+    /// Of the `count` shared matches, the player's (`?1`'s) wins and losses
+    /// (`matches.winning_team`; a draw — no winner — is neither).
+    pub wins: u32,
+    pub losses: u32,
 }
 
 /// [`Repo::top_teammates`]' query (`?1` the player, `?2` the earliest start):
 /// the player's rows by `idx_match_players_puuid`, then every other table by
 /// key (the teammates of one match are the `match_id` prefix of the primary
 /// key); the newest-first order is a sort. Public so a test can `EXPLAIN QUERY
-/// PLAN` exactly this text.
+/// PLAN` exactly this text. Column 6 is the player's result in that match
+/// (1 won, 0 lost, NULL a draw), read off the `matches` row already joined.
 pub const TOP_TEAMMATES_SQL: &str = "\
 SELECT mp2.puuid, mp2.game_name, mp2.tag_line, m.start_ms,
-       pl.game_name, pl.tag_line
+       pl.game_name, pl.tag_line,
+       CASE WHEN m.winning_team IS NULL THEN NULL
+            WHEN m.winning_team = mp1.team_id THEN 1 ELSE 0 END
 FROM match_players mp1
 JOIN match_players mp2
   ON mp2.match_id = mp1.match_id
@@ -1132,6 +1139,8 @@ impl Repo {
 
         struct Agg {
             count: u32,
+            wins: u32,
+            losses: u32,
             most_recent_ms: i64,
             /// The most recent shared row with a full name.
             match_name: Option<(String, String)>,
@@ -1146,6 +1155,7 @@ impl Repo {
                 full(row.get(1)?, row.get(2)?),
                 row.get::<_, i64>(3)?,
                 full(row.get(4)?, row.get(5)?),
+                row.get::<_, Option<bool>>(6)?,
             ))
         })?;
 
@@ -1154,20 +1164,24 @@ impl Repo {
         // only bump the count, and fill the name when every newer row had
         // none.
         for row in rows {
-            let (teammate_puuid, match_name, start_ms, seen_name) = row?;
-            agg.entry(teammate_puuid)
-                .and_modify(|a| {
-                    a.count += 1;
-                    if a.match_name.is_none() {
-                        a.match_name = match_name.clone();
-                    }
-                })
-                .or_insert(Agg {
-                    count: 1,
-                    most_recent_ms: start_ms,
-                    match_name,
-                    seen_name,
-                });
+            let (teammate_puuid, match_name, start_ms, seen_name, won) = row?;
+            let a = agg.entry(teammate_puuid).or_insert(Agg {
+                count: 0,
+                wins: 0,
+                losses: 0,
+                most_recent_ms: start_ms,
+                match_name: None,
+                seen_name,
+            });
+            a.count += 1;
+            match won {
+                Some(true) => a.wins += 1,
+                Some(false) => a.losses += 1,
+                None => {}
+            }
+            if a.match_name.is_none() {
+                a.match_name = match_name;
+            }
         }
 
         let mut rows: Vec<(String, Agg)> = agg.into_iter().collect();
@@ -1190,6 +1204,8 @@ impl Repo {
                     game_name,
                     tag_line,
                     count: a.count,
+                    wins: a.wins,
+                    losses: a.losses,
                 }
             })
             .collect())

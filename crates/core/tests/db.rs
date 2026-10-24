@@ -66,7 +66,7 @@ fn migrations_idempotent() {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 3);
+        assert_eq!(version, 4);
     }
 
     // Reopening an already-migrated file must succeed, not re-run schema
@@ -75,7 +75,7 @@ fn migrations_idempotent() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 3);
+    assert_eq!(version, 4);
 
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM players", [], |r| r.get(0))
@@ -111,7 +111,7 @@ fn user_version(conn: &rusqlite::Connection) -> i64 {
 #[test]
 fn fresh_db_has_the_phase2_columns() {
     let conn = open_db(Path::new(":memory:")).unwrap();
-    assert_eq!(user_version(&conn), 3);
+    assert_eq!(user_version(&conn), 4);
     for (table, column) in [
         ("matches", "game_length_ms"),
         ("match_teams", "rounds_won_h1"),
@@ -146,8 +146,8 @@ fn v1_db_upgrades_through_migrations_2_and_3() {
         }
     }
 
-    let conn = open_db(tmp.path()).expect("upgrade runs migrations 2 and 3");
-    assert_eq!(user_version(&conn), 3);
+    let conn = open_db(tmp.path()).expect("upgrade runs migrations 2, 3 and 4");
+    assert_eq!(user_version(&conn), 4);
     let old: [Option<i64>; 4] = conn
         .query_row(
             "SELECT m.game_length_ms, t.rounds_won_h1, p.competitive_tier, p.damage
@@ -179,7 +179,7 @@ fn v1_db_upgrades_through_migrations_2_and_3() {
 
     // A second open runs no migration: `ADD COLUMN` twice would fail.
     let conn = open_db(tmp.path()).expect("reopen is a no-op");
-    assert_eq!(user_version(&conn), 3);
+    assert_eq!(user_version(&conn), 4);
     let stored: i64 = conn
         .query_row("SELECT COUNT(*) FROM matches", [], |r| r.get(0))
         .unwrap();
@@ -1032,6 +1032,45 @@ fn top_teammates_orders_by_count() {
 }
 
 #[test]
+fn top_teammates_count_the_players_wins_and_losses_together() {
+    // From the player's side: two wins, one loss and a draw (no winner)
+    // shared with the same teammate; a draw is neither.
+    let repo = repo_in_memory();
+    for (id, start, winner) in [
+        ("w1", 1_000, Some("Blue")),
+        ("w2", 2_000, Some("Blue")),
+        ("l1", 3_000, Some("Red")),
+        ("d1", 4_000, None),
+    ] {
+        repo.upsert_match(
+            &sample_match(id, start, winner),
+            &[],
+            &[
+                sample_player("self", "Blue", "Self", "111"),
+                sample_player("mate", "Blue", "Mate", "AAA"),
+                sample_player("foe", "Red", "Foe", "BBB"),
+            ],
+        )
+        .unwrap();
+    }
+
+    let top = repo.top_teammates("self", 0, 10).unwrap();
+    assert_eq!(top.len(), 1, "an opponent is never a teammate");
+    assert_eq!(top[0].puuid, "mate");
+    assert_eq!(top[0].count, 4);
+    assert_eq!((top[0].wins, top[0].losses), (2, 1));
+
+    // The other side of the same matches: the foe's record is the mirror.
+    let foe = repo.top_teammates("foe", 0, 10).unwrap();
+    assert!(foe.is_empty(), "the foe had no teammate stored");
+    let mate = repo.top_teammates("mate", 0, 10).unwrap();
+    assert_eq!(
+        (mate[0].puuid.as_str(), mate[0].wins, mate[0].losses),
+        ("self", 2, 1)
+    );
+}
+
+#[test]
 fn top_teammates_tie_breaks_by_recency() {
     let repo = repo_in_memory();
 
@@ -1865,8 +1904,8 @@ fn v2_db_upgrades_to_user_version_3_with_the_name_asked_column() {
             .any(|c| c == "name_asked_ms"));
     }
 
-    let conn = open_db(tmp.path()).expect("upgrade runs migration 3 only");
-    assert_eq!(user_version(&conn), 3);
+    let conn = open_db(tmp.path()).expect("upgrade runs migrations 3 and 4");
+    assert_eq!(user_version(&conn), 4);
     assert!(column_names(&conn, "players")
         .iter()
         .any(|c| c == "name_asked_ms"));
@@ -1882,7 +1921,7 @@ fn v2_db_upgrades_to_user_version_3_with_the_name_asked_column() {
     // A second open runs no migration: `ADD COLUMN` twice would fail.
     drop(conn);
     let conn = open_db(tmp.path()).expect("reopen is a no-op");
-    assert_eq!(user_version(&conn), 3);
+    assert_eq!(user_version(&conn), 4);
 }
 
 #[test]
@@ -2114,4 +2153,105 @@ fn names_to_ask_is_index_backed() {
     let joined = plan.join("\n");
     assert!(!joined.contains("SCAN players"), "plan:\n{joined}");
     assert!(!joined.contains("SCAN match_players"), "plan:\n{joined}");
+}
+
+// ---------------------------------------------------------------------
+// Migration 4 (R189): the v2 redesign's tables
+// ---------------------------------------------------------------------
+
+#[test]
+fn v3_db_upgrades_to_user_version_4_and_keeps_its_data() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    {
+        // A DB as v0.3.x left it: migrations 1–3, a player, a match, an RR
+        // row, a history entry and a setting.
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(include_str!("fixtures/schema_v1.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../src/db/migration2.sql"))
+            .unwrap();
+        conn.execute_batch(include_str!("../src/db/migration3.sql"))
+            .unwrap();
+        conn.execute_batch(
+            "PRAGMA user_version = 3;
+             INSERT INTO players VALUES ('old', 'Old', 'TAG', 40, 'card', 7, 123);
+             INSERT INTO matches VALUES ('m', 'Ascent', 'competitive', 1000, 'Blue', 1, 24, 2000000);
+             INSERT INTO match_teams VALUES ('m', 'Blue', 1, 13, 7);
+             INSERT INTO match_players VALUES
+                ('m', 'old', 'Blue', NULL, 'jett', 20, 15, 5, 4000, 24, 10, 20, 5, 'Old', 'TAG', 15, 3100);
+             INSERT INTO comp_updates VALUES ('old', 'm', 's', 15, 14, 42, 20, NULL, 1000);
+             INSERT INTO history_index VALUES ('old', 'm', 'competitive', 1000);
+             INSERT INTO app_state VALUES ('ui_settings', '{\"sound\":true}');",
+        )
+        .unwrap();
+        for table in [
+            "saved_players",
+            "player_notes",
+            "smurf_dismissed",
+            "ascii_art",
+        ] {
+            assert!(
+                column_names(&conn, table).is_empty(),
+                "{table} exists before migration 4"
+            );
+        }
+    }
+
+    let conn = open_db(tmp.path()).expect("upgrade runs migration 4 only");
+    assert_eq!(user_version(&conn), 4);
+    for (table, columns) in [
+        ("saved_players", &["puuid", "saved_ms"][..]),
+        ("player_notes", &["puuid", "note", "updated_ms"][..]),
+        ("smurf_dismissed", &["puuid", "dismissed_ms"][..]),
+        ("ascii_art", &["id", "title", "raw", "created_ms"][..]),
+    ] {
+        assert_eq!(column_names(&conn, table), columns, "{table}");
+    }
+    let kept: (String, i64, i64, i64, i64, String) = conn
+        .query_row(
+            "SELECT p.game_name, p.name_asked_ms, m.game_length_ms, mp.damage, cu.rr_after,
+                    (SELECT value FROM app_state WHERE key = 'ui_settings')
+             FROM players p, matches m, match_players mp, comp_updates cu
+             WHERE p.puuid = 'old' AND m.match_id = 'm' AND mp.puuid = 'old' AND cu.puuid = 'old'",
+            [],
+            |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        kept,
+        (
+            "Old".into(),
+            123,
+            2_000_000,
+            3_100,
+            42,
+            r#"{"sound":true}"#.into()
+        ),
+        "every earlier row survives the upgrade"
+    );
+
+    // The new tables work, and a second open runs no migration (`CREATE
+    // TABLE` twice would fail).
+    let repo = Repo::new(conn);
+    repo.set_saved("old", true, 5).unwrap();
+    repo.ascii_save("t", "#", 6).unwrap();
+    drop(repo);
+    let conn = open_db(tmp.path()).expect("reopen is a no-op");
+    assert_eq!(user_version(&conn), 4);
+    let repo = Repo::new(conn);
+    assert_eq!(repo.player_marks().unwrap().saved, ["old"]);
+    assert_eq!(repo.ascii_list().unwrap().len(), 1);
+    let history = repo
+        .match_history("old", opd1_core::wire::HistoryQueue::All, 0, 10, &|_| None)
+        .unwrap();
+    assert_eq!(history.all_total, 1, "a pre-v4 match shows in the history");
 }

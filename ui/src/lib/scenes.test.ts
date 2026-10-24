@@ -7,8 +7,10 @@ import { writable } from "svelte/store";
 import demoMeta from "./demo/meta.json";
 import { DEMO_NOW, detailsFor, encounterMatchId, matchFor, PUUID, recentMatchId, roster } from "./demo/cdv8";
 import * as fixtures from "./demo/fixtures";
+import { demoHistory } from "./demo/v2/history";
 import { resolveDetails, resolveMatch, resolveMyStats, SCENES, type SceneName } from "./demo/scenes";
 import { dateLong, durationMin, score, time12 } from "./format";
+import { smurfSignal } from "./smurf";
 import type { DisplayName, LiveState, MatchDetailsView, Meta, MyStats, PlayerCard, PlayerDetails } from "./types";
 
 const NAMES: SceneName[] = [
@@ -131,16 +133,16 @@ describe("live scenes", () => {
   });
 
   it("Math.round(actWinrate*100) equals the design's win[0] for all 10 players", () => {
-    expect(players("ingame").map((c) => Math.round(c.actWinrate! * 100))).toEqual([58, 52, 49, 55, 61, 63, 54, 56, 49, 67]);
+    expect(players("ingame").map((c) => Math.round(c.actWinrate! * 100))).toEqual([58, 52, 49, 55, 61, 63, 54, 81, 49, 67]);
   });
 
   it("wins and losses are the design's win[1] / win[2] for all 10 players (v8 roster)", () => {
     const p = players("ingame");
     for (const c of p) expect(c.actWins!).toBeLessThanOrEqual(c.actGames!);
     expect(p.map((c) => [c.actWins, c.actGames! - c.actWins!])).toEqual([
-      [31, 22], [22, 20], [19, 20], [27, 22], [25, 16], [41, 24], [30, 26], [28, 22], [20, 21], [2, 1],
+      [31, 22], [22, 20], [19, 20], [27, 22], [25, 16], [41, 24], [30, 26], [13, 3], [20, 21], [2, 1],
     ]);
-    expect(p.map((c) => c.actGames)).toEqual([53, 42, 39, 49, 41, 65, 56, 50, 41, 3]);
+    expect(p.map((c) => c.actGames)).toEqual([53, 42, 39, 49, 41, 65, 56, 16, 41, 3]);
   });
 
   it("the design's roster: party marks, encounters, hidden and remembered names", () => {
@@ -156,6 +158,30 @@ describe("live scenes", () => {
     expect(enc.map((c) => (c.name && "name" in c.name ? c.name.name : "?")).sort()).toEqual(["Kilo", "Mara", "Rook", "VesperUnbreakabl"]);
     // The backend marks the user's own card `isSelfParty` too (state.rs `r.is_self_party || is_self`): only Fahad here.
     expect(players("ingame").filter((c) => c.isSelfParty).map((c) => c.puuid)).toEqual([players("ingame")[0]!.puuid]);
+  });
+
+  it("every History row opens a scoreboard that agrees with it (map, queue, start, duration, score, the user's line)", () => {
+    const { rows } = demoHistory("all", 0, 100);
+    expect(rows.length).toBeGreaterThan(10);
+    for (const r of rows) {
+      const v = matchFor(r.matchId);
+      const self = v.teams[0]!.players.find((p) => p.isSelf)!;
+      expect([v.mapId, v.queueId, v.startMs, v.durationMs], r.matchId).toEqual([r.mapId, r.queueId, r.startMs, r.durationMs]);
+      expect([v.teams[0]!.roundsWon, v.teams[1]!.roundsWon, v.teams[0]!.result], r.matchId).toEqual([r.roundsWon, r.roundsLost, r.result]);
+      expect([self.kills, self.deaths, self.assists, self.acs, self.hsPct, self.agentId], r.matchId).toEqual([
+        r.kills, r.deaths, r.assists, r.acs, r.hsPct, r.agentId,
+      ]);
+    }
+  });
+
+  it("wisp, the design's flagged smurf, is the third enemy and the only card every smurf signal agrees on", () => {
+    const p = players("ingame");
+    const wisp = p[7]!;
+    expect(wisp).toMatchObject({ name: { kind: "visible", name: "wisp", tag: "1nk" }, level: 41, hsPct: 0.38, prevActTier: null, team: "enemy" });
+    expect(smurfSignal(wisp, p, "cautious")?.reasons).toHaveLength(4);
+    expect(p.filter((c) => smurfSignal(c, p, "cautious")).map((c) => c.puuid)).toEqual([PUUID.wisp]);
+    // The scenes built around Zephyr still have him in that slot.
+    expect(players("ingame-unranked")[7]!.puuid).toBe(PUUID.zephyr);
   });
 
   it("ingame-remembered (R145): one remembered card of each source, all hidden on the live screen", () => {
@@ -709,7 +735,7 @@ describe("feed", () => {
     expect(applied2).toEqual([null]);
   });
 
-  it("keys 0-8 switch scenes (R12), set the route and update the URL", async () => {
+  it("keys 0-8 switch scenes (R12), go to Live and update the URL", async () => {
     vi.resetModules();
     const b = stubBrowser("?scene=lobby1");
     const feed = await import("./demo/feed");
@@ -722,11 +748,12 @@ describe("feed", () => {
       "6": ["pregame", 5], "7": ["ingame", 10], "8": ["ingame", 10],
     };
     for (const [k, [stage, n]] of Object.entries(want)) {
-      router.go({ name: "details", puuid: "x", more: false });
+      router.go("history");
       press(k);
       expect(applied.at(-1)?.stage, k).toBe(stage);
       expect(applied.at(-1)?.players, k).toHaveLength(n);
-      expect(router.router.route, k).toEqual({ name: "live" });
+      expect(router.router.screen, k).toBe("live");
+      expect(router.router.profile, k).toBeNull();
     }
     expect(b.replaceState).toHaveBeenCalled();
     press("9"); // no scene on 9
@@ -751,7 +778,7 @@ describe("feed", () => {
     let seen: MyStats | null | undefined;
     store.subscribe((v) => (seen = v))();
     expect(seen).toEqual(SCENES["mystats-closed"].mystats);
-    expect(router.router.route).toEqual({ name: "mystats" });
+    expect(router.router.screen).toBe("live"); // the v2 design always starts on Live
 
     vi.resetModules();
     stubBrowser("?scene=mystats-loading");
@@ -779,33 +806,44 @@ describe("feed", () => {
       writable<Meta | null>(null),
       writable<MyStats | null | undefined>(undefined),
     );
-    expect(router.router.route).toEqual({ name: "live" });
+    expect(router.router.screen).toBe("live");
   });
 
-  it("routeFromSearch: &route=mystats", async () => {
-    const { routeFromSearch } = await import("./demo/feed");
-    expect(routeFromSearch(new URLSearchParams("route=mystats"), { name: "live" })).toEqual({ name: "mystats" });
-  });
-
-  it("routeFromSearch: &route=details / match override the scene route (spec §8.1)", async () => {
-    const { routeFromSearch } = await import("./demo/feed");
-    const live = { name: "live" } as const;
-    const q = (s: string) => new URLSearchParams(s);
-    expect(routeFromSearch(q(""), live)).toEqual(live);
-    expect(routeFromSearch(q("route=details&puuid=P"), live)).toEqual({ name: "details", puuid: "P", more: false });
-    expect(routeFromSearch(q("route=details&puuid=P&more=1"), live)).toEqual({ name: "details", puuid: "P", more: true });
-    expect(routeFromSearch(q("route=match&match=M&puuid=P&from=encounter"), live)).toEqual({
-      name: "match",
-      matchId: "M",
-      focusPuuid: "P",
-      from: "encounter",
-      back: { puuid: "P", more: false },
+  it("navFromRoute: a scene's v8 route on the v2 router", async () => {
+    const { navFromRoute } = await import("./demo/feed");
+    const base = { screen: "live", profile: null, match: null, glance: null };
+    expect(navFromRoute({ name: "live" })).toEqual(base);
+    expect(navFromRoute({ name: "mystats" })).toEqual({ ...base, screen: "comp" });
+    expect(navFromRoute({ name: "details", puuid: "P", more: true })).toEqual({ ...base, profile: "P" });
+    expect(navFromRoute({ name: "match", matchId: "M", focusPuuid: "P", from: "encounter", back: { puuid: "P", more: false } })).toEqual({
+      ...base,
+      match: { matchId: "M", focusPuuid: "P", from: "encounter", encFrom: { puuid: "P", screen: "live" } },
     });
-    expect(routeFromSearch(q("route=match&match=M&puuid=P"), live)).toMatchObject({ from: "recent" });
-    expect(routeFromSearch(q("route=details"), live)).toEqual(live); // no puuid
-    expect(routeFromSearch(q("route=match&puuid=P"), live)).toEqual(live); // no match id
-    expect(routeFromSearch(q("route=nope"), live)).toEqual(live);
-    expect(routeFromSearch(q("route=live"), { name: "details", puuid: "x", more: false })).toEqual(live);
+    expect(navFromRoute({ name: "match", matchId: "M", focusPuuid: "P", from: "recent", back: "mystats" })).toEqual({
+      ...base,
+      screen: "comp",
+      match: { matchId: "M", focusPuuid: "P", from: "comp" },
+    });
+  });
+
+  it("navFromSearch: ?screen / &profile / &match / &glance, and the v8 &route names", async () => {
+    const { navFromSearch, navFromRoute } = await import("./demo/feed");
+    const live = navFromRoute({ name: "live" });
+    const q = (s: string) => new URLSearchParams(s);
+    expect(navFromSearch(q(""), live)).toEqual(live);
+    expect(navFromSearch(q("screen=skins"), live)).toMatchObject({ screen: "skins", profile: null, match: null });
+    expect(navFromSearch(q("screen=nope"), live)).toEqual(live);
+    expect(navFromSearch(q("screen=saved&profile=P"), live)).toMatchObject({ screen: "saved", profile: "P" });
+    expect(navFromSearch(q("match=M&puuid=P&from=recap"), live)).toMatchObject({ match: { matchId: "M", focusPuuid: "P", from: "recap" } });
+    expect(navFromSearch(q("match=M&puuid=P"), live)).toMatchObject({ match: { from: "history" } });
+    expect(navFromSearch(q("match=M"), live)).toEqual(live); // no focus player
+    expect(navFromSearch(q("glance=1"), live)).toMatchObject({ glance: true });
+    expect(navFromSearch(q("route=mystats"), live)).toMatchObject({ screen: "comp" });
+    expect(navFromSearch(q("route=details&puuid=P"), live)).toMatchObject({ screen: "live", profile: "P" });
+    expect(navFromSearch(q("route=details"), live)).toEqual(live); // no puuid
+    expect(navFromSearch(q("route=match&match=M&puuid=P"), live)).toMatchObject({ match: { matchId: "M", from: "profile" } });
+    expect(navFromSearch(q("route=match&match=M&puuid=P&from=encounter"), live)).toMatchObject({ match: { from: "encounter" } });
+    expect(navFromSearch(q("route=live"), navFromRoute({ name: "details", puuid: "x", more: false }))).toEqual(live);
   });
 });
 

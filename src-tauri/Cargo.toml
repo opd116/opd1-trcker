@@ -16,7 +16,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+# `tray-icon` (R189, user 2026-10-22): close to tray, Show / Quit menu.
+tauri = { version = "2", features = ["tray-icon"] }
+# R189 (user-approved plugins, 2026-10-22): "saved player in your match"
+# toasts. Driven from Rust only (`v2::window::notify_saved_player`).
+tauri-plugin-notification = "2.7"
 opd1-core = { path = "../crates/core" }
 opd1-riot = { path = "../crates/riot" }
 rusqlite = { workspace = true }
@@ -43,6 +47,13 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # (same 0.1.7 in Cargo.lock); Windows only, so nothing is compiled elsewhere.
 [target.'cfg(windows)'.dependencies]
 windows-version = "0.1"
+
+# R189/R193 (user-approved, 2026-10-22): "Launch with Windows" (the `boot`
+# setting), starting minimized in the tray (`--minimized`). `auto-launch` is
+# the crate `tauri-plugin-autostart` wraps, used directly so the entry always
+# goes to the current user's Run key and the exe path is quoted
+# (`v2::window::set_autostart`).
+auto-launch = "0.6"
 
 [dev-dependencies]
 # `test-support`: `RiotSession::with_global_rate` for the pipeline tests (a

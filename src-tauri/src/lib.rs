@@ -12,6 +12,7 @@
 //! - `my_stats` — My Stats' DB-only computation and its `"mystats"` push
 //! - `imgproto` — the `img` URI scheme
 //! - `commands` — IPC commands
+//! - `v2` — the redesign's commands, one file per area (R189)
 
 mod commands;
 mod details;
@@ -27,6 +28,7 @@ mod roster;
 mod state;
 mod store;
 mod sync;
+mod v2;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -91,6 +93,10 @@ pub fn run() {
     log::info!("OPD1 TRCKER {} starting", env!("CARGO_PKG_VERSION"));
 
     tauri::Builder::default()
+        // R189: saved-player toasts (`v2::window::notify_saved_player`).
+        .plugin(tauri_plugin_notification::init())
+        // R189: the title bar's × hides to the tray or quits.
+        .on_window_event(v2::window::on_window_event)
         .register_asynchronous_uri_scheme_protocol("img", |ctx, request, responder| {
             let Some(st) = ctx.app_handle().try_state::<Arc<AppState>>() else {
                 responder.respond(
@@ -119,12 +125,45 @@ pub fn run() {
             commands::copy_log,
             commands::ui_log,
             commands::dump_raw,
+            v2::status::app_status,
+            v2::status::retry_now,
+            v2::status::launch_valorant,
+            v2::marks::player_marks,
+            v2::marks::saved_players,
+            v2::marks::set_saved,
+            v2::marks::set_note,
+            v2::marks::dismiss_smurf,
+            v2::history::match_history,
+            v2::settings::get_settings,
+            v2::settings::set_settings,
+            v2::ascii::ascii_list,
+            v2::ascii::ascii_save,
+            v2::ascii::ascii_delete,
+            v2::appinfo::app_info,
+            v2::collection::collection,
+            v2::profile::profile_extras,
+            v2::window::set_glance,
         ])
         .setup(|app| {
             let started = std::time::Instant::now();
             let st = init_state(app).inspect_err(|e| log::error!("setup failed: {e}"))?;
             log::info!("setup: state ready in {} ms", started.elapsed().as_millis());
             app.manage(st.clone());
+            // R189: autostart plugin, tray, stored window settings, `--minimized`.
+            v2::window::setup(app, &st)?;
+            // R189: "Saved player in my match" — the poll loop decides when
+            // (once per player per match, `savedAlert` on); the toast reads
+            // the `sound` setting when it fires. A weak handle, so the hook
+            // stored on the state does not keep the state alive.
+            let handle = app.handle().clone();
+            let weak = Arc::downgrade(&st);
+            st.set_alert_hook(Box::new(move |name, note| {
+                let sound = weak
+                    .upgrade()
+                    .and_then(|st| st.db_blocking(v2::settings::load))
+                    .is_some_and(|s| s.sound);
+                v2::window::notify_saved_player(&handle, name, note, sound);
+            }));
 
             // Asset tables (agent/map/tier names, acts) once at start —
             // from disk when valorant-api's version is unchanged.

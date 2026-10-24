@@ -10,9 +10,14 @@
 //  - `Desc` has two optional fields beyond `{ kinds, optional?, shape? }`: `enum` (a closed string set) and
 //    `fraction` (a 0..1 number). Both are additive, and the type tests pin them.
 import type {
+  AppInfo,
+  AsciiArt,
+  Collection,
   DisplayName,
   EncounterCount,
   EncounterDetailRow,
+  HistoryPage,
+  HistoryRow,
   Insight,
   Last5Entry,
   LiveState,
@@ -21,17 +26,22 @@ import type {
   MatchSummary,
   MatchTeamView,
   MyStats,
+  OwnedSkin,
   PartyMark,
   Peak,
   PlayerCard,
   PlayerDetails,
+  PlayerMarks,
   Rank,
   RankChange,
   RankSummary,
   RrPoint,
+  SavedPlayer,
   ScoreRow,
   SessionMatch,
   SessionSummary,
+  Settings,
+  SharedRecord,
   StatRow,
   TeammateSummary,
   WeaponSkin,
@@ -49,6 +59,9 @@ export const enums = {
   rememberedSource: ["ownMatch", "otherMatch", "seen"],
   streakMark: ["W", "L", "D"],
   insightKind: ["bestMap", "worstMap", "timeOfDay", "weekdayWeekend", "rrEconomy", "last7Days"],
+  smurfLevel: ["off", "cautious", "eager"],
+  // R189 (backend-system): the Skins screen.
+  edition: ["select", "deluxe", "premium", "exclusive", "ultra"],
 } as const satisfies Record<string, readonly string[]>;
 
 export type Desc = {
@@ -167,7 +180,13 @@ export const shapes = {
     selfTier: numOrNull,
   } satisfies ShapeOf<EncounterDetailRow>,
 
-  TeammateSummary: { puuid: str, name: { kinds: ["object"], shape: "DisplayName" }, count: num } satisfies ShapeOf<TeammateSummary>,
+  TeammateSummary: {
+    puuid: str,
+    name: { kinds: ["object"], shape: "DisplayName" },
+    count: num,
+    wins: num,
+    losses: num,
+  } satisfies ShapeOf<TeammateSummary>,
 
   PlayerDetails: {
     card: { kinds: ["object"], shape: "PlayerCard" },
@@ -281,6 +300,100 @@ export const shapes = {
     byDaypart: { kinds: ["array"], shape: "WinCell" },
     insights: { kinds: ["array"], shape: "Insight" },
   } satisfies ShapeOf<MyStats>,
+
+  // ── v2 redesign (R189; history_page.json, saved_players.json, player_marks.json, settings.json, ascii_art.json,
+  // app_info.json) ──
+  HistoryRow: {
+    matchId: str,
+    // null when the asset tables do not know the map: never a Riot path.
+    mapId: strOrNull,
+    queueId: str,
+    startMs: num,
+    durationMs: numOrNull,
+    result: { kinds: ["string"], enum: "result" },
+    roundsWon: numOrNull,
+    roundsLost: numOrNull,
+    agentId: strOrNull,
+    // R102: the whole stat line is null when the match has no stats row for the user.
+    kills: numOrNull,
+    deaths: numOrNull,
+    assists: numOrNull,
+    kd: numOrNull,
+    acs: numOrNull,
+    hsPct: { kinds: ["number", "null"], fraction: true },
+    rrEarned: numOrNull,
+    tierAfter: numOrNull,
+  } satisfies ShapeOf<HistoryRow>,
+
+  HistoryPage: {
+    rows: { kinds: ["array"], shape: "HistoryRow" },
+    total: num,
+    competitiveTotal: num,
+    allTotal: num,
+  } satisfies ShapeOf<HistoryPage>,
+
+  SharedRecord: { games: num, wins: num, losses: num } satisfies ShapeOf<SharedRecord>,
+
+  SavedPlayer: {
+    puuid: str,
+    name: { kinds: ["object"], shape: "DisplayName" },
+    agentId: strOrNull,
+    tier: numOrNull,
+    with: { kinds: ["object"], shape: "SharedRecord" },
+    against: { kinds: ["object"], shape: "SharedRecord" },
+    note: str,
+    savedMs: num,
+    lastSeenMs: numOrNull,
+    lastSeenMapId: strOrNull,
+  } satisfies ShapeOf<SavedPlayer>,
+
+  // `notes` is a puuid -> note map: an object with no fixed keys, so no nested descriptor.
+  PlayerMarks: {
+    saved: { kinds: ["array"] },
+    notes: { kinds: ["object"] },
+    notSmurf: { kinds: ["array"] },
+  } satisfies ShapeOf<PlayerMarks>,
+
+  Settings: {
+    highlight: bool,
+    enemyFirst: bool,
+    smurf: { kinds: ["string"], enum: "smurfLevel" },
+    savedAlert: bool,
+    sound: bool,
+    onTop: bool,
+    boot: bool,
+    tray: bool,
+  } satisfies ShapeOf<Settings>,
+
+  AsciiArt: { id: num, title: str, raw: str, createdMs: num } satisfies ShapeOf<AsciiArt>,
+
+  AppInfo: {
+    version: str,
+    commit: strOrNull,
+    buildMs: numOrNull,
+    riotClientVersion: strOrNull,
+    valorantVersion: strOrNull,
+    dbMatches: num,
+    dbBytes: num,
+  } satisfies ShapeOf<AppInfo>,
+
+  // ── R189 (backend-system): the Skins screen (`collection`) ──
+  OwnedSkin: {
+    skinId: str,
+    levelId: str,
+    name: str,
+    weaponId: str,
+    edition: { kinds: ["string", "null"], enum: "edition" },
+    vp: numOrNull,
+  } satisfies ShapeOf<OwnedSkin>,
+
+  WeaponInfo: { id: str, name: str } satisfies ShapeOf<Collection["weapons"][number]>,
+
+  Collection: {
+    items: { kinds: ["array"], shape: "OwnedSkin" },
+    weapons: { kinds: ["array"], shape: "WeaponInfo" },
+    fetchedMs: num,
+  } satisfies ShapeOf<Collection>,
 };
 
 /** One descriptor per `DisplayName` variant, keyed by its `kind` tag. */
@@ -296,4 +409,45 @@ export const displayNameShapes = {
   } satisfies ShapeOf<Extract<DisplayName, { kind: "remembered" }>>,
   hiddenPlayer: { kind: { kinds: ["string"] } } satisfies ShapeOf<Extract<DisplayName, { kind: "hiddenPlayer" }>>,
   hiddenAgent: { kind: { kinds: ["string"] }, agentId: str } satisfies ShapeOf<Extract<DisplayName, { kind: "hiddenAgent" }>>,
+};
+
+// ── R189 (backend-live): AppStatus, ProfileExtras ──────────────────────────────────────────────────────────────────
+// Their own block (another lane appends other v2 types): contract.test.ts adds these to the walker's registry.
+import type { AppStatus, ConnState, ProfileExtras } from "./types";
+
+/** `AppStatus.conn`'s closed set; contract.test-d.ts pins it to `ConnState`. */
+export const CONN_STATES = ["waiting", "ok", "lost", "error"] as const satisfies readonly ConnState[];
+
+export type PregameInfo = NonNullable<AppStatus["pregame"]>;
+export type QueueInfo = NonNullable<AppStatus["queue"]>;
+export type LiveMates = ProfileExtras["liveMates"][number];
+
+export const liveShapes = {
+  PregameInfo: { phaseEndsMs: numOrNull, locked: num, total: num } satisfies ShapeOf<PregameInfo>,
+
+  QueueInfo: { queueId: str, searchingSinceMs: num } satisfies ShapeOf<QueueInfo>,
+
+  AppStatus: {
+    conn: str,
+    riotClientVersion: strOrNull,
+    lastDataMs: numOrNull,
+    attempt: num,
+    maxAttempts: num,
+    retryInMs: numOrNull,
+    errorCode: strOrNull,
+    errorAtMs: numOrNull,
+    lockfilePath: str,
+    pregame: { kinds: ["object", "null"], shape: "PregameInfo" },
+    queue: { kinds: ["object", "null"], shape: "QueueInfo" },
+    recapMatchId: strOrNull,
+    gameVersion: strOrNull,
+  } satisfies ShapeOf<AppStatus>,
+
+  LiveMates: { matchId: str, puuids: { kinds: ["array"] } } satisfies ShapeOf<LiveMates>,
+
+  ProfileExtras: {
+    puuid: str,
+    maps: { kinds: ["array"], shape: "StatRow" },
+    liveMates: { kinds: ["array"], shape: "LiveMates" },
+  } satisfies ShapeOf<ProfileExtras>,
 };

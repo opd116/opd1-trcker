@@ -2,12 +2,15 @@ import { isTauri } from "@tauri-apps/api/core";
 import { get, readable, writable } from "svelte/store";
 import { myStats, tauriBridge } from "./api";
 import { loadMeta, openDetails, openMatch, startLive, startMyStats } from "./boot";
-import { onStage, startPage } from "./router.svelte";
+import { onStage, setLiveCardLookup, startPage } from "./router.svelte";
 import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails, Stage } from "./types";
 import { reportError } from "./uilog";
 
 /** Live stage + roster. Pushed by Rust (`emit("live")`); the UI never polls Riot. null = nothing received yet. */
 export const live = writable<LiveState | null>(null);
+
+// The profile drawer's settled (failed) state keeps what the live card knew (router `openProfile`).
+setLiveCardLookup((puuid) => get(live)?.players.find((c) => c.puuid === puuid));
 
 /**
  * The My Stats page's data (`invoke("my_stats")` once at startup, then Rust's `mystats` events; the UI never asks
@@ -54,8 +57,8 @@ export const now = readable(Date.now(), (set) => {
 let prevStage: Stage | null = null;
 
 /**
- * Every LiveState goes through here: the first settled one picks the start page (VALORANT closed → My Stats), and
- * entering Agent Select switches the route to Live.
+ * Every LiveState goes through here: entering Agent Select switches to the Live screen (router `onStage`).
+ * `startPage` is a no-op kept for compatibility (the v2 design always starts on Live).
  */
 export function applyLive(s: LiveState | null): void {
   if (s) {

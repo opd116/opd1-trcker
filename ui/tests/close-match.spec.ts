@@ -1,33 +1,51 @@
-// R150: the Match Details page tells Rust when it is left (`close_match`, like `close_details`). The DEV browser has no
-// Rust, so this spec puts a recording fake behind Tauri's own door (`window.isTauri`, `__TAURI_INTERNALS__.invoke`): the
-// app takes its real Tauri paths (api.ts's `invoke`, startFeeds' `listen`) and every command it sends is logged, in
-// order, for the assertions. 1000×800, DPR 1, against the same demo data as the other specs.
+// R145 / R150 / R163 on the v2 router: leaving the profile drawer sends `close_details(puuid)` and leaving a scoreboard
+// sends `close_match(matchId)`, each once, before the next page's own open, so Rust never rebuilds or emits a page
+// nobody sees. The DEV browser has no Rust, so this spec puts a recording fake behind Tauri's own door
+// (`window.isTauri`, `__TAURI_INTERNALS__.invoke`): the app takes its real Tauri paths (api.ts's `invoke`, the feeds'
+// `listen`) and every command it sends is logged, in order, for the assertions.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-import { matchFor, PUUID, recentMatchId } from "../src/lib/demo/cdv8";
+import { detailsFor, encounterMatchId, matchFor, PUUID, recentMatchId } from "../src/lib/demo/cdv8";
 import { SCENES } from "../src/lib/demo/scenes";
-import { NOW, routeMedia, UI_DIR, waitPage } from "./harness";
+import { DEFAULT_SETTINGS } from "../src/lib/demo/v2/store";
+import { demoStatus } from "../src/lib/demo/v2/status";
+import { APP_READY, gotoApp, NOW, routeMedia, UI_DIR } from "./harness";
 
 const MARA = PUUID.mara!;
-const A = recentMatchId("mara", 0);
-const B = recentMatchId("mara", 1);
+const FAHAD = PUUID.fahad!;
+/** Mara's first encounter with the user, and the user's own two newest matches. */
+const ENC = encounterMatchId("mara", 0);
+const A = recentMatchId("fahad", 0);
+const B = recentMatchId("fahad", 1);
 
-/** The commands the app sent since `mark`, in order (`match_details` carries the id: `match_details:<id>`). */
-const calls = (page: Page): Promise<string[]> => page.evaluate(() => (window as unknown as { __calls: string[] }).__calls.slice());
-const mark = (page: Page) => page.evaluate(() => ((window as unknown as { __calls: string[] }).__calls.length = 0));
+type Fake = { __calls: string[]; __closes: string[]; __emit: (event: string, payload: unknown) => void };
 
-/** Boot the app as if inside Tauri: the fake answers meta, live_state, player_details and match_details, and lets a test emit events. */
+/** The commands the app sent since `mark`, in order (`match_details` / `player_details` carry their key). */
+const calls = (page: Page): Promise<string[]> => page.evaluate(() => (window as unknown as Fake).__calls.slice());
+const mark = (page: Page) => page.evaluate(() => ((window as unknown as Fake).__calls.length = 0));
+/** The `close_*` commands with their arguments, as sent (R163: each carries the key of the page it closes). */
+const closes = (page: Page): Promise<string[]> => page.evaluate(() => (window as unknown as Fake).__closes.slice());
+const count = (log: string[], cmd: string) => log.filter((c) => c === cmd).length;
+/** The page-level commands only (the drawer's `profile_extras` and the like are not what this spec is about). */
+const pageCalls = async (page: Page) => (await calls(page)).filter((c) => /^(close_|player_details|match_details)/.test(c));
+
+/** Boot the app as if inside Tauri: the fake answers what the screens ask for and lets a test emit events. */
 async function bootInTauri(page: Page): Promise<void> {
+  const live = SCENES.ingame.live!;
   const data = {
     meta: JSON.parse(readFileSync(join(UI_DIR, "src", "lib", "demo", "meta.json"), "utf8")),
-    live: SCENES.ingame.live,
-    details: SCENES.details.details,
-    matches: { [A]: matchFor(A), [B]: matchFor(B) },
+    live,
+    status: demoStatus(live, new URLSearchParams()),
+    settings: DEFAULT_SETTINGS,
+    details: {
+      [MARA]: detailsFor("mara", live.players.find((c) => c.puuid === MARA), live.players),
+      [FAHAD]: detailsFor("fahad", live.players.find((c) => c.puuid === FAHAD), live.players),
+    },
+    matches: { [ENC]: matchFor(ENC, live.players), [A]: matchFor(A, live.players), [B]: matchFor(B, live.players) },
   };
   await page.addInitScript((d) => {
-    type Fake = Record<string, unknown> & { __calls: string[]; __closes: string[]; __emit: (event: string, payload: unknown) => void };
-    const w = window as unknown as Fake;
+    const w = window as unknown as Record<string, unknown> & Fake;
     w.isTauri = true;
     w.__calls = [];
     w.__closes = [];
@@ -42,18 +60,25 @@ async function bootInTauri(page: Page): Promise<void> {
       },
       unregisterCallback: (id: number) => cbs.delete(id),
       convertFileSrc: (p: string) => p,
-      invoke: async (cmd: string, args: Record<string, string>) => {
+      // The title bar's window controls read the window's label (@tauri-apps/api/window).
+      metadata: { currentWindow: { label: "main" }, currentWebview: { windowLabel: "main", label: "main" } },
+      invoke: async (cmd: string, args: Record<string, string> | undefined) => {
         if (cmd === "plugin:event|listen") {
-          listeners.set(args.event!, Number(args.handler));
+          listeners.set(args!.event!, Number(args!.handler));
           return ++n;
         }
-        w.__calls.push(cmd === "match_details" ? `match_details:${args.matchId}` : cmd);
+        if (cmd.startsWith("plugin:")) return null;
+        w.__calls.push(cmd === "match_details" ? `match_details:${args!.matchId}` : cmd === "player_details" ? `player_details:${args!.puuid}` : cmd);
         if (cmd.startsWith("close_")) w.__closes.push(`${cmd}:${JSON.stringify(args ?? null)}`);
         const table: Record<string, unknown> = {
           meta: d.meta,
           live_state: d.live,
-          player_details: (d.details as Record<string, unknown>)[args.puuid!],
-          match_details: (d.matches as Record<string, unknown>)[args.matchId!],
+          app_status: d.status,
+          get_settings: d.settings,
+          player_marks: { saved: [], notes: {}, notSmurf: [] },
+          profile_extras: { puuid: args?.puuid, maps: [], liveMates: [] },
+          player_details: (d.details as Record<string, unknown>)[args?.puuid ?? ""],
+          match_details: (d.matches as Record<string, unknown>)[args?.matchId ?? ""],
         };
         return structuredClone(table[cmd] ?? null);
       },
@@ -61,116 +86,127 @@ async function bootInTauri(page: Page): Promise<void> {
   }, data);
   await routeMedia(page);
   await page.clock.setFixedTime(NOW);
-  await page.goto("/");
-  await page.locator(".live .card").first().waitFor();
+  await gotoApp(page, "/", APP_READY);
+  await page.locator("main [data-row]").first().waitFor();
+  // Nothing went wrong on the way in (the app reports its own errors through `ui_log`).
+  expect((await calls(page)).filter((c) => c === "ui_log")).toEqual([]);
 }
 
-/** Mara's Details, then her first recent row: the Match page for A, loaded. */
-async function openMatchA(page: Page): Promise<void> {
-  await page.locator(".live .card").filter({ hasText: "Mara" }).click({ position: { x: 20, y: 70 } });
-  await waitPage(page, "loaded");
-  await page.waitForTimeout(450); // past the double-click guard
-  await page.locator(".details .recent .rrow").first().click();
-  await expect(page.locator(".match")).toHaveCount(1);
-  await waitPage(page, "loaded");
-  expect(await calls(page)).toContain(`match_details:${A}`);
+const dialog = (page: Page) => page.getByRole("dialog");
+const board = (page: Page) => page.locator('main .match[aria-busy="false"]');
+const nav = (page: Page, label: string) => page.locator(`nav.rail button[aria-label="${label}"]`);
+
+/** The app's own double-click guard (lib/clickGuard.ts): a click within 400 ms of opening a drawer is swallowed. */
+async function guardDone(page: Page): Promise<void> {
+  await expect
+    .poll(() => page.evaluate(`import("/src/lib/clickGuard.ts").then(({ cardOpenGuard }) => cardOpenGuard.swallows())`))
+    .toBe(false);
 }
 
-/** The `close_*` commands with their arguments, as sent (R163: each carries the key of the page it closes). */
-const closes = (page: Page): Promise<string[]> => page.evaluate(() => (window as unknown as { __closes: string[] }).__closes.slice());
+/** Open a player's drawer from the board and wait for their details (and for the double-click guard to let go). */
+async function openDrawer(page: Page, name: string): Promise<void> {
+  await page.locator("main [data-row]").filter({ hasText: name }).first().click();
+  await expect(dialog(page)).toHaveAttribute("aria-busy", "false");
+  await guardDone(page);
+}
 
-const count = (log: string[], cmd: string) => log.filter((c) => c === cmd).length;
+/** Mara's drawer, then her first encounter row: the scoreboard for ENC, loaded. */
+async function openEncounter(page: Page): Promise<void> {
+  await openDrawer(page, "Mara");
+  await dialog(page).getByRole("button", { name: /Open scoreboard$/ }).first().click();
+  await expect(board(page)).toHaveCount(1);
+  expect(await calls(page)).toContain(`match_details:${ENC}`);
+}
 
-test.describe("close_match", () => {
-  test("Details opening the match closes the details, not the match; the Match page's own open comes after", async ({ page }) => {
+test.describe("close_details / close_match", () => {
+  test("a drawer row opening a scoreboard closes the details (with the puuid), not a match; the scoreboard's own open comes after", async ({ page }) => {
     await bootInTauri(page);
-    await openMatchA(page);
+    await openEncounter(page);
     const log = await calls(page);
     expect(log.indexOf("close_details")).toBeGreaterThan(-1);
-    expect(log.indexOf("close_details")).toBeLessThan(log.indexOf(`match_details:${A}`));
+    expect(log.indexOf("close_details")).toBeLessThan(log.indexOf(`match_details:${ENC}`));
     expect(count(log, "close_match")).toBe(0);
-  });
-
-  test("Back from Match: close_match once, before the Details page opens again", async ({ page }) => {
-    await bootInTauri(page);
-    await openMatchA(page);
-    await mark(page);
-    await page.locator(".match .back").click();
-    await waitPage(page, "loaded");
-    await page.waitForTimeout(300);
-    const log = await calls(page);
-    expect(count(log, "close_match")).toBe(1);
-    expect(log.indexOf("close_match")).toBeLessThan(log.indexOf("player_details"));
-    expect(count(log, "close_details")).toBe(0);
-  });
-
-  test("R163: the closes carry the key of the page they close", async ({ page }) => {
-    await bootInTauri(page);
-    await openMatchA(page);
-    // Details → Match closed the details page: its puuid.
     expect(await closes(page)).toEqual([`close_details:${JSON.stringify({ puuid: MARA })}`]);
-    await page.locator(".match .back").click();
-    await waitPage(page, "loaded");
-    // Back from Match closed the match: its id.
-    expect((await closes(page)).at(-1)).toBe(`close_match:${JSON.stringify({ matchId: A })}`);
   });
 
-  test("R163: the Live tab sends the keys too: close_match(matchId) from Match, close_details(puuid) from Details", async ({ page }) => {
+  test("Back from the scoreboard: close_match(matchId) once, before the drawer's player_details; no close_details", async ({ page }) => {
     await bootInTauri(page);
-    await openMatchA(page);
-    await page.locator("header.bar .tab.on").click();
-    await expect(page.locator(".live")).toHaveCount(1);
-    await page.waitForTimeout(300);
-    expect((await closes(page)).at(-1)).toBe(`close_match:${JSON.stringify({ matchId: A })}`);
+    await openEncounter(page);
+    await mark(page);
+    await page.locator("main .match .back").click();
+    await expect(dialog(page)).toHaveAttribute("aria-busy", "false");
+    const log = await pageCalls(page);
+    expect(log).toEqual(["close_match", `player_details:${MARA}`]);
+    expect((await closes(page)).at(-1)).toBe(`close_match:${JSON.stringify({ matchId: ENC })}`);
+  });
 
-    // And from Details straight to Live.
-    await page.locator(".live .card").filter({ hasText: "Mara" }).click({ position: { x: 20, y: 70 } });
-    await waitPage(page, "loaded");
-    await page.waitForTimeout(450);
-    await page.locator("header.bar .tab.on").click();
-    await expect(page.locator(".live")).toHaveCount(1);
-    await page.waitForTimeout(300);
+  test("the user's own recent row: the same order (close_details, then match_details)", async ({ page }) => {
+    await bootInTauri(page);
+    await openDrawer(page, "Fahad");
+    await mark(page);
+    await dialog(page).getByRole("button", { name: /Open scoreboard$/ }).first().click();
+    await expect(board(page)).toHaveCount(1);
+    expect(await pageCalls(page)).toEqual(["close_details", `match_details:${A}`]);
+  });
+
+  test("the nav rail sends the keys too: close_match(matchId) from a scoreboard, close_details(puuid) from the drawer", async ({ page }) => {
+    await bootInTauri(page);
+    await openEncounter(page);
+    await mark(page);
+    await nav(page, "Live").click();
+    await expect(page.locator("main .match")).toHaveCount(0);
+    await expect.poll(() => pageCalls(page)).toEqual(["close_match"]);
+    expect((await closes(page)).at(-1)).toBe(`close_match:${JSON.stringify({ matchId: ENC })}`);
+
+    // And from the drawer straight to another screen.
+    await openDrawer(page, "Mara");
+    await mark(page);
+    await nav(page, "Saved").click();
+    await expect(dialog(page)).toHaveCount(0);
+    await expect.poll(() => pageCalls(page)).toEqual(["close_details"]);
     expect((await closes(page)).at(-1)).toBe(`close_details:${JSON.stringify({ puuid: MARA })}`);
   });
 
-  test("the Live tab from Match: close_match once", async ({ page }) => {
+  test("Escape and × on the drawer close the details once", async ({ page }) => {
     await bootInTauri(page);
-    await openMatchA(page);
+    await openDrawer(page, "Mara");
     await mark(page);
-    await page.locator("header.bar .tab.on").click();
-    await expect(page.locator(".live")).toHaveCount(1);
-    await page.waitForTimeout(300);
-    expect(await calls(page)).toEqual(["close_match"]);
+    await page.keyboard.press("Escape");
+    await expect(dialog(page)).toHaveCount(0);
+    await expect.poll(() => pageCalls(page)).toEqual(["close_details"]);
+    await openDrawer(page, "Mara");
+    await mark(page);
+    await dialog(page).getByRole("button", { name: "Close profile" }).click();
+    await expect(dialog(page)).toHaveCount(0);
+    await expect.poll(() => pageCalls(page)).toEqual(["close_details"]);
   });
 
-  test("Agent Select's switch to Live from Match: close_match once", async ({ page }) => {
+  test("Agent Select's switch to Live from a scoreboard: close_match once", async ({ page }) => {
     await bootInTauri(page);
-    await openMatchA(page);
+    await openEncounter(page);
     await mark(page);
-    await page.evaluate((live) => (window as unknown as { __emit: (e: string, p: unknown) => void }).__emit("live", live), SCENES.pregame.live);
-    await expect(page.locator(".live")).toHaveCount(1);
-    await expect(page.locator(".match")).toHaveCount(0);
-    await page.waitForTimeout(300);
-    expect(await calls(page)).toEqual(["close_match"]);
+    await page.evaluate((live) => (window as unknown as Fake).__emit("live", live), SCENES.pregame.live);
+    await expect(nav(page, "Live")).toHaveAttribute("aria-current", "page");
+    await expect(page.locator("main .match")).toHaveCount(0);
+    await expect.poll(() => pageCalls(page)).toEqual(["close_match"]);
   });
 
-  test("a match-to-match switch ends with the new match open: the old page's close_match goes out before the new match_details", async ({ page }) => {
+  test("a match-to-match switch ends with the new match open: the old one's close_match goes out before the new match_details", async ({ page }) => {
     await bootInTauri(page);
-    await openMatchA(page);
-    const first = await page.locator(".match .mtitle").innerText();
+    await openDrawer(page, "Fahad");
+    await dialog(page).getByRole("button", { name: /Open scoreboard$/ }).first().click();
+    await expect(board(page)).toHaveCount(1);
     await mark(page);
     await page.evaluate(
-      `import("/src/lib/router.svelte.ts").then(({ go }) => go(${JSON.stringify({ name: "match", matchId: B, focusPuuid: MARA, from: "recent", back: { puuid: MARA, more: false } })}))`,
+      `import("/src/lib/router.svelte.ts").then(({ openMatch }) => openMatch(${JSON.stringify(B)}, { from: "history", focusPuuid: ${JSON.stringify(FAHAD)} }))`,
     );
-    await waitPage(page, "loaded");
-    await expect(page.locator(".match .mtitle")).not.toHaveText(first);
-    await page.waitForTimeout(400);
-    // Exactly the two commands, in this order, and nothing after them: the new match is not closed again.
-    expect(await calls(page)).toEqual(["close_match", `match_details:${B}`]);
+    await expect(board(page)).toHaveCount(1);
+    await expect.poll(() => pageCalls(page)).toEqual(["close_match", `match_details:${B}`]);
+    expect((await closes(page)).at(-1)).toBe(`close_match:${JSON.stringify({ matchId: A })}`);
     const open = await page.evaluate(
       `import("/src/lib/stores.ts").then((s) => { let v; s.openMatch.subscribe((x) => (v = x))(); return v ? v.matchId : null; })`,
     );
     expect(open).toBe(B);
-    await expect(page.locator(".match .srow")).toHaveCount(10);
+    await expect(page.locator("main .match .srow")).toHaveCount(10);
   });
 });

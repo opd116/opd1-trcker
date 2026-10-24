@@ -38,6 +38,9 @@ pub fn parse_path(path: &str) -> Option<(AssetKind, &str)> {
         "mapSplash" => AssetKind::MapSplash,
         "chroma" => AssetKind::Chroma,
         "contentTier" => AssetKind::ContentTier,
+        // R189: the Skins screen.
+        "weaponIcon" => AssetKind::WeaponIcon,
+        "skinLevel" => AssetKind::SkinLevel,
         _ => return None,
     };
     Some((kind, id))
@@ -110,6 +113,8 @@ mod tests {
             ("mapSplash", AssetKind::MapSplash),
             ("chroma", AssetKind::Chroma),
             ("contentTier", AssetKind::ContentTier),
+            ("weaponIcon", AssetKind::WeaponIcon),
+            ("skinLevel", AssetKind::SkinLevel),
         ] {
             assert_eq!(parse_path(&format!("/{name}/{UUID}")), Some((kind, UUID)));
         }
@@ -125,6 +130,8 @@ mod tests {
             "/agent/",
             "agent/x",
             "/weapon/abc",
+            "/weaponicon/abc",
+            "/SkinLevel/abc",
             "/Agent/abc",
             "/agent/../../etc/passwd",
             "/agent/a/b",

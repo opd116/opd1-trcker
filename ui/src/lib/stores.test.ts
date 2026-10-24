@@ -8,8 +8,8 @@ const state = (stage: LiveState["stage"], settled = true): LiveState => ({ stage
 async function load() {
   vi.resetModules();
   const stores = await import("./stores");
-  const router = await import("./router.svelte");
-  return { ...stores, ...router };
+  const { go, openProfile, router } = await import("./router.svelte");
+  return { ...stores, go, openProfile, router };
 }
 
 describe("stores", () => {
@@ -54,92 +54,34 @@ describe("stores", () => {
     expect(get(live)).toBeNull();
   });
 
-  it("entering Agent Select switches to Live; later pregame updates leave the route alone", async () => {
+  it("entering Agent Select switches to Live; later pregame updates leave the screen alone", async () => {
     const { applyLive, go, router } = await load();
     applyLive(state("menus"));
-    go({ name: "details", puuid: "p1", more: false });
+    go("history");
     applyLive(state("pregame"));
-    expect(router.route).toEqual({ name: "live" });
-    go({ name: "details", puuid: "p1", more: false });
-    applyLive(state("pregame")); // the same stage again: the user may be browsing Details
-    expect(router.route).toEqual({ name: "details", puuid: "p1", more: false });
+    expect(router.screen).toBe("live");
+    go("saved");
+    applyLive(state("pregame")); // the same stage again: the user may be browsing
+    expect(router.screen).toBe("saved");
     applyLive(state("ingame"));
     applyLive(state("menus"));
     applyLive(state("pregame")); // the next match
-    expect(router.route).toEqual({ name: "live" });
+    expect(router.screen).toBe("live");
   });
 
   it("a null LiveState forgets the stage, so the next pregame counts as entering it", async () => {
     const { applyLive, go, router } = await load();
     applyLive(state("pregame"));
     applyLive(null);
-    go({ name: "details", puuid: "p1", more: false });
+    go("comp");
     applyLive(state("pregame"));
-    expect(router.route).toEqual({ name: "live" });
+    expect(router.screen).toBe("live");
   });
 
-  describe("the start page (spec §2.4, R71 ended)", () => {
-    it("the first LiveState picks it: closed opens My Stats, anything else stays on Live", async () => {
-      for (const stage of ["menus", "pregame", "ingame"] as const) {
-        const { applyLive, router } = await load();
-        applyLive(state(stage));
-        expect(router.route, stage).toEqual({ name: "live" });
-      }
-      const { applyLive, router } = await load();
-      applyLive(state("closed"));
-      expect(router.route).toEqual({ name: "mystats" });
-    });
-
-    it("an unsettled closed state is no verdict: the app stays on Live until the first settled one", async () => {
-      // Rust publishes `closed` before its first look at the game: with VALORANT already running, that must not
-      // open My Stats (the Lobby follows a moment later).
-      const { applyLive, router } = await load();
-      applyLive(state("closed", false));
-      expect(router.route).toEqual({ name: "live" });
-      applyLive(state("closed", false));
-      expect(router.route).toEqual({ name: "live" });
-      applyLive(state("menus"));
-      expect(router.route, "settled on the Lobby").toEqual({ name: "live" });
-      applyLive(state("closed"));
-      expect(router.route, "the verdict was made, once").toEqual({ name: "live" });
-    });
-
-    it("a settled closed state after unsettled ones opens My Stats", async () => {
-      const { applyLive, router } = await load();
-      applyLive(state("closed", false));
-      applyLive(state("closed"));
-      expect(router.route).toEqual({ name: "mystats" });
-    });
-
-    it("a user who navigated while it was unsettled stays where they went", async () => {
-      const { applyLive, go, router } = await load();
-      applyLive(state("closed", false));
-      go({ name: "details", puuid: "p1", more: false });
-      applyLive(state("closed"));
-      expect(router.route).toEqual({ name: "details", puuid: "p1", more: false });
-    });
-
-    it("only once: a later closed state (the game quits) leaves the user where they are", async () => {
-      const { applyLive, router } = await load();
-      applyLive(state("menus"));
-      applyLive(state("closed"));
-      expect(router.route).toEqual({ name: "live" });
-    });
-
-    it("a user who already navigated is not moved", async () => {
-      const { applyLive, go, router } = await load();
-      go({ name: "details", puuid: "p1", more: false });
-      applyLive(state("closed"));
-      expect(router.route).toEqual({ name: "details", puuid: "p1", more: false });
-    });
-
-    it("entering Agent Select still forces Live from My Stats", async () => {
-      const { applyLive, go, router } = await load();
-      applyLive(state("menus"));
-      go({ name: "mystats" });
-      applyLive(state("pregame"));
-      expect(router.route).toEqual({ name: "live" });
-    });
+  it("the v2 design always starts on Live: a closed first state no longer opens another page", async () => {
+    const { applyLive, router } = await load();
+    applyLive(state("closed"));
+    expect(router.screen).toBe("live");
   });
 
   describe("startFeeds under Tauri", () => {

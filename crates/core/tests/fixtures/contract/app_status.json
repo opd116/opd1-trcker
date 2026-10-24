@@ -1,0 +1,103 @@
+[
+  {
+    "attempt": 0,
+    "conn": "ok",
+    "errorAtMs": null,
+    "errorCode": null,
+    "gameVersion": "release-11.08",
+    "lastDataMs": 1758970000000,
+    "lockfilePath": "C:\\Users\\me\\AppData\\Local\\Riot Games\\Riot Client\\Config\\lockfile",
+    "maxAttempts": 5,
+    "pregame": {
+      "locked": 3,
+      "phaseEndsMs": 1758970042500,
+      "total": 5
+    },
+    "queue": null,
+    "recapMatchId": null,
+    "retryInMs": null,
+    "riotClientVersion": "release-11.08-shipping-9-3104338"
+  },
+  {
+    "attempt": 0,
+    "conn": "ok",
+    "errorAtMs": null,
+    "errorCode": null,
+    "gameVersion": "release-11.08",
+    "lastDataMs": 1758970000000,
+    "lockfilePath": "C:\\Users\\me\\AppData\\Local\\Riot Games\\Riot Client\\Config\\lockfile",
+    "maxAttempts": 5,
+    "pregame": null,
+    "queue": {
+      "queueId": "competitive",
+      "searchingSinceMs": 1758969935000
+    },
+    "recapMatchId": null,
+    "retryInMs": null,
+    "riotClientVersion": "release-11.08-shipping-9-3104338"
+  },
+  {
+    "attempt": 0,
+    "conn": "ok",
+    "errorAtMs": null,
+    "errorCode": null,
+    "gameVersion": "release-11.08",
+    "lastDataMs": 1758970000000,
+    "lockfilePath": "C:\\Users\\me\\AppData\\Local\\Riot Games\\Riot Client\\Config\\lockfile",
+    "maxAttempts": 5,
+    "pregame": null,
+    "queue": null,
+    "recapMatchId": "aaaa0000-1111-2222-3333-444455556666",
+    "retryInMs": null,
+    "riotClientVersion": "release-11.08-shipping-9-3104338"
+  },
+  {
+    "attempt": 0,
+    "conn": "ok",
+    "errorAtMs": null,
+    "errorCode": null,
+    "gameVersion": "release-11.08",
+    "lastDataMs": 1758970000000,
+    "lockfilePath": "C:\\Users\\me\\AppData\\Local\\Riot Games\\Riot Client\\Config\\lockfile",
+    "maxAttempts": 5,
+    "pregame": {
+      "locked": 0,
+      "phaseEndsMs": null,
+      "total": 5
+    },
+    "queue": null,
+    "recapMatchId": null,
+    "retryInMs": null,
+    "riotClientVersion": "release-11.08-shipping-9-3104338"
+  },
+  {
+    "attempt": 2,
+    "conn": "lost",
+    "errorAtMs": null,
+    "errorCode": null,
+    "gameVersion": "release-11.08",
+    "lastDataMs": 1758970000000,
+    "lockfilePath": "C:\\Users\\me\\AppData\\Local\\Riot Games\\Riot Client\\Config\\lockfile",
+    "maxAttempts": 5,
+    "pregame": null,
+    "queue": null,
+    "recapMatchId": null,
+    "retryInMs": 2000,
+    "riotClientVersion": "release-11.08-shipping-9-3104338"
+  },
+  {
+    "attempt": 0,
+    "conn": "error",
+    "errorAtMs": 1758970000000,
+    "errorCode": "LOCKFILE_NOT_FOUND",
+    "gameVersion": null,
+    "lastDataMs": null,
+    "lockfilePath": "C:\\Users\\me\\AppData\\Local\\Riot Games\\Riot Client\\Config\\lockfile",
+    "maxAttempts": 5,
+    "pregame": null,
+    "queue": null,
+    "recapMatchId": null,
+    "retryInMs": 5000,
+    "riotClientVersion": null
+  }
+]

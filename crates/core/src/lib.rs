@@ -16,3 +16,4 @@ pub mod party;
 pub mod presence;
 pub mod shards;
 pub mod stats;
+pub mod wire;

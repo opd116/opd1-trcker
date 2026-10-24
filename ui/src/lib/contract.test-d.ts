@@ -2,10 +2,25 @@
 // with types.ts in both directions. Run by vitest's typecheck (vite.config.ts) and by `npm run check`.
 import { expectTypeOf, test } from "vitest";
 import { displayNameShapes, enums, shapes, type ShapeOf } from "./contract.shape";
+// R189 (backend-live)
+import {
+  CONN_STATES,
+  liveShapes,
+  type LiveMates as LiveMatesRow,
+  type PregameInfo as LivePregameInfo,
+  type QueueInfo as LiveQueueInfo,
+} from "./contract.shape";
+import type { AppStatus, ConnState, ProfileExtras } from "./types";
 import type {
+  AppInfo,
+  AsciiArt,
+  Collection,
   DisplayName,
+  Edition,
   EncounterCount,
   EncounterDetailRow,
+  HistoryPage,
+  HistoryRow,
   Insight,
   InsightKind,
   Last5Entry,
@@ -15,19 +30,25 @@ import type {
   MatchSummary,
   MatchTeamView,
   MyStats,
+  OwnedSkin,
   PartyMark,
   Peak,
   PlayerCard,
   PlayerDetails,
+  PlayerMarks,
   Rank,
   RankChange,
   RankSummary,
   RememberedSource,
   Result,
   RrPoint,
+  SavedPlayer,
   ScoreRow,
   SessionMatch,
   SessionSummary,
+  Settings,
+  SharedRecord,
+  SmurfLevel,
   Stage,
   StatRow,
   StreakMark,
@@ -102,6 +123,14 @@ test("every descriptor has exactly the keys of its TS type", () => {
   expectTypeOf<keyof typeof shapes.WinCell>().toEqualTypeOf<keyof WinCell>();
   expectTypeOf<keyof typeof shapes.Insight>().toEqualTypeOf<keyof Insight>();
   expectTypeOf<keyof typeof shapes.MyStats>().toEqualTypeOf<keyof MyStats>();
+  expectTypeOf<keyof typeof shapes.HistoryRow>().toEqualTypeOf<keyof HistoryRow>();
+  expectTypeOf<keyof typeof shapes.HistoryPage>().toEqualTypeOf<keyof HistoryPage>();
+  expectTypeOf<keyof typeof shapes.SharedRecord>().toEqualTypeOf<keyof SharedRecord>();
+  expectTypeOf<keyof typeof shapes.SavedPlayer>().toEqualTypeOf<keyof SavedPlayer>();
+  expectTypeOf<keyof typeof shapes.PlayerMarks>().toEqualTypeOf<keyof PlayerMarks>();
+  expectTypeOf<keyof typeof shapes.Settings>().toEqualTypeOf<keyof Settings>();
+  expectTypeOf<keyof typeof shapes.AsciiArt>().toEqualTypeOf<keyof AsciiArt>();
+  expectTypeOf<keyof typeof shapes.AppInfo>().toEqualTypeOf<keyof AppInfo>();
 });
 
 test("every DisplayName variant has a descriptor with exactly its keys", () => {
@@ -138,6 +167,14 @@ test("nullable and optional agree per key (R23 tri-state, R102, R124)", () => {
   expectTypeOf<DescFlags<typeof shapes.WinCell>>().toEqualTypeOf<Flags<WinCell>>();
   expectTypeOf<DescFlags<typeof shapes.Insight>>().toEqualTypeOf<Flags<Insight>>();
   expectTypeOf<DescFlags<typeof shapes.MyStats>>().toEqualTypeOf<Flags<MyStats>>();
+  expectTypeOf<DescFlags<typeof shapes.HistoryRow>>().toEqualTypeOf<Flags<HistoryRow>>();
+  expectTypeOf<DescFlags<typeof shapes.HistoryPage>>().toEqualTypeOf<Flags<HistoryPage>>();
+  expectTypeOf<DescFlags<typeof shapes.SharedRecord>>().toEqualTypeOf<Flags<SharedRecord>>();
+  expectTypeOf<DescFlags<typeof shapes.SavedPlayer>>().toEqualTypeOf<Flags<SavedPlayer>>();
+  expectTypeOf<DescFlags<typeof shapes.PlayerMarks>>().toEqualTypeOf<Flags<PlayerMarks>>();
+  expectTypeOf<DescFlags<typeof shapes.Settings>>().toEqualTypeOf<Flags<Settings>>();
+  expectTypeOf<DescFlags<typeof shapes.AsciiArt>>().toEqualTypeOf<Flags<AsciiArt>>();
+  expectTypeOf<DescFlags<typeof shapes.AppInfo>>().toEqualTypeOf<Flags<AppInfo>>();
   expectTypeOf<DescFlags<typeof displayNameShapes.visible>>().toEqualTypeOf<Flags<Variant<"visible">>>();
   expectTypeOf<DescFlags<typeof displayNameShapes.remembered>>().toEqualTypeOf<Flags<Variant<"remembered">>>();
   expectTypeOf<DescFlags<typeof displayNameShapes.hiddenPlayer>>().toEqualTypeOf<Flags<Variant<"hiddenPlayer">>>();
@@ -170,6 +207,14 @@ test("the base kinds agree per key: a number field is a number on the wire, an a
   expectTypeOf<DescKinds<typeof shapes.WinCell>>().toEqualTypeOf<Kinds<WinCell>>();
   expectTypeOf<DescKinds<typeof shapes.Insight>>().toEqualTypeOf<Kinds<Insight>>();
   expectTypeOf<DescKinds<typeof shapes.MyStats>>().toEqualTypeOf<Kinds<MyStats>>();
+  expectTypeOf<DescKinds<typeof shapes.HistoryRow>>().toEqualTypeOf<Kinds<HistoryRow>>();
+  expectTypeOf<DescKinds<typeof shapes.HistoryPage>>().toEqualTypeOf<Kinds<HistoryPage>>();
+  expectTypeOf<DescKinds<typeof shapes.SharedRecord>>().toEqualTypeOf<Kinds<SharedRecord>>();
+  expectTypeOf<DescKinds<typeof shapes.SavedPlayer>>().toEqualTypeOf<Kinds<SavedPlayer>>();
+  expectTypeOf<DescKinds<typeof shapes.PlayerMarks>>().toEqualTypeOf<Kinds<PlayerMarks>>();
+  expectTypeOf<DescKinds<typeof shapes.Settings>>().toEqualTypeOf<Kinds<Settings>>();
+  expectTypeOf<DescKinds<typeof shapes.AsciiArt>>().toEqualTypeOf<Kinds<AsciiArt>>();
+  expectTypeOf<DescKinds<typeof shapes.AppInfo>>().toEqualTypeOf<Kinds<AppInfo>>();
   expectTypeOf<DescKinds<typeof displayNameShapes.visible>>().toEqualTypeOf<Kinds<Variant<"visible">>>();
   expectTypeOf<DescKinds<typeof displayNameShapes.remembered>>().toEqualTypeOf<Kinds<Variant<"remembered">>>();
   expectTypeOf<DescKinds<typeof displayNameShapes.hiddenPlayer>>().toEqualTypeOf<Kinds<Variant<"hiddenPlayer">>>();
@@ -184,6 +229,7 @@ test("the closed string sets are the TS unions", () => {
   expectTypeOf<(typeof enums.rememberedSource)[number]>().toEqualTypeOf<RememberedSource>();
   expectTypeOf<(typeof enums.streakMark)[number]>().toEqualTypeOf<StreakMark>();
   expectTypeOf<(typeof enums.insightKind)[number]>().toEqualTypeOf<InsightKind>();
+  expectTypeOf<(typeof enums.smurfLevel)[number]>().toEqualTypeOf<SmurfLevel>();
 });
 
 test("the guard can fail: a descriptor missing a key, or with an extra one, does not compile", () => {
@@ -204,4 +250,42 @@ test("the guard can fail: a descriptor missing a key, or with an extra one, does
   expectTypeOf<DescKinds<AsObject>>().not.toEqualTypeOf<Kinds<LiveState>>();
   // And a TS type that drifts the other way: a result that may be null where the descriptor says it never is.
   expectTypeOf<DescKinds<typeof shapes.Last5Entry>>().not.toEqualTypeOf<Kinds<Omit<Last5Entry, "result"> & { result: Last5Entry["result"] | null }>>();
+});
+
+// ── R189 (backend-live): AppStatus and ProfileExtras ────────────────────────────────────────────────────────────────
+test("R189: the status and profile-extras descriptors agree with types.ts", () => {
+  expectTypeOf<keyof typeof liveShapes.AppStatus>().toEqualTypeOf<keyof AppStatus>();
+  expectTypeOf<keyof typeof liveShapes.PregameInfo>().toEqualTypeOf<keyof LivePregameInfo>();
+  expectTypeOf<keyof typeof liveShapes.QueueInfo>().toEqualTypeOf<keyof LiveQueueInfo>();
+  expectTypeOf<keyof typeof liveShapes.ProfileExtras>().toEqualTypeOf<keyof ProfileExtras>();
+  expectTypeOf<keyof typeof liveShapes.LiveMates>().toEqualTypeOf<keyof LiveMatesRow>();
+
+  expectTypeOf<DescFlags<typeof liveShapes.AppStatus>>().toEqualTypeOf<Flags<AppStatus>>();
+  expectTypeOf<DescFlags<typeof liveShapes.PregameInfo>>().toEqualTypeOf<Flags<LivePregameInfo>>();
+  expectTypeOf<DescFlags<typeof liveShapes.QueueInfo>>().toEqualTypeOf<Flags<LiveQueueInfo>>();
+  expectTypeOf<DescFlags<typeof liveShapes.ProfileExtras>>().toEqualTypeOf<Flags<ProfileExtras>>();
+  expectTypeOf<DescFlags<typeof liveShapes.LiveMates>>().toEqualTypeOf<Flags<LiveMatesRow>>();
+
+  expectTypeOf<DescKinds<typeof liveShapes.AppStatus>>().toEqualTypeOf<Kinds<AppStatus>>();
+  expectTypeOf<DescKinds<typeof liveShapes.PregameInfo>>().toEqualTypeOf<Kinds<LivePregameInfo>>();
+  expectTypeOf<DescKinds<typeof liveShapes.QueueInfo>>().toEqualTypeOf<Kinds<LiveQueueInfo>>();
+  expectTypeOf<DescKinds<typeof liveShapes.ProfileExtras>>().toEqualTypeOf<Kinds<ProfileExtras>>();
+  expectTypeOf<DescKinds<typeof liveShapes.LiveMates>>().toEqualTypeOf<Kinds<LiveMatesRow>>();
+
+  expectTypeOf<(typeof CONN_STATES)[number]>().toEqualTypeOf<ConnState>();
+});
+
+// ── R189 (backend-system): the Skins screen (`collection`) ──
+test("the collection descriptors agree with types.ts", () => {
+  type Weapon = Collection["weapons"][number];
+  expectTypeOf<(typeof enums.edition)[number]>().toEqualTypeOf<Edition>();
+  expectTypeOf<keyof typeof shapes.OwnedSkin>().toEqualTypeOf<keyof OwnedSkin>();
+  expectTypeOf<keyof typeof shapes.WeaponInfo>().toEqualTypeOf<keyof Weapon>();
+  expectTypeOf<keyof typeof shapes.Collection>().toEqualTypeOf<keyof Collection>();
+  expectTypeOf<DescFlags<typeof shapes.OwnedSkin>>().toEqualTypeOf<Flags<OwnedSkin>>();
+  expectTypeOf<DescFlags<typeof shapes.WeaponInfo>>().toEqualTypeOf<Flags<Weapon>>();
+  expectTypeOf<DescFlags<typeof shapes.Collection>>().toEqualTypeOf<Flags<Collection>>();
+  expectTypeOf<DescKinds<typeof shapes.OwnedSkin>>().toEqualTypeOf<Kinds<OwnedSkin>>();
+  expectTypeOf<DescKinds<typeof shapes.WeaponInfo>>().toEqualTypeOf<Kinds<Weapon>>();
+  expectTypeOf<DescKinds<typeof shapes.Collection>>().toEqualTypeOf<Kinds<Collection>>();
 });

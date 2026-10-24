@@ -1,0 +1,40 @@
+{
+  "liveMates": [
+    {
+      "matchId": "aaaa0000-1111-2222-3333-444455556666",
+      "puuids": [
+        "aaaaaaaa-0000-0000-0000-000000000001",
+        "eeeeeeee-0000-0000-0000-000000000005"
+      ]
+    },
+    {
+      "matchId": "aaaa0000-1111-2222-3333-777788889999",
+      "puuids": [
+        "eeeeeeee-0000-0000-0000-000000000005"
+      ]
+    }
+  ],
+  "maps": [
+    {
+      "acs": 212.5,
+      "games": 4,
+      "id": "d960549e-485c-e861-8d71-aa9d1aed12a2",
+      "kd": 1.5,
+      "losses": 1,
+      "netRr": 38,
+      "winrate": 0.75,
+      "wins": 3
+    },
+    {
+      "acs": null,
+      "games": 1,
+      "id": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
+      "kd": 0.5,
+      "losses": 0,
+      "netRr": null,
+      "winrate": 0.0,
+      "wins": 0
+    }
+  ],
+  "puuid": "bbbbbbbb-0000-0000-0000-000000000002"
+}

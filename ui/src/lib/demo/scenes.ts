@@ -2,7 +2,6 @@
 // suite all read SCENES. Scenes are built from the design's roster in cdv8.ts; nothing here is shipped
 // (it is reached only through a DEV-guarded dynamic import).
 import type { MatchFrom } from "../details";
-import type { Route } from "../router.svelte";
 import type {
   EncounterDetailRow,
   LiveState,
@@ -49,6 +48,17 @@ export type SceneName =
   | "match" | "match-enc" | "match-hidden" | "match-dm" | "match-loading" | "match-longnames" | "match-nostats"
   | "mystats" | "mystats-new" | "mystats-loading" | "mystats-unranked" | "mystats-immortal" | "mystats-rrnull"
   | "mystats-longnames" | "mystats-closed" | "closed-unsettled";
+
+/**
+ * Where a scene opens, in the v8 terms the scene table was written in. demo/feed.ts maps it onto the v2 router:
+ * live → Live, mystats → Competitive, details → the profile drawer, match → the History scoreboard.
+ */
+export type DemoRoute =
+  | { name: "live" }
+  | { name: "mystats" }
+  | { name: "details"; puuid: string; more: boolean }
+  | { name: "match"; matchId: string; focusPuuid: string; from: MatchFrom; back: { puuid: string; more: boolean } | "mystats" };
+type Route = DemoRoute;
 
 export type Scene = {
   /** null: no LiveState has arrived yet (`boot`). */
@@ -122,7 +132,7 @@ function longnames(): PlayerCard[] {
     c.peak = peak(ACT["V26 A4"], 23, SINCE["11mo"]);
   }
   p[8]!.peak = peak(ACT["E10 A3"], 23, SINCE["11mo"]); // Rook: the longer act label
-  p[7]!.encounters = { with: 70, against: 53 }; // Zephyr: a 3-digit ⟲ count, not self, no party
+  p[7]!.encounters = { with: 70, against: 53 }; // wisp: a 3-digit ⟲ count, not self, no party
   return p;
 }
 
@@ -157,7 +167,7 @@ function parties4(): PlayerCard[] {
   mark(2, 1, false);
   mark(5, 2, false); // Mara, Kilo: likely
   mark(6, 2, false);
-  mark(7, 3, true); // Zephyr, Rook: confirmed
+  mark(7, 3, true); // wisp, Rook: confirmed
   mark(8, 3, true);
   return p;
 }
@@ -181,7 +191,7 @@ function partial(): PlayerCard[] {
 }
 
 function unrankedRoster(): PlayerCard[] {
-  const p = roster();
+  const p = roster("zephyr");
   Object.assign(p[7]!, {
     level: null, rank: null, prevActTier: null, peak: null, kd: null, hsPct: null,
     actWinrate: null, actWins: null, actGames: null, last5: [],
@@ -219,9 +229,9 @@ function detailsLongnames(): Record<string, PlayerDetails> {
   // Spec §6.7's three name styles at their widest: a live visible teammate (the narrowest block), a remembered name
   // (eye + 16 W's + tag, so it wraps), and a hidden agent (Task 18 review, Minor 4).
   d.topTeammates = [
-    { puuid: PUUID.kilo!, name: w(LONGEST_TAG), count: 14 }, // on the live roster
-    { puuid: "d0000000-0000-4000-8000-000000000001", name: { kind: "remembered", name: LONGEST_NAME, tag: "WWWWV", ...REMEMBERED }, count: 9 },
-    { puuid: "d0000000-0000-4000-8000-000000000002", name: { kind: "hiddenAgent", agentId: AG.Brimstone }, count: 6 },
+    { puuid: PUUID.kilo!, name: w(LONGEST_TAG), count: 14, wins: 9, losses: 5 }, // on the live roster
+    { puuid: "d0000000-0000-4000-8000-000000000001", name: { kind: "remembered", name: LONGEST_NAME, tag: "WWWWV", ...REMEMBERED }, count: 9, wins: 5, losses: 4 },
+    { puuid: "d0000000-0000-4000-8000-000000000002", name: { kind: "hiddenAgent", agentId: AG.Brimstone }, count: 6, wins: 3, losses: 3 },
   ];
   const lo = loadout();
   for (const k of ["vandal", "phantom", "operator", "sheriff"] as const) {

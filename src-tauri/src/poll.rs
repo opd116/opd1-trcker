@@ -757,8 +757,9 @@ impl Poller {
                     self.status_lost(next);
                 } else if self.presence_drops > 0 {
                     // The previous session was dropped for this too: the
-                    // client is there but does not answer.
-                    self.status_error(CLIENT_UNREACHABLE, PRESENCE_EVERY);
+                    // client is there but does not answer. With the game
+                    // closed the next presence is the idle one.
+                    self.status_error(CLIENT_UNREACHABLE, PRESENCE_EVERY_IDLE);
                 }
                 if reconnect {
                     self.presence_drops = self.presence_drops.saturating_add(1);

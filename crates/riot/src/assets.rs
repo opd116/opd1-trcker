@@ -1718,11 +1718,16 @@ impl AssetCache {
         .await;
         match built {
             Ok(cat) => {
-                blocking({
+                // A disk that cannot take the file costs the next start one
+                // download; this session keeps the catalog in memory either way.
+                let written = blocking({
                     let cat = cat.clone();
                     move || write_json(&path, &cat)
                 })
-                .await?;
+                .await;
+                if let Err(e) = written {
+                    log::warn!("skin catalog not written to disk: {e}");
+                }
                 let cat = Arc::new(cat);
                 *slot = Some(cat.clone());
                 *locked(&self.catalog_failed) = None;

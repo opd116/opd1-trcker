@@ -183,6 +183,7 @@
               char = p.char;
               fx = p.effect;
               paint = {};
+              paintW = CANVAS_MIN_W;
             }
           : () => loadPaint(p.raw),
     })),
@@ -227,7 +228,10 @@
             {/if}
           {/snippet}
         </Segmented>
-        <button type="button" class="clear" disabled={noPaint} aria-label="Clear drawing" data-tip="Clear drawing" onclick={() => (paint = {})}
+        <button type="button" class="clear" disabled={noPaint} aria-label="Clear drawing" data-tip="Clear drawing" onclick={() => {
+          paint = {};
+          paintW = CANVAS_MIN_W;
+        }}
           ><svg width="13" height="14" viewBox="0 0 13 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
             ><path d="M1 3.5h11M4.5 3.5V1.8h4v1.7M2.5 3.5l.7 8.8h6.6l.7-8.8"></path></svg
           >Clear</button

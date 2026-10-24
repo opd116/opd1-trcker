@@ -154,15 +154,26 @@ pub fn run() {
             // R189: "Saved player in my match" — the poll loop decides when
             // (once per player per match, `savedAlert` on); the toast reads
             // the `sound` setting when it fires. A weak handle, so the hook
-            // stored on the state does not keep the state alive.
+            // stored on the state does not keep the state alive. The hook is
+            // called from the async poll loop, so the DB read and the toast
+            // run on the blocking pool (`db_blocking` locks the repo).
             let handle = app.handle().clone();
             let weak = Arc::downgrade(&st);
             st.set_alert_hook(Box::new(move |name, note| {
-                let sound = weak
-                    .upgrade()
-                    .and_then(|st| st.db_blocking(v2::settings::load))
-                    .is_some_and(|s| s.sound);
-                v2::window::notify_saved_player(&handle, name, note, sound);
+                let (handle, weak) = (handle.clone(), weak.clone());
+                let (name, note) = (name.to_string(), note.to_string());
+                tauri::async_runtime::spawn_blocking(move || {
+                    let settings = weak
+                        .upgrade()
+                        .and_then(|st| st.db_blocking(v2::settings::load));
+                    // The poll loop reads `savedAlert` once per match: a
+                    // switch-off since then still silences this one.
+                    if settings.as_ref().is_some_and(|s| !s.saved_alert) {
+                        return;
+                    }
+                    let sound = settings.is_some_and(|s| s.sound);
+                    v2::window::notify_saved_player(&handle, &name, &note, sound);
+                });
             }));
 
             // Asset tables (agent/map/tier names, acts) once at start —

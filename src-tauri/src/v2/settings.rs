@@ -27,7 +27,8 @@ pub async fn get_settings(state: AppStateRef<'_>) -> Result<Settings, String> {
 }
 
 /// Stores the settings, applies their window side effects
-/// (`window::apply_settings`) and emits `"settings"`. Returns what was stored.
+/// (`window::apply_settings`, and the autostart entry when `boot` changed)
+/// and emits `"settings"`. Returns what was stored.
 #[tauri::command]
 pub async fn set_settings(
     settings: Settings,
@@ -35,11 +36,20 @@ pub async fn set_settings(
     state: AppStateRef<'_>,
 ) -> Result<Settings, String> {
     let json = serde_json::to_string(&settings).map_err(|e| e.to_string())?;
-    state
-        .db(move |repo| repo.set_state(SETTINGS_KEY, &json))
+    let was_boot = state
+        .db(move |repo| {
+            let before = load(repo)?.boot;
+            repo.set_state(SETTINGS_KEY, &json)?;
+            Ok(before)
+        })
         .await
         .ok_or_else(|| "settings not stored".to_string())?;
     super::window::apply_settings(&app, &settings);
+    // Only a change of `boot` touches the autostart entry (see
+    // `window::autostart_at_start`).
+    if was_boot != settings.boot {
+        super::window::set_autostart(settings.boot);
+    }
     state.emit_settings(&settings);
     Ok(settings)
 }

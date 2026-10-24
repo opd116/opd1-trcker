@@ -123,6 +123,7 @@ pub fn setup(app: &tauri::App, st: &AppState) -> tauri::Result<()> {
 
     let settings = st.db_blocking(super::settings::load).unwrap_or_default();
     apply_settings(app.handle(), &settings);
+    autostart_at_start(settings.boot);
 
     let minimized = std::env::args().any(|a| a == MINIMIZED_ARG);
     if let Some(w) = main_window(app.handle()) {
@@ -195,9 +196,11 @@ pub fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
     }
 }
 
-/// Applies `onTop` (kept on while Glance is on), `boot` (autostart, with
-/// [`MINIMIZED_ARG`]) and `tray` (close to tray; the tray icon shows only
-/// with it). Failures are logged.
+/// Applies `onTop` (kept on while Glance is on) and `tray` (close to tray;
+/// the tray icon shows only with it). Failures are logged. `boot` is not
+/// applied here: [`set_autostart`] runs only when it changes, and
+/// [`autostart_at_start`] at startup, so a switch-off in Task Manager is
+/// never undone by an unrelated save or a restart.
 pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     let mut glance = false;
     if let Some(flags) = app.try_state::<WindowFlags>() {
@@ -215,7 +218,33 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let _ = tray.set_visible(settings.tray);
     }
-    set_autostart(app, settings.boot);
+}
+
+/// Startup: with `boot` on, the autostart entry is written only when the
+/// `Run` value is missing (the first start, or an update whose old
+/// uninstaller removed it). An entry that is there is left alone:
+/// `AutoLaunch::enable` also marks it enabled in Task Manager's
+/// `StartupApproved`, which would undo the user switching it off there.
+/// With `boot` off the entry is removed.
+pub fn autostart_at_start(on: bool) {
+    if on && autostart_registered() {
+        return;
+    }
+    set_autostart(on);
+}
+
+/// Whether the current user's `Run` key holds the autostart value.
+#[cfg(windows)]
+fn autostart_registered() -> bool {
+    windows_registry::CURRENT_USER
+        .open(r"Software\Microsoft\Windows\CurrentVersion\Run")
+        .and_then(|key| key.get_string(AUTOSTART_NAME))
+        .is_ok()
+}
+
+#[cfg(not(windows))]
+fn autostart_registered() -> bool {
+    false
 }
 
 /// The `boot` setting: the autostart entry written (it also refreshes the
@@ -228,8 +257,7 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
 /// one when the app runs elevated, which the per-user uninstaller cannot
 /// remove), and the exe path is quoted (it contains a space). Removing
 /// clears both keys, so an older machine-wide entry goes too.
-fn set_autostart(app: &AppHandle, on: bool) {
-    let _ = app;
+pub fn set_autostart(on: bool) {
     if cfg!(debug_assertions) {
         log::debug!("autostart not changed in a debug build (boot: {on})");
         return;

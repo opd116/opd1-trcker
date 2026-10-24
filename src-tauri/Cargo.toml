@@ -54,6 +54,10 @@ windows-version = "0.1"
 # goes to the current user's Run key and the exe path is quoted
 # (`v2::window::set_autostart`).
 auto-launch = "0.6"
+# Reads the `Run` value at startup (`v2::window::autostart_at_start`), so an
+# entry the user switched off in Task Manager is not re-enabled. Already in
+# the tree via `auto-launch` (same 0.6.1 in Cargo.lock): no new crate.
+windows-registry = "0.6"
 
 [dev-dependencies]
 # `test-support`: `RiotSession::with_global_rate` for the pipeline tests (a

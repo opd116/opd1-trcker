@@ -2710,6 +2710,7 @@ dependencies = [
  "tauri-plugin-notification",
  "tempfile",
  "tokio",
+ "windows-registry",
  "windows-version",
  "wiremock",
 ]

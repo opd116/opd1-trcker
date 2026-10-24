@@ -2976,7 +2976,8 @@ mod tests {
             deaths: 5,
             assists: 1,
             score: 1,
-            rounds: None,
+            // A stored stats row (with one, `rounds` is always known, R102).
+            rounds: Some(13),
             hs: 1,
             bs: 1,
             ls: 0,

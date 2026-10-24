@@ -1065,8 +1065,13 @@ fn build_mmr_fields(
 
             let prev_act_tier = stats::prev_act_tier(&mmr_input.seasons, ordered_acts).into();
 
-            // R164: never below the rank the card shows as Current.
-            let current = mmr_input.current_rank.map(|cr| (cr.tier, current_act_id));
+            // R164: never below the rank the card shows as Current — the
+            // R166 tier without its RR included.
+            let current = mmr_input
+                .current_rank
+                .map(|cr| cr.tier)
+                .or_else(|| mmr_tier_without_rr(mmr, current_act_id))
+                .map(|tier| (tier, current_act_id));
             let peak = match stats::peak(&mmr_input.seasons, ordered_acts, current) {
                 Some(p) => match ordered_acts.iter().find(|a| a.id == p.season_id) {
                     Some(act) => Field::Value(PeakInfo {
@@ -1200,13 +1205,24 @@ fn build_last5_fields(
     // the last 5, not however many rows happened to be passed in.
     sorted.truncate(LAST5_COUNT);
 
-    let total_kills: i64 = sorted.iter().map(|r| r.kills).sum();
-    let total_deaths: i64 = sorted.iter().map(|r| r.deaths).sum();
-    let total_hs: i64 = sorted.iter().map(|r| r.hs).sum();
-    let total_bs: i64 = sorted.iter().map(|r| r.bs).sum();
-    let total_ls: i64 = sorted.iter().map(|r| r.ls).sum();
+    // R102: a match with no stats row counts for neither (its zeros are not
+    // real ones), as in the hero stats; with none left K/D is unknown (`—`),
+    // never a counted 0.00.
+    let with_stats: Vec<&&MatchPlayerRow> = sorted
+        .iter()
+        .filter(|r| r.rounds.is_some_and(|n| n > 0))
+        .collect();
+    let total_kills: i64 = with_stats.iter().map(|r| r.kills).sum();
+    let total_deaths: i64 = with_stats.iter().map(|r| r.deaths).sum();
+    let total_hs: i64 = with_stats.iter().map(|r| r.hs).sum();
+    let total_bs: i64 = with_stats.iter().map(|r| r.bs).sum();
+    let total_ls: i64 = with_stats.iter().map(|r| r.ls).sum();
 
-    let kd = Field::Value(stats::kd(total_kills, total_deaths));
+    let kd = if with_stats.is_empty() {
+        Field::Missing
+    } else {
+        Field::Value(stats::kd(total_kills, total_deaths))
+    };
     let hs_pct = stats::hs_pct(total_hs, total_bs, total_ls).into();
 
     let rr_by_match: HashMap<&str, i32> = match comp_updates {

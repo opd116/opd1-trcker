@@ -91,7 +91,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -115,6 +115,10 @@ const JSON_TIMEOUT: Duration = Duration::from_secs(8);
 /// splash before downscaling is ~3MB; 8s was too tight a budget for that
 /// over a slow connection, so images get their own, longer-lived client.
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// R189: after a failed skin catalog build, the next one waits this long, so
+/// a broken `/v1/weapons` (~3.6MB) is not downloaded again on every call (the
+/// Skins screen asks once per uncached icon).
+const CATALOG_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 const DEFAULT_BASE: &str = "https://valorant-api.com";
 /// Where valorant-api serves its images (R189: the skin level icons'
@@ -920,6 +924,10 @@ pub struct AssetCache {
     /// R189: the skin catalog once used ([`AssetCache::skin_catalog`]);
     /// the async lock also coalesces concurrent builds into one download.
     catalog: tokio::sync::Mutex<Option<Arc<SkinCatalog>>>,
+    /// The version whose catalog build last failed, and when.
+    catalog_failed: Mutex<Option<(String, Instant)>>,
+    /// [`CATALOG_RETRY_AFTER`]; tests shorten it.
+    catalog_retry_after: Duration,
 }
 
 impl AssetCache {
@@ -974,7 +982,16 @@ impl AssetCache {
             skin_locks: Mutex::new(HashMap::new()),
             stale: AtomicBool::new(false),
             catalog: tokio::sync::Mutex::new(None),
+            catalog_failed: Mutex::new(None),
+            catalog_retry_after: CATALOG_RETRY_AFTER,
         }
+    }
+
+    /// Test-only: how long a failed skin catalog build waits before the next.
+    #[doc(hidden)]
+    pub fn with_catalog_retry_after(mut self, wait: Duration) -> Self {
+        self.catalog_retry_after = wait;
+        self
     }
 
     // -- bulk tables --------------------------------------------------
@@ -1648,8 +1665,10 @@ impl AssetCache {
     /// the tables' manifest): from memory, else `skincatalog.json`, else
     /// built from one `/v1/weapons` download (see the module docs) and
     /// written there. When the download fails, an older catalog (memory or
-    /// disk) stands in until the next call tries again. `TablesNotLoaded`
-    /// while no table set was ever stored (the version is unknown).
+    /// disk) stands in, and no new build is tried for
+    /// [`CATALOG_RETRY_AFTER`] (without an older one, the calls in that window
+    /// fail at once). `TablesNotLoaded` while no table set was ever stored
+    /// (the version is unknown).
     pub async fn skin_catalog(&self) -> Result<Arc<SkinCatalog>, AssetError> {
         let version = blocking({
             let path = self.dir.join("manifest.json");
@@ -1674,6 +1693,22 @@ impl AssetCache {
             return Ok(cat);
         }
 
+        let older = slot.clone().or_else(|| on_disk.map(Arc::new));
+        let recently_failed = locked(&self.catalog_failed)
+            .as_ref()
+            .is_some_and(|(v, at)| *v == version && at.elapsed() < self.catalog_retry_after);
+        if recently_failed {
+            return match older {
+                Some(cat) => {
+                    *slot = Some(cat.clone());
+                    Ok(cat)
+                }
+                None => Err(AssetError::Network(
+                    "skin catalog download failed; trying again shortly".into(),
+                )),
+            };
+        }
+
         // The longer-timeout client: the answer is ~3.6MB before gzip.
         let built = async {
             let bytes = self.download(&format!("{}/v1/weapons", self.base)).await?;
@@ -1690,12 +1725,13 @@ impl AssetCache {
                 .await?;
                 let cat = Arc::new(cat);
                 *slot = Some(cat.clone());
+                *locked(&self.catalog_failed) = None;
                 Ok(cat)
             }
             Err(e) => {
-                // An older catalog is better than none; the next call asks
-                // again (the version still differs).
-                let older = slot.clone().or_else(|| on_disk.map(Arc::new));
+                // An older catalog is better than none; a call after the
+                // wait asks again (the version still differs).
+                *locked(&self.catalog_failed) = Some((version.clone(), Instant::now()));
                 match older {
                     Some(cat) => {
                         log::warn!("skin catalog fetch failed, using an older one: {e}");

@@ -1614,7 +1614,8 @@ async fn a_new_version_rebuilds_the_catalog_and_a_failed_rebuild_keeps_the_old_o
     // v2's tables answer, its /v1/weapons does not (no mock: 404).
     let second = MockServer::start().await;
     mount_all_tables(&second, "v2").await;
-    let cache = AssetCache::with_base(dir.path().to_path_buf(), second.uri());
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), second.uri())
+        .with_catalog_retry_after(std::time::Duration::ZERO);
     cache.refresh_tables().await.unwrap();
     let got = cache
         .collection(&[REAVER_LEVEL.to_string()], 1)
@@ -1627,6 +1628,37 @@ async fn a_new_version_rebuilds_the_catalog_and_a_failed_rebuild_keeps_the_old_o
     cache.skin_catalog().await.unwrap();
     assert_eq!(weapons_requests(&second).await, 2);
     cache.skin_catalog().await.unwrap();
+    assert_eq!(weapons_requests(&second).await, 2);
+}
+
+#[tokio::test]
+async fn a_failed_catalog_build_is_not_downloaded_again_on_every_call() {
+    let dir = tempdir();
+    let first = MockServer::start().await;
+    mount_all_tables(&first, "v1").await;
+    mount_weapons(&first, None).await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), first.uri());
+    cache.refresh_tables().await.unwrap();
+    cache.skin_catalog().await.unwrap();
+
+    // v2's /v1/weapons fails: the v1 catalog stands in, and the calls right
+    // after (one per uncached icon on the Skins screen) don't download again.
+    let second = MockServer::start().await;
+    mount_all_tables(&second, "v2").await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), second.uri());
+    cache.refresh_tables().await.unwrap();
+    for _ in 0..5 {
+        cache.skin_catalog().await.unwrap();
+    }
+    assert_eq!(weapons_requests(&second).await, 1);
+
+    // With no older catalog at all, those calls fail at once, also without
+    // a download each.
+    let empty = tempdir();
+    let fresh = AssetCache::with_base(empty.path().to_path_buf(), second.uri());
+    fresh.refresh_tables().await.unwrap();
+    assert!(fresh.skin_catalog().await.is_err());
+    assert!(fresh.skin_catalog().await.is_err());
     assert_eq!(weapons_requests(&second).await, 2);
 }
 

@@ -1863,7 +1863,7 @@ fn profile_extras_value() -> Value {
                 losses: 1,
                 winrate: 0.75,
                 net_rr: Some(38),
-                kd: 1.5,
+                kd: Some(1.5),
                 acs: Some(212.5),
             },
             StatRow {
@@ -1873,7 +1873,7 @@ fn profile_extras_value() -> Value {
                 losses: 0,
                 winrate: 0.0,
                 net_rr: None,
-                kd: 0.5,
+                kd: Some(0.5),
                 acs: None,
             },
         ],

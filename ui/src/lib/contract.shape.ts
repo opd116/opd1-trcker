@@ -275,7 +275,7 @@ export const shapes = {
     losses: num,
     winrate: { kinds: ["number"], fraction: true },
     netRr: numOrNull,
-    kd: num,
+    kd: numOrNull,
     acs: numOrNull,
   } satisfies ShapeOf<StatRow>,
 

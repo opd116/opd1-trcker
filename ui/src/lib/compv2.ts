@@ -318,7 +318,7 @@ export function statRowView(r: StatRow): StatRowView {
     bar: wrBarVar(wrPct),
     netRr: typeof net === "number" ? rrDelta(net) : DASH,
     netColor: typeof net !== "number" ? "var(--text-muted)" : net >= 0 ? "var(--win)" : "var(--loss)",
-    kd: Number.isFinite(r.kd) ? r.kd.toFixed(2) : DASH,
+    kd: r.kd !== null && Number.isFinite(r.kd) ? r.kd.toFixed(2) : DASH,
     tipTail: `${plural(r.games, "game")}, ${r.wins}W – ${r.losses}L` + (r.games < LOW_SAMPLE ? `\n${LOW_SAMPLE_TIP}` : ""),
   };
 }

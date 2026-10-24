@@ -217,6 +217,8 @@ describe("tables and best times", () => {
     expect(v.tipTail).toBe("5 games, 3W – 2L\nUnder 8 games: limited evidence");
     expect(statRowView(row(10, 6, null)).netRr).toBe("—");
     expect(statRowView(row(10, 6, null)).tipTail).toBe("10 games, 6W – 4L");
+    // R102: no match of the row has a stats row: K/D unknown, not 0.00.
+    expect(statRowView({ ...row(1, 0, null), kd: null }).kd).toBe("—");
   });
 
   it("weekday tiles: tint, hatch under 8 games, dashed with none", () => {

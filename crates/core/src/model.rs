@@ -713,7 +713,9 @@ pub struct StatRow {
     pub winrate: f32,
     /// `None` when none of the row's matches has a stored RR change.
     pub net_rr: Option<i32>,
-    pub kd: f32,
+    /// `None` when none of the row's matches has a stats row (R102): their
+    /// zeros are not a 0.00 K/D.
+    pub kd: Option<f32>,
     /// `None` when no match of the row has a known round count.
     pub acs: Option<f32>,
 }

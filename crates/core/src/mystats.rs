@@ -236,8 +236,11 @@ struct Tally {
     games: u32,
     wins: u32,
     losses: u32,
+    /// Kills and deaths only over matches with a stats row (`rounds` known,
+    /// R102), counted in `stat_games`.
     kills: i64,
     deaths: i64,
+    stat_games: u32,
     /// Score and rounds only over matches with a known round count.
     score: i64,
     rounds: i64,
@@ -253,9 +256,10 @@ impl Tally {
             MatchResultKind::Loss => self.losses += 1,
             MatchResultKind::Draw => {}
         }
-        self.kills += p.row.kills;
-        self.deaths += p.row.deaths;
         if let Some(rounds) = p.row.rounds.filter(|&r| r > 0) {
+            self.kills += p.row.kills;
+            self.deaths += p.row.deaths;
+            self.stat_games += 1;
             self.score += p.row.score;
             self.rounds += rounds;
         }
@@ -282,7 +286,7 @@ impl Tally {
             losses: self.losses,
             winrate: self.wins as f32 / self.games as f32,
             net_rr: self.rr,
-            kd: stats::kd(self.kills, self.deaths),
+            kd: (self.stat_games > 0).then(|| stats::kd(self.kills, self.deaths)),
             acs: (self.rounds > 0).then(|| self.score as f32 / self.rounds as f32),
         }
     }

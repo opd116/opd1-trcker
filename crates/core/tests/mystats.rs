@@ -709,7 +709,7 @@ fn maps_and_agents_tables() {
     assert_eq!((ascent.games, ascent.wins, ascent.losses), (3, 2, 1));
     assert!((ascent.winrate - 2.0 / 3.0).abs() < 1e-6);
     assert_eq!(ascent.net_rr, Some(25));
-    assert_eq!(ascent.kd, 2.0);
+    assert_eq!(ascent.kd, Some(2.0));
     assert_eq!(ascent.acs, Some(200.0));
     let bind = &s.maps[1];
     assert_eq!((bind.games, bind.wins, bind.losses), (1, 0, 0));

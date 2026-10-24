@@ -910,7 +910,7 @@ async fn profile_extras_ranks_the_maps_by_games_with_the_asset_tables() {
     let split = &extras.maps[0];
     assert_eq!(split.id, SPLIT_UUID);
     assert_eq!((split.games, split.wins, split.losses), (3, 3, 0));
-    assert_eq!(split.kd, 2.0);
+    assert_eq!(split.kd, Some(2.0));
     assert_eq!(split.acs, Some(200.0));
 }
 

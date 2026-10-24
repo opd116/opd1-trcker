@@ -55,6 +55,14 @@ export function sessionEnd(s: Pick<SessionSummary, "matches" | "startedMs">, now
   return nowMs - lastStart > SESSION_GAP_MS ? lastStart : nowMs;
 }
 
+/**
+ * Whether the session is still going at `nowMs`: its last match started at most 6 h ago. Rust drops an ended session
+ * only when it recomputes My Stats (a DB change), so a snapshot held overnight still carries yesterday's.
+ */
+export function sessionOpen(s: Pick<SessionSummary, "matches" | "startedMs">, nowMs: number): boolean {
+  return sessionEnd(s, nowMs) === nowMs;
+}
+
 /** "1 game", "12 games". */
 export const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 

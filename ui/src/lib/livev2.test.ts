@@ -118,6 +118,8 @@ describe("row fields", () => {
     expect(p.tip.split("\n")[1]).toBe("V26 A4 · 1mo ago");
     expect(peakOf(card({ peak: { ...card().peak!, tier: 21 } }), META)).toBeNull();
     expect(peakOf(card({ rank: undefined }), META)).toBeNull();
+    // Unranked this act (placements): no ▲N counted from tier 0.
+    expect(peakOf(card({ rank: { tier: 0, rr: 0 } }), META)).toBeNull();
   });
 
   it("rank: loading / missing / RR unknown", () => {
@@ -236,9 +238,11 @@ describe("board", () => {
     expect(matchup(live("ingame", [...ally, ...enemy]))[1]).toMatchObject({ wr: "50%", hidden: false });
   });
 
-  it("loading progress counts complete cards out of 10 (In Game) or 5 (Agent Select)", () => {
+  it("loading progress counts complete cards out of the roster, or 10 (In Game) / 5 (Agent Select) before it", () => {
     expect(loadingProgress(live("ingame", []))).toEqual({ loaded: 0, total: 10 });
-    expect(loadingProgress(live("ingame", [...ally, card({ puuid: "x", kd: undefined })]))).toEqual({ loaded: 3, total: 10 });
+    expect(loadingProgress(live("ingame", [card({ puuid: "me", kd: undefined })]))).toEqual({ loaded: 0, total: 10 });
+    // Skirmish 2v2: four players is the whole roster.
+    expect(loadingProgress(live("ingame", [...ally, card({ puuid: "x", kd: undefined })]))).toEqual({ loaded: 3, total: 4 });
     const five = [1, 2, 3, 4, 5].map((i) => card({ puuid: `p${i}` }));
     expect(loadingProgress(live("pregame", five))).toBeNull();
   });

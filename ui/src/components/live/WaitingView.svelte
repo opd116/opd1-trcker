@@ -7,6 +7,7 @@
   import { launchValorant } from "../../lib/api";
   import { appStatus } from "../../lib/appdata.svelte";
   import { assetUrl } from "../../lib/assets";
+  import { sessionOpen } from "../../lib/compv2";
   import { queueLabel } from "../../lib/historyv2";
   import { pct0, rrDelta } from "../../lib/format";
   import { retryImg } from "../../lib/imgRetry";
@@ -45,7 +46,6 @@
   const party = $derived(menus && live ? selfFirst(live.players).slice(0, 5) : []);
   const ms = $derived($mystats ?? null);
   const last = $derived(ms?.last5[0] ?? null);
-  const session = $derived(ms?.session ?? null);
   const rank = $derived(ms && typeof ms.rank.tier === "number" ? ms.rank : null);
 
   // A clock for "45 MIN AGO" and the queue timer: every second while searching, else every 30 s. The session length
@@ -56,6 +56,8 @@
     const id = setInterval(() => (nowMs = Date.now()), queue ? 1000 : 30_000);
     return () => clearInterval(id);
   });
+  // TODAY is the session still going: one that ended 6 h ago is no longer today's (the snapshot can be hours old).
+  const session = $derived(ms?.session && sessionOpen(ms.session, nowMs) ? ms.session : null);
 
   let launching = $state(false);
   let launchError = $state<string | null>(null);

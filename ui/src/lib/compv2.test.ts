@@ -16,6 +16,7 @@ import {
   rankSubline,
   rrChart,
   sessionEnd,
+  sessionOpen,
   statRowView,
   subtitle,
   weekdayTile,
@@ -166,6 +167,8 @@ describe("axis, dates and durations", () => {
     const s = { startedMs: T0, matches: [{ matchId: "a", mapId: null, rrEarned: null, startMs: T0 + H, result: "W" as const }] };
     expect(sessionEnd(s, T0 + 2 * H)).toBe(T0 + 2 * H);
     expect(sessionEnd(s, T0 + 30 * H)).toBe(T0 + H);
+    expect(sessionOpen(s, T0 + 2 * H)).toBe(true);
+    expect(sessionOpen(s, T0 + 30 * H)).toBe(false);
   });
 });
 

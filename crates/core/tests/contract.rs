@@ -1023,6 +1023,7 @@ fn my_stats_full() -> Value {
             tier: tier as u8,
             rr: rr as u16,
         }),
+        mmr_tier_without_rr: None,
         has_mmr: true,
         stored_tier: None,
         map_names: &names,
@@ -1128,6 +1129,7 @@ fn my_stats_edge() -> Value {
         matches: &matches,
         comp_updates: &[],
         current_rank: None,
+        mmr_tier_without_rr: None,
         // R167: no MMR snapshot and no RR row, so the rank card falls back to the newest stored ranked match's
         // tier: a known tier with `rr` and `rrToNext` null.
         has_mmr: false,

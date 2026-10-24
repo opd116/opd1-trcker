@@ -131,16 +131,17 @@ pub fn current_rank_from_mmr(resp: &PlayerMmrResponse, season_id: &str) -> Optio
     })
 }
 
-/// R166: whether the current act's entry names a ranked tier but no
+/// R166: the current act's ranked tier when its entry has no
 /// `RankedRating` — the case [`current_rank_from_mmr`] answers `None` for
-/// although the player is ranked; the stored competitive updates answer.
-pub fn ranked_without_rr(resp: &PlayerMmrResponse, season_id: &str) -> bool {
-    resp.queue_skills
-        .get(COMPETITIVE_QUEUE)
-        .and_then(|c| c.seasonal_info_by_season_id.get(season_id))
-        .is_some_and(|info| {
-            clamp_u8(info.competitive_tier) >= UNRANKED_BELOW && info.ranked_rating.is_none()
-        })
+/// although the player is ranked; the RR comes from the stored updates.
+pub fn tier_without_rr(resp: &PlayerMmrResponse, season_id: &str) -> Option<u8> {
+    let info = resp
+        .queue_skills
+        .get(COMPETITIVE_QUEUE)?
+        .seasonal_info_by_season_id
+        .get(season_id)?;
+    let tier = clamp_u8(info.competitive_tier);
+    (tier >= UNRANKED_BELOW && info.ranked_rating.is_none()).then_some(tier)
 }
 
 // ---------------------------------------------------------------------

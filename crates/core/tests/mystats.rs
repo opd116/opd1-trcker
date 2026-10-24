@@ -158,6 +158,7 @@ fn input<'a>(
         matches,
         comp_updates,
         current_rank: None,
+        mmr_tier_without_rr: None,
         // A stored snapshot answered (with no rank): no fallback unless a
         // test turns it off.
         has_mmr: true,
@@ -209,6 +210,26 @@ fn mystats_current_act_only() {
     assert_eq!(s.by_daypart.iter().map(|c| c.games).sum::<u32>(), 2);
     // A day apart: the session is the newest match alone.
     assert_eq!(s.session.unwrap().started_ms, ACT_START + 2 * DAY);
+}
+
+#[test]
+fn an_mmr_tier_without_its_rr_shows_like_the_live_card_r166() {
+    let a = act();
+    let n = names();
+    // The newest update is at another tier: the tier stands, the RR is unknown.
+    let updates = vec![update("m1", ACT, ACT_START + DAY, (13, 14), 80, 20)];
+    let s = build(MyStatsInput {
+        mmr_tier_without_rr: Some(15),
+        ..input(&a, &[], &updates, &n)
+    });
+    assert_eq!((s.rank.tier, s.rank.rr), (Some(15), None));
+    // An update at that tier gives the RR.
+    let updates = vec![update("m2", ACT, ACT_START + DAY, (14, 15), 42, 20)];
+    let s = build(MyStatsInput {
+        mmr_tier_without_rr: Some(15),
+        ..input(&a, &[], &updates, &n)
+    });
+    assert_eq!((s.rank.tier, s.rank.rr), (Some(15), Some(42)));
 }
 
 #[test]

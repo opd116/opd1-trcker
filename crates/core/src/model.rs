@@ -973,12 +973,13 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
     // R154: MMR is the authority when it answered — even "no rank this act".
     // With no snapshot (still loading, or the call failed) the rank alone
     // is read off the player's stored matches; nothing else is.
+    let updates = match &comp_updates {
+        Field::Value(rows) => Some(rows.as_slice()),
+        _ => None,
+    };
     if !matches!(mmr, Field::Value(_)) {
         if let Some(stored) = rank_without_mmr(
-            match &comp_updates {
-                Field::Value(rows) => Some(rows.as_slice()),
-                _ => None,
-            },
+            updates,
             live_tier,
             stored_tier,
             ordered_acts,
@@ -986,6 +987,14 @@ pub fn build_card(input: BuildCardInput) -> PlayerCard {
         ) {
             rank = Field::Value(stored);
         }
+    } else if let Some(tier) = mmr_tier_without_rr(&mmr, current_act_id) {
+        // R166: MMR named this act's tier but left `RankedRating` out. The
+        // tier stands; the RR comes from the newest stored update when it
+        // is at that tier, else it is unknown (never "0 RR").
+        let rr = rank_without_mmr(updates, None, None, ordered_acts, current_act_id)
+            .filter(|r| r.tier == tier)
+            .and_then(|r| r.rr);
+        rank = Field::Value(RankInfo { tier, rr });
     }
     let (kd, hs_pct, last5_out) = build_last5_fields(&last5, &comp_updates);
 
@@ -1116,6 +1125,20 @@ fn build_mmr_fields(
 /// `None` when none applies — a previous act's row or match says nothing
 /// about the player's rank now — or when step 1 or 3 needs the current act
 /// and it is unknown (`current_act_id` empty, or not in `ordered_acts`).
+/// This act's ranked tier when the MMR answer named it without its RR
+/// (`current_rank` is `None` only for that or for an unranked act; the
+/// seasons map tells them apart).
+fn mmr_tier_without_rr(mmr: &Field<MmrInput>, current_act_id: &str) -> Option<u8> {
+    let Field::Value(m) = mmr else { return None };
+    if m.current_rank.is_some() {
+        return None;
+    }
+    m.seasons
+        .get(current_act_id)
+        .map(|s| s.competitive_tier)
+        .filter(|&t| t >= 3)
+}
+
 pub fn rank_without_mmr(
     comp_updates: Option<&[CompUpdateRow]>,
     live_tier: Option<u8>,

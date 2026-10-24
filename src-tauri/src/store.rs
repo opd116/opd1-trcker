@@ -27,7 +27,7 @@ use opd1_core::names::KnownName;
 use opd1_core::party::SharedRef;
 use opd1_core::stats::Act;
 use opd1_riot::endpoints::PlayerMmrResponse;
-use opd1_riot::to_core::current_rank_from_mmr;
+use opd1_riot::to_core::{current_rank_from_mmr, ranked_without_rr};
 
 use crate::roster::is_ffa_queue;
 use crate::sync::TEAMMATE_WINDOW;
@@ -467,8 +467,11 @@ pub fn load_my_stats(
         .as_ref()
         .and_then(|resp| current_rank_from_mmr(resp, &act.id));
     // R167: the live card's fallback (R154) — only without a snapshot, one
-    // indexed read, no request. A snapshot is the authority.
-    let has_mmr = snapshot.is_some();
+    // indexed read, no request. A snapshot is the authority, except one that
+    // names this act's tier without its RR (R166): the stored updates answer.
+    let has_mmr = snapshot
+        .as_ref()
+        .is_some_and(|resp| !ranked_without_rr(resp, &act.id));
     let stored_tier = if has_mmr {
         None
     } else {

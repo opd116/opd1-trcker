@@ -1349,6 +1349,46 @@ fn live_tier_is_below_a_snapshot_and_below_a_current_act_rr_row() {
 }
 
 #[test]
+fn an_mmr_tier_without_its_rr_takes_the_rr_from_the_stored_updates_r166() {
+    use opd1_core::stats::SeasonInfo;
+    use std::collections::HashMap;
+
+    // MMR names tier 15 this act but left `RankedRating` out.
+    let tier_only = || {
+        let mut seasons = HashMap::new();
+        seasons.insert(
+            CURRENT_ACT_ID.to_string(),
+            SeasonInfo {
+                competitive_tier: 15,
+                wins_by_tier: HashMap::new(),
+                number_of_wins: 3,
+                number_of_games: 5,
+            },
+        );
+        Field::Value(MmrInput {
+            seasons,
+            current_rank: None,
+        })
+    };
+    // A stored current-act update at that tier has the exact RR.
+    let card = build_card(no_snapshot(
+        tier_only(),
+        vec![update("m", CURRENT_ACT_ID, 2_400, 15, 42)],
+    ));
+    assert_eq!(card.rank, rank(15, Some(42)));
+    // No update at that tier: the tier stands, the RR is unknown (never 0).
+    let card = build_card(no_snapshot(
+        tier_only(),
+        vec![update("m", CURRENT_ACT_ID, 2_400, 14, 80)],
+    ));
+    assert_eq!(card.rank, rank(15, None));
+    assert_eq!(
+        build_card(no_snapshot(tier_only(), vec![])).rank,
+        rank(15, None)
+    );
+}
+
+#[test]
 fn live_tier_is_above_a_stored_match_tier() {
     let mut input = live(Field::Missing, Some(22));
     input.stored_tier = Some(StoredTier {

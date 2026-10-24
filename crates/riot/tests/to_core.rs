@@ -6,7 +6,7 @@
 use opd1_riot::endpoints::{CompetitiveUpdatesResponse, MatchDetailsResponse, PlayerMmrResponse};
 use opd1_riot::to_core::{
     acts_from_seasons, comp_update_rows_from_response, current_rank_from_mmr, match_from_details,
-    seasonal_map_from_mmr, SeasonEntry,
+    ranked_without_rr, seasonal_map_from_mmr, SeasonEntry,
 };
 
 const SEASON_ID: &str = "3e47230a-463c-a301-eb7d-67bb60357d4f";
@@ -90,6 +90,26 @@ fn current_rank_from_mmr_resolves_tier_and_rr() {
 fn current_rank_from_mmr_none_when_season_absent() {
     let resp: PlayerMmrResponse = serde_json::from_str(&fixture("mmr.json")).unwrap();
     assert!(current_rank_from_mmr(&resp, "no-such-season").is_none());
+}
+
+#[test]
+fn a_ranked_tier_without_ranked_rating_is_told_apart_from_unranked_r166() {
+    let resp: PlayerMmrResponse = serde_json::from_str(&fixture("mmr.json")).unwrap();
+    assert!(!ranked_without_rr(&resp, SEASON_ID), "the RR is there");
+    assert!(!ranked_without_rr(&resp, "no-such-season"));
+
+    let mut json: serde_json::Value = serde_json::from_str(&fixture("mmr.json")).unwrap();
+    let season = &mut json["QueueSkills"]["competitive"]["SeasonalInfoBySeasonID"][SEASON_ID];
+    season.as_object_mut().unwrap().remove("RankedRating");
+    let resp: PlayerMmrResponse = serde_json::from_value(json.clone()).unwrap();
+    assert!(current_rank_from_mmr(&resp, SEASON_ID).is_none());
+    assert!(ranked_without_rr(&resp, SEASON_ID));
+
+    // Unranked this act (tier 0): no RR expected, not this case.
+    json["QueueSkills"]["competitive"]["SeasonalInfoBySeasonID"][SEASON_ID]["CompetitiveTier"] =
+        0.into();
+    let resp: PlayerMmrResponse = serde_json::from_value(json).unwrap();
+    assert!(!ranked_without_rr(&resp, SEASON_ID));
 }
 
 // ---------------------------------------------------------------------

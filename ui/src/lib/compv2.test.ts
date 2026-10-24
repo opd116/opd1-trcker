@@ -142,6 +142,16 @@ describe("axis, dates and durations", () => {
     expect(labels[3]).toBe("Today");
   });
 
+  it("a date that repeats the next one is left blank, keeping its slot", () => {
+    // 40 points a minute apart, all today (T0 is noon): every mark is "Today", and only the last one says it.
+    const pts = series(Array.from({ length: 40 }, () => 2000), 60_000);
+    const labels = axisLabels(pts, pts[39]!.startMs + 60_000);
+    expect(labels).toHaveLength(4);
+    expect(labels.filter((l) => l === "Today")).toHaveLength(1);
+    expect(labels[3]).toBe("Today");
+    expect(labels[2]).toBe("");
+  });
+
   it("exactWhen writes the design's en-GB date with the 12-hour clock", () => {
     expect(exactWhen(new Date(2026, 9, 22, 17, 21).getTime())).toBe("Thu 22 Oct 2026 · 5:21 PM");
   });

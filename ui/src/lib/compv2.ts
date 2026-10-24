@@ -217,12 +217,17 @@ export function rrChart(
   };
 }
 
-/** The four dates under the chart: first, a third, two thirds and last point ("Today" for today). */
+/**
+ * The four dates under the chart: first, a third, two thirds and last point ("Today" for today). A label equal to the
+ * next one is left blank (two marks on the same day would read "Today Today"); its slot stays, so the others keep
+ * their place on the axis.
+ */
 export function axisLabels(points: readonly { startMs: number }[], nowMs: number): string[] {
   const n = points.length;
   if (n === 0) return [];
   const idx = [...new Set([0, Math.round((n - 1) / 3), Math.round((2 * (n - 1)) / 3), n - 1])];
-  return idx.map((i) => dayLabel(points[i]!.startMs, nowMs));
+  const labels = idx.map((i) => dayLabel(points[i]!.startMs, nowMs));
+  return labels.map((l, i) => (l === labels[i + 1] ? "" : l));
 }
 
 /** The chart header's net: "+212 RR", "−40 RR", "0 RR". */

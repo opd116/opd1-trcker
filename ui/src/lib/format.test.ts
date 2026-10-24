@@ -38,6 +38,8 @@ describe("span", () => {
     expect(span(15 * DAY)).toBe("2w");
     expect(span(70 * DAY)).toBe("2mo");
     expect(span(13 * 30 * DAY)).toBe("1y");
+    expect(span(359 * DAY)).toBe("11mo");
+    expect(span(362 * DAY)).toBe("1y");
     expect(span(800 * DAY)).toBe("2y");
   });
 

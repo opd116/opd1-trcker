@@ -1259,6 +1259,16 @@ impl LiveModel {
             || self.comp_backfill_ready()
     }
 
+    /// R101/R150: drops the own-history run and hands back the players of
+    /// the matches it stored, for the names fill — however the run ended (a
+    /// finished run, `sync::end_run`, or one dropped with its session).
+    pub fn take_backfill_asks(&mut self) -> Vec<NameAsk> {
+        self.backfill
+            .take()
+            .map(|run| run.participants)
+            .unwrap_or_default()
+    }
+
     /// R150: queues asks for the names fill, one per puuid. Asks
     /// [`Self::fill_allowed`] refuses (the user, an empty id) are not queued
     /// at all — and are checked again when taken. Asks are accepted at any

@@ -1077,10 +1077,7 @@ fn end_run(st: &AppState, me: &str) {
         if live.self_puuid.as_deref() != Some(me) {
             return;
         }
-        live.backfill
-            .take()
-            .map(|run| run.participants)
-            .unwrap_or_default()
+        live.take_backfill_asks()
     };
     st.queue_name_fill(asks);
 }

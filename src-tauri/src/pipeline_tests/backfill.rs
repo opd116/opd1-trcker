@@ -636,6 +636,33 @@ async fn backfill_interrupted_keeps_anchor() {
 }
 
 #[tokio::test]
+async fn a_run_dropped_with_its_session_still_queues_its_players_for_the_names_fill() {
+    // R150: a run kept while VALORANT was closed holds the players of the
+    // matches it stored; the session ends (VALORANT restarts, the client
+    // exits). The next run skips those stored matches, so only this run can
+    // ask about them.
+    let h = harness().await;
+    {
+        let mut live = lock(&h.st.live);
+        live.self_puuid = Some(ME.into());
+        live.start_backfill(None, None);
+        live.backfill
+            .as_mut()
+            .unwrap()
+            .add_participants(entry_start(base_ms(), 3), vec![OTHER.into()]);
+    }
+    let mut poller = crate::poll::Poller::held(h.st.clone());
+    poller.drop_session().await;
+    let live = lock(&h.st.live);
+    assert!(live.backfill.is_none(), "the run itself is dropped (R101)");
+    assert!(
+        live.name_fill.iter().any(|a| a.puuid == OTHER),
+        "its players are asked: {:?}",
+        live.name_fill
+    );
+}
+
+#[tokio::test]
 async fn backfill_history_error_ends_the_run_and_keeps_the_anchor() {
     let h = harness().await;
     let base = base_ms();

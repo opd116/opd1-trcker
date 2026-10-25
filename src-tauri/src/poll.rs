@@ -221,12 +221,13 @@ where
 /// are the dead loop's: the new one connects again from the lockfile like at
 /// startup, and the cursor of an interrupted run is never trusted (R101).
 fn reset_after_panic(st: &AppState) {
-    {
+    let asks = {
         let mut live = lock(&st.live);
         live.revoke_worker();
-        live.backfill = None;
         live.comp_backfill = None;
-    }
+        live.take_backfill_asks()
+    };
+    st.queue_name_fill(asks);
     st.set_session(None);
 }
 
@@ -609,12 +610,15 @@ impl Poller {
         self.stop_worker();
         // R101: an interrupted run is dropped; the next connect starts over
         // from the stored anchor, which only a finished run moves. B1: the
-        // competitive-updates run likewise.
-        {
+        // competitive-updates run likewise. R150: the players of the matches
+        // it already stored still go to the names fill (the next run skips
+        // those matches, so nothing else would ask about them).
+        let asks = {
             let mut live = lock(&self.st.live);
-            live.backfill = None;
             live.comp_backfill = None;
-        }
+            live.take_backfill_asks()
+        };
+        self.st.queue_name_fill(asks);
         self.session = None;
         self.st.set_session(None);
         self.stage = Stage::Closed;

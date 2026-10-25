@@ -194,6 +194,15 @@ describe("keyAction", () => {
     expect(keyAction(k("D", { ctrlKey: true, shiftKey: true }))).toBe("dumpRaw");
   });
 
+  it("works with an Arabic layout active: the physical key counts when the letter is not Latin", () => {
+    const both = { ctrlKey: true, shiftKey: true };
+    expect(keyAction({ ...k("م", both), code: "KeyL" })).toBe("copyLog");
+    expect(keyAction({ ...k("ي", both), code: "KeyD" })).toBe("dumpRaw");
+    // A Latin layout's own letters win over the position (Dvorak's L is on QWERTY's P key).
+    expect(keyAction({ ...k("l", both), code: "KeyP" })).toBe("copyLog");
+    expect(browserKeyBlocked({ ...k("ق", { ctrlKey: true }), code: "KeyR" })).toBe(true);
+  });
+
   it("nothing else does", () => {
     expect(keyAction(k("L", { ctrlKey: true }))).toBeNull();
     expect(keyAction(k("L", { shiftKey: true }))).toBeNull();

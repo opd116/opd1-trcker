@@ -88,12 +88,22 @@ export async function loadMeta(
   }
 }
 
-/** Ctrl+Shift+L copies the log, Ctrl+Shift+D dumps the raw captures. No UI for either. */
-export function keyAction(
-  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey">,
-): "copyLog" | "dumpRaw" | null {
-  if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return null;
+type KeyLike = Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey"> & { code?: string };
+
+/**
+ * The letter a shortcut means: `key` when it is a Latin letter (so Dvorak's or AZERTY's own letters count), else the
+ * physical key (`code` "KeyL" → "l"): with an Arabic (or any non-Latin) layout active, Ctrl+Shift+L gives `key` "م".
+ */
+function shortcutLetter(e: KeyLike): string {
   const k = e.key.toLowerCase();
+  if (/^[a-z]$/.test(k)) return k;
+  return e.code && /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : k;
+}
+
+/** Ctrl+Shift+L copies the log, Ctrl+Shift+D dumps the raw captures. No UI for either. */
+export function keyAction(e: KeyLike): "copyLog" | "dumpRaw" | null {
+  if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return null;
+  const k = shortcutLetter(e);
   return k === "l" ? "copyLog" : k === "d" ? "dumpRaw" : null;
 }
 
@@ -103,12 +113,10 @@ export function keyAction(
  * Never Ctrl+Shift+L or Ctrl+Shift+D (`keyAction` above); Ctrl+Alt chords are AltGr characters on some layouts, and
  * Tab, Enter and Space are the keyboard's way into the UI.
  */
-export function browserKeyBlocked(
-  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey">,
-): boolean {
+export function browserKeyBlocked(e: KeyLike): boolean {
   if (e.key === "F5" || e.key === "F7") return true;
   if (!e.ctrlKey || e.altKey || e.metaKey) return false;
-  const k = e.key.toLowerCase();
+  const k = shortcutLetter(e);
   return k === "r" || (!e.shiftKey && (k === "p" || k === "f" || k === "u"));
 }
 

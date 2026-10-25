@@ -1032,6 +1032,41 @@ fn top_teammates_orders_by_count() {
 }
 
 #[test]
+fn top_teammates_ties_come_out_the_same_on_every_call() {
+    // One match, four teammates: equal counts and starts. The pick and its
+    // order must not follow the HashMap's iteration order.
+    let repo = repo_in_memory();
+    repo.upsert_match(
+        &sample_match("m1", 2_000, None),
+        &[],
+        &[
+            sample_player("self", "Blue", "Self", "111"),
+            sample_player("dd", "Blue", "D", "D"),
+            sample_player("bb", "Blue", "B", "B"),
+            sample_player("aa", "Blue", "A", "A"),
+            sample_player("cc", "Blue", "C", "C"),
+        ],
+    )
+    .unwrap();
+    let first: Vec<String> = repo
+        .top_teammates("self", 1_000, 3)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.puuid)
+        .collect();
+    assert_eq!(first, ["aa", "bb", "cc"]);
+    for _ in 0..50 {
+        let again: Vec<String> = repo
+            .top_teammates("self", 1_000, 3)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.puuid)
+            .collect();
+        assert_eq!(again, first);
+    }
+}
+
+#[test]
 fn top_teammates_count_the_players_wins_and_losses_together() {
     // From the player's side: two wins, one loss and a draw (no winner)
     // shared with the same teammate; a draw is neither.

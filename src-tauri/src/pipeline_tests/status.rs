@@ -176,6 +176,42 @@ async fn the_client_up_with_the_game_closed_is_waiting_and_the_game_up_is_ok() {
 }
 
 #[tokio::test]
+async fn another_account_in_the_same_client_is_noticed_while_valorant_is_closed() {
+    // VALORANT closed; the user signs into another account in a Riot Client
+    // that stays open (same lockfile). Our presence is looked up by our puuid,
+    // so only the account check sees it: the session is rebuilt for them.
+    let h = harness().await;
+    let (cell, _) = presence(&h, blob("MENUS", "unrated")).await;
+    *cell.lock().unwrap() = None;
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Closed);
+
+    // Same account at the next check: nothing happens.
+    poller.next_account_check = tokio::time::Instant::now();
+    poller.presence_tick(&h.session).await.unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "a2", "entitlements": [], "issuer": "i",
+            "subject": "bbbbbbbb-0000-0000-0000-00000000000b", "token": "t2",
+        })))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    // Not before the check is due.
+    poller.presence_tick(&h.session).await.unwrap();
+    poller.next_account_check = tokio::time::Instant::now();
+    assert!(matches!(
+        poller.presence_tick(&h.session).await,
+        Err(crate::poll::Stop::Reconnect(why)) if why == "account changed"
+    ));
+}
+
+#[tokio::test]
 async fn a_presence_every_two_seconds_does_not_emit_a_status_every_two_seconds() {
     let h = harness().await;
     presence(&h, blob("MENUS", "unrated")).await;

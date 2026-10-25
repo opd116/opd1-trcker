@@ -1776,6 +1776,61 @@ async fn a_fresh_token_for_another_account_ends_the_session() {
     assert!(matches!(err, RiotError::ClientGone), "{err:?}");
 }
 
+#[tokio::test]
+async fn the_account_check_reconnects_only_for_another_account() {
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    let answer = |status: u16, subject: &str| {
+        ResponseTemplate::new(status).set_body_json(json!({
+            "accessToken": "a", "entitlements": [], "issuer": "i",
+            "subject": subject, "token": "t",
+        }))
+    };
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(answer(200, SELF_PUUID))
+        .up_to_n_times(2)
+        .mount(&server)
+        .await;
+    let session = connect_with_age(&tmp, &server, None).await;
+    // The same account: no verdict to act on.
+    session.check_account().await.expect("same account");
+    // Signed out (no answer, or no subject): not a reason to reconnect.
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    session.check_account().await.expect("no answer");
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(answer(200, ""))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    session.check_account().await.expect("no subject");
+    // Another account: gone, and so is every later call.
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(answer(200, "bbbbbbbb-0000-0000-0000-000000000002"))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    assert!(matches!(
+        session.check_account().await,
+        Err(RiotError::ClientGone)
+    ));
+    assert!(matches!(
+        session.local::<Value>("/chat/v4/presences").await,
+        Err(RiotError::ClientGone)
+    ));
+}
+
 /// `n` overlapping calls of the `/mmr` path on one session.
 async fn fan_out(session: RiotSession, n: usize) -> Vec<Result<Value, RiotError>> {
     let session = std::sync::Arc::new(session);

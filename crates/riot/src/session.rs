@@ -704,6 +704,27 @@ impl RiotSession {
     /// `connect()` time. Cheap (one small file read), called before every
     /// local/pd/glz call so a closed or restarted Riot client is caught
     /// immediately instead of failing on a dead connection.
+    /// The account the local client is signed in as now, against this
+    /// session's (one local call, no remote request): another account latches
+    /// `account_changed` and is `ClientGone`, so the caller reconnects for it.
+    /// A client that gives no answer or no subject (signed out, busy) is no
+    /// verdict: the presence failures and the lockfile cover a dead client.
+    pub async fn check_account(&self) -> Result<(), RiotError> {
+        self.check_alive()?;
+        match fetch_entitlements(&self.local_client, &self.local_base, &self.basic_auth).await {
+            Ok(e) if !e.subject.is_empty() && e.subject != self.puuid => {
+                log::info!("the Riot Client now answers for another account");
+                self.account_changed.store(true, Ordering::Release);
+                Err(RiotError::ClientGone)
+            }
+            Ok(_) => Ok(()),
+            Err(e) => {
+                log::debug!("account check: {e}");
+                Ok(())
+            }
+        }
+    }
+
     fn check_alive(&self) -> Result<(), RiotError> {
         if self.account_changed.load(Ordering::Acquire) {
             return Err(RiotError::ClientGone);

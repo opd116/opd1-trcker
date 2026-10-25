@@ -70,6 +70,11 @@ const CLOSED_CHECK: Duration = Duration::from_secs(5);
 /// Presence cadence while VALORANT is running / while it isn't.
 const PRESENCE_EVERY: Duration = Duration::from_secs(2);
 const PRESENCE_EVERY_IDLE: Duration = Duration::from_secs(5);
+/// While VALORANT is closed, how often the local client is asked which
+/// account it is signed in as (`RiotSession::check_account`): an account
+/// changed in a Riot Client that stayed open shows no presence of ours and no
+/// failure, so nothing else would notice it.
+const ACCOUNT_CHECK_EVERY: Duration = Duration::from_secs(30);
 /// R39: Agent Select re-poll, only to pick up agent selections.
 const PREGAME_REPOLL: Duration = Duration::from_secs(3);
 /// Consecutive presence failures (other than ClientGone) before the
@@ -303,6 +308,8 @@ pub(crate) struct Poller {
     /// shorten it).
     pub(crate) ingame_loadouts_timeout: Duration,
     next_presence: Instant,
+    /// The next [`ACCOUNT_CHECK_EVERY`] check while VALORANT is closed.
+    pub(crate) next_account_check: Instant,
     next_pregame: Option<Instant>,
     /// When the next roster retry is due and how many fetches failed so far.
     roster_retry: Option<(Instant, u32)>,
@@ -382,6 +389,7 @@ impl Poller {
             pregame_loadouts_valid: false,
             ingame_loadouts_timeout: INGAME_LOADOUTS_TIMEOUT,
             next_presence: Instant::now(),
+            next_account_check: Instant::now(),
             next_pregame: None,
             roster_retry: None,
             post_match: None,
@@ -569,6 +577,8 @@ impl Poller {
         self.version_from_presence_done = false;
         self.presence_errors = 0;
         self.next_presence = Instant::now();
+        // The account was just read (connect); the next check waits its turn.
+        self.next_account_check = Instant::now() + ACCOUNT_CHECK_EVERY;
         // R43: the user's own Riot ID, from the local chat session.
         let _ = crate::sync::fetch_self_name(&self.st, &session).await;
 
@@ -798,6 +808,14 @@ impl Poller {
                 if self.stage != Stage::Closed {
                     log::info!("VALORANT is not running");
                     self.change_stage(session, Stage::Closed, None).await?;
+                }
+                // Another account in the same client: its VALORANT would never
+                // show here (our presence is looked up by our puuid).
+                if Instant::now() >= self.next_account_check {
+                    self.next_account_check = Instant::now() + ACCOUNT_CHECK_EVERY;
+                    if let Err(RiotError::ClientGone) = session.check_account().await {
+                        return Err(Stop::Reconnect("account changed"));
+                    }
                 }
                 self.status_session(session, false);
                 // Absent twice: the first verdict (or a later one, no change).

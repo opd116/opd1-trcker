@@ -274,7 +274,7 @@ pub(crate) struct Poller {
     pub(crate) local_app_data: Option<PathBuf>,
     session: Option<Arc<RiotSession>>,
     /// The stage being shown (`roster::view_stage` of the presence).
-    stage: Stage,
+    pub(crate) stage: Stage,
     /// The raw presence stage last seen (differs from `stage` in FFA).
     presence_stage: Stage,
     /// VALORANT's own presence under this session (R46).
@@ -1416,7 +1416,11 @@ impl Poller {
 
     /// The new stage with only the user's own card (roster fetch failed);
     /// the user's own data still syncs meanwhile (never a stuck skeleton).
-    async fn show_self_only(&mut self, session: &Arc<RiotSession>) {
+    /// A placeholder while the roster retry runs, not a roster change: the
+    /// others' pending rank retries (R155) are kept for the roster that
+    /// follows (`apply_roster` prunes then; `due_rank_retry` skips anyone not
+    /// on screen meanwhile).
+    pub(crate) async fn show_self_only(&mut self, session: &Arc<RiotSession>) {
         let (me, own) = {
             let live = lock(&self.st.live);
             (live.self_puuid.clone(), live.self_roster.clone())
@@ -1438,7 +1442,6 @@ impl Poller {
             live.map_path = None;
             live.map_id = None;
             live.slots = slot.into_iter().collect();
-            live.prune_rank_retries();
         }
         self.st.publish();
         self.ensure_worker(session);

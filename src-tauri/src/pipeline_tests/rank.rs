@@ -441,6 +441,47 @@ async fn a_player_who_left_the_roster_is_not_retried() {
 }
 
 #[tokio::test]
+async fn a_self_only_placeholder_keeps_the_others_pending_rank_retry() {
+    // In Game: OTHER's rank sync fails (the harness's default), so a retry is
+    // due in 20 s. The next roster fetch fails once: the user's card alone
+    // shows meanwhile. The roster comes back with OTHER: the retry still runs.
+    let h = harness().await;
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.self_puuid = Some(ME.into());
+        live.self_roster = Some(roster(ME, false));
+        live.slots = vec![
+            Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            },
+            Slot {
+                roster: roster(OTHER, false),
+                db: PlayerDb::default(),
+            },
+        ];
+    }
+    drain(&h).await;
+    assert_eq!(count(&h.server, "GET", &comp_path(OTHER)).await, 1);
+
+    let mut poller = crate::poll::Poller::held(h.st.clone());
+    poller.stage = Stage::Ingame;
+    poller.show_self_only(&h.session).await;
+    {
+        let mut live = lock(&h.st.live);
+        assert_eq!(live.slots.len(), 1, "the placeholder");
+        live.slots.push(Slot {
+            roster: roster(OTHER, false),
+            db: PlayerDb::default(),
+        });
+        live.prune_rank_retries(); // what the next `apply_roster` does
+    }
+    advance(&h, 20 * S);
+    assert_eq!(lock(&h.st.live).due_rank_retry().as_deref(), Some(OTHER));
+}
+
+#[tokio::test]
 async fn no_retry_runs_while_valorant_is_closed() {
     let h = harness().await;
     mmr_answers(&h, ME, 500, None).await;

@@ -1061,12 +1061,17 @@ impl AssetCache {
                     return Ok(false);
                 }
             };
-            blocking({
+            // Best effort: a disk that cannot take the file costs the next
+            // start one download, never this session its tables.
+            let written = blocking({
                 let dir = self.dir.clone();
                 let content_tiers = content_tiers.clone();
                 move || write_json(&dir.join("contenttiers.json"), &content_tiers)
             })
-            .await?;
+            .await;
+            if let Err(e) = written {
+                log::warn!("content tiers not written to disk: {e}");
+            }
             tables.content_tiers = content_tiers;
             *write_lock(&self.tables) = tables;
             return Ok(true);
@@ -1105,7 +1110,12 @@ impl AssetCache {
         };
         self.stale.store(false, Ordering::Relaxed);
 
-        blocking({
+        // Best effort: a disk that cannot take the tables (full, read-only, a
+        // file locked by another program) must not throw away what was just
+        // downloaded, or the app would have no names or acts and download
+        // everything again at each retry. The manifest is written last, so a
+        // partial write leaves the old version and the next start fetches again.
+        let written = blocking({
             let dir = self.dir.clone();
             let agents = agents.clone();
             let maps = maps.clone();
@@ -1123,7 +1133,10 @@ impl AssetCache {
                 Ok(())
             }
         })
-        .await?;
+        .await;
+        if let Err(e) = written {
+            log::warn!("asset tables not written to disk: {e}");
+        }
 
         *write_lock(&self.tables) = Tables {
             agents,
@@ -1874,8 +1887,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
     }
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp_path = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
-    std::fs::write(&tmp_path, bytes).map_err(io_err)?;
-    std::fs::rename(&tmp_path, path).map_err(io_err)?;
+    // A failed write or rename takes its temp file with it: every retry has
+    // a new name, so leftovers would pile up.
+    let done = std::fs::write(&tmp_path, bytes).and_then(|()| std::fs::rename(&tmp_path, path));
+    if let Err(e) = done {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(io_err(e));
+    }
     Ok(())
 }
 

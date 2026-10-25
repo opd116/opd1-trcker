@@ -1476,6 +1476,45 @@ async fn a_failed_table_fetch_with_no_disk_tables_is_still_an_error() {
     assert!(!cache.tables_stale(), "no tables at all is not 'stale'");
 }
 
+#[tokio::test]
+async fn tables_that_cannot_be_written_to_disk_are_still_used() {
+    // The cache dir cannot be created (a file is in its place): the tables
+    // just downloaded still serve this session.
+    let dir = tempdir();
+    let blocked = dir.path().join("assets");
+    std::fs::write(&blocked, b"not a directory").unwrap();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    let cache = AssetCache::with_base(blocked.join("inner"), server.uri());
+    cache
+        .refresh_tables()
+        .await
+        .expect("downloaded, even if not stored");
+    assert!(cache.meta().is_ok(), "names and acts are there");
+}
+
+#[tokio::test]
+async fn a_failed_cache_write_leaves_no_temp_file_behind() {
+    // agents.json cannot be replaced (a directory is in its place): the
+    // write fails, and its temp file goes with it.
+    let dir = tempdir();
+    std::fs::create_dir_all(dir.path().join("agents.json")).unwrap();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    for _ in 0..3 {
+        let _ = cache.refresh_tables().await;
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    assert!(cache.meta().is_ok());
+}
+
 // ---------------------------------------------------------------------
 // R189: the skin catalog, the collection and the Skins screen's images
 // ---------------------------------------------------------------------

@@ -32,8 +32,9 @@ pub async fn profile_extras(
 ///   same [`crate::sync::RECENT_COUNT`] newest that Player Details' `recent`
 ///   lists), the players of the current live roster (the user included,
 ///   unless the profile is the user's) who were in that stored match. Only
-///   matches with at least one such player are listed; none while VALORANT is
-///   closed (there is no live match).
+///   matches with at least one such player are listed; none unless a match is
+///   live (Agent Select, In Game): in the menus or closed there is no "your
+///   match now".
 pub async fn build(st: &Arc<AppState>, puuid: String) -> Result<ProfileExtras, String> {
     if !is_uuid(&puuid) {
         return Err("invalid puuid".into());
@@ -41,7 +42,7 @@ pub async fn build(st: &Arc<AppState>, puuid: String) -> Result<ProfileExtras, S
     let act = st.current_act();
     let on_screen: HashSet<String> = {
         let live = lock(&st.live);
-        if live.stage == Stage::Closed {
+        if !matches!(live.stage, Stage::Pregame | Stage::Ingame) {
             HashSet::new()
         } else {
             live.slots

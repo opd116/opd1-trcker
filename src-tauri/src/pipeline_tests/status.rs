@@ -949,12 +949,14 @@ async fn profile_extras_gives_the_act_maps_and_who_on_screen_was_in_each_recent_
     want.sort_unstable();
     assert_eq!(mine.live_mates[0].puuids, want);
 
-    // Closed: no live match, no chips.
-    lock(&h.st.live).stage = Stage::Closed;
-    let closed = crate::v2::profile::build(&h.st, OTHER.into())
-        .await
-        .unwrap();
-    assert!(closed.live_mates.is_empty());
+    // Closed, or only in the menus: no live match, no chips.
+    for stage in [Stage::Closed, Stage::Menus] {
+        lock(&h.st.live).stage = stage;
+        let none = crate::v2::profile::build(&h.st, OTHER.into())
+            .await
+            .unwrap();
+        assert!(none.live_mates.is_empty(), "{stage:?}");
+    }
 }
 
 #[tokio::test]

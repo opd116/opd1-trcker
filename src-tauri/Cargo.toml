@@ -30,9 +30,11 @@ serde_json = "1"
 # `log::Log`; already in the tree via tauri, so no new crate.
 log = "0.4"
 # `time` (poll-loop timers), `sync` (tables-load mutex), `rt` (`JoinSet`
-# for the per-player match-details fan-out). Same tokio tauri already runs
-# on — no new crates, only feature edges.
-tokio = { version = "1", features = ["time", "sync", "rt"] }
+# for the per-player match-details fan-out), `macros` (`select!`: the names
+# fill gives up when a match begins, `sync::fill_names_step`). Same tokio
+# tauri already runs on — no new crates, only feature edges (tokio-macros is
+# already in the lockfile, compile time only).
+tokio = { version = "1", features = ["time", "sync", "rt", "macros"] }
 # Decoding the presence `private` blob for the party key (`roster.rs`) —
 # same version opd1-core/opd1-riot already use.
 base64 = "0.22"

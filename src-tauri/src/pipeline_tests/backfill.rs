@@ -312,7 +312,7 @@ async fn store_details_stores_the_compact_rows() {
     let details = h.session.match_details(&entry_id(1)).await.unwrap();
     assert!(!is_stored(&h.st, entry_id(1)).await);
 
-    assert!(store_details(&h.st, details).await.is_some());
+    assert!(store_details(&h.st, details, |_, _, _| {}).await.is_some());
 
     assert!(is_stored(&h.st, entry_id(1)).await);
     assert!(!is_stored(&h.st, entry_id(2)).await, "only that match");

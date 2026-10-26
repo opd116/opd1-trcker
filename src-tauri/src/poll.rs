@@ -842,17 +842,15 @@ impl Poller {
         // R137: the raw presence, not the view — a free-for-all match keeps
         // the Lobby view (R41) but is still a match. Set before any stage
         // change below starts a worker.
-        let match_began = {
+        {
             let mut live = lock(&self.st.live);
-            let was = live.in_match;
             live.in_match = matches!(presence.stage, Stage::Pregame | Stage::Ingame);
             if live.in_match {
                 // R150: a match is running, so no match end is on record: the
                 // one that ended before it is history.
                 live.match_end_ms = None;
             }
-            !was && live.in_match
-        };
+        }
 
         if presence.stage == Stage::Ingame {
             self.match_queue = presence.queue_id.clone();
@@ -869,17 +867,6 @@ impl Poller {
             lock(&self.st.live).match_end_ms = Some(now_ms());
         }
         let view = view_stage(presence.stage, presence.queue_id.as_deref());
-        // A free-for-all match began without a view change (R41 keeps the
-        // Lobby view), so no `change_stage` aborts the worker. A names-fill
-        // request waiting in the call (a hold, a 429 resend) would then go
-        // out during the match (R150/R153: nothing is asked during a match,
-        // a Deathmatch included). Abort it here; the restart picks up the
-        // Lobby view's own work, and the fill hands out nothing until the
-        // match ends.
-        if match_began && view == self.stage {
-            self.stop_worker();
-            self.ensure_worker(session);
-        }
         if presence.stage != self.presence_stage {
             if view != presence.stage {
                 log::info!("free-for-all {:?}: keeping the lobby view", presence.stage);

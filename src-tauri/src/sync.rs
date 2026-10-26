@@ -408,18 +408,24 @@ async fn comp_updates_call(
 
 /// A match-details response -> the compact rows stored in SQLite (~1-2 KB;
 /// the large body is dropped before the write). `None`: the write failed
-/// (`AppState::db` already logged it); otherwise the match's start and the
-/// puuids of its players other than the user whose names match-details left
-/// blank, for the own-history backfill's names fill. Shared by the live sync
-/// ([`fetch_missing_details`]) and the backfill.
+/// (`AppState::db` already logged it). Once stored, `after` gets the match's
+/// start and the puuids of its players other than the user whose names
+/// match-details left blank (the caller's names-fill follow-ups). Shared by
+/// the live sync ([`fetch_missing_details`]) and the backfill.
 ///
 /// R150: when the stored match is the one that just ended
 /// ([`AppState::match_end_asks`]), its players are queued for the names fill
 /// right here, once the rows are stored — whichever path fetched it.
+///
+/// The write and everything that follows it run in their own task: a worker
+/// aborted during the write (a stage change) must not leave the match stored
+/// with its asks lost, since a stored match is never fetched, so never asked
+/// about, again.
 pub async fn store_details(
     st: &Arc<AppState>,
     details: MatchDetailsResponse,
-) -> Option<(i64, Vec<String>)> {
+    after: impl FnOnce(&Arc<AppState>, i64, Vec<String>) + Send + 'static,
+) -> Option<()> {
     let (m, teams, players) = match_from_details(&details);
     drop(details);
     let asks = st.match_end_asks(&m, &players);
@@ -428,10 +434,17 @@ pub async fn store_details(
         let me = lock(&st.live).self_puuid.clone().unwrap_or_default();
         unnamed_others(&players, &me).collect()
     };
-    st.db(move |repo| repo.upsert_match(&m, &teams, &players))
-        .await?;
-    st.queue_name_fill(asks);
-    Some((start_ms, others))
+    let st = st.clone();
+    tauri::async_runtime::spawn(async move {
+        st.db(move |repo| repo.upsert_match(&m, &teams, &players))
+            .await?;
+        st.queue_name_fill(asks);
+        after(&st, start_ms, others);
+        Some(())
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Fetches match-details for every id the DB doesn't have yet and stores
@@ -555,12 +568,14 @@ async fn fetch_missing_details_asking(
         match joined {
             Ok((id, Ok(details))) => {
                 // A failed write is logged; the live sync goes on (partial).
-                match store_details(st, details).await {
-                    Some((start_ms, others)) if ask_names => {
+                let stored = store_details(st, details, move |st, start_ms, others| {
+                    if ask_names {
                         st.queue_name_fill_low(match_asks(start_ms, others));
                     }
-                    Some(_) => {}
-                    None => failed = true,
+                })
+                .await;
+                if stored.is_none() {
+                    failed = true;
                 }
                 // Stored: whoever waits on this id can read it now.
                 claimed.remove(&id);
@@ -1534,14 +1549,19 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
         };
         match session.match_details(&id).await {
             Ok(details) => {
-                let Some((start_ms, others)) = store_details(st, details).await else {
+                // B2: right as it is stored, not when the pass returns — a pass
+                // the worker's abort ends mid-await still told My Stats. And
+                // the run's participants, in the same task as the write.
+                let owner = me.to_string();
+                let stored = store_details(st, details, move |st, start_ms, others| {
+                    crate::my_stats::notify(st);
+                    with_run(st, &owner, |run| run.add_participants(start_ms, others));
+                })
+                .await;
+                if stored.is_none() {
                     end_run(st, me);
                     return Ok(());
-                };
-                // B2: right as it is stored, not when the pass returns — a pass
-                // the worker's abort ends mid-await still told My Stats.
-                crate::my_stats::notify(st);
-                with_run(st, me, |run| run.add_participants(start_ms, others));
+                }
                 pop(st);
             }
             Err(RiotError::ClientGone) => {
@@ -1916,6 +1936,15 @@ pub const NAME_BATCH_MAX: usize = 100;
 /// worker on a stage change — or that loses the Riot client puts them back in
 /// the queue, because for a player who hid their name they are the only
 /// route to it (a stored match queues its players once).
+/// Resolves once the poll loop says a match is running (Agent Select, In
+/// Game, a free-for-all); a cheap look at the live model every 200 ms, only
+/// while a names call waits.
+async fn until_in_match(st: &AppState) {
+    while lock(&st.live).between_matches() {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
 pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Result<(), Gone> {
     let mut held = TakenAsks::new(st);
     while held.asks.len() < NAME_BATCH_MAX {
@@ -1973,7 +2002,19 @@ pub async fn fill_names_step(st: &Arc<AppState>, session: &RiotSession) -> Resul
         return Ok(());
     }
 
-    let entries = match session.names(&visible).await {
+    // The call can wait (a hold, a 429's resend) after the checks above. A
+    // free-for-all match that begins meanwhile changes no view (R41), so no
+    // stage change aborts this worker: the call itself gives up as soon as
+    // the poll loop sees a match, before anything more is sent (`held` puts
+    // the asks back).
+    let names = tokio::select! {
+        r = session.names(&visible) => r,
+        () = until_in_match(st) => {
+            log::debug!("names fill dropped: a match began while it waited");
+            return Ok(());
+        }
+    };
+    let entries = match names {
         Ok(entries) => entries,
         // Nothing was answered: `held` keeps the asks for the next connection.
         Err(RiotError::ClientGone) => return Err(Gone),

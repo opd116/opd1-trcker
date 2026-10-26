@@ -856,6 +856,38 @@ async fn details_sync_fallback_loadouts_are_resolved_before_the_rebuild() {
 }
 
 #[tokio::test]
+async fn a_failed_skin_name_is_not_asked_again_at_every_roster_change_while_open() {
+    // R97: retried at the next open, not every 3 s while Agent Select re-polls
+    // the roster with the page open.
+    let h = harness().await;
+    lobby_with(&h, OTHER).await;
+    mount_failing_skin(&h.assets_server, REAVER).await;
+    lock(&h.st.live)
+        .loadouts
+        .insert(OTHER.into(), reaver_loadout());
+    let seen = details_events(&h.rec);
+    crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    details_event_after(&h.rec, seen, OTHER, |d| {
+        d["loadout"].get("vandal") == Some(&Value::Null)
+    })
+    .await;
+    assert_eq!(skin_requests(&h).await, 1);
+
+    for _ in 0..5 {
+        crate::details::refresh_open_after_live_change(&h.st).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        skin_requests(&h).await,
+        1,
+        "no new asks while the page stays open"
+    );
+    assert!(!h.st.skins_resolving(OTHER), "no skeleton comes back");
+}
+
+#[tokio::test]
 async fn failed_skin_fetch_settles_to_null() {
     // R97: a failed name fetch never leaves a skeleton behind.
     let h = harness().await;

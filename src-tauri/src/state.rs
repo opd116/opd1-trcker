@@ -1809,6 +1809,11 @@ pub struct AppState {
     /// weapons are still "resolving" (absent keys); once it leaves, an
     /// unknown name is `null`.
     skins_inflight: Mutex<HashMap<String, usize>>,
+    /// R97: the skins whose names were already asked for the open Player
+    /// Details (its puuid, the skin ids). A name that failed is asked again
+    /// at the next open of the page, not at every roster change while it
+    /// stays open (Agent Select re-polls every 3 s). Reset by every open.
+    skins_tried: Mutex<Option<(String, HashSet<String>)>>,
     /// The Player Details the UI asked for last (`player_details`), as it
     /// was last given to the UI (the answer, or the last `details` event).
     /// A rebuild is emitted only for this player and only when it differs:
@@ -1916,6 +1921,7 @@ impl AppState {
             details_synced: Mutex::new(HashMap::new()),
             details_rerun: Mutex::new(HashSet::new()),
             skins_inflight: Mutex::new(HashMap::new()),
+            skins_tried: Mutex::new(None),
             open_details: Mutex::new(None),
             details_inflight: Mutex::new(HashMap::new()),
             details_404: Mutex::new(HashSet::new()),
@@ -2489,7 +2495,25 @@ impl AppState {
     /// must hand to [`Self::set_open_details`] once its build is done. Any
     /// earlier ticket is void from now on (R163).
     pub fn begin_open_details(&self, puuid: &str) -> u64 {
+        // R97: a new open asks again for every skin name still unknown.
+        *lock(&self.skins_tried) = Some((puuid.to_string(), HashSet::new()));
         lock(&self.details_gate).begin(puuid)
+    }
+
+    /// R97: records that the names of `ids` were asked for `puuid`'s open page.
+    pub fn note_skins_tried(&self, puuid: &str, ids: impl IntoIterator<Item = String>) {
+        let mut tried = lock(&self.skins_tried);
+        match tried.as_mut() {
+            Some((p, set)) if p == puuid => set.extend(ids),
+            _ => *tried = Some((puuid.to_string(), ids.into_iter().collect())),
+        }
+    }
+
+    /// R97: whether `id`'s name was already asked for `puuid`'s open page.
+    pub fn skin_tried(&self, puuid: &str, id: &str) -> bool {
+        lock(&self.skins_tried)
+            .as_ref()
+            .is_some_and(|(p, set)| p == puuid && set.contains(id))
     }
 
     /// Records `details` as the open Player Details, as the UI was just

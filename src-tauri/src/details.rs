@@ -130,6 +130,14 @@ pub fn skins_pending(st: &AppState, puuid: &str) -> bool {
     !unnamed_skins(st, puuid).is_empty()
 }
 
+/// [`skins_pending`], counting only skins not yet asked for the open page
+/// (R97): a name that failed waits for the next open.
+fn untried_skins_pending(st: &AppState, puuid: &str) -> bool {
+    unnamed_skins(st, puuid)
+        .iter()
+        .any(|s| !st.skin_tried(puuid, &s.skin_id))
+}
+
 /// Fetches the names of `puuid`'s unnamed skins from valorant-api (R83):
 /// up to four small JSON requests at once, each cached forever, independent
 /// of the 120s Riot details sync. `true` when at least one name became
@@ -137,7 +145,9 @@ pub fn skins_pending(st: &AppState, puuid: &str) -> bool {
 /// on the next open of the Details, not before (R97).
 pub async fn resolve_skins(st: &Arc<AppState>, puuid: &str) -> bool {
     let mut set = tokio::task::JoinSet::new();
-    for skin in unnamed_skins(st, puuid) {
+    let skins = unnamed_skins(st, puuid);
+    st.note_skins_tried(puuid, skins.iter().map(|s| s.skin_id.clone()));
+    for skin in skins {
         let assets = st.assets.clone();
         set.spawn(async move {
             let named = assets.weapon_skin(&skin.skin_id, &skin.chroma_id).await;
@@ -246,7 +256,10 @@ pub async fn refresh_open_after_live_change(st: &Arc<AppState>) {
     if !lock(&st.live).slots.iter().any(|s| s.roster.puuid == puuid) {
         return;
     }
-    let resolving = skins_pending(st, &puuid).then(|| st.begin_skin_resolve(&puuid));
+    // Only skins this open has not asked yet: a name that failed is asked
+    // again at the next open (R97), not at every roster change (Agent Select
+    // re-polls every 3 s).
+    let resolving = untried_skins_pending(st, &puuid).then(|| st.begin_skin_resolve(&puuid));
     refresh(st, &puuid).await;
     if let Some(guard) = resolving {
         resolve_skins_in_background(st, &puuid, guard);

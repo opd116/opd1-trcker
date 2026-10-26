@@ -288,3 +288,38 @@ test.describe("Scoreboard", () => {
     await expect(page.locator('.match[aria-busy="true"] .hero.skel')).toBeVisible();
   });
 });
+
+test.describe("the double-click guard covers every opener", () => {
+  test("a Saved row double-clicked opens the drawer and leaves it open", async ({ page }) => {
+    await routeMedia(page);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openScene(page, "closed", { screen: "saved" });
+    const row = page.locator(".row[data-row]").first();
+    await expect(row).toBeVisible();
+    const box = (await row.locator(".player").boundingBox())!;
+    await page.mouse.dblclick(box.x + 60, box.y + box.height / 2);
+    await page.waitForTimeout(500);
+    await expect(page.locator('[role="dialog"]')).toHaveCount(1);
+  });
+
+  test("a History row double-clicked by its chevron never saves the player under the second click", async ({ page }) => {
+    await routeMedia(page);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openScene(page, "closed", { screen: "history" });
+    for (const n of [4, 6]) {
+      const row = page.locator(".row[data-match-id]").nth(n);
+      await expect(row).toBeVisible();
+      const b = (await row.boundingBox())!;
+      const [x, y] = [b.x + b.width - 20, b.y + b.height / 2];
+      await page.mouse.click(x, y);
+      await page.waitForTimeout(150);
+      const pressed = page.locator('button.save[aria-pressed="true"]');
+      const before = await pressed.count();
+      await page.mouse.click(x, y);
+      await page.waitForTimeout(300);
+      await expect(pressed).toHaveCount(before);
+      await page.keyboard.press("Escape");
+      await expect(page.locator(".row[data-match-id]").first()).toBeVisible();
+    }
+  });
+});

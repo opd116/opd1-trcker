@@ -9,6 +9,7 @@ import { closeDetails, closeMatch, getMatchDetails, getPlayerDetails, setGlance 
 import { DETAILS_RETRY_MS, DETAILS_TIMEOUT_MS, openDetails, openMatch as matchSlot } from "./boot";
 import { emptyMatch, settledDetails } from "./details";
 import { hideTip } from "./tooltip.svelte";
+import { cardOpenGuard } from "./clickGuard";
 import type { PlayerCard, Stage } from "./types";
 import { reportError } from "./uilog";
 
@@ -102,6 +103,7 @@ function activeElement(): HTMLElement | null {
  */
 export function openProfile(puuid: string, trigger?: HTMLElement | null): void {
   hideTip();
+  cardOpenGuard.arm();
   profileTrigger = trigger === undefined ? activeElement() : trigger;
   if (router.profile === puuid) return;
   router.profile = puuid;
@@ -166,6 +168,7 @@ export const matchOpenedByKeyboard = (): boolean => matchByKeyboard;
 
 export function openMatch(matchId: string, opts: { from: MatchFrom; focusPuuid: string; encFrom?: EncFrom }): void {
   hideTip();
+  cardOpenGuard.arm();
   matchByKeyboard = activeElement()?.matches(":focus-visible") ?? false;
   const encFrom =
     opts.encFrom ??

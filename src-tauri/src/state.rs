@@ -373,6 +373,9 @@ pub struct BackfillRun {
     /// fill when the run ends (`sync::end_run`), so one run asks in a few
     /// batched requests, not one per match.
     pub participants: Vec<NameAsk>,
+    /// R160: a request hold met the run; its next page or match waits until
+    /// then ([`LiveModel::pause_backfill`]), the cursor and `pending` kept.
+    pub resume_at: Option<Instant>,
 }
 
 impl BackfillRun {
@@ -983,7 +986,31 @@ impl LiveModel {
     /// stays the Lobby (R41): the raw presence (`in_match`) decides. The
     /// run's cursor survives the pause.
     pub fn backfill_ready(&self) -> bool {
-        self.backfill.is_some() && self.between_matches()
+        self.between_matches()
+            && self
+                .backfill
+                .as_ref()
+                .is_some_and(|run| run.resume_at.is_none_or(|at| self.now() >= at))
+    }
+
+    /// R160: a paused own-history run's hold has run out: the poll tick
+    /// starts a worker, as [`Self::comp_backfill_resume_due`] does. It stays
+    /// true until the run's next step clears the pause.
+    pub fn backfill_resume_due(&self) -> bool {
+        self.backfill
+            .as_ref()
+            .and_then(|run| run.resume_at)
+            .is_some_and(|at| self.now() >= at)
+            && self.between_matches()
+    }
+
+    /// R160: the run met a request hold with `wait` left: it waits for it
+    /// instead of ending (nothing was sent, so nothing says the run is done).
+    pub fn pause_backfill(&mut self, wait: Duration) {
+        let at = self.now() + wait;
+        if let Some(run) = self.backfill.as_mut() {
+            run.resume_at = Some(run.resume_at.map_or(at, |t| t.max(at)));
+        }
     }
 
     /// B1: the own competitive-updates backfill has a page to fetch: a run is
@@ -1436,6 +1463,7 @@ impl LiveModel {
             done: false,
             total: None,
             participants: Vec::new(),
+            resume_at: None,
         });
     }
 
@@ -2466,8 +2494,11 @@ impl AppState {
     /// Holding the lock across the emit is fine: Tauri's `emit` only
     /// serializes and queues the event for the webview.
     pub fn publish(&self) {
-        let acts = self.acts();
         let mut live = lock(&self.live);
+        // Under the lock: a publish that waited for it never builds from an
+        // act table older than the one a publish before it used (`acts` is a
+        // leaf lock; nothing takes `live` while holding it).
+        let acts = self.acts();
         live.observe_match_end();
         if live.map_id.is_none() {
             if let Some(path) = live.map_path.clone() {
@@ -4024,6 +4055,25 @@ mod tests {
     }
 
     #[test]
+    fn a_paused_backfill_is_no_work_until_its_hold_ends_and_then_wakes_the_tick() {
+        let mut m = model(vec![slot("me", false)]);
+        m.stage = Stage::Menus;
+        m.synced.insert("me".into());
+        m.start_backfill(None, None);
+        m.pause_backfill(10 * S);
+        assert!(!m.backfill_ready());
+        assert!(!m.backfill_resume_due());
+        assert!(m.try_start_worker().is_none(), "a pause alone is no work");
+        assert!(m.backfill.is_some(), "the cursor waits");
+
+        m.advance_clock(11 * S);
+        assert!(m.backfill_ready());
+        assert!(m.backfill_resume_due(), "the tick starts a worker");
+        let id = m.try_start_worker().expect("work again");
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
+    }
+
+    #[test]
     fn a_paused_comp_backfill_is_no_work_until_its_hold_ends_and_then_wakes_the_tick() {
         let mut m = model(vec![slot("me", false)]);
         m.stage = Stage::Menus;
@@ -4697,6 +4747,32 @@ mod tests {
         let emitted = lock(&rec.0).clone();
         assert_eq!(emitted.len(), 2);
         assert_eq!(emitted.last(), Some(&st.live_state()));
+    }
+
+    #[test]
+    fn a_publish_waiting_for_the_lock_builds_from_the_newest_acts() {
+        // A publisher blocks on `live`; meanwhile the act tables load. What it
+        // emits last must carry them, not the empty table it would have read
+        // before waiting.
+        let (st, rec, _dir) = test_state();
+        let held = lock(&st.live);
+        let waiting = {
+            let st = st.clone();
+            std::thread::spawn(move || st.publish())
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        let now = now_ms();
+        st.set_acts_for_test(vec![Act {
+            id: "act-now".into(),
+            name: "ACT I".into(),
+            episode_name: "EPISODE 1".into(),
+            start_ms: now - 3_600_000,
+            end_ms: now + 3_600_000,
+        }]);
+        drop(held);
+        waiting.join().unwrap();
+        assert!(!lock(&rec.0).is_empty(), "it emitted");
+        assert_eq!(lock(&st.live).built_act_id.as_deref(), Some("act-now"));
     }
 
     #[test]

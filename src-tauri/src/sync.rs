@@ -1112,6 +1112,23 @@ fn with_run<R>(st: &AppState, me: &str, f: impl FnOnce(&mut BackfillRun) -> R) -
     live.backfill.as_mut().map(f)
 }
 
+/// A backfill match was stored: its players join `me`'s run. A run dropped
+/// while the write ran (`drop_session`, a panic reset) already handed its
+/// players to the names fill, so these go there now (R150).
+pub(crate) fn backfill_stored(st: &AppState, me: &str, start_ms: i64, others: Vec<String>) {
+    let mut live = lock(&st.live);
+    if live.self_puuid.as_deref() != Some(me) {
+        return;
+    }
+    match live.backfill.as_mut() {
+        Some(run) => run.add_participants(start_ms, others),
+        None => {
+            drop(live);
+            st.queue_name_fill(match_asks(start_ms, others));
+        }
+    }
+}
+
 /// Drops `me`'s run without touching the anchor (the next trigger starts
 /// over from it). R150: the players of the matches it stored go to the names
 /// fill, however the run ended — they are stored, and nothing else will ask
@@ -1143,6 +1160,11 @@ async fn backfill_page(
         Err(RiotError::ClientGone) => {
             end_run(st, me);
             return Err(Gone);
+        }
+        // R160: nothing was sent; the run waits for the hold, cursor kept.
+        Err(RiotError::Held(left)) => {
+            lock(&st.live).pause_backfill(left + HOLD_SLACK);
+            return Ok(false);
         }
         Err(e) => {
             log::warn!("own history page {index} failed: {e}; the backfill stops");
@@ -1528,6 +1550,8 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
         }
     }
     let Some(page_at) = with_run(st, me, |run| {
+        // Ready means any pause is over; a new hold pauses it again.
+        run.resume_at = None;
         (run.pending.is_empty() && !run.done).then_some(run.next_index)
     }) else {
         return Ok(());
@@ -1585,7 +1609,7 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
                 let owner = me.to_string();
                 let stored = store_details(st, details, move |st, start_ms, others| {
                     crate::my_stats::notify(st);
-                    with_run(st, &owner, |run| run.add_participants(start_ms, others));
+                    backfill_stored(st, &owner, start_ms, others);
                 })
                 .await;
                 if stored.is_none() {
@@ -1601,6 +1625,11 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
             Err(e @ RiotError::Status(404, _)) => {
                 log::warn!("backfill: match {} skipped: {e}", short(&id));
                 pop(st);
+            }
+            // R160: nothing was sent; the id stays first for after the hold.
+            Err(RiotError::Held(left)) => {
+                lock(&st.live).pause_backfill(left + HOLD_SLACK);
+                return Ok(());
             }
             // R139: rate-limit, network and auth errors say nothing about
             // the id — the run ends, uncounted, and the next one retries it.

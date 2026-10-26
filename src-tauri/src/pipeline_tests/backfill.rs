@@ -687,6 +687,72 @@ async fn backfill_history_error_ends_the_run_and_keeps_the_anchor() {
 }
 
 #[tokio::test]
+async fn a_backfill_match_stored_after_its_run_was_dropped_still_asks_its_players() {
+    // The write ran on while `drop_session` took the run: its players go to
+    // the names fill instead of being lost (R150).
+    let h = harness().await;
+    lock(&h.st.live).self_puuid = Some(ME.into());
+    start_backfill_run(&h.st).await;
+    crate::sync::backfill_stored(&h.st, ME, 5_000, vec![OTHER.into()]);
+    assert!(
+        lock(&h.st.live).name_fill.is_empty(),
+        "a live run keeps them"
+    );
+    lock(&h.st.live).backfill = None;
+    crate::sync::backfill_stored(&h.st, ME, 6_000, vec![MATE.into()]);
+    let live = lock(&h.st.live);
+    assert!(
+        live.name_fill.iter().any(|a| a.puuid == MATE),
+        "{:?}",
+        live.name_fill
+    );
+}
+
+#[tokio::test]
+async fn backfill_a_hold_pauses_the_run_and_it_resumes_after_it() {
+    // R160: a 429 elsewhere set the `other` family's hold (a minute). The
+    // run's page is refused locally: the run waits for the hold, it does
+    // not end until the next match.
+    let h = harness().await;
+    let base = base_ms();
+    Mock::given(method("GET"))
+        .and(path(history_path()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    mount_feed(&h.server, Feed::new(10)).await;
+    store_anchor(&h.st, 9, base).await;
+    assert!(h
+        .session
+        .match_history(ME, Some(0), Some(2), None)
+        .await
+        .is_err());
+    assert_eq!(count(&h.server, "GET", &history_path()).await, 1, "the 429");
+
+    run_backfill(&h).await;
+    assert_eq!(
+        count(&h.server, "GET", &history_path()).await,
+        1,
+        "nothing sent while held"
+    );
+    assert!(run_active(&h.st), "the run waits, it did not end");
+    assert!(lock(&h.st.live).try_start_worker().is_none(), "no work yet");
+
+    h.session.end_holds();
+    super::rank::advance(&h, Duration::from_secs(70));
+    assert!(lock(&h.st.live).backfill_resume_due(), "the tick wakes it");
+    let id = lock(&h.st.live).try_start_worker().expect("work again");
+    run_worker(h.st.clone(), h.session.clone(), id).await;
+    assert_eq!(
+        stored_anchor(&h.st).await,
+        Some((entry_id(0), entry_start(base, 0))),
+        "the run finished"
+    );
+}
+
+#[tokio::test]
 async fn backfill_details_error_ends_the_run_but_a_missing_match_is_skipped() {
     let base = base_ms();
     // 404: Riot no longer has that match — skipped for good, or the anchor

@@ -428,7 +428,11 @@ fn match_info_accepts_techchrism_documented_casing_as_well_as_the_fixtures() {
 
 #[test]
 fn acts_from_seasons_builds_ordered_acts_from_the_seasons_fixture() {
-    let seasons: Vec<SeasonEntry> = serde_json::from_str(&core_fixture("seasons.json")).unwrap();
+    let mut seasons: Vec<SeasonEntry> =
+        serde_json::from_str(&core_fixture("seasons.json")).unwrap();
+    // The fixture lists them in order; valorant-api need not: the sort is
+    // what puts them in order.
+    seasons.reverse();
     let acts = acts_from_seasons(&seasons);
 
     // 5 acts in the fixture: ACT III/E4, ACT I/E5, ACT III/E8, ACT IV/V26,

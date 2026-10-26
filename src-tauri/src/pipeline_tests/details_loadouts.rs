@@ -657,6 +657,23 @@ async fn a_failed_own_party_lookup_in_agent_select_is_asked_again_on_the_repoll(
 }
 
 #[tokio::test]
+async fn an_own_party_that_never_answers_is_asked_three_times_per_agent_select() {
+    // Lightness: a lookup that keeps failing is not repeated every 3 s for
+    // the whole Agent Select.
+    let h = harness().await;
+    mock_pregame(&h.server).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.fetch_pregame(&h.session, ME).await.unwrap();
+    for _ in 0..6 {
+        poller.pregame_repoll(&h.session).await.unwrap();
+    }
+    assert_eq!(
+        count(&h.server, "GET", &format!("/parties/v1/players/{ME}")).await,
+        3
+    );
+}
+
+#[tokio::test]
 async fn pregame_loadouts_polled_once_then_stops() {
     let loadouts = "/pregame/v1/matches/pg-1/loadouts";
     let h = harness().await;

@@ -1051,6 +1051,11 @@ async fn buffer_response(resp: Response) -> Result<CapturedResponse, RiotError> 
     })
 }
 
+/// The [`RiotError::AuthFailed`] text of a client answering with no account
+/// (signed out, busy): the poll loop retries it at the base pace, so a
+/// sign-in is seen within seconds however long the client sat signed out.
+pub const SIGNED_OUT: &str = "the Riot Client is signed out";
+
 async fn fetch_entitlements(
     local_client: &Client,
     local_base: &str,
@@ -1068,9 +1073,7 @@ async fn fetch_entitlements(
     // A signed-out or busy client answers with no account: no token at all,
     // never another account (one rule for connect, refresh and the check).
     if e.subject.is_empty() || e.access_token.is_empty() {
-        return Err(RiotError::AuthFailed(
-            "the Riot Client is signed out".into(),
-        ));
+        return Err(RiotError::AuthFailed(SIGNED_OUT.into()));
     }
     Ok(e)
 }

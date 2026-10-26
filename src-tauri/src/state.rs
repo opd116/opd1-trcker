@@ -1106,6 +1106,20 @@ impl LiveModel {
         wake
     }
 
+    /// Everyone gets a fresh first pass: a match ended, VALORANT closed, or
+    /// the session was rebuilt (which drops the pending rank retries, R155).
+    /// The names asked and their answers go too: the next match asks its
+    /// visible players again (one name-service call), so a renamed player is
+    /// not shown by an old name for the app's lifetime.
+    pub fn forget_synced(&mut self) {
+        self.synced.clear();
+        self.party_ready.clear();
+        self.names_attempted.clear();
+        self.known_names.clear();
+        // R165: the failure counts went with it; so does the wake-up.
+        self.clear_names_retry_wake();
+    }
+
     /// R165: drops the armed names-retry wake-up (the stage reset forgets the
     /// failure counts with `names_attempted.clear()`, so no retry is waiting).
     pub fn clear_names_retry_wake(&mut self) {

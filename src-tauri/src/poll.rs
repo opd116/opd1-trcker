@@ -235,6 +235,7 @@ fn reset_after_panic(st: &AppState) {
         let mut live = lock(&st.live);
         live.revoke_worker();
         live.comp_backfill = None;
+        live.forget_synced();
         live.take_backfill_asks()
     };
     st.queue_name_fill(asks);
@@ -648,6 +649,9 @@ impl Poller {
         let asks = {
             let mut live = lock(&self.st.live);
             live.comp_backfill = None;
+            // The Closed card below drops the pending rank retries; a same
+            // match after the reconnect must not then count everyone synced.
+            live.forget_synced();
             live.take_backfill_asks()
         };
         self.st.queue_name_fill(asks);
@@ -657,7 +661,8 @@ impl Poller {
         self.pregame_match_id = None;
         self.next_pregame = None;
         self.roster_retry = None;
-        self.post_match = None;
+        // R48's follow-up is kept: the game may still be running, and only
+        // VALORANT closing (`change_stage`) ends it.
         self.party_key = None;
         self.match_queue = None;
         self.ffa_match_id = None;
@@ -1069,15 +1074,7 @@ impl Poller {
             let ended = live.coregame_match_id.take();
             live.loadouts.clear();
             if t.reset_synced {
-                live.synced.clear();
-                live.party_ready.clear();
-                live.names_attempted.clear();
-                // And the answers: the next match asks its visible players
-                // again (one name-service call), so a renamed player is not
-                // shown by an old name for the app's lifetime.
-                live.known_names.clear();
-                // R165: the failure counts went with it; so does the wake-up.
-                live.clear_names_retry_wake();
+                live.forget_synced();
                 // R161: a match is over or VALORANT closed.
                 live.match_tiers.clear();
             }
@@ -2954,6 +2951,25 @@ mod tests {
         *presence.lock().unwrap() = ("MENUS".into(), "".into());
         poller.presence_tick(&h.session).await.unwrap();
         assert_eq!(h.st.status().recap_match_id.as_deref(), Some("cg-ffa"));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_session_keeps_the_post_match_follow_up() {
+        // R48: the game may still be running; the next session checks the
+        // match the follow-up waits for. Only VALORANT closing ends it.
+        let h = harness().await;
+        let mut poller = Poller::held(h.st.clone());
+        poller.post_match = Some(PostMatch {
+            match_id: "m1".into(),
+            competitive: true,
+            due: Instant::now(),
+            attempt: 0,
+        });
+        poller.drop_session().await;
+        assert_eq!(
+            poller.post_match.as_ref().map(|p| p.match_id.as_str()),
+            Some("m1")
+        );
     }
 
     #[tokio::test]

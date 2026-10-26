@@ -482,6 +482,47 @@ async fn a_self_only_placeholder_keeps_the_others_pending_rank_retry() {
 }
 
 #[tokio::test]
+async fn a_reconnect_mid_match_syncs_the_roster_again_and_its_failed_rank_is_asked() {
+    // In Game: OTHER's rank sync fails (the harness's default) with a retry
+    // pending. The session drops and comes back on the same match: OTHER is
+    // synced again rather than left counted synced with no retry.
+    let h = harness().await;
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.self_puuid = Some(ME.into());
+        live.slots = vec![
+            Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            },
+            Slot {
+                roster: roster(OTHER, false),
+                db: PlayerDb::default(),
+            },
+        ];
+    }
+    drain(&h).await;
+    assert_eq!(count(&h.server, "GET", &comp_path(OTHER)).await, 1);
+
+    let mut poller = crate::poll::Poller::held(h.st.clone());
+    poller.drop_session().await;
+    assert!(!lock(&h.st.live).synced.contains(OTHER));
+    poller.on_connected(h.session.clone()).await;
+    poller
+        .apply_roster(
+            &h.session,
+            Stage::Ingame,
+            None,
+            vec![roster(ME, false), roster(OTHER, false)],
+        )
+        .await;
+    advance(&h, 100 * S);
+    assert!(drain(&h).await, "work for OTHER again");
+    assert!(count(&h.server, "GET", &comp_path(OTHER)).await >= 2);
+}
+
+#[tokio::test]
 async fn a_profile_sync_refreshes_a_snapshot_older_than_the_newest_comp_match() {
     // A player off screen (Saved, History): the live sync never refreshes
     // their rank. Their stored snapshot is from before their newest match

@@ -3,7 +3,8 @@
 // default and minimum window sizes (no page or sideways scroll, nothing cut).
 import { expect, test, type Page } from "@playwright/test";
 import { AFTER_MATCH_MS } from "../src/lib/matchEnd";
-import { openScene } from "./harness";
+import { PUUID } from "../src/lib/demo/cdv8";
+import { gotoApp, NOW, openScene, routeMedia } from "./harness";
 
 const SIZES = [
   [1280, 800],
@@ -141,6 +142,31 @@ test.describe("Saved players", () => {
   test("an open Saved page asks for its rows again after the match ends", async ({ page }) => {
     await openScene(page, "ingame", { screen: "saved" }, { clock: "manual" });
     await asksAfterMatchEnd(page, "savedAsks");
+  });
+
+  test("Back from a scoreboard puts a long list where it was, though its rows answer late", async ({ page }) => {
+    await routeMedia(page);
+    await page.clock.setFixedTime(NOW);
+    // saved_players answers 600 ms late (a slow DB read), long after the scroll restore's first tries.
+    await gotoApp(page, "/?scene=closed&screen=saved&delay=saved:600");
+    // 20 more saved players, so the list scrolls.
+    await page.evaluate(`import("/src/lib/demo/v2/store.ts").then(({ state, marksChannel, cloneMarks }) => {
+      for (let i = 0; i < 20; i++) state.marks.saved.push("00000000-0000-4000-8000-" + String(i).padStart(12, "0"));
+      marksChannel.emit(cloneMarks());
+    })`);
+    const card = page.locator("main .page > .card");
+    const rows = card.locator(".row[data-row]");
+    await expect(rows).toHaveCount(22);
+    const y = await card.evaluate((el) => ((el.scrollTop = 400), el.scrollTop));
+    expect(y).toBeGreaterThan(100);
+    // Mara's profile (scrolled out of view), one of her encounters, then Back.
+    await page.evaluate(`import("/src/lib/router.svelte.ts").then(({ openProfile }) => openProfile(${JSON.stringify(PUUID.mara)}))`);
+    await page.getByRole("dialog").getByRole("button", { name: /Open scoreboard$/ }).first().click();
+    await expect(page.locator('main .match[aria-busy="false"]')).toHaveCount(1);
+    await page.locator("main .match .back").click();
+    await expect(page.getByRole("dialog")).toHaveAttribute("aria-label", "Mara profile");
+    await expect(rows).toHaveCount(22);
+    await expect.poll(() => card.evaluate((el) => el.scrollTop)).toBe(y);
   });
 
   test("a row opens the profile (click and Enter)", async ({ page }) => {

@@ -7,6 +7,7 @@
 -->
 <script lang="ts">
   import { onMount } from "svelte";
+  import { fromAction } from "svelte/attachments";
   import SavedRow from "../components/saved/SavedRow.svelte";
   import Skel from "../components/Skel.svelte";
   import { savedPlayers } from "../lib/api";
@@ -103,6 +104,13 @@
   ];
 
   const empty = $derived(list !== null && views.length === 0);
+
+  /**
+   * The card is the scroll host only once the rows are in, as History's list: Back from a scoreboard restores the old
+   * position when the host mounts, and the skeleton is too short to hold it.
+   */
+  const scrollHostAttach = fromAction(scrollHost);
+  const loaded = $derived(list !== null);
 </script>
 
 <div class="page">
@@ -141,7 +149,7 @@
         >
       {/each}
     </div>
-    <div class="card" use:scrollHost aria-busy={list === null}>
+    <div class="card" {@attach loaded && scrollHostAttach} aria-busy={list === null}>
       <div class="cols" role="row">
         {#each COLS as c (c.label)}
           {@const st = c.k ? sortState(sort, c.k) : { aria: "none" as const, arrow: "" }}

@@ -73,6 +73,11 @@
     }
   }
 
+  // The game reached the menus (started some other way): an older launch error no longer applies when it closes again.
+  $effect(() => {
+    if (menus) launchError = null;
+  });
+
   function openLast() {
     if (!ms || !last) return;
     openMatch(last.matchId, { from: "lastMatch", focusPuuid: ms.puuid });

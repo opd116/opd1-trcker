@@ -7,6 +7,7 @@
 <script lang="ts">
   import { appStatus, savedInMatch } from "../../lib/appdata.svelte";
   import { assetUrl } from "../../lib/assets";
+  import { retryImg } from "../../lib/imgRetry";
   import { go, router, type Screen } from "../../lib/router.svelte";
   import { live, meta, mystats } from "../../lib/stores";
   import { tierColor, tierShort } from "../../lib/theme";
@@ -62,7 +63,7 @@
   {#each BOTTOM as n (n.id)}{@render item(n)}{/each}
   <button type="button" class="rank" aria-label="Your rank: open Competitive" use:tip={"Your rank · open Competitive"} onclick={() => go("comp")}>
     {#if self}
-      <img src={assetUrl("tier", self.tier)} alt="" width="28" height="28" />
+      <img {@attach retryImg} src={assetUrl("tier", self.tier)} alt="" width="28" height="28" />
       <span class="short" style:color={tierColor(self.tier)}>{tierShort(self.tier, $meta)}</span>
       <span class="rr">{self.tier >= 3 ? `${self.rr ?? "—"} RR` : "—"}</span>
     {:else}

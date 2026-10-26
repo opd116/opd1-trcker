@@ -26,9 +26,10 @@
   }
 </script>
 
-<div class="lost" role="status">
+<!-- Only the head is the live region: the age below it changes every second and would be read out each time. -->
+<div class="lost">
   <Dot color="var(--warn)" pulse />
-  <span class="head">Lost connection to the Riot Client</span>
+  <span class="head" role="status">Lost connection to the Riot Client</span>
   <span class="text" data-ellipsis>{age === null ? "" : `Showing data from ${age} ago. `}{attempt}</span>
   <div class="fill"></div>
   <button type="button" onclick={retry}>Retry now</button>

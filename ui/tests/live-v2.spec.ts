@@ -132,6 +132,25 @@ test("waiting (menus): the party and the queue timer", async ({ page }) => {
   await expect(page.locator(".wait .cap .n").first()).toHaveText("3 / 5");
 });
 
+test("a failed Launch VALORANT error does not come back after the game was started and closed some other way", async ({ page }) => {
+  await openScene(page, "closed");
+  // Under "Tauri", with `launch_valorant` failing (the DEV browser's own launch does nothing).
+  await page.evaluate(() => {
+    const w = window as unknown as { isTauri?: boolean; __TAURI_INTERNALS__?: { invoke: (cmd: string) => Promise<unknown> } };
+    w.isTauri = true;
+    w.__TAURI_INTERNALS__ = { invoke: (cmd) => (cmd === "launch_valorant" ? Promise.reject(new Error("no Riot install found")) : Promise.resolve(null)) };
+  });
+  await page.getByRole("button", { name: "Launch VALORANT" }).click();
+  const err = page.locator(".wait .err");
+  await expect(err).toHaveText("Couldn’t start VALORANT: no Riot install found");
+  const stage = (s: string) => page.evaluate(`import("/src/lib/stores.ts").then(({ live }) => live.set({ stage: "${s}", mapId: null, players: [] }))`);
+  await stage("menus");
+  await expect(err).toHaveCount(0);
+  await stage("closed");
+  await expect(page.getByRole("button", { name: "Launch VALORANT" })).toBeVisible();
+  await expect(err).toHaveCount(0);
+});
+
 test("error: code, lockfile path, Retry now and the auto-retry countdown; no folder picker", async ({ page }) => {
   await openScene(page, "closed", { variant: "error" });
   await expect(page.locator(".err h1")).toHaveText("Can’t reach the Riot Client");
@@ -139,6 +158,30 @@ test("error: code, lockfile path, Retry now and the auto-retry countdown; no fol
   await expect(page.locator(".err .path")).toContainText("lockfile");
   await expect(page.locator(".err .auto")).toHaveText("AUTO-RETRY IN 8S");
   await expect(page.locator(".err button")).toHaveText(["Retry now"]);
+});
+
+test("error: the alert is not read out again every second, and Retry now restarts the countdown", async ({ page }) => {
+  await openScene(page, "closed", { variant: "error" }, { clock: "manual" });
+  const auto = page.locator(".err .auto");
+  const left = async () => Number(/(\d+)S$/.exec((await auto.textContent()) ?? "")![1]);
+  const alert = await page.getByRole("alert").ariaSnapshot();
+  const n = await left();
+  await page.clock.runFor(3_000);
+  await expect.poll(left).toBe(n - 3);
+  // The countdown ticks, but what the alert says does not change.
+  expect(await page.getByRole("alert").ariaSnapshot()).toBe(alert);
+  expect(alert).not.toContain("AUTO-RETRY");
+  // Rust retries at the click and counts its next retry from there (the status it sends stays the same).
+  await page.getByRole("button", { name: "Retry now" }).click();
+  await expect(auto).toHaveText("AUTO-RETRY IN 8S");
+  await page.clock.runFor(2_000);
+  await expect(auto).toHaveText("AUTO-RETRY IN 6S");
+});
+
+test("lost: the banner's live region leaves out the ticking age", async ({ page }) => {
+  await openScene(page, "ingame", { variant: "lost" });
+  await expect(page.getByRole("status")).toHaveText("Lost connection to the Riot Client");
+  await expect(page.locator(".lost .text")).toContainText("Showing data from");
 });
 
 test("lost: the banner over the last data", async ({ page }) => {

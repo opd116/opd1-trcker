@@ -142,7 +142,7 @@ test.describe("Collection", () => {
   test("a collection never fetched: the empty state, no figures", async ({ page }) => {
     await open(page, "scene=closed&screen=skins&empty=1");
     await expect(page.getByText("No collection yet")).toBeVisible();
-    await expect(page.getByText("Start VALORANT once to load your collection.", { exact: false })).toBeVisible();
+    await expect(page.getByText("Open this page while VALORANT is running to load your collection.", { exact: false })).toBeVisible();
     await expect(page.locator(".value")).toHaveCount(0);
   });
 

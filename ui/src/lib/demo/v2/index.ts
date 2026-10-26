@@ -48,8 +48,13 @@ function countAsk(key: "historyAsks" | "savedAsks"): void {
   d[key] = String(Number(d[key] ?? 0) + 1);
 }
 
-export function v2SavedPlayers(): SavedPlayer[] {
+/** DEV scroll tests: `?delay=saved:N` answers `saved_players` N ms late, as a slow DB read would. */
+const savedDelayMs = () => Number(/(?:^|,)saved:(\d+)/.exec(q().get("delay") ?? "")?.[1] ?? 0);
+
+export async function v2SavedPlayers(): Promise<SavedPlayer[]> {
   countAsk("savedAsks");
+  const ms = savedDelayMs();
+  if (ms > 0) await new Promise((r) => setTimeout(r, ms));
   return empty() ? [] : demoSavedPlayers();
 }
 

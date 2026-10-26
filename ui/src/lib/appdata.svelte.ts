@@ -16,6 +16,14 @@ export const appStatus = writable<AppStatus | null>(null);
 let statusArrivedMs = 0;
 export const statusArrivedAt = (): number => statusArrivedMs;
 
+/**
+ * "Retry now": Rust's next automatic retry counts from the click, but a status that stays the same is not sent again,
+ * so the countdown is restarted here. (A slow failed connect still drifts: Rust counts from the failure, not the click.)
+ */
+export function retryCountFromNow(): void {
+  statusArrivedMs = Date.now();
+}
+
 /** A status from Rust (snapshot or event), stamped with its arrival so every view counts the same retry down. */
 export function applyStatus(s: AppStatus): void {
   statusArrivedMs = Date.now();
@@ -60,22 +68,37 @@ function optimistic(f: (m: PlayerMarks) => PlayerMarks): void {
  * A mark write failed: Rust sends no `marks` event then, so the optimistic change would stay on screen as if stored.
  * Rust's own copy is read back instead.
  */
-function resyncMarks(): void {
-  api
+function resyncMarks(): Promise<void> {
+  return api
     .playerMarks()
     .then(applyMarks)
     .catch((err) => reportError("player_marks", err));
 }
 
-export async function toggleSaved(puuid: string, on?: boolean): Promise<void> {
+/**
+ * Mark writes go out one at a time, in order, as settings saves do: Rust runs concurrent writes in no set order, so
+ * two quick ones (Save, then Cancel) could be stored and echoed the wrong way round. Each step (the write, and its
+ * read-back when it failed) has answered before the next is sent.
+ */
+let markWrites: Promise<void> = Promise.resolve();
+function queueMark(step: () => Promise<void>): Promise<void> {
+  const run = markWrites.then(step);
+  // A step that throws must not stop every later write.
+  markWrites = run.catch(() => {});
+  return run;
+}
+
+export function toggleSaved(puuid: string, on?: boolean): Promise<void> {
   const next = on ?? !isSaved(get(marks), puuid);
   optimistic((m) => ({ ...m, saved: next ? [puuid, ...m.saved.filter((p) => p !== puuid)] : m.saved.filter((p) => p !== puuid) }));
-  try {
-    await api.setSaved(puuid, next);
-  } catch (err) {
-    reportError("set_saved", err);
-    resyncMarks();
-  }
+  return queueMark(async () => {
+    try {
+      await api.setSaved(puuid, next);
+    } catch (err) {
+      reportError("set_saved", err);
+      await resyncMarks();
+    }
+  });
 }
 
 const noteTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -124,29 +147,33 @@ export function setNote(puuid: string, typed: string, delayMs = 400): void {
     puuid,
     setTimeout(() => {
       noteTimers.delete(puuid);
-      api.setNote(puuid, note).then(
-        () => {
-          // Answered: Rust's copy is this text now, unless more was typed meanwhile.
-          if (typedNotes.get(puuid) === note) typedNotes.delete(puuid);
-        },
-        (err) => {
-          reportError("set_note", err);
-          // Not stored: the text stays typed (no event wipes it) and is written again, unless newer text is queued.
-          if (typedNotes.get(puuid) === note && !noteTimers.has(puuid)) setNote(puuid, note, NOTE_RETRY_MS);
-        },
+      void queueMark(() =>
+        api.setNote(puuid, note).then(
+          () => {
+            // Answered: Rust's copy is this text now, unless more was typed meanwhile.
+            if (typedNotes.get(puuid) === note) typedNotes.delete(puuid);
+          },
+          (err) => {
+            reportError("set_note", err);
+            // Not stored: the text stays typed (no event wipes it) and is written again, unless newer text is queued.
+            if (typedNotes.get(puuid) === note && !noteTimers.has(puuid)) setNote(puuid, note, NOTE_RETRY_MS);
+          },
+        ),
       );
     }, delayMs),
   );
 }
 
-export async function dismissSmurf(puuid: string): Promise<void> {
+export function dismissSmurf(puuid: string): Promise<void> {
   optimistic((m) => ({ ...m, notSmurf: [...m.notSmurf, puuid] }));
-  try {
-    await api.dismissSmurf(puuid);
-  } catch (err) {
-    reportError("dismiss_smurf", err);
-    resyncMarks();
-  }
+  return queueMark(async () => {
+    try {
+      await api.dismissSmurf(puuid);
+    } catch (err) {
+      reportError("dismiss_smurf", err);
+      await resyncMarks();
+    }
+  });
 }
 
 /** Setting changes not stored yet: laid over every stored copy that arrives, until their own save answers. */

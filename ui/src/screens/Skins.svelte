@@ -96,7 +96,7 @@
           >
         </div>
         <span class="etitle">No collection yet</span>
-        <span class="ebody">Start VALORANT once to load your collection. Every skin you own shows up here with its store value.</span>
+        <span class="ebody">Open this page while VALORANT is running to load your collection. Every skin you own shows up here with its store value.</span>
       </div>
     </div>
   {:else}

@@ -217,3 +217,39 @@ describe("a failed mark write", () => {
     expect(get(marks).notes.p1).toBe("from rust");
   });
 });
+
+describe("mark writes", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.clearAllMocks();
+  });
+
+  it("go out one at a time, in order: Save then Cancel never reaches Rust together", async () => {
+    vi.useFakeTimers();
+    applyMarks({ saved: [], notes: {}, notSmurf: [] });
+    const first = deferred<void>();
+    api.setSaved.mockImplementationOnce(() => first.promise).mockResolvedValue(undefined);
+    api.setNote.mockResolvedValue(undefined);
+    api.dismissSmurf.mockResolvedValue(undefined);
+
+    const save = toggleSaved("p1", true);
+    const cancel = toggleSaved("p1", false);
+    setNote("p1", "lurks");
+    const dismiss = dismissSmurf("p1");
+    await vi.advanceTimersByTimeAsync(400);
+    // Only the first write is out while it has not answered.
+    expect(api.setSaved.mock.calls).toEqual([["p1", true]]);
+    expect(api.setNote).not.toHaveBeenCalled();
+    expect(api.dismissSmurf).not.toHaveBeenCalled();
+
+    first.resolve();
+    await Promise.all([save, cancel, dismiss]);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(api.setSaved.mock.calls).toEqual([
+      ["p1", true],
+      ["p1", false],
+    ]);
+    expect(api.setSaved.mock.invocationCallOrder[1]!).toBeLessThan(api.dismissSmurf.mock.invocationCallOrder[0]!);
+    expect(api.setNote).toHaveBeenCalledWith("p1", "lurks");
+  });
+});

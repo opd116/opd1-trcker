@@ -4,7 +4,7 @@
 -->
 <script lang="ts">
   import { retryNow } from "../../lib/api";
-  import { statusArrivedAt } from "../../lib/appdata.svelte";
+  import { retryCountFromNow, statusArrivedAt } from "../../lib/appdata.svelte";
   import { shortLockfilePath } from "../../lib/format";
   import { tip } from "../../lib/tooltip.svelte";
   import type { AppStatus } from "../../lib/types";
@@ -13,11 +13,16 @@
   let { status }: { status: AppStatus } = $props();
 
   let nowMs = $state(Date.now());
+  /** Bumped by "Retry now", which restarts the count. */
+  let retried = $state(0);
   /**
-   * When the next automatic retry happens: the status's `retryInMs`, counted from when that status arrived (not from
-   * this view's mount: coming back to Live must not restart the count).
+   * When the next automatic retry happens: the status's `retryInMs`, counted from when that status arrived or "Retry
+   * now" was clicked (not from this view's mount: coming back to Live must not restart the count).
    */
-  const deadline = $derived(status.retryInMs === null ? null : statusArrivedAt() + status.retryInMs);
+  const deadline = $derived.by(() => {
+    void retried;
+    return status.retryInMs === null ? null : statusArrivedAt() + status.retryInMs;
+  });
   $effect(() => {
     if (deadline === null) return;
     nowMs = Date.now();
@@ -46,6 +51,8 @@
   });
 
   function retry() {
+    retryCountFromNow();
+    retried++;
     retryNow().catch((err: unknown) => reportError("retry_now", err));
   }
 </script>
@@ -77,7 +84,8 @@
       <!-- The design's "Choose Riot Client folder…" button is left out: it needs the dialog plugin, which is not approved
            (Tauri plugin = a new dependency). Add it back with a `choose_riot_folder` command if that changes. -->
       <div class="fill"></div>
-      {#if secondsLeft !== null}<span class="auto">AUTO-RETRY IN {secondsLeft}S</span>{/if}
+      <!-- Outside the alert's speech: it changes every second, and the alert would be read out again each time. -->
+      {#if secondsLeft !== null}<span class="auto" aria-hidden="true">AUTO-RETRY IN {secondsLeft}S</span>{/if}
     </div>
   </div>
 </div>

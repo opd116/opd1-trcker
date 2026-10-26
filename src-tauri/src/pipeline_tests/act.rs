@@ -369,6 +369,60 @@ async fn the_act_crosses_its_end_without_a_restart() {
     assert!(h.st.content_due(n + H + 1), "ended: ask again");
 }
 
+fn built(h: &Harness) -> Option<String> {
+    lock(&h.st.live).built_act_id.clone()
+}
+
+#[tokio::test]
+async fn cards_built_in_the_old_act_are_rebuilt_even_when_the_table_switched_first() {
+    let h = harness().await;
+    let n = now_ms();
+    // The cards were built while act A was current.
+    h.st.set_acts_for_test(vec![
+        api_act("act-a-g", "ACT IV", n - 60 * D, n + D),
+        api_act("act-b-g", "ACT V", n + D, n + 50 * D),
+    ]);
+    h.st.publish();
+    assert_eq!(built(&h).as_deref(), Some("act-a-g"));
+    // B began by date before anything looked (the table switched alone), and
+    // Riot then answers B: no difference from the table, but the cards are A's.
+    h.st.set_acts_for_test(vec![
+        api_act("act-a-g", "ACT IV", n - 60 * D, n - 2 * H),
+        api_act("act-b-g", "ACT V", n - 2 * H, n + 50 * D),
+    ]);
+    mount_content(
+        &h,
+        200,
+        json!({"Seasons": [
+            season("act-a-g", "ACT IV", n - 60 * D, n - 2 * H, false),
+            season("act-b-g", "ACT V", n - 2 * H, n + 50 * D, true),
+        ]}),
+    )
+    .await;
+    h.st.set_session(Some(h.session.clone()));
+    h.st.refresh_content().await;
+    assert_eq!(built(&h).as_deref(), Some("act-b-g"));
+}
+
+#[tokio::test]
+async fn the_slow_tick_rebuilds_the_cards_when_the_act_ends_with_no_answer() {
+    // VALORANT closed (no content refresh) or content-service failing: the
+    // act by date moves on, and the 15-minute tick sees it.
+    let h = harness().await;
+    let n = now_ms();
+    h.st.set_acts_for_test(vec![
+        api_act("act-a-h", "ACT IV", n - 60 * D, n + D),
+        api_act("act-b-h", "ACT V", n + D, n + 50 * D),
+    ]);
+    h.st.publish();
+    h.st.set_acts_for_test(vec![
+        api_act("act-a-h", "ACT IV", n - 60 * D, n - 2 * H),
+        api_act("act-b-h", "ACT V", n - 2 * H, n + 50 * D),
+    ]);
+    h.st.act_tick().await;
+    assert_eq!(built(&h).as_deref(), Some("act-b-h"));
+}
+
 #[tokio::test]
 async fn content_is_asked_before_any_answer_but_backs_off_after_one() {
     let h = harness().await;

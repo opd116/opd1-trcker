@@ -566,6 +566,10 @@ pub struct LiveModel {
     /// The last built/emitted state (`live_state()` returns it).
     pub current: LiveState,
     last_bytes: Vec<u8>,
+    /// The current act the last published cards were built with
+    /// ([`AppState::publish`]): an act change is told by it, not by a table
+    /// that may already have switched before the change was looked at.
+    pub(crate) built_act_id: Option<String>,
 }
 
 impl LiveModel {
@@ -612,6 +616,7 @@ impl LiveModel {
                 settled: false,
             },
             last_bytes: Vec::new(),
+            built_act_id: None,
         }
     }
 
@@ -2245,7 +2250,6 @@ impl AppState {
         }
         let result = session.content().await;
         let now = now_ms();
-        let before = self.current_act().map(|a| a.id);
         // R185: a request hold (nothing was sent, e.g. one carried into this
         // session) is "not now", not a failure.
         let mut held = None;
@@ -2310,12 +2314,34 @@ impl AppState {
             }
             c.logged = Some(key);
         }
-        if current.map(|a| a.id) != before {
-            // The live cards, an open Player Details and My Stats (B2) read
-            // the act.
-            self.publish();
-            crate::my_stats::notify(self);
-            crate::details::refresh_open(self).await;
+        // The live cards, an open Player Details and My Stats (B2) read the
+        // act. Compared with what the cards were built with: the table may
+        // have switched by date before this answer came (or without one).
+        if self.act_changed_since_publish(current.map(|a| a.id)) {
+            self.on_act_change().await;
+        }
+    }
+
+    /// Whether `current` differs from the act the published cards used.
+    fn act_changed_since_publish(&self, current: Option<String>) -> bool {
+        lock(&self.live).built_act_id != current
+    }
+
+    /// Rebuilds what reads the current act: the cards (`publish` dedupes), My
+    /// Stats and an open Player Details.
+    async fn on_act_change(self: &Arc<Self>) {
+        self.publish();
+        crate::my_stats::notify(self);
+        crate::details::refresh_open(self).await;
+    }
+
+    /// The slow tick's act check: an act can end with no content answer
+    /// (failing, held) and while VALORANT is closed (no content refresh
+    /// then), so the cards are rebuilt when the act by date moved on.
+    pub async fn act_tick(self: &Arc<Self>) {
+        let current = self.current_act().map(|a| a.id);
+        if self.act_changed_since_publish(current) {
+            self.on_act_change().await;
         }
     }
 
@@ -2442,7 +2468,9 @@ impl AppState {
                 live.map_id = self.map_uuid(&path);
             }
         }
-        let state = live.build(&acts, card_clock(now_ms()), &|p| self.map_uuid(p));
+        let clock = card_clock(now_ms());
+        live.built_act_id = current_act(&acts, clock).map(|a| a.id.clone());
+        let state = live.build(&acts, clock, &|p| self.map_uuid(p));
         let bytes = serde_json::to_vec(&state).unwrap_or_default();
         if bytes == live.last_bytes {
             return;

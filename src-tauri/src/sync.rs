@@ -852,6 +852,36 @@ pub async fn sync_details(
             for left in [fetched.held, fetched.rate_limited].into_iter().flatten() {
                 hold(left);
             }
+            // Sync, don't refetch: a competitive match newer than the stored
+            // snapshot's means the rank moved, for a player off screen too
+            // (Saved, History), whose card the live sync never refreshes.
+            // A snapshot from another act would otherwise be the authority.
+            if !rows.is_empty() {
+                let latest = latest_comp_match(&rows);
+                let (p, l) = (puuid.to_string(), latest.clone());
+                let needs = st
+                    .db(move |repo| mmr_refresh_needed(repo, &p, &l))
+                    .await
+                    .unwrap_or(true);
+                if needs {
+                    match rank_call(session.mmr(puuid).await, "mmr", puuid)? {
+                        RankCall::Ok(resp) => {
+                            let snap = MmrSnapshot {
+                                puuid: puuid.to_string(),
+                                json: trim_mmr(&resp).to_string(),
+                                last_comp_match_id: Some(latest),
+                                fetched_ms: now_ms(),
+                            };
+                            st.db(move |repo| repo.save_mmr_snapshot(&snap)).await;
+                        }
+                        // R160: the sync runs again after the hold.
+                        RankCall::Held(left) => hold(left),
+                        // The stored snapshot keeps showing; the page's own
+                        // matches are what this sync is for.
+                        RankCall::Failed => {}
+                    }
+                }
+            }
         }
         RankCall::Held(left) => hold(left),
         RankCall::Failed => failed = true,

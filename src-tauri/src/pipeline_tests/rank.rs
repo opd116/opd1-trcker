@@ -482,6 +482,40 @@ async fn a_self_only_placeholder_keeps_the_others_pending_rank_retry() {
 }
 
 #[tokio::test]
+async fn a_profile_sync_refreshes_a_snapshot_older_than_the_newest_comp_match() {
+    // A player off screen (Saved, History): the live sync never refreshes
+    // their rank. Their stored snapshot is from before their newest match
+    // (another act, say): the profile's own sync asks MMR again, once.
+    let h = harness().await;
+    h.st.db(|repo| {
+        repo.save_mmr_snapshot(&opd1_core::db::repo::MmrSnapshot {
+            puuid: ME.into(),
+            json: "{}".into(),
+            last_comp_match_id: Some("an-older-match".into()),
+            fetched_ms: 1,
+        })
+    })
+    .await
+    .unwrap();
+    crate::sync::sync_details(&h.st, &h.session, ME)
+        .await
+        .unwrap();
+    assert_eq!(count(&h.server, "GET", &mmr_path(ME)).await, 1);
+    let snap =
+        h.st.db(|repo| repo.load_mmr_snapshot(ME))
+            .await
+            .flatten()
+            .expect("stored");
+    assert_eq!(snap.last_comp_match_id.as_deref(), Some("m1"));
+
+    // Nothing newer since: no second call (sync, don't refetch).
+    crate::sync::sync_details(&h.st, &h.session, ME)
+        .await
+        .unwrap();
+    assert_eq!(count(&h.server, "GET", &mmr_path(ME)).await, 1);
+}
+
+#[tokio::test]
 async fn no_retry_runs_while_valorant_is_closed() {
     let h = harness().await;
     mmr_answers(&h, ME, 500, None).await;

@@ -664,6 +664,36 @@ async fn a_match_end_forgets_this_matchs_name_answers() {
 }
 
 #[tokio::test]
+async fn a_deathmatch_starting_aborts_the_running_worker() {
+    // R150/R153: nothing is asked during a match, a Deathmatch included. The
+    // Lobby view stays (R41), so no stage change would stop a worker whose
+    // names request is waiting in the call.
+    let h = harness().await;
+    let (cell, _) = presence(&h, blob("MENUS", "deathmatch")).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Menus);
+    let claim = lock(&h.st.live).try_start_worker();
+    assert!(
+        claim.is_some(),
+        "the Lobby has work: a worker holds the claim"
+    );
+
+    *cell.lock().unwrap() = Some(blob("INGAME", "deathmatch"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(
+        h.st.live_state().stage,
+        Stage::Menus,
+        "the Lobby view stays"
+    );
+    assert!(
+        !lock(&h.st.live).worker_running(),
+        "the worker that was running when the match began is gone"
+    );
+}
+
+#[tokio::test]
 async fn the_game_closing_in_game_points_the_recap_at_the_match_too() {
     let h = harness().await;
     mock_coregame(&h).await;

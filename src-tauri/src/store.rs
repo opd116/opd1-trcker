@@ -113,6 +113,17 @@ pub fn save_player(conn: &Connection, upd: &PlayerUpdate, now_ms: i64) -> Result
     Ok(())
 }
 
+/// R100: another player now hides their level, so the level kept from an
+/// earlier visible sighting is dropped too; their off-screen card then
+/// shows `Lv —` like their live one.
+pub fn forget_level(conn: &Connection, puuid: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE players SET account_level = 0 WHERE puuid = ?1",
+        params![puuid],
+    )?;
+    Ok(())
+}
+
 pub fn load_player(conn: &Connection, puuid: &str) -> Result<Option<StoredPlayer>> {
     conn.query_row(
         "SELECT game_name, tag_line, account_level, card_id FROM players WHERE puuid = ?1",

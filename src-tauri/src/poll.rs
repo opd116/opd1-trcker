@@ -62,7 +62,8 @@ use crate::roster::{
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
 use crate::store::{
-    load_player_db, match_landed, save_player, PlayerDb, SELF_LOADOUT_KEY, SELF_PUUID_KEY,
+    forget_level, load_player_db, match_landed, save_player, PlayerDb, SELF_LOADOUT_KEY,
+    SELF_PUUID_KEY,
 };
 
 /// Closed: how often the lockfile's existence is checked.
@@ -1415,6 +1416,9 @@ impl Poller {
                     let mut out = HashMap::new();
                     for p in &new_players {
                         save_player(repo.conn(), &p.player_update(&me), now)?;
+                        if p.hides_level_from(&me) {
+                            forget_level(repo.conn(), &p.puuid)?;
+                        }
                         out.insert(p.puuid.clone(), load_player_db(repo, Some(&me), &p.puuid)?);
                     }
                     Ok(out)
@@ -1491,7 +1495,18 @@ impl Poller {
             .await
             .unwrap_or_default();
         let slot = match own {
-            Some(roster) => Some(Slot { roster, db }),
+            // Only the identity carries over: the agent, team and tier were
+            // the last stage's (R99: no agent before this stage's lock-in).
+            Some(roster) => Some(Slot {
+                roster: RosterPlayer {
+                    team_id: String::new(),
+                    character_id: String::new(),
+                    selection_state: String::new(),
+                    live_tier: None,
+                    ..roster
+                },
+                db,
+            }),
             None => closed_self_slot(&me, db),
         };
         {
@@ -2564,6 +2579,32 @@ mod tests {
         }];
         live.self_roster = Some(roster(ME, false));
         live.synced.insert(ME.into());
+    }
+
+    #[tokio::test]
+    async fn the_self_only_placeholder_never_shows_the_last_matchs_agent() {
+        // The match on Jett ends; the Lobby's party fetch fails: the
+        // placeholder card is the user, with no agent locked.
+        let h = harness().await;
+        {
+            let mut live = lock(&h.st.live);
+            live.self_puuid = Some(ME.into());
+            live.self_roster = Some(RosterPlayer {
+                team_id: "Blue".into(),
+                character_id: "jett".into(),
+                selection_state: "locked".into(),
+                ..roster(ME, false)
+            });
+        }
+        let mut poller = Poller::held(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.show_self_only(&h.session).await;
+        let live = lock(&h.st.live);
+        let own = &live.slots[0].roster;
+        assert_eq!(own.puuid, ME);
+        assert_eq!(own.character_id, "");
+        assert_eq!(own.selection_state, "");
+        assert_eq!(own.team_id, "");
     }
 
     // R164 (review finding 7): the roster retry is a flat ~2 s for the first

@@ -129,20 +129,27 @@ impl RosterPlayer {
 
     /// The `players` row upsert for this roster player; `me` is the user's
     /// PUUID. A level another player hides (`HideAccountLevel`) is never
-    /// stored (`0` = unknown; the upsert keeps what the row has). The user's
+    /// stored (`0` = unknown; the upsert keeps what the row has, and
+    /// [`Self::hides_level_from`] says to forget it). The user's
     /// own level is always stored (R100): the Closed-stage card and the
     /// user's own Player Details read it back from this row.
     pub fn player_update(&self, me: &str) -> PlayerUpdate {
         PlayerUpdate {
             puuid: self.puuid.clone(),
             name: None,
-            account_level: if self.hide_account_level && self.puuid != me {
+            account_level: if self.hides_level_from(me) {
                 0
             } else {
                 self.account_level
             },
             card_id: self.card_id.clone(),
         }
+    }
+
+    /// Another player who hides their level: the level stored from an
+    /// earlier sighting is forgotten (R100).
+    pub fn hides_level_from(&self, me: &str) -> bool {
+        self.hide_account_level && self.puuid != me
     }
 }
 

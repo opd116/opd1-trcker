@@ -18,7 +18,7 @@ use crate::roster::{EquippedSkin, RawLoadout, RosterPlayer};
 use crate::state::{
     card_clock, closed_self_slot, lock, now_ms, AppState, LiveModel, SkinResolveGuard, Slot,
 };
-use crate::store::{act_hero_stats, load_player_db, recent_matches};
+use crate::store::{act_hero_stats, load_player_db, recent_matches, StoredPlayer};
 use crate::sync::RECENT_COUNT;
 
 /// CLAUDE.md: "Top 3 Teammates".
@@ -202,8 +202,25 @@ fn encounter_row(e: EncounterRow, lookup: &dyn Fn(&str) -> Option<String>) -> En
 /// (R145) the best name the DB knows from any source, in the remembered
 /// style; that includes the `players` row's name from an earlier visible
 /// sighting (its `Seen` kind), never shown in the visible style.
-fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Option<PlayerCard> {
-    let mut slot: Slot = closed_self_slot(puuid, db)?;
+///
+/// A player the DB knows only from stored matches (saved from a History
+/// scoreboard or a recap, never on a live roster) has no `players` row, or
+/// one without a name: the card then has no level or card art, and a
+/// visible name comes from those matches (`PlayerDb::remembered`).
+fn offscreen_card(st: &AppState, puuid: &str, mut db: crate::store::PlayerDb) -> PlayerCard {
+    let row = db.row.get_or_insert_with(|| StoredPlayer {
+        game_name: String::new(),
+        tag_line: String::new(),
+        account_level: 0,
+        card_id: String::new(),
+    });
+    if row.name().is_none() {
+        if let Some(known) = &db.remembered {
+            row.game_name = known.name.clone();
+            row.tag_line = known.tag.clone();
+        }
+    }
+    let mut slot: Slot = closed_self_slot(puuid, db).expect("the row was just filled in");
     let live = lock(&st.live);
     let is_self = live.self_puuid.as_deref() == Some(puuid);
     let hidden = (!is_self).then(|| live.seen_hidden.get(puuid)).flatten();
@@ -225,7 +242,7 @@ fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Opt
     let mut card = live.card_for(&slot, &acts, &act_id, now, None, &|p| st.map_uuid(p));
     // Nothing is being fetched for it right now: unknown means `—`.
     crate::state::settle_card(&mut card, true, true);
-    Some(card)
+    card
 }
 
 /// Names `puuid`'s unnamed skins in the background (R83, R97) and rebuilds
@@ -362,7 +379,7 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
     let card = match on_screen {
         Some(card) => card,
         None => db
-            .and_then(|db| offscreen_card(st, puuid, db))
+            .map(|db| offscreen_card(st, puuid, db))
             .ok_or_else(|| "unknown player".to_string())?,
     };
 

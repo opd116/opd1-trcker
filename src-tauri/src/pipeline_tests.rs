@@ -1069,6 +1069,67 @@ async fn another_players_hidden_level_is_never_stored() {
     assert_eq!(db.row.unwrap().account_level, 0);
 }
 
+#[tokio::test]
+async fn a_level_another_player_now_hides_is_forgotten_in_their_off_screen_details() {
+    // R100: OTHER was seen at Lv 150, then hides their level. Their live
+    // card says `Lv —`; once they are off screen, Details must too.
+    let h = harness().await;
+    let now = now_ms();
+    h.st.db(move |repo| {
+        save_player(
+            repo.conn(),
+            &PlayerUpdate {
+                puuid: OTHER.into(),
+                name: Some(("Other".into(), "OTH".into())),
+                account_level: 150,
+                card_id: "card".into(),
+            },
+            now,
+        )
+    })
+    .await
+    .unwrap();
+    let mut other = roster(OTHER, false);
+    other.hide_account_level = true;
+    other.account_level = 0;
+    let mut poller = crate::poll::Poller::held(h.st.clone());
+    poller
+        .apply_roster(
+            &h.session,
+            Stage::Ingame,
+            None,
+            vec![roster(ME, false), other],
+        )
+        .await;
+    {
+        // The match ends: OTHER leaves the screen.
+        let mut live = lock(&h.st.live);
+        live.slots.clear();
+        live.current.players.clear();
+    }
+
+    let d = crate::details::build(&h.st, OTHER).await.unwrap();
+    let card = serde_json::to_value(&d.card).unwrap();
+    assert_eq!(card["level"], Value::Null, "{card}");
+}
+
+#[tokio::test]
+async fn a_player_known_only_from_stored_matches_has_details_named_from_them() {
+    // OTHER was never on a live roster (no `players` row): the user saved
+    // them from a History scoreboard. Their Details still opens, with the
+    // name the stored matches give and an unknown level.
+    let h = harness().await;
+    store_earlier_shared_matches(&h.st).await;
+    let d = crate::details::build(&h.st, OTHER).await.unwrap();
+    let card = serde_json::to_value(&d.card).unwrap();
+    assert_eq!(
+        card["name"],
+        json!({"kind": "visible", "name": "Other", "tag": "OTH"}),
+        "{card}"
+    );
+    assert_eq!(card["level"], Value::Null);
+}
+
 // ---------------------------------------------------------------------
 // Task 14: a failed match history never feeds party marks
 // ---------------------------------------------------------------------

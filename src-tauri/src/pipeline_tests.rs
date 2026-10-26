@@ -1130,6 +1130,47 @@ async fn a_player_known_only_from_stored_matches_has_details_named_from_them() {
     assert_eq!(card["level"], Value::Null);
 }
 
+#[tokio::test]
+async fn an_open_profile_off_the_roster_follows_who_is_hidden_on_it() {
+    // R18: OTHER's drawer is open from Saved; MATE, OTHER's Top 3 teammate,
+    // then shows incognito on the live roster: the drawer stops naming them
+    // from OTHER's history.
+    let h = harness().await;
+    let start_ms = now_ms() - 3_600_000;
+    h.st.db(move |repo| {
+        let m = Match {
+            match_id: "comp-1".into(),
+            map_id: "/Game/Maps/Ascent/Ascent".into(),
+            queue_id: "competitive".into(),
+            start_ms,
+            winning_team: Some("Blue".into()),
+            is_ranked: true,
+            rounds_played: Some(20),
+            game_length_ms: None,
+        };
+        let players = [
+            player_row(OTHER, "Blue", "Other", "OTH"),
+            player_row(MATE, "Blue", "Mate", "MAT"),
+        ];
+        repo.upsert_match(&m, &[], &players)
+    })
+    .await
+    .unwrap();
+    let first = crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    let mate = |d: &opd1_core::model::PlayerDetails| {
+        serde_json::to_value(d).unwrap()["topTeammates"][0]["name"].clone()
+    };
+    assert_eq!(mate(&first)["kind"], json!("visible"), "{}", mate(&first));
+
+    let hidden_mate = slot_for(&h.st, MATE, true).await;
+    lock(&h.st.live).slots = vec![hidden_mate];
+    crate::details::refresh_open_after_live_change(&h.st).await;
+    let last = h.rec.details.lock().unwrap().last().cloned().unwrap();
+    assert_ne!(mate(&last)["kind"], json!("visible"), "{}", mate(&last));
+}
+
 // ---------------------------------------------------------------------
 // Task 14: a failed match history never feeds party marks
 // ---------------------------------------------------------------------

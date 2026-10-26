@@ -265,12 +265,28 @@ pub fn resolve_skins_in_background(st: &Arc<AppState>, puuid: &str, guard: SkinR
 /// real change. Skins that just became known are named like an open does
 /// ([`resolve_skins_in_background`], with the mark taken before the
 /// rebuild). A no-op with nothing open, and for a player who is not on the
-/// roster (nothing changed for them).
+/// roster unless their Top 3 is (then rebuilt without the skins).
 pub async fn refresh_open_after_live_change(st: &Arc<AppState>) {
     let Some(puuid) = st.open_details_puuid() else {
         return;
     };
-    if !lock(&st.live).slots.iter().any(|s| s.roster.puuid == puuid) {
+    let on_screen: Vec<String> = lock(&st.live)
+        .slots
+        .iter()
+        .map(|s| s.roster.puuid.clone())
+        .collect();
+    if !on_screen.contains(&puuid) {
+        // Not on the roster: nothing changed for them, unless their Top 3
+        // holds someone who is on it now, or who was shown hidden (R18: who
+        // is hidden on screen decides how a teammate shows).
+        let touched = st.open_details_of(&puuid).is_some_and(|d| {
+            d.top_teammates.iter().any(|t| {
+                on_screen.contains(&t.puuid) || !matches!(t.name, DisplayName::Visible { .. })
+            })
+        });
+        if touched {
+            refresh(st, &puuid).await;
+        }
         return;
     }
     // Only skins this open has not asked yet: a name that failed is asked

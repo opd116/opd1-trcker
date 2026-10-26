@@ -1,7 +1,5 @@
 <script lang="ts">
   import { isTauri } from "@tauri-apps/api/core";
-  import type { Attachment } from "svelte/attachments";
-  import type { Readable } from "svelte/store";
   import ProfileDrawer from "./components/profile/ProfileDrawer.svelte";
   import GlanceShell from "./components/shell/GlanceShell.svelte";
   import NavRail from "./components/shell/NavRail.svelte";
@@ -9,6 +7,7 @@
   import Tooltip from "./components/Tooltip.svelte";
   import { tauriBridge } from "./lib/api";
   import { keyAction, runKeyAction } from "./lib/boot";
+  import { retryOnChange, retryOnNextUpdate } from "./lib/boundary";
   import { cardOpenGuard } from "./lib/clickGuard";
   import { router } from "./lib/router.svelte";
   import { live, mystats } from "./lib/stores";
@@ -43,21 +42,6 @@
   /** One boundary per page: a crash on one page never follows the user to the next. A scoreboard is its own page. */
   const pageKey = $derived(router.matchId === null ? router.screen : `${router.screen}:match:${router.matchId}`);
 
-  /**
-   * A crashed page tries again on the next update of the data it shows (the likeliest cause is one bad payload):
-   * Competitive on the next My Stats update, any other page (and the drawer) on the next live update.
-   */
-  const retryOnNextUpdate =
-    (reset: () => void, source: Readable<unknown>): Attachment =>
-    () => {
-      /** The subscription's own first call is the state that crashed; only a later one is an update. */
-      let first = true;
-      return source.subscribe(() => {
-        if (first) first = false;
-        else reset();
-      });
-    };
-
   // #app fills the window; glance mode drops the full layout's minimum size (the window is a 420px column then).
   $effect(() => {
     document.getElementById("app")?.toggleAttribute("data-glance", router.glance);
@@ -67,6 +51,7 @@
 <svelte:window {onkeydown} onclickcapture={swallowDoubleClick} />
 
 {#if router.glance}
+  <!-- GlanceShell holds the body's own boundary, so its title bar (drag, Exit glance, Close) survives a body crash. -->
   <svelte:boundary onerror={(err) => reportError("glance", err)}>
     <GlanceShell />
     {#snippet failed(_error, reset)}
@@ -97,18 +82,20 @@
           {:else}
             <About />
           {/if}
-          <!-- A quiet empty page: no text. The title bar and the nav rail stay. -->
+          <!-- A quiet empty page: no text. The title bar and the nav rail stay. A crashed page tries again on the next
+               update of its data: Competitive on the next My Stats update, any other page on the next live update. -->
           {#snippet failed(_error, reset)}
             <div class="blank" {@attach retryOnNextUpdate(reset, router.screen === "comp" ? mystats : live)}></div>
           {/snippet}
         </svelte:boundary>
       {/key}
       {#if router.profile !== null}
-        <!-- The drawer covers <main> only (the design's `position:absolute; inset:0` inside main). -->
+        <!-- The drawer covers <main> only (the design's `position:absolute; inset:0` inside main). A crashed drawer takes
+             no room from the page under it, and tries again on the next live update or when another player opens. -->
         <svelte:boundary onerror={(err) => reportError("profile", err)}>
           <ProfileDrawer puuid={router.profile} />
           {#snippet failed(_error, reset)}
-            <div class="blank" {@attach retryOnNextUpdate(reset, live)}></div>
+            <div class="gone" {@attach retryOnNextUpdate(reset, live)} {@attach retryOnChange(reset, () => router.profile)}></div>
           {/snippet}
         </svelte:boundary>
       {/if}
@@ -157,5 +144,9 @@
   .blank {
     flex: 1;
     min-height: 0;
+  }
+
+  .gone {
+    display: none;
   }
 </style>

@@ -2,6 +2,7 @@
 // note editor, opening a scoreboard and coming back (button and Esc), the hidden-name rows and the layout at the
 // default and minimum window sizes (no page or sideways scroll, nothing cut).
 import { expect, test, type Page } from "@playwright/test";
+import { AFTER_MATCH_MS } from "../src/lib/matchEnd";
 import { openScene } from "./harness";
 
 const SIZES = [
@@ -22,6 +23,27 @@ async function noOverflow(page: Page): Promise<void> {
     return out;
   });
   expect(bad).toEqual([]);
+}
+
+/** DEV: how often the open screen asked for its rows (demo/v2 `countAsk`). */
+const asks = (page: Page, key: "historyAsks" | "savedAsks") => page.evaluate((k) => Number(document.documentElement.dataset[k] ?? 0), key);
+
+/**
+ * The match ends (the live state goes In Game → Lobby) with the screen open. The match is stored only after a later sync, so
+ * the screen asks again on AFTER_MATCH_MS, and no more once that schedule is used up.
+ */
+async function asksAfterMatchEnd(page: Page, key: "historyAsks" | "savedAsks"): Promise<void> {
+  const before = await asks(page, key);
+  await page.evaluate(`import("/src/lib/stores.ts").then(({ live }) => live.set({ stage: "menus", mapId: null, players: [] }))`);
+  let t = 0;
+  for (const [i, at] of AFTER_MATCH_MS.entries()) {
+    await page.clock.runFor(at - t);
+    t = at;
+    await expect.poll(() => asks(page, key)).toBeGreaterThanOrEqual(before + i + 1);
+  }
+  const done = await asks(page, key);
+  await page.clock.runFor(300_000);
+  expect(await asks(page, key)).toBe(done);
 }
 
 test.describe("Saved players", () => {
@@ -99,6 +121,28 @@ test.describe("Saved players", () => {
     await expect(page.locator(".row[data-row]")).toHaveCount(1);
   });
 
+  test("a note edited under a search it stops matching keeps its row and its field", async ({ page }) => {
+    await openScene(page, "closed", { screen: "saved" });
+    await page.getByLabel("Search saved players").fill("dry-peeks");
+    await page.getByRole("button", { name: "Edit note on Mara" }).click();
+    const area = page.locator(".notecell textarea");
+    await expect(area).toBeFocused();
+    await area.press("ControlOrMeta+a");
+    await area.pressSequentially("Lurks B");
+    await expect(area).toBeFocused();
+    await expect(area).toHaveValue("Lurks B");
+    // Closed: the search applies to it again.
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".row[data-row]")).toHaveCount(0);
+    await page.getByLabel("Search saved players").fill("");
+    await expect(page.locator(".row[data-row]", { hasText: "Mara" }).locator(".note")).toHaveText("Lurks B");
+  });
+
+  test("an open Saved page asks for its rows again after the match ends", async ({ page }) => {
+    await openScene(page, "ingame", { screen: "saved" }, { clock: "manual" });
+    await asksAfterMatchEnd(page, "savedAsks");
+  });
+
   test("a row opens the profile (click and Enter)", async ({ page }) => {
     await openScene(page, "closed", { screen: "saved" });
     const row = page.locator(".row[data-row]").first();
@@ -168,6 +212,11 @@ test.describe("Match history", () => {
     await expect(page.locator('.match[aria-busy="false"]')).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(page.locator(".dlabel").first()).toHaveText("Today");
+  });
+
+  test("an open list asks again after the match ends, until the match is stored", async ({ page }) => {
+    await openScene(page, "ingame", { screen: "history" }, { clock: "manual" });
+    await asksAfterMatchEnd(page, "historyAsks");
   });
 
   test("empty", async ({ page }) => {

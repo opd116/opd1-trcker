@@ -87,6 +87,15 @@ describe("filter, search, sort", () => {
     expect(arrange(rows, "all", "zzz", DEFAULT_SORT, META, NOW)).toEqual([]);
   });
 
+  it("the row being edited stays while its note stops matching the search", () => {
+    // ishi's note was "Great comms"; the first keystroke of a new note no longer matches "comms".
+    const typed = rows.map((r) => (r.s.puuid === "ishi" ? { ...r, note: "N" } : r));
+    expect(ids(arrange(typed, "all", "comms", DEFAULT_SORT, META, NOW, "ishi"))).toEqual(["ishi"]);
+    expect(arrange(typed, "all", "comms", DEFAULT_SORT, META, NOW)).toEqual([]);
+    // The filter pills still apply to it.
+    expect(arrange(typed, "opp", "comms", DEFAULT_SORT, META, NOW, "ishi")).toEqual([]);
+  });
+
   it("sorts by each column, and flips", () => {
     expect(ids(arrange(rows, "all", "", { key: "name", dir: 1 }, META, NOW))).toEqual(["halo", "ishi", "Mara", "Nyx"]);
     expect(ids(arrange(rows, "all", "", { key: "rank", dir: 1 }, META, NOW))).toEqual(["Mara", "halo", "ishi", "Nyx"]);

@@ -11,6 +11,14 @@ const ZEPHYR = PUUID.zephyr!;
 
 const dialog = (page: Page) => page.getByRole("dialog");
 
+/** A drawer row opened its scoreboard: History is the screen, the board loaded, the user's own row is there, Back names the player. */
+async function expectScoreboard(page: Page, back: string): Promise<void> {
+  await expect(page.locator('nav.rail button[aria-label="History"]')).toHaveAttribute("aria-current", "page");
+  await expect(page.locator('main .match[aria-busy="false"]')).toHaveCount(1);
+  await expect(page.locator("main .match .srow.self")).toHaveCount(1);
+  await expect(page.locator("main .match .back")).toHaveText(back);
+}
+
 async function open(page: Page, query: string): Promise<void> {
   await routeMedia(page);
   await gotoApp(page, `/?${query}`);
@@ -55,6 +63,7 @@ test("the user: personal notes, Competitive stats, Net RR, clickable recent rows
   await expect(rows).toHaveCount(6);
   await rows.first().click();
   await expect(dialog(page)).toHaveCount(0);
+  await expectScoreboard(page, "Fahad");
 });
 
 test("save + note popover: a new save's × cancels it; Escape closes the popover before the drawer", async ({ page }) => {
@@ -81,6 +90,27 @@ test("save + note popover: a new save's × cancels it; Escape closes the popover
   await page.keyboard.press("Escape");
   await page.keyboard.press("Escape");
   await expect(dialog(page)).toHaveCount(0);
+});
+
+test("a new save's Cancel puts back the note the player already had, instead of deleting it", async ({ page }) => {
+  await open(page, `scene=ingame&profile=${MARA}`);
+  const d = dialog(page);
+  const OLD = "Entry every round, dry-peeks A long";
+  const stored = () => page.evaluate(`import("/src/lib/demo/v2/store.ts").then(({ state }) => state.marks.notes[${JSON.stringify(MARA)}] ?? null)`);
+  // Removed from saved: the note stays stored (as Rust keeps it).
+  await d.getByRole("button", { name: "Saved" }).click();
+  await d.getByRole("button", { name: "Remove from saved" }).click();
+  await d.getByRole("button", { name: "Save player" }).click();
+  const note = d.getByRole("textbox", { name: "Note on Mara" });
+  await expect(note).toHaveValue(OLD);
+  await note.fill(`${OLD}, then lurks`);
+  await d.getByRole("button", { name: "Cancel" }).click();
+  await expect(d.getByRole("button", { name: "Save player" })).toHaveAttribute("aria-pressed", "false");
+  // Past the note's 400ms write: what was typed is undone, the older note is still stored.
+  await page.waitForTimeout(800);
+  expect(await stored()).toBe(OLD);
+  await d.getByRole("button", { name: "Save player" }).click();
+  await expect(note).toHaveValue(OLD);
 });
 
 test("focus returns to the card that opened the drawer", async ({ page }) => {
@@ -128,4 +158,5 @@ test("an encounter row opens the scoreboard from the user's side", async ({ page
   await open(page, `scene=ingame&profile=${MARA}`);
   await dialog(page).getByRole("button", { name: /Open scoreboard$/ }).first().press("Enter");
   await expect(dialog(page)).toHaveCount(0);
+  await expectScoreboard(page, "Mara");
 });

@@ -102,8 +102,10 @@
 
   // ── save + note popover (prototype 975–985, `onSave` / `unsave`) ──────────────
   let noteOpen = $state(false);
-  /** Saved by this very click: the popover's × reads Cancel and also clears the note. */
+  /** Saved by this very click: the popover's × reads Cancel and also undoes what was typed in it. */
   let fresh = $state(false);
+  /** The note before that save: an unsave keeps a player's note, so Cancel puts it back rather than clearing it. */
+  let noteAtSave = "";
   let saveBtn = $state<HTMLButtonElement | null>(null);
 
   function onSave() {
@@ -112,6 +114,7 @@
       noteOpen = !noteOpen;
     } else {
       fresh = true;
+      noteAtSave = note;
       void toggleSaved(puuid, true);
       noteOpen = true;
     }
@@ -126,7 +129,7 @@
     const wasFresh = fresh;
     fresh = false;
     void toggleSaved(puuid, false);
-    if (wasFresh) setNote(puuid, "");
+    if (wasFresh && note !== noteAtSave) setNote(puuid, noteAtSave);
     closeNote();
   }
 

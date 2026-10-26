@@ -25,6 +25,7 @@
     whenText,
   } from "../../lib/historyv2";
   import { retryImg } from "../../lib/imgRetry";
+  import { followMatchEnds } from "../../lib/matchEnd";
   import { agentName, isRankedTier, mapName } from "../../lib/meta";
   import { openMatch, scrollHost } from "../../lib/router.svelte";
   import { live, meta, mystats, now } from "../../lib/stores";
@@ -128,7 +129,17 @@
     void refresh(queue, data?.rows.length ?? PAGE);
   });
 
-  // A match that just ended lands in the list: ask again whenever the live stage changes.
+  // A match that just ended lands in the list: ask again whenever the live stage changes, and after a match ends on
+  // the schedule its store follows (lib/matchEnd.ts) until the stored total grows.
+  onMount(() =>
+    followMatchEnds(live, () => {
+      const before = data?.allTotal ?? null;
+      return async () => {
+        await refresh(queue, data?.rows.length ?? PAGE);
+        return before !== null && (data?.allTotal ?? 0) > before;
+      };
+    }),
+  );
   let lastStage: string | null | undefined;
   $effect(() => {
     const st = $live?.stage ?? null;

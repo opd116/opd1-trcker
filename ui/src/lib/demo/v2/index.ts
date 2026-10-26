@@ -14,6 +14,7 @@ import type {
   Settings,
 } from "../../types";
 import { DEMO_NOW, MAPS, PUUID } from "../cdv8";
+import { failNow } from "../scenes";
 import { demoCollection } from "./collection";
 import { demoHistory } from "./history";
 import { demoSavedPlayers } from "./saved";
@@ -41,7 +42,14 @@ export function v2Marks(): PlayerMarks {
   return cloneMarks();
 }
 
+/** DEV: how often a screen asked for its rows (`data-history-asks` / `data-saved-asks` on <html>; Playwright reads it). */
+function countAsk(key: "historyAsks" | "savedAsks"): void {
+  const d = document.documentElement.dataset;
+  d[key] = String(Number(d[key] ?? 0) + 1);
+}
+
 export function v2SavedPlayers(): SavedPlayer[] {
+  countAsk("savedAsks");
   return empty() ? [] : demoSavedPlayers();
 }
 
@@ -67,6 +75,7 @@ export function v2DismissSmurf(puuid: string): void {
 }
 
 export function v2History(queue: HistoryQueue, offset: number, limit: number): HistoryPage {
+  countAsk("historyAsks");
   return demoHistory(queue, offset, limit, empty());
 }
 
@@ -107,6 +116,7 @@ export function v2AppInfo(): AppInfo {
 }
 
 export function v2Collection(): Collection | null {
+  if (failNow("collection")) throw new Error("demo: skins unavailable");
   return empty() ? null : demoCollection();
 }
 

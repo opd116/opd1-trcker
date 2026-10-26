@@ -209,7 +209,8 @@
       {/if}
 
       <div class="fill"></div>
-      <button type="button" class="primary" onclick={openFull}>Open full scoreboard</button>
+      <!-- data-match-id: Back from the scoreboard puts a keyboard user's focus here again (router `backFromMatch`). -->
+      <button type="button" class="primary" data-match-id={matchId} onclick={openFull}>Open full scoreboard</button>
       <span class="mono clears">CLEARS WHEN YOU QUEUE AGAIN</span>
     </div>
   </div>

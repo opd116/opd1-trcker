@@ -56,6 +56,17 @@ function optimistic(f: (m: PlayerMarks) => PlayerMarks): void {
   marks.update((m) => f({ saved: [...m.saved], notes: { ...m.notes }, notSmurf: [...m.notSmurf] }));
 }
 
+/**
+ * A mark write failed: Rust sends no `marks` event then, so the optimistic change would stay on screen as if stored.
+ * Rust's own copy is read back instead.
+ */
+function resyncMarks(): void {
+  api
+    .playerMarks()
+    .then(applyMarks)
+    .catch((err) => reportError("player_marks", err));
+}
+
 export async function toggleSaved(puuid: string, on?: boolean): Promise<void> {
   const next = on ?? !isSaved(get(marks), puuid);
   optimistic((m) => ({ ...m, saved: next ? [puuid, ...m.saved.filter((p) => p !== puuid)] : m.saved.filter((p) => p !== puuid) }));
@@ -63,6 +74,7 @@ export async function toggleSaved(puuid: string, on?: boolean): Promise<void> {
     await api.setSaved(puuid, next);
   } catch (err) {
     reportError("set_saved", err);
+    resyncMarks();
   }
 }
 
@@ -94,6 +106,9 @@ export function applyMarks(m: PlayerMarks): void {
   marks.set(next);
 }
 
+/** A note whose write failed is written again after this long (it stays on screen, typed, meanwhile). */
+export const NOTE_RETRY_MS = 5_000;
+
 /** "Saves as you type": the store changes at once, the write goes out 400ms after the last keystroke. */
 export function setNote(puuid: string, typed: string, delayMs = 400): void {
   // Code points, as Rust's cut: what shows is what is stored.
@@ -109,13 +124,17 @@ export function setNote(puuid: string, typed: string, delayMs = 400): void {
     puuid,
     setTimeout(() => {
       noteTimers.delete(puuid);
-      api
-        .setNote(puuid, note)
-        .catch((err) => reportError("set_note", err))
-        .finally(() => {
+      api.setNote(puuid, note).then(
+        () => {
           // Answered: Rust's copy is this text now, unless more was typed meanwhile.
           if (typedNotes.get(puuid) === note) typedNotes.delete(puuid);
-        });
+        },
+        (err) => {
+          reportError("set_note", err);
+          // Not stored: the text stays typed (no event wipes it) and is written again, unless newer text is queued.
+          if (typedNotes.get(puuid) === note && !noteTimers.has(puuid)) setNote(puuid, note, NOTE_RETRY_MS);
+        },
+      );
     }, delayMs),
   );
 }
@@ -126,6 +145,7 @@ export async function dismissSmurf(puuid: string): Promise<void> {
     await api.dismissSmurf(puuid);
   } catch (err) {
     reportError("dismiss_smurf", err);
+    resyncMarks();
   }
 }
 

@@ -167,7 +167,8 @@
           <div class="st"><span class="mono">HS%</span><span class="sv">{pct0(last.hsPct)}</span></div>
           <div class="st"><span class="mono">RR</span><span class="sv" style:color={rrColor(last.rrEarned)}>{rrDelta(last.rrEarned)}</span></div>
         </div>
-        <div class="lm-open" role="button" tabindex="0" onclick={openLast} onkeydown={lastKey}>
+        <!-- data-match-id: Back from the scoreboard puts a keyboard user's focus here again (router `backFromMatch`). -->
+        <div class="lm-open" role="button" tabindex="0" data-match-id={last.matchId} onclick={openLast} onkeydown={lastKey}>
           View scoreboard<svg width="7" height="12" viewBox="0 0 7 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M1.5 1.5L5.5 6l-4 4.5"></path></svg>
         </div>
       </div>

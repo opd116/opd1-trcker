@@ -214,7 +214,8 @@ export function backFromMatch(): void {
   router.screen = to;
   if (enc && (from === "encounter" || from === "profile")) openProfile(enc.puuid, null);
   // The page under the scoreboard is drawn again: a keyboard user's focus goes back to the row that opened it (a
-  // History row carries its `data-match-id`), so the next Tab continues from there and not from the title bar.
+  // History row, Live's LAST MATCH and the recap's full-scoreboard button carry its `data-match-id`), so the next Tab
+  // continues from there and not from the title bar.
   else if (matchByKeyboard && typeof document !== "undefined") {
     setTimeout(() => {
       const row = document.querySelector<HTMLElement>(`[data-match-id="${CSS.escape(matchId)}"]`);

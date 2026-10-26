@@ -159,6 +159,22 @@ test("recap: hero, both teams by ACS with bookmarks, the full scoreboard", async
   await expect(page.locator('nav.rail button[aria-label="History"]')).toHaveAttribute("aria-current", "page");
 });
 
+// A keyboard open starts the scoreboard on Back; Back puts the focus on what opened it, not on the page.
+for (const c of [
+  { what: "Last Match's View scoreboard", params: {} as Record<string, string>, opener: ".lm-open" },
+  { what: "the recap's Open full scoreboard", params: { recap: "1" }, opener: ".recap .primary" },
+]) {
+  test(`keyboard: ${c.what} opens the scoreboard, and Back returns the focus to it`, async ({ page }) => {
+    await openScene(page, "closed", c.params);
+    await page.locator(c.opener).focus();
+    await page.keyboard.press("Enter");
+    const back = page.locator('main .match[aria-busy="false"] .back');
+    await expect(back).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page.locator(c.opener)).toBeFocused();
+  });
+}
+
 test("glance: enemy team first, 52px rows, the saved-player callout", async ({ page }) => {
   await page.setViewportSize({ width: 420, height: 800 });
   await openScene(page, "ingame", { glance: "1" });

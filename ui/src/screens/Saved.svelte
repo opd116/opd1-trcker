@@ -1,15 +1,17 @@
 <!--
   Saved players (design v2 450–522, logic 1680–1740): the title with the count, a search over name, tag and note, the
   All / Teammates / Opponents pills with counts, and a sortable table (default: last seen, most recent first; the
-  header's columns sort, NOTE does not). Rows are `saved_players`, asked again whenever the saved set changes; a note
-  shows the live `marks` copy, so typing in a row never waits on a round trip. Empty: the design's "No saved players
+  header's columns sort, NOTE does not). Rows are `saved_players`, asked again whenever the saved set changes and after a
+  match ends; a note shows the live `marks` copy, so typing in a row never waits on a round trip. Empty: the design's "No saved players
   yet" with Go to live match.
 -->
 <script lang="ts">
+  import { onMount } from "svelte";
   import SavedRow from "../components/saved/SavedRow.svelte";
   import Skel from "../components/Skel.svelte";
   import { savedPlayers } from "../lib/api";
   import { marks, savedSet } from "../lib/appdata.svelte";
+  import { followMatchEnds } from "../lib/matchEnd";
   import { go, scrollHost } from "../lib/router.svelte";
   import {
     arrange,
@@ -38,11 +40,8 @@
   let editing = $state<string | null>(null);
   let expanded = $state<Record<string, boolean>>({});
 
-  // Ask for the rows on open and whenever someone is saved or unsaved (a note change needs no round trip).
-  const savedKey = $derived($marks.saved.join(","));
   let gen = 0;
-  $effect(() => {
-    void savedKey;
+  function load() {
     const g = ++gen;
     savedPlayers()
       .then((rows) => {
@@ -52,7 +51,22 @@
         reportError("saved_players", err);
         if (g === gen && list === null) list = [];
       });
+  }
+
+  // Ask for the rows on open and whenever someone is saved or unsaved (a note change needs no round trip).
+  const savedKey = $derived($marks.saved.join(","));
+  $effect(() => {
+    void savedKey;
+    load();
   });
+
+  // A match that just ended changes LAST SEEN and the records once it is stored (lib/matchEnd.ts): ask again then.
+  onMount(() =>
+    followMatchEnds(live, () => async () => {
+      load();
+      return false;
+    }),
+  );
 
   const cards = $derived(liveCards($live));
 
@@ -71,7 +85,7 @@
   });
 
   const n = $derived(counts(views.map((v) => v.s)));
-  const shown = $derived(arrange(views, filter, query, sort, $meta, $now));
+  const shown = $derived(arrange(views, filter, query, sort, $meta, $now, editing));
 
   const FILTERS: { k: SavedFilter; label: string }[] = [
     { k: "all", label: "All" },

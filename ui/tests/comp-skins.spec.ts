@@ -146,6 +146,23 @@ test.describe("Collection", () => {
     await expect(page.locator(".value")).toHaveCount(0);
   });
 
+  test("a collection that failed is not shown as never fetched, and is asked again", async ({ page }) => {
+    await routeMedia(page);
+    await page.clock.install({ time: NOW });
+    await gotoApp(page, "/?scene=closed&screen=skins&fail=collection:1");
+    const cards = page.getByRole("region", { name: "Skins" }).locator(".card");
+    // Answered (no skeleton left), but with nothing to show: empty frames, no figures, no false empty state.
+    await expect(page.locator('main [aria-busy="true"]')).toHaveCount(0);
+    await expect(page.locator(".gridcard")).toBeVisible();
+    await expect(page.getByText("No collection yet")).toHaveCount(0);
+    await expect(page.locator(".value")).toHaveCount(0);
+    await expect(cards).toHaveCount(0);
+    // The next ask (a minute later) brings the collection.
+    await page.clock.runFor(60_000);
+    await expect(cards).toHaveCount(22);
+    await expect(page.locator(".value .num")).toHaveText("46,075");
+  });
+
   for (const size of [
     { width: 1280, height: 800 },
     { width: 1180, height: 760 },
@@ -153,6 +170,9 @@ test.describe("Collection", () => {
     test(`fits ${size.width}×${size.height}: the page never scrolls, the lists scroll inside their cards`, async ({ page }) => {
       await page.setViewportSize(size);
       await open(page, "scene=closed&screen=skins");
+      // Measured on the loaded collection, not on the skeleton drawn before it answers.
+      await expect(page.getByRole("region", { name: "Skins" }).locator(".card")).toHaveCount(22);
+      await settle(page);
       const fit = await page.evaluate(() => {
         const s = document.querySelector<HTMLElement>("main .screen")!;
         return { y: s.scrollHeight > s.clientHeight, x: s.scrollWidth > s.clientWidth };

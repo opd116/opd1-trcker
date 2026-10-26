@@ -19,8 +19,9 @@ import {
   rrCell,
   stamp,
   whenText,
+  yourRrOf,
 } from "./historyv2";
-import type { HistoryRow, MatchDetailsView, ScoreRow } from "./types";
+import type { HistoryRow, MatchDetailsView, MatchSummary, ScoreRow } from "./types";
 
 const NOW = Date.UTC(2026, 9, 22, 22, 40);
 const MIN = 60_000;
@@ -193,6 +194,19 @@ describe("scoreboard", () => {
     expect(dm).toEqual({ match: "y", team: new Set() });
     // Nobody with stats: no MVP.
     expect(mvpOf(view({ teams: [{ teamId: "", result: null, roundsWon: null, firstHalf: null, players: [p("x", null)] }] })).match).toBeNull();
+  });
+
+  it("YOUR RR: the rank after the match comes from a history row, never from My Stats' rank during it", () => {
+    // A promotion game: Gold 3 (14) during the match, Platinum 1 (15) after it.
+    const ms = { last5: [{ matchId: "m", rrEarned: 22, tier: 14 } as MatchSummary], session: null };
+    // The History cache lacks the match (and the scoreboard's own ask has not answered): the RR change alone.
+    expect(yourRrOf("m", null, ms)).toEqual({ rr: 22, tier: null });
+    // The history row, cached or asked for, has the rank after it.
+    expect(yourRrOf("m", { rrEarned: 22, tierAfter: 15 }, ms)).toEqual({ rr: 22, tier: 15 });
+    expect(yourRrOf("m", { rrEarned: null, tierAfter: null }, ms)).toEqual({ rr: 22, tier: null });
+    const session = { netRr: 22, wins: 1, losses: 0, startedMs: 0, matches: [{ matchId: "s", rrEarned: -15 }] } as never;
+    expect(yourRrOf("s", null, { last5: [], session })).toEqual({ rr: -15, tier: null });
+    expect(yourRrOf("x", null, ms)).toBeNull();
   });
 
   it("K/D", () => {

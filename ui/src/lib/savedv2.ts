@@ -61,7 +61,10 @@ export interface SavedView {
   inMatch: boolean;
 }
 
-/** Filter pill, then the search (name, tag or note, case-insensitive), then the sort. Stable: ties keep saved order. */
+/**
+ * Filter pill, then the search (name, tag or note, case-insensitive), then the sort. Stable: ties keep saved order.
+ * `editing`: the row whose note is open stays whatever the search, so typing a note that stops matching keeps its field.
+ */
 export function arrange(
   rows: readonly SavedView[],
   filter: SavedFilter,
@@ -69,12 +72,13 @@ export function arrange(
   sort: SavedSort,
   meta: Meta | null,
   nowMs: number,
+  editing: string | null = null,
 ): SavedView[] {
   const q = query.trim().toLowerCase();
   const out = rows
     .filter((r) => filter === "all" || (filter === "mates" ? r.s.with.games > 0 : r.s.against.games > 0))
     .filter((r) => {
-      if (!q) return true;
+      if (!q || r.s.puuid === editing) return true;
       const p = nameParts(r.name, meta);
       return [p.name, p.tag ?? "", r.note].join(" ").toLowerCase().includes(q);
     });

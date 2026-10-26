@@ -712,7 +712,7 @@ impl RiotSession {
     pub async fn check_account(&self) -> Result<(), RiotError> {
         self.check_alive()?;
         match fetch_entitlements(&self.local_client, &self.local_base, &self.basic_auth).await {
-            Ok(e) if !e.subject.is_empty() && e.subject != self.puuid => {
+            Ok(e) if e.subject != self.puuid => {
                 log::info!("the Riot Client now answers for another account");
                 self.account_changed.store(true, Ordering::Release);
                 Err(RiotError::ClientGone)
@@ -1060,7 +1060,16 @@ async fn fetch_entitlements(
         .await
         .map_err(http_error)?;
     let captured = buffer_response(resp).await?;
-    parse_json(&captured).map_err(|e| RiotError::AuthFailed(e.to_string()))
+    let e: EntitlementsResponse =
+        parse_json(&captured).map_err(|e| RiotError::AuthFailed(e.to_string()))?;
+    // A signed-out or busy client answers with no account: no token at all,
+    // never another account (one rule for connect, refresh and the check).
+    if e.subject.is_empty() || e.access_token.is_empty() {
+        return Err(RiotError::AuthFailed(
+            "the Riot Client is signed out".into(),
+        ));
+    }
+    Ok(e)
 }
 
 /// A reqwest failure as [`RiotError::Http`], without the request URL:

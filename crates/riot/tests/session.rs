@@ -1777,6 +1777,79 @@ async fn a_fresh_token_for_another_account_ends_the_session() {
 }
 
 #[tokio::test]
+async fn a_signed_out_client_is_no_account_on_connect_or_refresh() {
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    let signed_out = || {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "", "entitlements": [], "issuer": "i",
+            "subject": "", "token": "",
+        }))
+    };
+    // Connect: no session for an empty account (the poll loop retries).
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(signed_out())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let base = server.uri();
+    let Err(err) = RiotSession::connect_with_overrides(
+        tmp.path(),
+        ConnectOverrides {
+            pd_base: Some(base.clone()),
+            glz_base: Some(base.clone()),
+            valorant_api_base: Some(base),
+            ..Default::default()
+        },
+    )
+    .await
+    else {
+        panic!("no session for a signed-out client");
+    };
+    assert!(matches!(err, RiotError::AuthFailed(_)), "{err:?}");
+
+    // Refresh: a signed-out moment is a failed refresh, not another account.
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "a", "entitlements": [], "issuer": "i",
+            "subject": SELF_PUUID, "token": "t",
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(signed_out())
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let session = connect_with_age(&tmp, &server, None).await;
+    let err = session.pd::<Value>(&mmr_path()).await.unwrap_err();
+    assert!(!matches!(err, RiotError::ClientGone), "{err:?}");
+    assert_eq!(session.self_puuid(), SELF_PUUID);
+    Mock::given(method("GET"))
+        .and(path("/chat/v4/presences"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"presences": []})))
+        .mount(&server)
+        .await;
+    session
+        .local::<Value>("/chat/v4/presences")
+        .await
+        .expect("the session stays");
+}
+
+#[tokio::test]
 async fn the_account_check_reconnects_only_for_another_account() {
     let tmp = TempDir::new();
     write_shooter_log(tmp.path());

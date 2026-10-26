@@ -1091,6 +1091,24 @@ async fn skin_requests(server: &MockServer) -> usize {
 }
 
 #[tokio::test]
+async fn a_skin_that_cannot_be_written_is_still_kept_in_memory() {
+    // A file sits where the skins folder goes: the name still shows, and it
+    // is not downloaded again at every call.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("skins"), b"not a directory").unwrap();
+    let server = MockServer::start().await;
+    mount_skin(&server, None).await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    for _ in 0..3 {
+        cache
+            .weapon_skin(SKIN_UUID, RED_CHROMA)
+            .await
+            .expect("named, even if not stored");
+    }
+    assert_eq!(skin_requests(&server).await, 1);
+}
+
+#[tokio::test]
 async fn weapon_skin_names_and_tier() {
     let dir = tempdir();
     let server = MockServer::start().await;
@@ -1491,6 +1509,12 @@ async fn tables_that_cannot_be_written_to_disk_are_still_used() {
         .await
         .expect("downloaded, even if not stored");
     assert!(cache.meta().is_ok(), "names and acts are there");
+    // The version is known in memory too: the Skins screen works.
+    mount_weapons(&server, None).await;
+    cache
+        .skin_catalog()
+        .await
+        .expect("the catalog, though manifest.json was never written");
 }
 
 #[tokio::test]

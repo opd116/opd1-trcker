@@ -910,6 +910,10 @@ pub struct AssetCache {
     media_base: String,
     dir: PathBuf,
     tables: RwLock<Tables>,
+    /// The version of the tables in memory when the disk refused them (their
+    /// `manifest.json` never written); `None` while disk and memory agree.
+    /// The skin catalog's version comes from here first.
+    unwritten_version: RwLock<Option<String>>,
     image_locks: ImageLocks,
     /// Every weapon skin seen so far (lower-case skin uuid -> its reduced
     /// entry): what [`AssetCache::weapon_skin_cached`] answers from, with
@@ -977,6 +981,7 @@ impl AssetCache {
             media_base,
             dir: cache_dir,
             tables: RwLock::new(Tables::default()),
+            unwritten_version: RwLock::new(None),
             image_locks: Mutex::new(HashMap::new()),
             skins: RwLock::new(HashMap::new()),
             skin_locks: Mutex::new(HashMap::new()),
@@ -1020,7 +1025,7 @@ impl AssetCache {
                         move || load_tables_from_disk_sync(&dir)
                     })
                     .await?;
-                    *write_lock(&self.tables) = tables;
+                    self.set_tables(tables, None);
                     Ok(false)
                 } else {
                     Err(network_err)
@@ -1037,7 +1042,7 @@ impl AssetCache {
                 move || load_tables_from_disk_sync(&dir)
             })
             .await?;
-            *write_lock(&self.tables) = tables;
+            self.set_tables(tables, None);
             return Ok(false);
         }
 
@@ -1057,7 +1062,7 @@ impl AssetCache {
                 Ok(content_tiers) => content_tiers,
                 Err(e) => {
                     log::warn!("content tiers fetch failed, keeping the cached tables: {e}");
-                    *write_lock(&self.tables) = tables;
+                    self.set_tables(tables, None);
                     return Ok(false);
                 }
             };
@@ -1073,7 +1078,7 @@ impl AssetCache {
                 log::warn!("content tiers not written to disk: {e}");
             }
             tables.content_tiers = content_tiers;
-            *write_lock(&self.tables) = tables;
+            self.set_tables(tables, None);
             return Ok(true);
         }
 
@@ -1103,7 +1108,7 @@ impl AssetCache {
                     move || load_tables_from_disk_sync(&dir)
                 })
                 .await?;
-                *write_lock(&self.tables) = tables;
+                self.set_tables(tables, None);
                 return Ok(false);
             }
             Err(e) => return Err(e),
@@ -1115,6 +1120,7 @@ impl AssetCache {
         // downloaded, or the app would have no names or acts and download
         // everything again at each retry. The manifest is written last, so a
         // partial write leaves the old version and the next start fetches again.
+        let version_kept = version.clone();
         let written = blocking({
             let dir = self.dir.clone();
             let agents = agents.clone();
@@ -1134,18 +1140,30 @@ impl AssetCache {
             }
         })
         .await;
-        if let Err(e) = written {
-            log::warn!("asset tables not written to disk: {e}");
-        }
-
-        *write_lock(&self.tables) = Tables {
-            agents,
-            maps,
-            tiers,
-            seasons,
-            content_tiers,
+        let unwritten = match written {
+            Ok(()) => None,
+            Err(e) => {
+                log::warn!("asset tables not written to disk: {e}");
+                Some(version_kept)
+            }
         };
+
+        self.set_tables(
+            Tables {
+                agents,
+                maps,
+                tiers,
+                seasons,
+                content_tiers,
+            },
+            unwritten,
+        );
         Ok(true)
+    }
+
+    fn set_tables(&self, tables: Tables, unwritten_version: Option<String>) {
+        *write_lock(&self.tables) = tables;
+        *write_lock(&self.unwritten_version) = unwritten_version;
     }
 
     /// A single small file read + a handful of `is_file` stats — cheap
@@ -1652,11 +1670,16 @@ impl AssetCache {
                     .get("data")
                     .and_then(SkinEntry::from_response)
                     .ok_or_else(|| AssetError::Decode("missing skin displayName".to_string()))?;
-                blocking({
+                // Best effort: the name needs no file to be shown, and a
+                // disk that refuses it must not cost a download per call.
+                let written = blocking({
                     let entry = entry.clone();
                     move || write_json(&path, &entry)
                 })
-                .await?;
+                .await;
+                if let Err(e) = written {
+                    log::warn!("skin {skin} not written to disk: {e}");
+                }
                 entry
             }
         };
@@ -1683,12 +1706,16 @@ impl AssetCache {
     /// fail at once). `TablesNotLoaded` while no table set was ever stored
     /// (the version is unknown).
     pub async fn skin_catalog(&self) -> Result<Arc<SkinCatalog>, AssetError> {
-        let version = blocking({
-            let path = self.dir.join("manifest.json");
-            move || Ok(read_json::<Manifest>(&path).ok().map(|m| m.version))
-        })
-        .await?
-        .ok_or(AssetError::TablesNotLoaded)?;
+        let unwritten = read_lock(&self.unwritten_version).clone();
+        let version = match unwritten {
+            Some(version) => version,
+            None => blocking({
+                let path = self.dir.join("manifest.json");
+                move || Ok(read_json::<Manifest>(&path).ok().map(|m| m.version))
+            })
+            .await?
+            .ok_or(AssetError::TablesNotLoaded)?,
+        };
 
         let mut slot = self.catalog.lock().await;
         if let Some(cat) = slot.as_ref().filter(|c| c.version == version) {

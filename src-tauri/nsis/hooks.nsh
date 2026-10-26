@@ -22,7 +22,8 @@
   ; main binary is there), and recursively only when the folder is the app's
   ; own (named after the product, the default). A folder the installer was
   ; pointed at by hand (say D:\Games) loses only the files this app puts
-  ; there (Section Install: the exe, THIRD-PARTY-NOTICES.md, uninstall.exe);
+  ; there (Section Install: the exe, THIRD-PARTY-NOTICES.md, OFL.txt,
+  ; uninstall.exe);
   ; anything else in it stays (R4).
   ${If} ${FileExists} "$INSTDIR\${MAINBINARYNAME}.exe"
     Push $0
@@ -36,6 +37,7 @@
     ${Else}
       Delete "$INSTDIR\${MAINBINARYNAME}.exe"
       Delete "$INSTDIR\THIRD-PARTY-NOTICES.md"
+      Delete "$INSTDIR\OFL.txt"
       Delete "$INSTDIR\uninstall.exe"
     ${EndIf}
     Pop $0

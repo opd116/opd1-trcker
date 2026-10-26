@@ -47,7 +47,8 @@
     "active": true,
     "targets": ["nsis"],
     "resources": {
-      "../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md"
+      "../THIRD-PARTY-NOTICES.md": "THIRD-PARTY-NOTICES.md",
+      "../ui/src/assets/fonts/OFL.txt": "OFL.txt"
     },
     "icon": [
       "icons/32x32.png",

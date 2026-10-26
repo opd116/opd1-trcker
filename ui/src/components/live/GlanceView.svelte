@@ -7,6 +7,7 @@
 <script lang="ts">
   import { marks, settings } from "../../lib/appdata.svelte";
   import { assetUrl } from "../../lib/assets";
+  import { cardOpenGuard } from "../../lib/clickGuard";
   import { retryImg } from "../../lib/imgRetry";
   import { avgRankShort, glanceTeams, rowView, savedCallout, teamTier, type RowCtx, type RowView } from "../../lib/livev2";
   import { mapName } from "../../lib/meta";
@@ -36,6 +37,9 @@
   const map = $derived(l?.mapId ? mapName($meta, l.mapId) : null);
 
   function open(puuid: string) {
+    // As Live's rows: the full layout and the drawer replace the row, so a double-click's second click would land on
+    // the drawer's scrim (closing it) or on the nav rail.
+    cardOpenGuard.arm();
     setGlance(false);
     openProfile(puuid, null);
   }

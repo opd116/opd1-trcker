@@ -257,6 +257,16 @@ test.describe("double-click guard", () => {
     await expect(dialog(page)).toHaveCount(0);
   });
 
+  test("a double-click on a Glance row opens the drawer once: the second click neither closes it nor hits the rail", async ({ page }) => {
+    await page.setViewportSize({ width: 420, height: 800 });
+    await openScene(page, "ingame", { glance: "1" });
+    const row = (await page.locator('.glance-body [data-row][role="button"]').first().boundingBox())!;
+    await page.mouse.dblclick(row.x + 150, row.y + row.height / 2);
+    await expect(dialog(page)).toBeVisible();
+    await expect.poll(() => guard(page)).toBe(false);
+    await expect(dialog(page)).toBeVisible();
+  });
+
   test("the guard does not delay the first click on a row", async ({ page }) => {
     await openScene(page, "ingame");
     await page.locator("main [data-row]").nth(3).click();

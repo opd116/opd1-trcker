@@ -1,6 +1,7 @@
 // The double-click guard (v0.2.0 polish). A card click opens Details, which replaces the card grid; the second click
 // of a double-click then lands on whatever sits under the pointer on the new page (Back where the top-left card was,
-// a recent row under a middle one). For 400 ms after a card opens Details, App swallows every click in the capture phase.
+// a recent row under a middle one). For 400 ms after a card opens Details (a Live or a Glance row), App swallows every
+// click in the capture phase.
 
 export const DOUBLE_CLICK_MS = 400;
 

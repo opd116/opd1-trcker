@@ -1038,7 +1038,7 @@ impl AssetCache {
         if self.disk_cache_matches(&version) {
             let loaded = blocking({
                 let dir = self.dir.clone();
-                move || load_tables_from_disk_sync(&dir)
+                move || load_tables_from_disk_sync_strict(&dir)
             })
             .await;
             match loaded {
@@ -1841,18 +1841,6 @@ impl AssetCache {
     }
 }
 
-/// Downscales `bytes` to `kind`'s target width (see
-/// [`AssetKind::downscale_target_width`]), preserving aspect ratio, if the
-/// source is wider than that target. Re-encodes as PNG regardless of the
-/// source format (every valorant-api image asset is PNG or JPEG; PNG is a
-/// safe, lossless, universally-supported cache format for both). Returns
-/// `bytes` unchanged for a kind with no downscale target, or a source
-/// already at/under the target width.
-///
-/// A free function (not a method) so it can be moved into a
-/// [`tokio::task::spawn_blocking`] closure by value, with no `&self`
-/// lifetime to fight (fix-round item 10 / R37 — this is the CPU-bound
-/// decode/resize step).
 /// A cached image is there and starts like an image file: an empty or damaged
 /// one (a power cut mid-write, another program) is downloaded again rather
 /// than served forever. Reads only the first bytes.
@@ -1866,6 +1854,18 @@ fn cached_image_ok(path: &Path) -> bool {
     n > 0 && image::guess_format(&head[..n]).is_ok()
 }
 
+/// Downscales `bytes` to `kind`'s target width (see
+/// [`AssetKind::downscale_target_width`]), preserving aspect ratio, if the
+/// source is wider than that target. Re-encodes as PNG regardless of the
+/// source format (every valorant-api image asset is PNG or JPEG; PNG is a
+/// safe, lossless, universally-supported cache format for both). Returns
+/// `bytes` unchanged for a kind with no downscale target, or a source
+/// already at/under the target width.
+///
+/// A free function (not a method) so it can be moved into a
+/// [`tokio::task::spawn_blocking`] closure by value, with no `&self`
+/// lifetime to fight (fix-round item 10 / R37 — this is the CPU-bound
+/// decode/resize step).
 fn downscale_image(kind: AssetKind, bytes: Vec<u8>) -> Result<Vec<u8>, AssetError> {
     let Some(target_width) = kind.downscale_target_width() else {
         return Ok(bytes);
@@ -1894,6 +1894,22 @@ fn downscale_image(kind: AssetKind, bytes: Vec<u8>) -> Result<Vec<u8>, AssetErro
         .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
         .map_err(|e| AssetError::Decode(e.to_string()))?;
     Ok(out)
+}
+
+/// [`load_tables_from_disk_sync`], where a download can replace what does
+/// not decode: a damaged `contenttiers.json` is an error too (a missing one,
+/// from before content tiers, still is none known).
+fn load_tables_from_disk_sync_strict(dir: &Path) -> Result<Tables, AssetError> {
+    let path = dir.join("contenttiers.json");
+    let content_tiers = if path.is_file() {
+        read_json(&path)?
+    } else {
+        Default::default()
+    };
+    Ok(Tables {
+        content_tiers,
+        ..load_tables_from_disk_sync(dir)?
+    })
 }
 
 fn load_tables_from_disk_sync(dir: &Path) -> Result<Tables, AssetError> {

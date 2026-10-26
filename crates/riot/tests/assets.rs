@@ -521,6 +521,18 @@ async fn an_unreadable_cached_table_is_downloaded_again() {
         !again.refresh_tables().await.unwrap(),
         "the disk copy is whole again"
     );
+
+    // A damaged content-tier table too (a missing one is a cache from before
+    // content tiers; that one is fetched on its own).
+    std::fs::write(dir.path().join("contenttiers.json"), b"{").unwrap();
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    assert!(cache.refresh_tables().await.unwrap(), "downloaded again");
+    assert!(
+        std::fs::metadata(dir.path().join("contenttiers.json"))
+            .unwrap()
+            .len()
+            > 1
+    );
 }
 
 #[tokio::test]

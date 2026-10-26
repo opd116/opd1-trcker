@@ -418,10 +418,13 @@ impl RiotSession {
         // validation. `no_gzip`: with reqwest's `gzip` feature on, every
         // client asks for gzip by default; the local client talks to
         // 127.0.0.1, where compression only costs CPU, so it opts out.
+        // `no_proxy`: a system or `HTTP(S)_PROXY`/`ALL_PROXY` proxy must never
+        // see the local calls (they carry the lockfile's Basic auth).
         let local_client = Client::builder()
             .danger_accept_invalid_certs(true)
             .timeout(local_timeout)
             .no_gzip()
+            .no_proxy()
             .build()
             .map_err(http_error)?;
         // `gzip`: pd/glz bodies (match-details is about 1 MB) come back

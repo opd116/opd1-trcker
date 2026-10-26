@@ -476,6 +476,54 @@ async fn ensure_image_downloads_once_and_downscales_agent_icon() {
 }
 
 #[tokio::test]
+async fn a_damaged_cached_image_is_downloaded_again() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    Mock::given(method("GET"))
+        .and(path("/img/agent.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(64, 64)))
+        .mount(&server)
+        .await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    cache.refresh_tables().await.unwrap();
+    let file = cache
+        .ensure_image(AssetKind::Agent, AGENT_UUID)
+        .await
+        .unwrap();
+    for damage in [&b""[..], &[0u8; 64][..]] {
+        std::fs::write(&file, damage).unwrap();
+        cache
+            .ensure_image(AssetKind::Agent, AGENT_UUID)
+            .await
+            .unwrap();
+        assert_eq!(png_dimensions(&std::fs::read(&file).unwrap()), (64, 64));
+    }
+}
+
+#[tokio::test]
+async fn an_unreadable_cached_table_is_downloaded_again() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    AssetCache::with_base(dir.path().to_path_buf(), server.uri())
+        .refresh_tables()
+        .await
+        .unwrap();
+    std::fs::write(dir.path().join("agents.json"), b"{").unwrap();
+
+    // The next start: same version, a damaged file.
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    cache.refresh_tables().await.expect("downloaded again");
+    assert!(cache.meta().is_ok());
+    let again = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    assert!(
+        !again.refresh_tables().await.unwrap(),
+        "the disk copy is whole again"
+    );
+}
+
+#[tokio::test]
 async fn ensure_image_downscales_map_splash_to_1000_wide_preserving_aspect() {
     let dir = tempdir();
     let server = MockServer::start().await;
@@ -821,11 +869,24 @@ async fn ensure_image_returns_not_found_for_an_unknown_agent_uuid() {
     let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
     cache.refresh_tables().await.unwrap();
 
-    let err = cache
-        .ensure_image(AssetKind::Agent, "not-a-real-uuid")
+    // Well-formed ids no table knows: the table lookup, not the id check,
+    // says NotFound, and no image is asked for.
+    let unknown = "ffffffff-0000-0000-0000-000000000000";
+    for kind in [AssetKind::Agent, AssetKind::MapList, AssetKind::MapSplash] {
+        let err = cache.ensure_image(kind, unknown).await.unwrap_err();
+        assert!(
+            matches!(err, opd1_riot::assets::AssetError::NotFound),
+            "{kind:?}: {err:?}"
+        );
+    }
+    let images = server
+        .received_requests()
         .await
-        .unwrap_err();
-    assert!(matches!(err, opd1_riot::assets::AssetError::NotFound));
+        .unwrap()
+        .iter()
+        .filter(|r| !r.url.path().starts_with("/v1/"))
+        .count();
+    assert_eq!(images, 0);
 }
 
 // ---------------------------------------------------------------------

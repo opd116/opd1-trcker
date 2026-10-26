@@ -1036,14 +1036,22 @@ impl AssetCache {
 
     async fn refresh_with_known_version(&self, version: String) -> Result<bool, AssetError> {
         if self.disk_cache_matches(&version) {
-            self.stale.store(false, Ordering::Relaxed);
-            let tables = blocking({
+            let loaded = blocking({
                 let dir = self.dir.clone();
                 move || load_tables_from_disk_sync(&dir)
             })
-            .await?;
-            self.set_tables(tables, None);
-            return Ok(false);
+            .await;
+            match loaded {
+                Ok(tables) => {
+                    self.stale.store(false, Ordering::Relaxed);
+                    self.set_tables(tables, None);
+                    return Ok(false);
+                }
+                // A damaged file (a power cut mid-write, another program):
+                // the current version is downloaded again below, which
+                // rewrites every table and the manifest.
+                Err(e) => log::warn!("cached asset tables unreadable, downloading again: {e}"),
+            }
         }
 
         // A cache from before content tiers existed: its four tables are
@@ -1407,7 +1415,7 @@ impl AssetCache {
 
         // Re-check after acquiring the lock: another caller may have just
         // finished downloading this exact asset while we were waiting.
-        if file_path.is_file() {
+        if cached_image_ok(&file_path) {
             return Ok(file_path);
         }
 
@@ -1845,6 +1853,19 @@ impl AssetCache {
 /// [`tokio::task::spawn_blocking`] closure by value, with no `&self`
 /// lifetime to fight (fix-round item 10 / R37 — this is the CPU-bound
 /// decode/resize step).
+/// A cached image is there and starts like an image file: an empty or damaged
+/// one (a power cut mid-write, another program) is downloaded again rather
+/// than served forever. Reads only the first bytes.
+fn cached_image_ok(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let n = file.read(&mut head).unwrap_or(0);
+    n > 0 && image::guess_format(&head[..n]).is_ok()
+}
+
 fn downscale_image(kind: AssetKind, bytes: Vec<u8>) -> Result<Vec<u8>, AssetError> {
     let Some(target_width) = kind.downscale_target_width() else {
         return Ok(bytes);

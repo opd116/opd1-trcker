@@ -735,6 +735,10 @@ impl Poller {
         if self.stage != Stage::Closed && lock(&self.st.live).comp_backfill_resume_due() {
             self.ensure_worker(session);
         }
+        // R160: and for the own-history run a request hold paused.
+        if self.stage != Stage::Closed && lock(&self.st.live).backfill_resume_due() {
+            self.ensure_worker(session);
+        }
         Ok(())
     }
 
@@ -1215,16 +1219,34 @@ impl Poller {
         }
     }
 
+    /// The user's own party, while no answer named it yet (every party has
+    /// the user, so empty means unknown): Agent Select asks at its start and
+    /// again at each re-poll, so a failed first lookup never leaves the
+    /// user's party with a stripe or a ⟲ badge.
+    async fn ask_self_party_while_unknown(
+        &mut self,
+        session: &RiotSession,
+        me: &str,
+    ) -> Result<(), RiotError> {
+        if !self.self_party.is_empty() {
+            return Ok(());
+        }
+        match self.party_response(session, me).await {
+            Ok(party) => {
+                self.self_party = party.members.iter().map(|m| m.subject.clone()).collect();
+            }
+            Err(RiotError::ClientGone) => return Err(RiotError::ClientGone),
+            Err(e) => log::debug!("own party lookup failed: {e}"),
+        }
+        Ok(())
+    }
+
     pub(crate) async fn fetch_pregame(
         &mut self,
         session: &Arc<RiotSession>,
         me: &str,
     ) -> Result<(), RiotError> {
-        if self.self_party.is_empty() {
-            if let Ok(party) = self.party_response(session, me).await {
-                self.self_party = party.members.iter().map(|m| m.subject.clone()).collect();
-            }
-        }
+        self.ask_self_party_while_unknown(session, me).await?;
         let match_id = session.pregame_player(me).await?.match_id;
         let m = session.pregame_match(&match_id).await?;
         let roster = from_pregame(&m, me, &self.self_party);
@@ -1251,9 +1273,12 @@ impl Poller {
         let Some(match_id) = self.pregame_match_id.clone() else {
             return Ok(());
         };
+        let me = session.self_puuid().to_string();
+        if let Err(RiotError::ClientGone) = self.ask_self_party_while_unknown(session, &me).await {
+            return Err(Stop::Reconnect("Riot client closed"));
+        }
         match session.pregame_match(&match_id).await {
             Ok(m) => {
-                let me = session.self_puuid().to_string();
                 let roster = from_pregame(&m, &me, &self.self_party);
                 lock(&self.st.live)
                     .match_tiers

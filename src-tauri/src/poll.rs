@@ -583,10 +583,12 @@ impl Poller {
         let _ = crate::sync::fetch_self_name(&self.st, &session).await;
 
         // One cheap /v1/version check per client start (new patch → new
-        // tables); the tables themselves only download when it changed.
+        // tables); the tables themselves only download when it changed. A
+        // reconnect that only retries a failing presence is no client start.
         let st = self.st.clone();
+        let recheck = self.presence_drops == 0;
         tauri::async_runtime::spawn(async move {
-            if st.ensure_tables(true).await.is_ok() {
+            if st.ensure_tables(recheck).await.is_ok() {
                 st.publish();
                 // B2: with the user's puuid known (just above), the tables
                 // may be what makes My Stats computable.
@@ -640,9 +642,20 @@ impl Poller {
         self.match_queue = None;
         self.presence_stage = Stage::Closed;
         // A deliberate reconnect (e.g. VALORANT started) goes straight to
-        // `connect`, not through the failure backoff.
-        self.connect_failures = 0;
-        self.next_connect = Instant::now();
+        // `connect`, not through the failure backoff. So does the first drop
+        // for a failing presence; the ones after it back off like failed
+        // connects (R47): each reconnect re-reads ShooterGame.log and asks
+        // valorant-api, which must not run every ~20 s for as long as the
+        // client's presence fails. A rewritten lockfile or "Retry now" still
+        // connects at once.
+        if self.presence_drops >= 2 {
+            let delay = connect_retry_delay(self.presence_drops - 1);
+            self.next_connect = Instant::now() + delay;
+            self.status_error(CLIENT_UNREACHABLE, delay);
+        } else {
+            self.connect_failures = 0;
+            self.next_connect = Instant::now();
+        }
         self.enter_closed().await;
     }
 

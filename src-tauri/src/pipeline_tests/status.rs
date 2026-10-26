@@ -297,6 +297,40 @@ async fn a_reconnect_whose_presence_still_fails_is_unreachable_not_waiting() {
     assert_eq!(status(&h).conn, ConnState::Ok);
 }
 
+/// Presence ticks until the poller gives the session up.
+async fn fail_until_drop(poller: &mut Poller, session: &Arc<RiotSession>) {
+    for _ in 0..crate::poll::LOST_MAX_ATTEMPTS * 2 {
+        if poller.presence_tick(session).await.is_err() {
+            return;
+        }
+    }
+    panic!("never dropped");
+}
+
+#[tokio::test]
+async fn repeated_presence_failure_drops_back_off_instead_of_reconnecting_at_once() {
+    let h = harness().await;
+    let (_, fail) = presence(&h, blob("MENUS", "unrated")).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    // The first drop reconnects at once (the existing rule).
+    fail_until_drop(&mut poller, &h.session).await;
+    poller.note_session_lost("presence keeps failing");
+    poller.drop_session().await;
+    assert_ne!(status(&h).retry_in_ms, Some(5_000));
+    // The second waits the connect backoff's first step, and says so.
+    poller.on_connected(h.session.clone()).await;
+    fail_until_drop(&mut poller, &h.session).await;
+    poller.note_session_lost("presence keeps failing");
+    poller.drop_session().await;
+    let s = status(&h);
+    assert_eq!(s.conn, ConnState::Error);
+    assert_eq!(s.error_code.as_deref(), Some(CLIENT_UNREACHABLE));
+    assert_eq!(s.retry_in_ms, Some(5_000));
+}
+
 #[tokio::test]
 async fn a_lost_client_counts_its_reconnects_then_falls_to_unreachable() {
     let h = harness().await;

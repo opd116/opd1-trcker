@@ -709,6 +709,19 @@ async fn a_backfill_match_stored_after_its_run_was_dropped_still_asks_its_player
 }
 
 #[tokio::test]
+async fn backfill_a_missing_match_is_remembered_as_missing() {
+    // R165: Riot no longer has entry 4: a task that waited on the backfill's
+    // download reads the 404 instead of counting a failure.
+    let h = harness().await;
+    let mut feed = Feed::new(10);
+    feed.details_status.insert(4, 404);
+    mount_feed(&h.server, feed).await;
+    store_anchor(&h.st, 9, base_ms()).await;
+    run_backfill(&h).await;
+    assert!(h.st.details_404(&entry_id(4)));
+}
+
+#[tokio::test]
 async fn backfill_a_hold_pauses_the_run_and_it_resumes_after_it() {
     // R160: a 429 elsewhere set the `other` family's hold (a minute). The
     // run's page is refused locally: the run waits for the hold, it does

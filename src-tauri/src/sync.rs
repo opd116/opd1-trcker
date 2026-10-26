@@ -1624,6 +1624,8 @@ pub async fn backfill_step(st: &Arc<AppState>, session: &Arc<RiotSession>) -> Re
             }
             Err(e @ RiotError::Status(404, _)) => {
                 log::warn!("backfill: match {} skipped: {e}", short(&id));
+                // R165: a task waiting on this download sees the 404 too.
+                st.note_details_404(&id);
                 pop(st);
             }
             // R160: nothing was sent; the id stays first for after the hold.

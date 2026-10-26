@@ -286,7 +286,7 @@ pub fn match_from_details(
         queue_id: info.queue_id.clone(),
         start_ms: info.game_start_millis,
         winning_team,
-        is_ranked: info.is_ranked,
+        is_ranked: info.is_ranked.unwrap_or(info.queue_id == "competitive"),
         rounds_played,
         game_length_ms: info.game_length_millis,
     };

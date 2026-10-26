@@ -655,6 +655,7 @@ fn details_body() -> Value {
 fn match_details_tolerates_soft_fields_missing_or_null() {
     for field in [
         "/matchInfo/mapId",
+        "/matchInfo/isRanked",
         "/matchInfo/completionState",
         "/matchInfo/gameLengthMillis",
         "/players/0/gameName",

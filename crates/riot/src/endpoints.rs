@@ -785,7 +785,11 @@ pub struct MatchInfo {
     pub game_start_millis: i64,
     #[serde(alias = "queueID")]
     pub queue_id: String,
-    pub is_ranked: bool,
+    /// Optional (R166): missing or `null` must not fail a match that is stored
+    /// for good; `to_core` derives it from the queue then, never a made-up
+    /// `false`.
+    #[serde(default)]
+    pub is_ranked: Option<bool>,
     /// `z.enum(['Surrendered', 'Completed', 'VoteDraw', ''])` per
     /// techchrism's types — not in the Task 3 fixture at all, so this
     /// defaults to `""` (itself one of the documented values) rather than

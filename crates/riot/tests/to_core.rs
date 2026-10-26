@@ -351,6 +351,26 @@ fn match_from_details_handles_null_stats_teams_and_round_results() {
 // ---------------------------------------------------------------------
 
 #[test]
+fn a_missing_or_null_is_ranked_is_derived_from_the_queue_not_defaulted_to_false() {
+    for (queue, ranked) in [("competitive", true), ("unrated", false)] {
+        for remove in [true, false] {
+            let mut value: serde_json::Value =
+                serde_json::from_str(&fixture("match_details.json")).unwrap();
+            let info = value["matchInfo"].as_object_mut().unwrap();
+            if remove {
+                info.remove("isRanked");
+            } else {
+                info.insert("isRanked".into(), serde_json::Value::Null);
+            }
+            info.insert("queueId".into(), serde_json::json!(queue));
+            let details: MatchDetailsResponse = serde_json::from_value(value).unwrap();
+            let (m, _teams, _players) = match_from_details(&details);
+            assert_eq!(m.is_ranked, ranked, "{queue}, removed: {remove}");
+        }
+    }
+}
+
+#[test]
 fn is_ranked_false_derives_directly_from_match_info() {
     let mut value: serde_json::Value =
         serde_json::from_str(&fixture("match_details.json")).unwrap();

@@ -8,7 +8,9 @@ const api = vi.hoisted(() => ({
 }));
 vi.mock("./api", () => api);
 
-const { DEFAULT_SETTINGS, applyMarks, applyStoredSettings, marks, setNote, settings, updateSettings } = await import("./appdata.svelte");
+const { DEFAULT_SETTINGS, NOTE_MAX_CHARS, applyMarks, applyStoredSettings, marks, setNote, settings, updateSettings } = await import(
+  "./appdata.svelte"
+);
 
 /** A promise with its resolve outside, to answer a call when the test says so. */
 function deferred<T>() {
@@ -58,6 +60,22 @@ describe("updateSettings", () => {
   });
 });
 
+describe("a failed settings save", () => {
+  afterEach(() => vi.clearAllMocks());
+
+  it("puts the stored value back instead of showing one that never took effect", async () => {
+    applyStoredSettings({ ...STORED, tray: true });
+    api.saveSettings.mockRejectedValueOnce("settings not stored");
+    const done = updateSettings({ tray: false });
+    expect(get(settings).tray).toBe(false);
+    await done;
+    expect(get(settings).tray).toBe(true);
+    // A later stored copy is not overlaid with the failed change either.
+    applyStoredSettings({ ...STORED, tray: true, sound: true });
+    expect(get(settings)).toMatchObject({ tray: true, sound: true });
+  });
+});
+
 describe("notes", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -65,6 +83,17 @@ describe("notes", () => {
   });
 
   const MARKS: PlayerMarks = { saved: ["p1"], notes: {}, notSmurf: [] };
+
+  it("a note is cut at Rust's limit (code points), so what shows is what is stored", async () => {
+    vi.useFakeTimers();
+    api.setNote.mockResolvedValue(undefined);
+    applyMarks(MARKS);
+    const long = "😀".repeat(NOTE_MAX_CHARS + 5);
+    setNote("p2", long);
+    expect([...get(marks).notes.p2!].length).toBe(NOTE_MAX_CHARS);
+    await vi.advanceTimersByTimeAsync(400);
+    expect([...api.setNote.mock.calls[0]![1]].length).toBe(NOTE_MAX_CHARS);
+  });
 
   it("an echo of an earlier write does not undo what was typed after it", async () => {
     vi.useFakeTimers();

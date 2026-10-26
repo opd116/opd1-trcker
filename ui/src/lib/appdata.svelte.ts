@@ -12,6 +12,16 @@ import { reportError } from "./uilog";
 /** null until the first answer. */
 export const appStatus = writable<AppStatus | null>(null);
 
+/** When the current status arrived: its `retryInMs` counts from then (an unchanged status is not sent again). */
+let statusArrivedMs = 0;
+export const statusArrivedAt = (): number => statusArrivedMs;
+
+/** A status from Rust (snapshot or event), stamped with its arrival so every view counts the same retry down. */
+export function applyStatus(s: AppStatus): void {
+  statusArrivedMs = Date.now();
+  appStatus.set(s);
+}
+
 /** The design's defaults until the stored copy arrives, so nothing waits on it. */
 export const DEFAULT_SETTINGS: Settings = {
   highlight: true,
@@ -58,6 +68,9 @@ export async function toggleSaved(puuid: string, on?: boolean): Promise<void> {
 
 const noteTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
+/** Rust's `NOTE_MAX_CHARS` (crates/core/src/db/marks.rs): a longer note is cut there. The textareas stop at it. */
+export const NOTE_MAX_CHARS = 2000;
+
 /**
  * Notes typed here that Rust has not confirmed yet (waiting for the 400ms timer, or written and not answered). A
  * `marks` event can carry an older copy of such a note (the echo of an earlier write): the typed text wins until its
@@ -82,7 +95,10 @@ export function applyMarks(m: PlayerMarks): void {
 }
 
 /** "Saves as you type": the store changes at once, the write goes out 400ms after the last keystroke. */
-export function setNote(puuid: string, note: string, delayMs = 400): void {
+export function setNote(puuid: string, typed: string, delayMs = 400): void {
+  // Code points, as Rust's cut: what shows is what is stored.
+  const chars = [...typed];
+  const note = chars.length > NOTE_MAX_CHARS ? chars.slice(0, NOTE_MAX_CHARS).join("") : typed;
   typedNotes.set(puuid, note);
   optimistic((m) => {
     withNote(m, puuid, note);
@@ -121,8 +137,12 @@ const settingsReady = new Promise<void>((resolve) => (settingsLoaded = resolve))
 /** Saves go out one at a time, in order, so an older write never lands over a newer one. */
 let saving: Promise<void> = Promise.resolve();
 
+/** The last copy Rust stored (what a failed save falls back to). */
+let lastStoredSettings: Settings | null = null;
+
 /** The stored settings from Rust (snapshot, event or a save's answer), with the changes not stored yet on top. */
 export function applyStoredSettings(s: Settings): void {
+  lastStoredSettings = s;
   settings.set({ ...s, ...pendingSettings });
   settingsLoaded();
 }
@@ -138,14 +158,23 @@ export function updateSettings(patch: Partial<Settings>): Promise<void> {
     await settingsReady;
     const sent = pendingSettings;
     if (Object.keys(sent).length === 0) return; // an earlier save in the queue carried it
-    try {
-      const stored = await api.saveSettings(get(settings));
+    // The keys this save carried leave the pending set either way (unless changed again meanwhile: that newer change
+    // has its own queued save).
+    const settle = () => {
       const rest = { ...pendingSettings };
       for (const k of Object.keys(sent) as (keyof Settings)[]) if (rest[k] === sent[k]) delete rest[k];
       pendingSettings = rest;
+    };
+    try {
+      const stored = await api.saveSettings(get(settings));
+      settle();
       applyStoredSettings(stored);
     } catch (err) {
       reportError("set_settings", err);
+      // Not stored, so not applied either: the toggle goes back to what Rust has, instead of showing a value that
+      // never took effect.
+      settle();
+      settings.set({ ...(lastStoredSettings ?? DEFAULT_SETTINGS), ...pendingSettings });
     }
   });
   return saving;
@@ -186,7 +215,7 @@ export async function startAppData(): Promise<void> {
     const demo = await import("./demo/v2");
     demo.listenMarks(applyMarks);
     demo.listenSettings(applyStoredSettings);
-    demo.listenStatus((s) => appStatus.set(s));
+    demo.listenStatus(applyStatus);
     // The demo's status follows its scene.
     live.subscribe((l) => demo.pushStatus(l));
     applyMarks(demo.v2Marks());
@@ -195,7 +224,7 @@ export async function startAppData(): Promise<void> {
   }
 
   await Promise.all([
-    follow<AppStatus>((cb) => listen<AppStatus>("status", (e) => cb(e.payload)), () => api.appStatus(), (s) => appStatus.set(s), "status"),
+    follow<AppStatus>((cb) => listen<AppStatus>("status", (e) => cb(e.payload)), () => api.appStatus(), applyStatus, "status"),
     follow<PlayerMarks>((cb) => listen<PlayerMarks>("marks", (e) => cb(e.payload)), api.playerMarks, applyMarks, "marks"),
     follow<Settings>((cb) => listen<Settings>("settings", (e) => cb(e.payload)), api.getSettings, applyStoredSettings, "settings"),
   ]);

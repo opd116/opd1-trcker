@@ -10,7 +10,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { profileExtras } from "../../lib/api";
-  import { dismissSmurf, isSaved, marks, noteOf, setNote, settings, toggleSaved } from "../../lib/appdata.svelte";
+  import { dismissSmurf, isSaved, marks, NOTE_MAX_CHARS, noteOf, setNote, settings, toggleSaved } from "../../lib/appdata.svelte";
   import { assetUrl } from "../../lib/assets";
   import { retryBg, retryImg } from "../../lib/imgRetry";
   import { agentName } from "../../lib/meta";
@@ -307,6 +307,7 @@
           {@attach focusNow}
           aria-label={`Note on ${nv?.ref ?? "this player"}`}
           placeholder="Playstyle, comms, anything worth remembering…"
+          maxlength={NOTE_MAX_CHARS}
           value={note}
           oninput={(e) => onNoteInput(e.currentTarget.value)}
         ></textarea>
@@ -343,6 +344,7 @@
             <textarea
               aria-label="Personal notes"
               placeholder="Goals for this session, warm-up routine, things to work on…"
+              maxlength={NOTE_MAX_CHARS}
               value={note}
               oninput={(e) => setNote(puuid, e.currentTarget.value)}
             ></textarea>

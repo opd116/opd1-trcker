@@ -4,6 +4,7 @@
 -->
 <script lang="ts">
   import { retryNow } from "../../lib/api";
+  import { statusArrivedAt } from "../../lib/appdata.svelte";
   import { shortLockfilePath } from "../../lib/format";
   import { tip } from "../../lib/tooltip.svelte";
   import type { AppStatus } from "../../lib/types";
@@ -12,8 +13,11 @@
   let { status }: { status: AppStatus } = $props();
 
   let nowMs = $state(Date.now());
-  /** When the next automatic retry happens: the status's `retryInMs`, counted from when that status arrived. */
-  const deadline = $derived(status.retryInMs === null ? null : Date.now() + status.retryInMs);
+  /**
+   * When the next automatic retry happens: the status's `retryInMs`, counted from when that status arrived (not from
+   * this view's mount: coming back to Live must not restart the count).
+   */
+  const deadline = $derived(status.retryInMs === null ? null : statusArrivedAt() + status.retryInMs);
   $effect(() => {
     if (deadline === null) return;
     nowMs = Date.now();

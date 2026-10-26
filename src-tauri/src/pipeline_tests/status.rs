@@ -402,20 +402,32 @@ async fn valorant_starting_is_no_lost_connection_and_neither_is_a_failure_with_t
 
 #[tokio::test]
 async fn a_signed_out_client_is_asked_again_at_the_base_pace() {
-    // The client answers with no account: no backoff builds up, so a
-    // sign-in after a long signed-out spell is seen within 5 s.
+    // The client answers with no account: no backoff builds up (and what the
+    // failures before it built is dropped), so a sign-in after a long
+    // signed-out spell is seen within 5 s.
     let h = harness().await;
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(3)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
     Mock::given(method("GET"))
         .and(path("/entitlements/v1/token"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "accessToken": "", "entitlements": [], "issuer": "i", "subject": "", "token": ""
         })))
-        .with_priority(1)
+        .with_priority(2)
         .mount(&h.server)
         .await;
     let mut poller = Poller::held(h.st.clone());
     poller.local_app_data = Some(h._dir.path().to_path_buf());
-    for _ in 0..4 {
+    for _ in 0..3 {
+        disconnected_tick_now(&h, &mut poller).await;
+    }
+    assert_eq!(status(&h).retry_in_ms, Some(20_000), "three failures");
+    for _ in 0..2 {
         disconnected_tick_now(&h, &mut poller).await;
     }
     assert_eq!(status(&h).retry_in_ms, Some(5_000));

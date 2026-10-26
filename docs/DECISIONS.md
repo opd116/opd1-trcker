@@ -334,6 +334,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **What:** Repeated connect failures back off (5s, then up to 30-60s) (a reviewer Minor upgraded).
 - **Why:** Idle lightness: a failing connect re-reads `ShooterGame.log` every 5s forever.
 - **Cost:** Slower reconnect after a Riot Client crash.
+- **Amended (2026-10-26, bug hunt):** a client that answers with no account (signed out) gets no backoff: it is asked every 5 s so a sign-in is seen at once. Connect asks `/entitlements/v1/token` before it reads the log, so such an attempt is one small local call.
 - **Status:** active
 
 ### R48 — Post-match follow-up checks comp_updates

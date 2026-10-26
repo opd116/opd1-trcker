@@ -303,9 +303,10 @@ impl GameWatch {
 }
 
 /// Wait before the next `RiotSession::connect` after `failures`
-/// consecutive failures: 5s, 10s, 20s, 40s, then 60s. A stale lockfile or
-/// a logged-out Riot Client then costs one attempt a minute, not one every
-/// 5s (each attempt re-reads `ShooterGame.log` and calls the local API).
+/// consecutive failures: 5s, 10s, 20s, 40s, then 60s. A stale lockfile then
+/// costs one attempt a minute, not one every 5s (each attempt reads
+/// `ShooterGame.log` and calls the local API). A signed-out client is not
+/// counted (R47 amended): its attempt stops at the first local call.
 pub fn connect_retry_delay(failures: u32) -> Duration {
     const BASE: u64 = 5;
     const CAP: u64 = 60;

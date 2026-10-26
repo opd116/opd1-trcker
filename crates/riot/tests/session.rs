@@ -1850,6 +1850,31 @@ async fn a_signed_out_client_is_no_account_on_connect_or_refresh() {
 }
 
 #[tokio::test]
+async fn a_signed_out_client_is_found_before_the_games_log_is_read() {
+    // R47 amended: the signed-out retry is one local call; with no log at all
+    // the answer is still "signed out", not "shards unavailable".
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "", "entitlements": [], "issuer": "i", "subject": "", "token": ""
+        })))
+        .mount(&server)
+        .await;
+    let Err(err) =
+        RiotSession::connect_with_overrides(tmp.path(), ConnectOverrides::default()).await
+    else {
+        panic!("no session for a signed-out client");
+    };
+    assert!(
+        matches!(&err, RiotError::AuthFailed(m) if m == opd1_riot::session::SIGNED_OUT),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
 async fn the_account_check_reconnects_only_for_another_account() {
     let tmp = TempDir::new();
     write_shooter_log(tmp.path());

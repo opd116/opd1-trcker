@@ -399,13 +399,6 @@ impl RiotSession {
             .map_err(|_| RiotError::ClientGone)?;
         let lockfile = parse_lockfile(&raw_lockfile).map_err(|_| RiotError::ClientGone)?;
 
-        // Bytes, decoded lossily: one invalid UTF-8 byte anywhere in the game's
-        // log (a localized line, a crash dump) must not hide the shard lines.
-        let raw_log = std::fs::read(shooter_log_path(local_app_data))
-            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
-            .map_err(|_| RiotError::ShardsUnavailable)?;
-        let shards = parse_shards(&raw_log).ok_or(RiotError::ShardsUnavailable)?;
-
         let local_base = format!("{}://127.0.0.1:{}", lockfile.protocol, lockfile.port);
         let basic_auth = format!(
             "Basic {}",
@@ -427,6 +420,18 @@ impl RiotSession {
             .no_proxy()
             .build()
             .map_err(http_error)?;
+        // First, before the game's log is read: a signed-out client (no
+        // account, retried every 5 s) costs one small local call, not a read
+        // of a log that can be megabytes (R47).
+        let entitlements = fetch_entitlements(&local_client, &local_base, &basic_auth).await?;
+
+        // Bytes, decoded lossily: one invalid UTF-8 byte anywhere in the game's
+        // log (a localized line, a crash dump) must not hide the shard lines.
+        let raw_log = std::fs::read(shooter_log_path(local_app_data))
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .map_err(|_| RiotError::ShardsUnavailable)?;
+        let shards = parse_shards(&raw_log).ok_or(RiotError::ShardsUnavailable)?;
+
         // `gzip`: pd/glz bodies (match-details is about 1 MB) come back
         // compressed, as they do for Valorant-Scout's `requests`; reqwest
         // decodes them before `buffer_response`, so captures and parsing see
@@ -453,8 +458,6 @@ impl RiotSession {
         let shared_base = shared_override.unwrap_or_else(|| shared_base_url(&shards.pd));
         let valorant_api_base =
             valorant_api_base_override.unwrap_or_else(|| "https://valorant-api.com".to_string());
-
-        let entitlements = fetch_entitlements(&local_client, &local_base, &basic_auth).await?;
 
         let (client_version, client_version_source) = fetch_client_version(
             &local_client,

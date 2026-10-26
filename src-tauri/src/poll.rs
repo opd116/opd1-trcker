@@ -498,9 +498,11 @@ impl Poller {
                 // Signed out: no backoff, the sign-in can come any moment.
                 let signed_out =
                     matches!(&e, RiotError::AuthFailed(m) if m == opd1_riot::session::SIGNED_OUT);
-                if !signed_out {
-                    self.connect_failures = self.connect_failures.saturating_add(1);
-                }
+                self.connect_failures = if signed_out {
+                    0
+                } else {
+                    self.connect_failures.saturating_add(1)
+                };
                 let delay = connect_retry_delay(self.connect_failures);
                 self.next_connect = Instant::now() + delay;
                 self.status_connect_failed(delay);
@@ -1554,16 +1556,20 @@ impl Poller {
         let same_match = self.stage == Stage::Ingame && lock(&self.st.live).stage == Stage::Pregame;
         let slot = match own {
             Some(roster) if same_match => Some(Slot { roster, db }),
-            Some(roster) => Some(Slot {
-                roster: RosterPlayer {
+            Some(roster) => {
+                let roster = RosterPlayer {
                     team_id: String::new(),
                     character_id: String::new(),
                     selection_state: String::new(),
                     live_tier: None,
                     ..roster
-                },
-                db,
-            }),
+                };
+                // Kept cleared: a later placeholder of this match (Agent
+                // Select failed too, then In Game) never brings back the
+                // older match's agent.
+                lock(&self.st.live).self_roster = Some(roster.clone());
+                Some(Slot { roster, db })
+            }
             None => closed_self_slot(&me, db),
         };
         {
@@ -2678,6 +2684,18 @@ mod tests {
         poller.stage = Stage::Ingame;
         poller.show_self_only(&h.session).await;
         assert_eq!(lock(&h.st.live).slots[0].roster.character_id, "jett");
+
+        // Every fetch fails from the Lobby on: the placeholders of the next
+        // Agent Select and In Game never bring the last match's agent back.
+        for stage in [Stage::Menus, Stage::Pregame, Stage::Ingame] {
+            poller.stage = stage;
+            poller.show_self_only(&h.session).await;
+            assert_eq!(
+                lock(&h.st.live).slots[0].roster.character_id,
+                "",
+                "{stage:?}"
+            );
+        }
     }
 
     // R164 (review finding 7): the roster retry is a flat ~2 s for the first

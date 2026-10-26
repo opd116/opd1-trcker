@@ -297,6 +297,9 @@ pub(crate) struct Poller {
     /// The presence `queueId` while in a match — decides the post-match
     /// check for the match that just ended (R48).
     match_queue: Option<String>,
+    /// R189: a free-for-all's match id (the Lobby view stays, R41, so no
+    /// stage change records it): its end points the recap at it.
+    ffa_match_id: Option<String>,
     presence_errors: u32,
     party_key: Option<PartyKey>,
     self_party: HashSet<String>,
@@ -382,6 +385,7 @@ impl Poller {
             content_asked: false,
             version_from_presence_done: false,
             match_queue: None,
+            ffa_match_id: None,
             presence_errors: 0,
             party_key: None,
             self_party: HashSet::new(),
@@ -640,6 +644,7 @@ impl Poller {
         self.post_match = None;
         self.party_key = None;
         self.match_queue = None;
+        self.ffa_match_id = None;
         self.presence_stage = Stage::Closed;
         // A deliberate reconnect (e.g. VALORANT started) goes straight to
         // `connect`, not through the failure backoff. So does the first drop
@@ -867,6 +872,18 @@ impl Poller {
             lock(&self.st.live).match_end_ms = Some(now_ms());
         }
         let view = view_stage(presence.stage, presence.queue_id.as_deref());
+        // A free-for-all in progress (R41: the Lobby view stays): its match
+        // id, for the recap at its end. One call per match, about the user
+        // alone (core-game's player ref holds just the match id); nothing
+        // about the other players is fetched.
+        if presence.stage == Stage::Ingame && view == Stage::Menus && self.ffa_match_id.is_none() {
+            match session.coregame_player(session.self_puuid()).await {
+                Ok(r) if !r.match_id.is_empty() => self.ffa_match_id = Some(r.match_id),
+                Err(RiotError::ClientGone) => return Err(Stop::Reconnect("Riot client closed")),
+                // Asked again at the next tick while the match runs.
+                _ => {}
+            }
+        }
         if presence.stage != self.presence_stage {
             if view != presence.stage {
                 log::info!("free-for-all {:?}: keeping the lobby view", presence.stage);
@@ -888,6 +905,12 @@ impl Poller {
             }
         }
         if match_ended {
+            // R189: a free-for-all's end is the user's match end too: the
+            // recap follows it until they queue again (its view never left
+            // the Lobby, so `change_stage` did not set it).
+            if let Some(id) = self.ffa_match_id.take() {
+                self.st.set_status(|s| s.recap_match_id = Some(id));
+            }
             // After the stage change above: the Lobby's roster is installed
             // (and its worker running) before the backfill is queued.
             self.begin_backfill(session).await;

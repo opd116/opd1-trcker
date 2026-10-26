@@ -664,6 +664,45 @@ async fn a_match_end_forgets_this_matchs_name_answers() {
 }
 
 #[tokio::test]
+async fn a_deathmatch_end_points_the_recap_at_it_without_fetching_the_others() {
+    // R41: the Lobby view stays through a free-for-all, so no stage change
+    // records its match; R189's recap follows it all the same.
+    let h = harness().await;
+    mock_coregame(&h).await;
+    let (cell, _) = presence(&h, blob("MENUS", "deathmatch")).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    *cell.lock().unwrap() = Some(blob("INGAME", "deathmatch"));
+    poller.presence_tick(&h.session).await.unwrap();
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(
+        h.st.live_state().stage,
+        Stage::Menus,
+        "the Lobby view stays"
+    );
+    assert_eq!(status(&h).recap_match_id, None, "not before the match ends");
+    *cell.lock().unwrap() = Some(blob("MENUS", "deathmatch"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(status(&h).recap_match_id, Some(entry_id(0)));
+    assert_eq!(
+        count(&h.server, "GET", &format!("/core-game/v1/players/{ME}")).await,
+        1,
+        "the match id is asked once"
+    );
+    assert_eq!(
+        count(
+            &h.server,
+            "GET",
+            &format!("/core-game/v1/matches/{}", entry_id(0))
+        )
+        .await,
+        0,
+        "R41: nothing about the other players"
+    );
+}
+
+#[tokio::test]
 async fn the_game_closing_in_game_points_the_recap_at_the_match_too() {
     let h = harness().await;
     mock_coregame(&h).await;

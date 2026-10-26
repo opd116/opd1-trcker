@@ -48,13 +48,19 @@ pub const MAX_ERROR_CAPTURE_BYTES: usize = 4 * 1024;
 pub const LOG_EXCERPT_CHARS: usize = 200;
 
 /// Object keys (matched case-insensitively, by substring) whose value is
-/// always replaced regardless of type or shape.
+/// always replaced regardless of type or shape. `token` covers the
+/// entitlements JWT's keys (`token`, `entitlements_token`); a bare
+/// `entitlements` key is not one: the store's `Entitlements` lists are item
+/// ids (owned skins), and a JWT inside any value is caught by its shape.
+/// `ConnectionDetails` (core-game) holds the game server's address and the
+/// player's join key (`PlayerKey`).
 const REDACT_KEY_SUBSTRINGS: &[&str] = &[
     "accesstoken",
     "token",
-    "entitlements",
     "password",
     "authorization",
+    "connectiondetails",
+    "playerkey",
 ];
 
 const REDACTED: &str = "REDACTED";
@@ -614,6 +620,29 @@ mod tests {
         assert_eq!(parsed["accessToken"], REDACTED);
         assert_eq!(parsed["token"], REDACTED);
         assert_eq!(parsed["subject"], "aaaaaaaa-0000-0000-0000-000000000001");
+    }
+
+    #[test]
+    fn redact_bytes_redacts_the_game_server_join_details_but_keeps_owned_items() {
+        let body = json!({
+            "MatchID": "m1",
+            "ConnectionDetails": {
+                "GameServerHost": "203.0.113.7",
+                "GameServerObfuscatedIP": 123456,
+                "PlayerKey": "join-key"
+            },
+            "PlayerKey": "join-key",
+            "EntitlementsByTypes": [{ "Entitlements": [{ "ItemID": "skin-level-1" }] }],
+        });
+        let redacted = redact_bytes(body.to_string().as_bytes());
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        assert_eq!(parsed["ConnectionDetails"], REDACTED);
+        assert_eq!(parsed["PlayerKey"], REDACTED);
+        assert_eq!(parsed["MatchID"], "m1");
+        assert_eq!(
+            parsed["EntitlementsByTypes"][0]["Entitlements"][0]["ItemID"],
+            "skin-level-1"
+        );
     }
 
     #[test]

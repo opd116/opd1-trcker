@@ -26,8 +26,9 @@ export function span(ms: Num): string {
   const days = Math.floor(d / DAY);
   if (days < 7) return `${days}d`;
   if (days < 30) return `${Math.floor(days / 7)}w`;
-  if (days < 365) return `${Math.floor(days / 30)}mo`;
-  return `${Math.floor(days / 365)}y`;
+  // 360–364 days would read "12mo": a year from 12 months on.
+  if (days < 360) return `${Math.floor(days / 30)}mo`;
+  return `${Math.max(1, Math.floor(days / 365))}y`;
 }
 
 /** Time since a timestamp (epoch ms), e.g. "3h ago". */

@@ -55,6 +55,14 @@ export function sessionEnd(s: Pick<SessionSummary, "matches" | "startedMs">, now
   return nowMs - lastStart > SESSION_GAP_MS ? lastStart : nowMs;
 }
 
+/**
+ * Whether the session is still going at `nowMs`: its last match started at most 6 h ago. Rust drops an ended session
+ * only when it recomputes My Stats (a DB change), so a snapshot held overnight still carries yesterday's.
+ */
+export function sessionOpen(s: Pick<SessionSummary, "matches" | "startedMs">, nowMs: number): boolean {
+  return sessionEnd(s, nowMs) === nowMs;
+}
+
 /** "1 game", "12 games". */
 export const plural = (n: number, one: string, many = `${one}s`): string => `${n} ${n === 1 ? one : many}`;
 
@@ -310,7 +318,7 @@ export function statRowView(r: StatRow): StatRowView {
     bar: wrBarVar(wrPct),
     netRr: typeof net === "number" ? rrDelta(net) : DASH,
     netColor: typeof net !== "number" ? "var(--text-muted)" : net >= 0 ? "var(--win)" : "var(--loss)",
-    kd: Number.isFinite(r.kd) ? r.kd.toFixed(2) : DASH,
+    kd: r.kd !== null && Number.isFinite(r.kd) ? r.kd.toFixed(2) : DASH,
     tipTail: `${plural(r.games, "game")}, ${r.wins}W – ${r.losses}L` + (r.games < LOW_SAMPLE ? `\n${LOW_SAMPLE_TIP}` : ""),
   };
 }
@@ -360,7 +368,7 @@ export function weekdayTile(c: WinCell | undefined, i: number): WeekdayTile {
     bg: low ? `${HATCH},${tint === "transparent" ? "var(--card-head)" : tint}` : tint,
     dashed: low || wr === null,
     empty: wr === null,
-    tip: `${full}: ` + (g ? `${wr}% · ${w}W – ${g - w}L over ${plural(g, "game")}` : "no games played") + (low ? `\n${LOW_SAMPLE_TIP}` : ""),
+    tip: `${full}: ` + (g ? `${wr}% · ${w}W – ${c?.losses ?? 0}L over ${plural(g, "game")}` : "no games played") + (low ? `\n${LOW_SAMPLE_TIP}` : ""),
   };
 }
 
@@ -389,7 +397,7 @@ export function daypartRow(c: WinCell | undefined, i: number): DaypartRow {
     bar: wr === null ? "transparent" : wrBarVar(wr),
     empty: wr === null,
     g: g ? plural(g, "game") : "No games",
-    tip: `${v.d} (${v.h}): ` + (g ? `${wr}% · ${w}W – ${g - w}L` : "no games played, so no win rate") + (low ? `\n${LOW_SAMPLE_TIP}` : ""),
+    tip: `${v.d} (${v.h}): ` + (g ? `${wr}% · ${w}W – ${c?.losses ?? 0}L` : "no games played, so no win rate") + (low ? `\n${LOW_SAMPLE_TIP}` : ""),
   };
 }
 

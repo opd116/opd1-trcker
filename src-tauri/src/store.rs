@@ -27,7 +27,7 @@ use opd1_core::names::KnownName;
 use opd1_core::party::SharedRef;
 use opd1_core::stats::Act;
 use opd1_riot::endpoints::PlayerMmrResponse;
-use opd1_riot::to_core::current_rank_from_mmr;
+use opd1_riot::to_core::{current_rank_from_mmr, tier_without_rr};
 
 use crate::roster::is_ffa_queue;
 use crate::sync::TEAMMATE_WINDOW;
@@ -109,6 +109,17 @@ pub fn save_player(conn: &Connection, upd: &PlayerUpdate, now_ms: i64) -> Result
             upd.card_id,
             now_ms
         ],
+    )?;
+    Ok(())
+}
+
+/// R100: another player now hides their level, so the level kept from an
+/// earlier visible sighting is dropped too; their off-screen card then
+/// shows `Lv —` like their live one.
+pub fn forget_level(conn: &Connection, puuid: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE players SET account_level = 0 WHERE puuid = ?1",
+        params![puuid],
     )?;
     Ok(())
 }
@@ -466,6 +477,11 @@ pub fn load_my_stats(
     let current_rank = snapshot
         .as_ref()
         .and_then(|resp| current_rank_from_mmr(resp, &act.id));
+    // R166: a snapshot that names this act's tier without its RR: the card's
+    // rule (the tier, the RR of a stored update at that tier).
+    let mmr_tier_without_rr = snapshot
+        .as_ref()
+        .and_then(|resp| tier_without_rr(resp, &act.id));
     // R167: the live card's fallback (R154) — only without a snapshot, one
     // indexed read, no request. A snapshot is the authority.
     let has_mmr = snapshot.is_some();
@@ -480,6 +496,7 @@ pub fn load_my_stats(
         matches: &matches,
         comp_updates: &comp_updates,
         current_rank,
+        mmr_tier_without_rr,
         has_mmr,
         stored_tier,
         map_names,

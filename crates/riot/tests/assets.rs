@@ -476,6 +476,66 @@ async fn ensure_image_downloads_once_and_downscales_agent_icon() {
 }
 
 #[tokio::test]
+async fn a_damaged_cached_image_is_downloaded_again() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    Mock::given(method("GET"))
+        .and(path("/img/agent.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(64, 64)))
+        .mount(&server)
+        .await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    cache.refresh_tables().await.unwrap();
+    let file = cache
+        .ensure_image(AssetKind::Agent, AGENT_UUID)
+        .await
+        .unwrap();
+    for damage in [&b""[..], &[0u8; 64][..]] {
+        std::fs::write(&file, damage).unwrap();
+        cache
+            .ensure_image(AssetKind::Agent, AGENT_UUID)
+            .await
+            .unwrap();
+        assert_eq!(png_dimensions(&std::fs::read(&file).unwrap()), (64, 64));
+    }
+}
+
+#[tokio::test]
+async fn an_unreadable_cached_table_is_downloaded_again() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    AssetCache::with_base(dir.path().to_path_buf(), server.uri())
+        .refresh_tables()
+        .await
+        .unwrap();
+    std::fs::write(dir.path().join("agents.json"), b"{").unwrap();
+
+    // The next start: same version, a damaged file.
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    cache.refresh_tables().await.expect("downloaded again");
+    assert!(cache.meta().is_ok());
+    let again = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    assert!(
+        !again.refresh_tables().await.unwrap(),
+        "the disk copy is whole again"
+    );
+
+    // A damaged content-tier table too (a missing one is a cache from before
+    // content tiers; that one is fetched on its own).
+    std::fs::write(dir.path().join("contenttiers.json"), b"{").unwrap();
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    assert!(cache.refresh_tables().await.unwrap(), "downloaded again");
+    assert!(
+        std::fs::metadata(dir.path().join("contenttiers.json"))
+            .unwrap()
+            .len()
+            > 1
+    );
+}
+
+#[tokio::test]
 async fn ensure_image_downscales_map_splash_to_1000_wide_preserving_aspect() {
     let dir = tempdir();
     let server = MockServer::start().await;
@@ -821,11 +881,24 @@ async fn ensure_image_returns_not_found_for_an_unknown_agent_uuid() {
     let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
     cache.refresh_tables().await.unwrap();
 
-    let err = cache
-        .ensure_image(AssetKind::Agent, "not-a-real-uuid")
+    // Well-formed ids no table knows: the table lookup, not the id check,
+    // says NotFound, and no image is asked for.
+    let unknown = "ffffffff-0000-0000-0000-000000000000";
+    for kind in [AssetKind::Agent, AssetKind::MapList, AssetKind::MapSplash] {
+        let err = cache.ensure_image(kind, unknown).await.unwrap_err();
+        assert!(
+            matches!(err, opd1_riot::assets::AssetError::NotFound),
+            "{kind:?}: {err:?}"
+        );
+    }
+    let images = server
+        .received_requests()
         .await
-        .unwrap_err();
-    assert!(matches!(err, opd1_riot::assets::AssetError::NotFound));
+        .unwrap()
+        .iter()
+        .filter(|r| !r.url.path().starts_with("/v1/"))
+        .count();
+    assert_eq!(images, 0);
 }
 
 // ---------------------------------------------------------------------
@@ -1088,6 +1161,24 @@ async fn skin_requests(server: &MockServer) -> usize {
         .iter()
         .filter(|r| r.url.path().starts_with("/v1/weapons/skins"))
         .count()
+}
+
+#[tokio::test]
+async fn a_skin_that_cannot_be_written_is_still_kept_in_memory() {
+    // A file sits where the skins folder goes: the name still shows, and it
+    // is not downloaded again at every call.
+    let dir = tempdir();
+    std::fs::write(dir.path().join("skins"), b"not a directory").unwrap();
+    let server = MockServer::start().await;
+    mount_skin(&server, None).await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    for _ in 0..3 {
+        cache
+            .weapon_skin(SKIN_UUID, RED_CHROMA)
+            .await
+            .expect("named, even if not stored");
+    }
+    assert_eq!(skin_requests(&server).await, 1);
 }
 
 #[tokio::test]
@@ -1476,6 +1567,51 @@ async fn a_failed_table_fetch_with_no_disk_tables_is_still_an_error() {
     assert!(!cache.tables_stale(), "no tables at all is not 'stale'");
 }
 
+#[tokio::test]
+async fn tables_that_cannot_be_written_to_disk_are_still_used() {
+    // The cache dir cannot be created (a file is in its place): the tables
+    // just downloaded still serve this session.
+    let dir = tempdir();
+    let blocked = dir.path().join("assets");
+    std::fs::write(&blocked, b"not a directory").unwrap();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    let cache = AssetCache::with_base(blocked.join("inner"), server.uri());
+    cache
+        .refresh_tables()
+        .await
+        .expect("downloaded, even if not stored");
+    assert!(cache.meta().is_ok(), "names and acts are there");
+    // The version is known in memory too: the Skins screen works.
+    mount_weapons(&server, None).await;
+    cache
+        .skin_catalog()
+        .await
+        .expect("the catalog, though manifest.json was never written");
+}
+
+#[tokio::test]
+async fn a_failed_cache_write_leaves_no_temp_file_behind() {
+    // agents.json cannot be replaced (a directory is in its place): the
+    // write fails, and its temp file goes with it.
+    let dir = tempdir();
+    std::fs::create_dir_all(dir.path().join("agents.json")).unwrap();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    for _ in 0..3 {
+        let _ = cache.refresh_tables().await;
+    }
+    let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.contains(".tmp-"))
+        .collect();
+    assert!(leftovers.is_empty(), "{leftovers:?}");
+    assert!(cache.meta().is_ok());
+}
+
 // ---------------------------------------------------------------------
 // R189: the skin catalog, the collection and the Skins screen's images
 // ---------------------------------------------------------------------
@@ -1614,7 +1750,8 @@ async fn a_new_version_rebuilds_the_catalog_and_a_failed_rebuild_keeps_the_old_o
     // v2's tables answer, its /v1/weapons does not (no mock: 404).
     let second = MockServer::start().await;
     mount_all_tables(&second, "v2").await;
-    let cache = AssetCache::with_base(dir.path().to_path_buf(), second.uri());
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), second.uri())
+        .with_catalog_retry_after(std::time::Duration::ZERO);
     cache.refresh_tables().await.unwrap();
     let got = cache
         .collection(&[REAVER_LEVEL.to_string()], 1)
@@ -1627,6 +1764,37 @@ async fn a_new_version_rebuilds_the_catalog_and_a_failed_rebuild_keeps_the_old_o
     cache.skin_catalog().await.unwrap();
     assert_eq!(weapons_requests(&second).await, 2);
     cache.skin_catalog().await.unwrap();
+    assert_eq!(weapons_requests(&second).await, 2);
+}
+
+#[tokio::test]
+async fn a_failed_catalog_build_is_not_downloaded_again_on_every_call() {
+    let dir = tempdir();
+    let first = MockServer::start().await;
+    mount_all_tables(&first, "v1").await;
+    mount_weapons(&first, None).await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), first.uri());
+    cache.refresh_tables().await.unwrap();
+    cache.skin_catalog().await.unwrap();
+
+    // v2's /v1/weapons fails: the v1 catalog stands in, and the calls right
+    // after (one per uncached icon on the Skins screen) don't download again.
+    let second = MockServer::start().await;
+    mount_all_tables(&second, "v2").await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), second.uri());
+    cache.refresh_tables().await.unwrap();
+    for _ in 0..5 {
+        cache.skin_catalog().await.unwrap();
+    }
+    assert_eq!(weapons_requests(&second).await, 1);
+
+    // With no older catalog at all, those calls fail at once, also without
+    // a download each.
+    let empty = tempdir();
+    let fresh = AssetCache::with_base(empty.path().to_path_buf(), second.uri());
+    fresh.refresh_tables().await.unwrap();
+    assert!(fresh.skin_catalog().await.is_err());
+    assert!(fresh.skin_catalog().await.is_err());
     assert_eq!(weapons_requests(&second).await, 2);
 }
 

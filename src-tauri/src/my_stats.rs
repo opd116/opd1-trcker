@@ -210,6 +210,8 @@ pub(crate) async fn periodic(st: Arc<AppState>, every: Duration) {
     loop {
         tick.tick().await;
         notify(&st);
+        // An act that ended since the cards were built (no event says so).
+        st.act_tick().await;
     }
 }
 

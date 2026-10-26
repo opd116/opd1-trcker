@@ -68,6 +68,10 @@ pub struct MyStatsInput<'a> {
     pub comp_updates: &'a [CompUpdateRow],
     /// The current act's rank from the MMR snapshot.
     pub current_rank: Option<CurrentRank>,
+    /// R166: the snapshot named this act's tier but left its RR out
+    /// (`current_rank` is then `None`): the card shows that tier with the RR
+    /// of the newest stored update at it, else none — and so does this page.
+    pub mmr_tier_without_rr: Option<u8>,
     /// R167: a stored MMR snapshot of the user answered. It is the authority
     /// for the rank card, even when it has no rank this act (placements);
     /// only without one (`false`) does the card fall back like the live card
@@ -104,6 +108,7 @@ pub fn build(input: MyStatsInput) -> MyStats {
         matches,
         comp_updates,
         current_rank,
+        mmr_tier_without_rr,
         has_mmr,
         stored_tier,
         map_names,
@@ -153,7 +158,14 @@ pub fn build(input: MyStatsInput) -> MyStats {
     MyStats {
         puuid: puuid.to_string(),
         rank: rank_summary(
-            current_rank_of(act, current_rank, has_mmr, stored_tier, comp_updates),
+            current_rank_of(
+                act,
+                current_rank,
+                mmr_tier_without_rr,
+                has_mmr,
+                stored_tier,
+                comp_updates,
+            ),
             &played,
             &updates,
         ),
@@ -224,8 +236,11 @@ struct Tally {
     games: u32,
     wins: u32,
     losses: u32,
+    /// Kills and deaths only over matches with a stats row (`rounds` known,
+    /// R102), counted in `stat_games`.
     kills: i64,
     deaths: i64,
+    stat_games: u32,
     /// Score and rounds only over matches with a known round count.
     score: i64,
     rounds: i64,
@@ -241,9 +256,10 @@ impl Tally {
             MatchResultKind::Loss => self.losses += 1,
             MatchResultKind::Draw => {}
         }
-        self.kills += p.row.kills;
-        self.deaths += p.row.deaths;
         if let Some(rounds) = p.row.rounds.filter(|&r| r > 0) {
+            self.kills += p.row.kills;
+            self.deaths += p.row.deaths;
+            self.stat_games += 1;
             self.score += p.row.score;
             self.rounds += rounds;
         }
@@ -256,6 +272,7 @@ impl Tally {
         WinCell {
             games: self.games,
             wins: self.wins,
+            losses: self.losses,
             winrate: stats::winrate(self.wins.into(), self.games.into()),
         }
     }
@@ -269,7 +286,7 @@ impl Tally {
             losses: self.losses,
             winrate: self.wins as f32 / self.games as f32,
             net_rr: self.rr,
-            kd: stats::kd(self.kills, self.deaths),
+            kd: (self.stat_games > 0).then(|| stats::kd(self.kills, self.deaths)),
             acs: (self.rounds > 0).then(|| self.score as f32 / self.rounds as f32),
         }
     }
@@ -350,6 +367,7 @@ fn table(played: &[Played], key: fn(&CompMatchRow) -> Option<&str>) -> Vec<StatR
 fn current_rank_of(
     act: &Act,
     snapshot: Option<CurrentRank>,
+    tier_without_rr: Option<u8>,
     has_mmr: bool,
     stored_tier: Option<StoredTier>,
     comp_updates: &[CompUpdateRow],
@@ -359,6 +377,20 @@ fn current_rank_of(
             tier: c.tier,
             rr: Some(c.rr),
         });
+    }
+    if let Some(tier) = tier_without_rr {
+        // As the live card (R166): the tier stands, the RR only from an
+        // update at that tier.
+        let rr = rank_without_mmr(
+            Some(comp_updates),
+            None,
+            None,
+            std::slice::from_ref(act),
+            &act.id,
+        )
+        .filter(|r| r.tier == tier)
+        .and_then(|r| r.rr);
+        return Some(RankInfo { tier, rr });
     }
     if has_mmr {
         return None;

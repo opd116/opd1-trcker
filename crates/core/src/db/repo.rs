@@ -1185,10 +1185,14 @@ impl Repo {
         }
 
         let mut rows: Vec<(String, Agg)> = agg.into_iter().collect();
+        // A total order: the same Top 3 on every rebuild of the page. Ties
+        // (teammates of one match share its count and start) go by puuid,
+        // not by the HashMap's iteration order.
         rows.sort_by(|a, b| {
             b.1.count
                 .cmp(&a.1.count)
                 .then(b.1.most_recent_ms.cmp(&a.1.most_recent_ms))
+                .then_with(|| a.0.cmp(&b.0))
         });
         rows.truncate(limit);
 

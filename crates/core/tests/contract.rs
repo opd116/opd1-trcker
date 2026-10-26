@@ -1023,6 +1023,7 @@ fn my_stats_full() -> Value {
             tier: tier as u8,
             rr: rr as u16,
         }),
+        mmr_tier_without_rr: None,
         has_mmr: true,
         stored_tier: None,
         map_names: &names,
@@ -1128,6 +1129,7 @@ fn my_stats_edge() -> Value {
         matches: &matches,
         comp_updates: &[],
         current_rank: None,
+        mmr_tier_without_rr: None,
         // R167: no MMR snapshot and no RR row, so the rank card falls back to the newest stored ranked match's
         // tier: a known tier with `rr` and `rrToNext` null.
         has_mmr: false,
@@ -1380,7 +1382,7 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
     );
     assert_eq!(
         keys(&stats["byWeekday"][0]),
-        spec(&["games", "wins", "winrate"])
+        spec(&["games", "wins", "losses", "winrate"])
     );
     assert_eq!(stats["byWeekday"].as_array().map(Vec::len), Some(7));
     assert_eq!(stats["byDaypart"].as_array().map(Vec::len), Some(4));
@@ -1861,7 +1863,7 @@ fn profile_extras_value() -> Value {
                 losses: 1,
                 winrate: 0.75,
                 net_rr: Some(38),
-                kd: 1.5,
+                kd: Some(1.5),
                 acs: Some(212.5),
             },
             StatRow {
@@ -1871,7 +1873,7 @@ fn profile_extras_value() -> Value {
                 losses: 0,
                 winrate: 0.0,
                 net_rr: None,
-                kd: 0.5,
+                kd: Some(0.5),
                 acs: None,
             },
         ],

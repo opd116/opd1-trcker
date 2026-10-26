@@ -7,7 +7,7 @@
 -->
 <script lang="ts">
   import { tick } from "svelte";
-  import { setNote } from "../../lib/appdata.svelte";
+  import { NOTE_MAX_CHARS, setNote } from "../../lib/appdata.svelte";
   import { assetUrl } from "../../lib/assets";
   import { retryImg } from "../../lib/imgRetry";
   import { isRankedTier } from "../../lib/meta";
@@ -119,6 +119,7 @@
         bind:this={area}
         aria-label={editLabel}
         value={v.note}
+        maxlength={NOTE_MAX_CHARS}
         placeholder="Playstyle, comms, anything worth remembering…"
         oninput={(e) => setNote(v.s.puuid, e.currentTarget.value)}
         onkeydown={noteKey}

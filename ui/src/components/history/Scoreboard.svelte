@@ -15,10 +15,10 @@
   import { assetUrl } from "../../lib/assets";
   import { pct0, rrDelta } from "../../lib/format";
   import { pmText } from "../../lib/details";
-  import { byAcs, endMs, halvesLine, heroMeta, kdaText, kdOf, mvpOf, RESULT_LETTER, RESULT_WORD_BIG, stamp } from "../../lib/historyv2";
+  import { byAcs, endMs, halvesLine, heroMeta, kdaText, kdOf, mvpOf, RESULT_LETTER, RESULT_WORD_BIG, stamp, yourRrOf } from "../../lib/historyv2";
   import { retryImg } from "../../lib/imgRetry";
   import { isRankedTier, mapName } from "../../lib/meta";
-  import { backFromMatch, router, scrollHost } from "../../lib/router.svelte";
+  import { backFromMatch, matchOpenedByKeyboard, router, scrollHost } from "../../lib/router.svelte";
   import { nameParts } from "../../lib/savedv2";
   import { live, meta, mystats, now, openMatch } from "../../lib/stores";
   import { tierColor, tierName } from "../../lib/theme";
@@ -40,6 +40,15 @@
   const settledEmpty = $derived(view !== null && teams.length === 0);
 
   // ── Back ──
+  /**
+   * Opening the scoreboard from the keyboard destroyed the row that had the focus: it starts on Back instead of on
+   * nothing. (A click leaves the focus alone, so no ring appears for the mouse.)
+   */
+  let backBtn = $state<HTMLButtonElement | null>(null);
+  $effect(() => {
+    if (backBtn && matchOpenedByKeyboard()) backBtn.focus({ preventScroll: true });
+  });
+
   function nameOf(puuid: string): DisplayName | null {
     for (const t of teams) for (const p of t.players) if (p.puuid === puuid) return p.name;
     return $live?.players.find((p) => p.puuid === puuid)?.name ?? null;
@@ -83,17 +92,10 @@
   const map = $derived(view && view.mapId ? mapName($meta, view.mapId) : null);
 
   /** The user's RR change and rank after it, for their own competitive match: their history row, else My Stats. */
-  let fetchedRr = $state<{ id: string; rr: number | null; tier: number | null } | null>(null);
-  const yourRr = $derived.by((): { rr: number; tier: number | null } | null => {
+  let fetchedRow = $state<{ id: string; rrEarned: number | null; tierAfter: number | null } | null>(null);
+  const yourRr = $derived.by(() => {
     if (!view || view.perspective !== "self" || view.queueId !== "competitive") return null;
-    const row = cachedRow(matchId);
-    if (row && row.rrEarned !== null) return { rr: row.rrEarned, tier: row.tierAfter };
-    const m = $mystats?.last5.find((x) => x.matchId === matchId);
-    if (m && m.rrEarned !== null) return { rr: m.rrEarned, tier: m.tier };
-    const s = $mystats?.session?.matches.find((x) => x.matchId === matchId);
-    if (s && s.rrEarned !== null) return { rr: s.rrEarned, tier: null };
-    if (fetchedRr?.id === matchId && fetchedRr.rr !== null) return { rr: fetchedRr.rr, tier: fetchedRr.tier };
-    return null;
+    return yourRrOf(matchId, cachedRow(matchId) ?? (fetchedRow?.id === matchId ? fetchedRow : null), $mystats);
   });
 
   // Not in what is loaded: ask the newest page of the user's competitive history once (a local DB read).
@@ -104,7 +106,7 @@
     matchHistory("competitive", 0, 50)
       .then((p) => {
         const r = p.rows.find((x) => x.matchId === matchId);
-        if (r) fetchedRr = { id: matchId, rr: r.rrEarned, tier: r.tierAfter };
+        if (r) fetchedRow = { id: matchId, rrEarned: r.rrEarned, tierAfter: r.tierAfter };
       })
       .catch((err: unknown) => reportError("match_history", err));
   });
@@ -198,7 +200,7 @@
 
 <div class="match" aria-busy={view === null} use:scrollHost>
   <div class="top">
-    <button type="button" class="back" onclick={() => backFromMatch()}>
+    <button type="button" class="back" bind:this={backBtn} onclick={() => backFromMatch()}>
       <svg width="7" height="12" viewBox="0 0 7 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"
         ><path d="M5.5 1.5L1.5 6l4 4.5"></path></svg
       ><span class="blabel" data-ellipsis>{backLabel}</span>

@@ -62,14 +62,24 @@ use crate::roster::{
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
 use crate::store::{
-    load_player_db, match_landed, save_player, PlayerDb, SELF_LOADOUT_KEY, SELF_PUUID_KEY,
+    forget_level, load_player_db, match_landed, save_player, PlayerDb, SELF_LOADOUT_KEY,
+    SELF_PUUID_KEY,
 };
+
+/// Own-party lookups an Agent Select makes while the party is unknown: at
+/// its start and at the next two re-polls (about 6 s), then none.
+const SELF_PARTY_ASKS: u8 = 3;
 
 /// Closed: how often the lockfile's existence is checked.
 const CLOSED_CHECK: Duration = Duration::from_secs(5);
 /// Presence cadence while VALORANT is running / while it isn't.
 const PRESENCE_EVERY: Duration = Duration::from_secs(2);
 const PRESENCE_EVERY_IDLE: Duration = Duration::from_secs(5);
+/// While VALORANT is closed, how often the local client is asked which
+/// account it is signed in as (`RiotSession::check_account`): an account
+/// changed in a Riot Client that stayed open shows no presence of ours and no
+/// failure, so nothing else would notice it.
+const ACCOUNT_CHECK_EVERY: Duration = Duration::from_secs(30);
 /// R39: Agent Select re-poll, only to pick up agent selections.
 const PREGAME_REPOLL: Duration = Duration::from_secs(3);
 /// Consecutive presence failures (other than ClientGone) before the
@@ -221,12 +231,14 @@ where
 /// are the dead loop's: the new one connects again from the lockfile like at
 /// startup, and the cursor of an interrupted run is never trusted (R101).
 fn reset_after_panic(st: &AppState) {
-    {
+    let asks = {
         let mut live = lock(&st.live);
         live.revoke_worker();
-        live.backfill = None;
         live.comp_backfill = None;
-    }
+        live.forget_synced();
+        live.take_backfill_asks()
+    };
+    st.queue_name_fill(asks);
     st.set_session(None);
 }
 
@@ -274,7 +286,7 @@ pub(crate) struct Poller {
     pub(crate) local_app_data: Option<PathBuf>,
     session: Option<Arc<RiotSession>>,
     /// The stage being shown (`roster::view_stage` of the presence).
-    stage: Stage,
+    pub(crate) stage: Stage,
     /// The raw presence stage last seen (differs from `stage` in FFA).
     presence_stage: Stage,
     /// VALORANT's own presence under this session (R46).
@@ -291,10 +303,16 @@ pub(crate) struct Poller {
     /// The presence `queueId` while in a match — decides the post-match
     /// check for the match that just ended (R48).
     match_queue: Option<String>,
+    /// R189: a free-for-all's match id (the Lobby view stays, R41, so no
+    /// stage change records it): its end points the recap at it.
+    ffa_match_id: Option<String>,
     presence_errors: u32,
     party_key: Option<PartyKey>,
     self_party: HashSet<String>,
     pregame_match_id: Option<String>,
+    /// Own-party lookups left in this Agent Select while the party is unknown
+    /// (`ask_self_party_while_unknown`).
+    self_party_asks_left: u8,
     /// Riot answered `LoadoutsValid` for the current Agent Select: the
     /// pre-game loadouts are not asked for again (R83).
     pregame_loadouts_valid: bool,
@@ -302,6 +320,8 @@ pub(crate) struct Poller {
     /// shorten it).
     pub(crate) ingame_loadouts_timeout: Duration,
     next_presence: Instant,
+    /// The next [`ACCOUNT_CHECK_EVERY`] check while VALORANT is closed.
+    pub(crate) next_account_check: Instant,
     next_pregame: Option<Instant>,
     /// When the next roster retry is due and how many fetches failed so far.
     roster_retry: Option<(Instant, u32)>,
@@ -324,6 +344,11 @@ pub(crate) struct Poller {
     /// lost). Counts the presence failures while VALORANT runs, then the
     /// reconnects after that session was lost, up to [`LOST_MAX_ATTEMPTS`].
     pub(crate) lost_attempt: u32,
+    /// Sessions dropped in a row because their presence kept failing, with
+    /// no presence answered since. While above 0 the game's state is
+    /// unknown, so a reconnect does not claim "waiting": the pill stays
+    /// lost, then says the client is unreachable.
+    presence_drops: u32,
     /// R189: when this poller first saw the party matchmaking (the queue
     /// timer's start when the presence carries no entry time).
     queue_seen_ms: Option<i64>,
@@ -369,13 +394,16 @@ impl Poller {
             content_asked: false,
             version_from_presence_done: false,
             match_queue: None,
+            ffa_match_id: None,
             presence_errors: 0,
             party_key: None,
             self_party: HashSet::new(),
             pregame_match_id: None,
+            self_party_asks_left: SELF_PARTY_ASKS,
             pregame_loadouts_valid: false,
             ingame_loadouts_timeout: INGAME_LOADOUTS_TIMEOUT,
             next_presence: Instant::now(),
+            next_account_check: Instant::now(),
             next_pregame: None,
             roster_retry: None,
             post_match: None,
@@ -387,6 +415,7 @@ impl Poller {
             next_connect: Instant::now(),
             lockfile_mtime: None,
             lost_attempt: 0,
+            presence_drops: 0,
             queue_seen_ms: None,
             alerts: SavedAlerts::default(),
         }
@@ -442,6 +471,7 @@ impl Poller {
             self.connect_failures = 0;
             self.lockfile_mtime = None;
             self.lost_attempt = 0;
+            self.presence_drops = 0;
             self.status_error(LOCKFILE_NOT_FOUND, CLOSED_CHECK);
             self.idle(CLOSED_CHECK).await;
             return;
@@ -466,7 +496,14 @@ impl Poller {
                 // A client that cannot be reached tells nothing about the game:
                 // the first verdict is "closed" (a later success still moves on).
                 self.settle();
-                self.connect_failures = self.connect_failures.saturating_add(1);
+                // Signed out: no backoff, the sign-in can come any moment.
+                let signed_out =
+                    matches!(&e, RiotError::AuthFailed(m) if m == opd1_riot::session::SIGNED_OUT);
+                self.connect_failures = if signed_out {
+                    0
+                } else {
+                    self.connect_failures.saturating_add(1)
+                };
                 let delay = connect_retry_delay(self.connect_failures);
                 self.next_connect = Instant::now() + delay;
                 self.status_connect_failed(delay);
@@ -496,6 +533,7 @@ impl Poller {
                 live.synced.clear();
                 live.party_ready.clear();
                 live.names_attempted.clear();
+                live.known_names.clear();
                 live.self_roster = None;
                 live.self_name = None;
                 live.self_loadout = None;
@@ -527,6 +565,8 @@ impl Poller {
             // once (DB only), not after the asset tables are re-checked below
             // and not after the push's trailing wait either.
             crate::my_stats::notify_now(&self.st);
+            // R189: nor is the previous account's match this one's recap.
+            self.st.set_status(|s| s.recap_match_id = None);
         }
         let key_value = me.clone();
         self.st
@@ -546,7 +586,9 @@ impl Poller {
         // R189: the Riot Client answers; whether VALORANT runs is the first
         // presence's to say.
         self.lost_attempt = 0;
-        self.status_session(&session, false);
+        if self.presence_drops == 0 {
+            self.status_session(&session, false);
+        }
         self.game = GameWatch::default();
         // R90: asked at this session's first presence showing VALORANT.
         self.self_loadout_asked = false;
@@ -556,14 +598,18 @@ impl Poller {
         self.version_from_presence_done = false;
         self.presence_errors = 0;
         self.next_presence = Instant::now();
+        // The account was just read (connect); the next check waits its turn.
+        self.next_account_check = Instant::now() + ACCOUNT_CHECK_EVERY;
         // R43: the user's own Riot ID, from the local chat session.
         let _ = crate::sync::fetch_self_name(&self.st, &session).await;
 
         // One cheap /v1/version check per client start (new patch → new
-        // tables); the tables themselves only download when it changed.
+        // tables); the tables themselves only download when it changed. A
+        // reconnect that only retries a failing presence is no client start.
         let st = self.st.clone();
+        let recheck = self.presence_drops == 0;
         tauri::async_runtime::spawn(async move {
-            if st.ensure_tables(true).await.is_ok() {
+            if st.ensure_tables(recheck).await.is_ok() {
                 st.publish();
                 // B2: with the user's puuid known (just above), the tables
                 // may be what makes My Stats computable.
@@ -597,26 +643,45 @@ impl Poller {
         self.stop_worker();
         // R101: an interrupted run is dropped; the next connect starts over
         // from the stored anchor, which only a finished run moves. B1: the
-        // competitive-updates run likewise.
-        {
+        // competitive-updates run likewise. R150: the players of the matches
+        // it already stored still go to the names fill (the next run skips
+        // those matches, so nothing else would ask about them).
+        let asks = {
             let mut live = lock(&self.st.live);
-            live.backfill = None;
             live.comp_backfill = None;
-        }
+            // The Closed card below drops the pending rank retries; a same
+            // match after the reconnect must not then count everyone synced.
+            live.forget_synced();
+            live.take_backfill_asks()
+        };
+        self.st.queue_name_fill(asks);
         self.session = None;
         self.st.set_session(None);
         self.stage = Stage::Closed;
         self.pregame_match_id = None;
         self.next_pregame = None;
         self.roster_retry = None;
-        self.post_match = None;
+        // R48's follow-up is kept: the game may still be running, and only
+        // VALORANT closing (`change_stage`) ends it.
         self.party_key = None;
         self.match_queue = None;
+        self.ffa_match_id = None;
         self.presence_stage = Stage::Closed;
         // A deliberate reconnect (e.g. VALORANT started) goes straight to
-        // `connect`, not through the failure backoff.
-        self.connect_failures = 0;
-        self.next_connect = Instant::now();
+        // `connect`, not through the failure backoff. So does the first drop
+        // for a failing presence; the ones after it back off like failed
+        // connects (R47): each reconnect re-reads ShooterGame.log and asks
+        // valorant-api, which must not run every ~20 s for as long as the
+        // client's presence fails. A rewritten lockfile or "Retry now" still
+        // connects at once.
+        if self.presence_drops >= 2 {
+            let delay = connect_retry_delay(self.presence_drops - 1);
+            self.next_connect = Instant::now() + delay;
+            self.status_error(CLIENT_UNREACHABLE, delay);
+        } else {
+            self.connect_failures = 0;
+            self.next_connect = Instant::now();
+        }
         self.enter_closed().await;
     }
 
@@ -690,6 +755,10 @@ impl Poller {
         if self.stage != Stage::Closed && lock(&self.st.live).comp_backfill_resume_due() {
             self.ensure_worker(session);
         }
+        // R160: and for the own-history run a request hold paused.
+        if self.stage != Stage::Closed && lock(&self.st.live).backfill_resume_due() {
+            self.ensure_worker(session);
+        }
         Ok(())
     }
 
@@ -725,6 +794,7 @@ impl Poller {
             Ok(p) => {
                 self.presence_errors = 0;
                 self.lost_attempt = 0;
+                self.presence_drops = 0;
                 // R189: the local API answered.
                 self.st.note_local_data(now_ms());
                 p
@@ -743,8 +813,14 @@ impl Poller {
                         PRESENCE_EVERY
                     };
                     self.status_lost(next);
+                } else if self.presence_drops > 0 {
+                    // The previous session was dropped for this too: the
+                    // client is there but does not answer. With the game
+                    // closed the next presence is the idle one.
+                    self.status_error(CLIENT_UNREACHABLE, PRESENCE_EVERY_IDLE);
                 }
                 if reconnect {
+                    self.presence_drops = self.presence_drops.saturating_add(1);
                     return Err(Stop::Reconnect("presence keeps failing"));
                 }
                 return Ok(());
@@ -774,7 +850,23 @@ impl Poller {
             GameVerdict::Closed => {
                 if self.stage != Stage::Closed {
                     log::info!("VALORANT is not running");
+                    // R189: the game closed on a free-for-all: its end is the
+                    // user's match end too (its view never left the Lobby, so
+                    // `change_stage` records nothing for it).
+                    if self.presence_stage == Stage::Ingame {
+                        if let Some(id) = self.ffa_match_id.take() {
+                            self.st.set_status(|s| s.recap_match_id = Some(id));
+                        }
+                    }
                     self.change_stage(session, Stage::Closed, None).await?;
+                }
+                // Another account in the same client: its VALORANT would never
+                // show here (our presence is looked up by our puuid).
+                if Instant::now() >= self.next_account_check {
+                    self.next_account_check = Instant::now() + ACCOUNT_CHECK_EVERY;
+                    if let Err(RiotError::ClientGone) = session.check_account().await {
+                        return Err(Stop::Reconnect("account changed"));
+                    }
                 }
                 self.status_session(session, false);
                 // Absent twice: the first verdict (or a later one, no change).
@@ -813,6 +905,18 @@ impl Poller {
             lock(&self.st.live).match_end_ms = Some(now_ms());
         }
         let view = view_stage(presence.stage, presence.queue_id.as_deref());
+        // A free-for-all in progress (R41: the Lobby view stays): its match
+        // id, for the recap at its end. One call per match, about the user
+        // alone (core-game's player ref holds just the match id); nothing
+        // about the other players is fetched.
+        if presence.stage == Stage::Ingame && view == Stage::Menus && self.ffa_match_id.is_none() {
+            match session.coregame_player(session.self_puuid()).await {
+                Ok(r) if !r.match_id.is_empty() => self.ffa_match_id = Some(r.match_id),
+                Err(RiotError::ClientGone) => return Err(Stop::Reconnect("Riot client closed")),
+                // Asked again at the next tick while the match runs.
+                _ => {}
+            }
+        }
         if presence.stage != self.presence_stage {
             if view != presence.stage {
                 log::info!("free-for-all {:?}: keeping the lobby view", presence.stage);
@@ -834,6 +938,12 @@ impl Poller {
             }
         }
         if match_ended {
+            // R189: a free-for-all's end is the user's match end too: the
+            // recap follows it until they queue again (its view never left
+            // the Lobby, so `change_stage` did not set it).
+            if let Some(id) = self.ffa_match_id.take() {
+                self.st.set_status(|s| s.recap_match_id = Some(id));
+            }
             // After the stage change above: the Lobby's roster is installed
             // (and its worker running) before the backfill is queued.
             self.begin_backfill(session).await;
@@ -964,11 +1074,7 @@ impl Poller {
             let ended = live.coregame_match_id.take();
             live.loadouts.clear();
             if t.reset_synced {
-                live.synced.clear();
-                live.party_ready.clear();
-                live.names_attempted.clear();
-                // R165: the failure counts went with it; so does the wake-up.
-                live.clear_names_retry_wake();
+                live.forget_synced();
                 // R161: a match is over or VALORANT closed.
                 live.match_tiers.clear();
             }
@@ -1133,16 +1239,39 @@ impl Poller {
         }
     }
 
+    /// The user's own party, while no answer named it yet (every party has
+    /// the user, so empty means unknown): Agent Select asks at its start and
+    /// again at the next re-polls ([`SELF_PARTY_ASKS`] in all), so a failed
+    /// first lookup never leaves the user's party with a stripe or a ⟲ badge.
+    async fn ask_self_party_while_unknown(
+        &mut self,
+        session: &RiotSession,
+        me: &str,
+    ) -> Result<(), RiotError> {
+        if !self.self_party.is_empty() || self.self_party_asks_left == 0 {
+            return Ok(());
+        }
+        self.self_party_asks_left -= 1;
+        match self.party_response(session, me).await {
+            Ok(party) => {
+                self.self_party = party.members.iter().map(|m| m.subject.clone()).collect();
+            }
+            Err(RiotError::ClientGone) => return Err(RiotError::ClientGone),
+            Err(e) => log::debug!("own party lookup failed: {e}"),
+        }
+        Ok(())
+    }
+
     pub(crate) async fn fetch_pregame(
         &mut self,
         session: &Arc<RiotSession>,
         me: &str,
     ) -> Result<(), RiotError> {
-        if self.self_party.is_empty() {
-            if let Ok(party) = self.party_response(session, me).await {
-                self.self_party = party.members.iter().map(|m| m.subject.clone()).collect();
-            }
+        if self.pregame_match_id.is_none() {
+            // A new Agent Select: its own lookups.
+            self.self_party_asks_left = SELF_PARTY_ASKS;
         }
+        self.ask_self_party_while_unknown(session, me).await?;
         let match_id = session.pregame_player(me).await?.match_id;
         let m = session.pregame_match(&match_id).await?;
         let roster = from_pregame(&m, me, &self.self_party);
@@ -1169,9 +1298,12 @@ impl Poller {
         let Some(match_id) = self.pregame_match_id.clone() else {
             return Ok(());
         };
+        let me = session.self_puuid().to_string();
+        if let Err(RiotError::ClientGone) = self.ask_self_party_while_unknown(session, &me).await {
+            return Err(Stop::Reconnect("Riot client closed"));
+        }
         match session.pregame_match(&match_id).await {
             Ok(m) => {
-                let me = session.self_puuid().to_string();
                 let roster = from_pregame(&m, &me, &self.self_party);
                 lock(&self.st.live)
                     .match_tiers
@@ -1252,6 +1384,9 @@ impl Poller {
             // The Lobby roster goes on screen as Menus, but this is still a
             // match (R137): no backfill until it ends.
             lock(&self.st.live).in_match = true;
+            // R189: its recap follows it, as for a presence that says
+            // free-for-all.
+            self.ffa_match_id = Some(match_id);
             return self.fetch_party(session, me).await;
         }
         let mut roster = from_coregame(&m, me, &self.self_party);
@@ -1334,6 +1469,9 @@ impl Poller {
                     let mut out = HashMap::new();
                     for p in &new_players {
                         save_player(repo.conn(), &p.player_update(&me), now)?;
+                        if p.hides_level_from(&me) {
+                            forget_level(repo.conn(), &p.puuid)?;
+                        }
                         out.insert(p.puuid.clone(), load_player_db(repo, Some(&me), &p.puuid)?);
                     }
                     Ok(out)
@@ -1393,7 +1531,11 @@ impl Poller {
 
     /// The new stage with only the user's own card (roster fetch failed);
     /// the user's own data still syncs meanwhile (never a stuck skeleton).
-    async fn show_self_only(&mut self, session: &Arc<RiotSession>) {
+    /// A placeholder while the roster retry runs, not a roster change: the
+    /// others' pending rank retries (R155) are kept for the roster that
+    /// follows (`apply_roster` prunes then; `due_rank_retry` skips anyone not
+    /// on screen meanwhile).
+    pub(crate) async fn show_self_only(&mut self, session: &Arc<RiotSession>) {
         let (me, own) = {
             let live = lock(&self.st.live);
             (live.self_puuid.clone(), live.self_roster.clone())
@@ -1405,8 +1547,26 @@ impl Poller {
             .db(move |repo| load_player_db(repo, Some(&p), &p))
             .await
             .unwrap_or_default();
+        // Agent Select to In Game is the same match: its lock-in, team and
+        // tier still hold. Any other way, they were the last match's (R99:
+        // no agent before this stage's lock-in).
+        let same_match = self.stage == Stage::Ingame && lock(&self.st.live).stage == Stage::Pregame;
         let slot = match own {
-            Some(roster) => Some(Slot { roster, db }),
+            Some(roster) if same_match => Some(Slot { roster, db }),
+            Some(roster) => {
+                let roster = RosterPlayer {
+                    team_id: String::new(),
+                    character_id: String::new(),
+                    selection_state: String::new(),
+                    live_tier: None,
+                    ..roster
+                };
+                // Kept cleared: a later placeholder of this match (Agent
+                // Select failed too, then In Game) never brings back the
+                // older match's agent.
+                lock(&self.st.live).self_roster = Some(roster.clone());
+                Some(Slot { roster, db })
+            }
             None => closed_self_slot(&me, db),
         };
         {
@@ -1415,7 +1575,6 @@ impl Poller {
             live.map_path = None;
             live.map_id = None;
             live.slots = slot.into_iter().collect();
-            live.prune_rank_retries();
         }
         self.st.publish();
         self.ensure_worker(session);
@@ -2482,6 +2641,60 @@ mod tests {
         live.synced.insert(ME.into());
     }
 
+    #[tokio::test]
+    async fn the_self_only_placeholder_never_shows_the_last_matchs_agent() {
+        // The match on Jett ends; the Lobby's party fetch fails: the
+        // placeholder card is the user, with no agent locked.
+        let h = harness().await;
+        {
+            let mut live = lock(&h.st.live);
+            live.self_puuid = Some(ME.into());
+            live.self_roster = Some(RosterPlayer {
+                team_id: "Blue".into(),
+                character_id: "jett".into(),
+                selection_state: "locked".into(),
+                ..roster(ME, false)
+            });
+        }
+        let mut poller = Poller::held(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.show_self_only(&h.session).await;
+        {
+            let live = lock(&h.st.live);
+            let own = &live.slots[0].roster;
+            assert_eq!(own.puuid, ME);
+            assert_eq!(own.character_id, "");
+            assert_eq!(own.selection_state, "");
+            assert_eq!(own.team_id, "");
+        }
+
+        // Agent Select to In Game is the same match: the lock-in holds.
+        {
+            let mut live = lock(&h.st.live);
+            live.stage = Stage::Pregame;
+            live.self_roster = Some(RosterPlayer {
+                character_id: "jett".into(),
+                selection_state: "locked".into(),
+                ..roster(ME, false)
+            });
+        }
+        poller.stage = Stage::Ingame;
+        poller.show_self_only(&h.session).await;
+        assert_eq!(lock(&h.st.live).slots[0].roster.character_id, "jett");
+
+        // Every fetch fails from the Lobby on: the placeholders of the next
+        // Agent Select and In Game never bring the last match's agent back.
+        for stage in [Stage::Menus, Stage::Pregame, Stage::Ingame] {
+            poller.stage = stage;
+            poller.show_self_only(&h.session).await;
+            assert_eq!(
+                lock(&h.st.live).slots[0].roster.character_id,
+                "",
+                "{stage:?}"
+            );
+        }
+    }
+
     // R164 (review finding 7): the roster retry is a flat ~2 s for the first
     // five retries, then the old 3, 6, 12, 24, 30 s backoff.
     #[test]
@@ -2689,6 +2902,74 @@ mod tests {
         assert_eq!(details_requests(&h).await, 0, "no match-details mid-match");
         assert!(run_active(&h.st), "the run waits for the match to end");
         poller.stop_worker();
+    }
+
+    #[tokio::test]
+    async fn an_ffa_roster_fallback_points_the_recap_at_its_match_when_it_ends() {
+        // A custom Deathmatch: presence has no queueId, the roster is
+        // free-for-all (R41). Its end still gets the recap (R189).
+        let h = harness().await;
+        let identity = json!({"Incognito": false, "HideAccountLevel": false,
+                              "AccountLevel": 10, "PlayerCardID": "card"});
+        let get = |p: String, body: serde_json::Value| {
+            Mock::given(method("GET"))
+                .and(path(p))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        };
+        get(
+            "/parties/v1/parties/party-1".into(),
+            json!({"ID": "party-1", "Members": [{"Subject": ME, "PlayerIdentity": identity}]}),
+        )
+        .mount(&h.server)
+        .await;
+        get(
+            format!("/core-game/v1/players/{ME}"),
+            json!({"Subject": ME, "MatchID": "cg-ffa"}),
+        )
+        .mount(&h.server)
+        .await;
+        let player = |puuid: &str| {
+            json!({"Subject": puuid, "TeamID": puuid, "CharacterID": "agent",
+                   "PlayerIdentity": identity})
+        };
+        get(
+            "/core-game/v1/matches/cg-ffa".into(),
+            json!({"MapID": "/Game/Maps/Ascent/Ascent",
+                   "Players": [player(ME), player("p2"), player("p3")]}),
+        )
+        .mount(&h.server)
+        .await;
+        let presence = switchable_presence(&h, "INGAME", "").await;
+        let mut poller = Poller::held(h.st.clone());
+        poller.stage = Stage::Menus;
+        poller.presence_stage = Stage::Menus;
+        poller.party_key = mocked_party_key();
+        poller.presence_tick(&h.session).await.unwrap();
+        assert_eq!(lock(&h.st.live).stage, Stage::Menus, "the FFA fallback");
+        assert_eq!(h.st.status().recap_match_id, None);
+
+        *presence.lock().unwrap() = ("MENUS".into(), "".into());
+        poller.presence_tick(&h.session).await.unwrap();
+        assert_eq!(h.st.status().recap_match_id.as_deref(), Some("cg-ffa"));
+    }
+
+    #[tokio::test]
+    async fn a_dropped_session_keeps_the_post_match_follow_up() {
+        // R48: the game may still be running; the next session checks the
+        // match the follow-up waits for. Only VALORANT closing ends it.
+        let h = harness().await;
+        let mut poller = Poller::held(h.st.clone());
+        poller.post_match = Some(PostMatch {
+            match_id: "m1".into(),
+            competitive: true,
+            due: Instant::now(),
+            attempt: 0,
+        });
+        poller.drop_session().await;
+        assert_eq!(
+            poller.post_match.as_ref().map(|p| p.match_id.as_str()),
+            Some("m1")
+        );
     }
 
     #[tokio::test]

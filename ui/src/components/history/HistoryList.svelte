@@ -25,6 +25,7 @@
     whenText,
   } from "../../lib/historyv2";
   import { retryImg } from "../../lib/imgRetry";
+  import { followMatchEnds } from "../../lib/matchEnd";
   import { agentName, isRankedTier, mapName } from "../../lib/meta";
   import { openMatch, scrollHost } from "../../lib/router.svelte";
   import { live, meta, mystats, now } from "../../lib/stores";
@@ -52,18 +53,45 @@
     if (q === queue) data = p;
   }
 
-  /** Fetch the first `n` rows of `q` again (at least one page), replacing what is shown. */
+  /** Rust's page ceiling (`HISTORY_MAX_LIMIT`): one call never returns more rows. */
+  const MAX_PAGE = 200;
+
+  /**
+   * Fetch the first `n` rows of `q` again (at least one page), replacing what is shown. Past `MAX_PAGE` rows only the
+   * newest `MAX_PAGE` come back, so the older rows already loaded are kept after them instead of being dropped.
+   */
   async function refresh(q: HistoryQueue, n = PAGE) {
     const g = ++gen;
     busy = true;
     try {
-      const p = await matchHistory(q, 0, Math.max(PAGE, n));
-      if (g === gen) put(q, p);
+      const p = await matchHistory(q, 0, Math.min(MAX_PAGE, Math.max(PAGE, n)));
+      const had = historyCache.pages[q]?.rows ?? [];
+      if (g === gen) {
+        if (n > MAX_PAGE && had.length > p.rows.length) {
+          const fresh = new Set(p.rows.map((r) => r.matchId));
+          put(q, { ...p, rows: [...p.rows, ...had.filter((r) => !fresh.has(r.matchId))] });
+        } else put(q, p);
+      }
     } catch (err) {
       reportError("match_history", err);
     } finally {
-      if (g === gen) busy = false;
+      if (g === gen) {
+        busy = false;
+        recheck();
+      }
     }
+  }
+
+  /**
+   * The observer only fires when the list's end crosses into range: a `more()` skipped while a load was running, or a
+   * page too short to push the end out of range, would leave the list stuck. After each load (once the rows are
+   * drawn) the end is measured, and the next page asked while it is still within 400px.
+   */
+  function recheck() {
+    requestAnimationFrame(() => {
+      if (!scroller || !sentinel) return;
+      if (sentinel.getBoundingClientRect().top <= scroller.getBoundingClientRect().bottom + 400) void more();
+    });
   }
 
   async function more() {
@@ -72,14 +100,19 @@
     const q = queue;
     const g = gen;
     busy = true;
+    let added = 0;
     try {
       const p = await matchHistory(q, d.rows.length, PAGE);
-      if (g === gen && q === queue) put(q, { ...p, rows: [...d.rows, ...p.rows.filter((r) => !d.rows.some((x) => x.matchId === r.matchId))] });
+      const fresh = p.rows.filter((r) => !d.rows.some((x) => x.matchId === r.matchId));
+      added = fresh.length;
+      if (g === gen && q === queue) put(q, { ...p, rows: [...d.rows, ...fresh] });
     } catch (err) {
       reportError("match_history", err);
     } finally {
       if (g === gen) busy = false;
     }
+    // A page that brought nothing new (or failed) asks no further: no request loop.
+    if (g === gen && added > 0) recheck();
   }
 
   function pick(q: HistoryQueue) {
@@ -96,7 +129,17 @@
     void refresh(queue, data?.rows.length ?? PAGE);
   });
 
-  // A match that just ended lands in the list: ask again whenever the live stage changes.
+  // A match that just ended lands in the list: ask again whenever the live stage changes, and after a match ends on
+  // the schedule its store follows (lib/matchEnd.ts) until the stored total grows.
+  onMount(() =>
+    followMatchEnds(live, () => {
+      const before = data?.allTotal ?? null;
+      return async () => {
+        await refresh(queue, data?.rows.length ?? PAGE);
+        return before !== null && (data?.allTotal ?? 0) > before;
+      };
+    }),
+  );
   let lastStage: string | null | undefined;
   $effect(() => {
     const st = $live?.stage ?? null;
@@ -176,7 +219,7 @@
           {@const hs = hsCell(r)}
           {@const rr = rrCell(r)}
           {@const tone = kdTone(r.kd)}
-          <div class="row" data-row="1" tabindex="0" role="button" aria-label={rowAria(r, map ?? null)} onclick={() => open(r)} onkeydown={(e) => onKey(e, r)}>
+          <div class="row" data-row="1" data-match-id={r.matchId} tabindex="0" role="button" aria-label={rowAria(r, map ?? null)} onclick={() => open(r)} onkeydown={(e) => onKey(e, r)}>
             <div class="bar" style:background={RES_COLOR[r.result]}></div>
             <div class="res">
               <span class="badge" style:background={RES_BG[r.result]} style:color={RES_COLOR[r.result]}>{RESULT_LETTER[r.result]}</span>

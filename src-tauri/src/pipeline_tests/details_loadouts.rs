@@ -625,6 +625,55 @@ async fn mock_pregame(server: &MockServer) {
 }
 
 #[tokio::test]
+async fn a_failed_own_party_lookup_in_agent_select_is_asked_again_on_the_repoll() {
+    // The app connects in Agent Select; the parties call fails (nothing
+    // mounted: 404). MATE is in the user's party: the re-poll asks again, and
+    // their card loses the stripe and badge a stranger would get.
+    let h = harness().await;
+    mock_pregame(&h.server).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.fetch_pregame(&h.session, ME).await.unwrap();
+    assert_eq!(card_json(&h.st, MATE)["isSelfParty"], json!(false));
+
+    get(
+        &h.server,
+        &format!("/parties/v1/players/{ME}"),
+        json!({"Subject": ME, "CurrentPartyID": "party-1"}),
+    )
+    .await;
+    let member = |puuid: &str| {
+        json!({"Subject": puuid, "PlayerIdentity": {"Incognito": false,
+               "HideAccountLevel": false, "AccountLevel": 10, "PlayerCardID": "card"}})
+    };
+    get(
+        &h.server,
+        "/parties/v1/parties/party-1",
+        json!({"ID": "party-1", "Members": [member(ME), member(MATE)]}),
+    )
+    .await;
+    poller.pregame_repoll(&h.session).await.unwrap();
+    assert_eq!(card_json(&h.st, MATE)["isSelfParty"], json!(true));
+    assert_eq!(card_json(&h.st, OTHER)["isSelfParty"], json!(false));
+}
+
+#[tokio::test]
+async fn an_own_party_that_never_answers_is_asked_three_times_per_agent_select() {
+    // Lightness: a lookup that keeps failing is not repeated every 3 s for
+    // the whole Agent Select.
+    let h = harness().await;
+    mock_pregame(&h.server).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.fetch_pregame(&h.session, ME).await.unwrap();
+    for _ in 0..6 {
+        poller.pregame_repoll(&h.session).await.unwrap();
+    }
+    assert_eq!(
+        count(&h.server, "GET", &format!("/parties/v1/players/{ME}")).await,
+        3
+    );
+}
+
+#[tokio::test]
 async fn pregame_loadouts_polled_once_then_stops() {
     let loadouts = "/pregame/v1/matches/pg-1/loadouts";
     let h = harness().await;
@@ -853,6 +902,38 @@ async fn details_sync_fallback_loadouts_are_resolved_before_the_rebuild() {
             "an unnamed vandal was emitted: {vandal}"
         );
     }
+}
+
+#[tokio::test]
+async fn a_failed_skin_name_is_not_asked_again_at_every_roster_change_while_open() {
+    // R97: retried at the next open, not every 3 s while Agent Select re-polls
+    // the roster with the page open.
+    let h = harness().await;
+    lobby_with(&h, OTHER).await;
+    mount_failing_skin(&h.assets_server, REAVER).await;
+    lock(&h.st.live)
+        .loadouts
+        .insert(OTHER.into(), reaver_loadout());
+    let seen = details_events(&h.rec);
+    crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    details_event_after(&h.rec, seen, OTHER, |d| {
+        d["loadout"].get("vandal") == Some(&Value::Null)
+    })
+    .await;
+    assert_eq!(skin_requests(&h).await, 1);
+
+    for _ in 0..5 {
+        crate::details::refresh_open_after_live_change(&h.st).await;
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        skin_requests(&h).await,
+        1,
+        "no new asks while the page stays open"
+    );
+    assert!(!h.st.skins_resolving(OTHER), "no skeleton comes back");
 }
 
 #[tokio::test]

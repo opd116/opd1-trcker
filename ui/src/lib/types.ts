@@ -314,7 +314,8 @@ export interface StatRow {
   winrate: number;
   /** null when none of the row's matches has a stored RR change. */
   netRr: number | null;
-  kd: number;
+  /** null when none of the row's matches has a stats row (R102). */
+  kd: number | null;
   /** null when no match of the row has a known round count. */
   acs: number | null;
 }
@@ -323,6 +324,8 @@ export interface StatRow {
 export interface WinCell {
   games: number;
   wins: number;
+  /** Not `games - wins`: a draw is neither. */
+  losses: number;
   /** Fraction 0..1; null when the bucket has no games. */
   winrate: number | null;
 }

@@ -10,7 +10,7 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { profileExtras } from "../../lib/api";
-  import { dismissSmurf, isSaved, marks, noteOf, setNote, settings, toggleSaved } from "../../lib/appdata.svelte";
+  import { dismissSmurf, isSaved, marks, NOTE_MAX_CHARS, noteOf, setNote, settings, toggleSaved } from "../../lib/appdata.svelte";
   import { assetUrl } from "../../lib/assets";
   import { retryBg, retryImg } from "../../lib/imgRetry";
   import { agentName } from "../../lib/meta";
@@ -102,8 +102,10 @@
 
   // ── save + note popover (prototype 975–985, `onSave` / `unsave`) ──────────────
   let noteOpen = $state(false);
-  /** Saved by this very click: the popover's × reads Cancel and also clears the note. */
+  /** Saved by this very click: the popover's × reads Cancel and also undoes what was typed in it. */
   let fresh = $state(false);
+  /** The note before that save: an unsave keeps a player's note, so Cancel puts it back rather than clearing it. */
+  let noteAtSave = "";
   let saveBtn = $state<HTMLButtonElement | null>(null);
 
   function onSave() {
@@ -112,6 +114,7 @@
       noteOpen = !noteOpen;
     } else {
       fresh = true;
+      noteAtSave = note;
       void toggleSaved(puuid, true);
       noteOpen = true;
     }
@@ -126,7 +129,7 @@
     const wasFresh = fresh;
     fresh = false;
     void toggleSaved(puuid, false);
-    if (wasFresh) setNote(puuid, "");
+    if (wasFresh && note !== noteAtSave) setNote(puuid, noteAtSave);
     closeNote();
   }
 
@@ -188,11 +191,24 @@
     }
   }
 
+  /**
+   * Escape with the focus outside the panel (a title bar button was clicked, or focus fell to the page): the panel's
+   * own handler never hears it, so the window's closes the drawer too. Inside the panel that handler stops it first.
+   */
+  function windowKey(e: KeyboardEvent) {
+    if (e.key !== "Escape" || e.defaultPrevented) return;
+    e.preventDefault();
+    if (noteOpen) closeNote();
+    else closeProfile();
+  }
+
   function onScroll(e: Event) {
     const s = (e.currentTarget as HTMLElement).scrollTop > 4;
     if (s !== scrolled) scrolled = s;
   }
 </script>
+
+<svelte:window onkeydown={windowKey} />
 
 <div class="overlay">
   <button type="button" class="scrim" tabindex="-1" aria-label="Close profile" onclick={closeProfile}></button>
@@ -294,6 +310,7 @@
           {@attach focusNow}
           aria-label={`Note on ${nv?.ref ?? "this player"}`}
           placeholder="Playstyle, comms, anything worth remembering…"
+          maxlength={NOTE_MAX_CHARS}
           value={note}
           oninput={(e) => onNoteInput(e.currentTarget.value)}
         ></textarea>
@@ -330,6 +347,7 @@
             <textarea
               aria-label="Personal notes"
               placeholder="Goals for this session, warm-up routine, things to work on…"
+              maxlength={NOTE_MAX_CHARS}
               value={note}
               oninput={(e) => setNote(puuid, e.currentTarget.value)}
             ></textarea>

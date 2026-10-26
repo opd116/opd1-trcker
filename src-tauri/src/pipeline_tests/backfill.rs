@@ -312,7 +312,7 @@ async fn store_details_stores_the_compact_rows() {
     let details = h.session.match_details(&entry_id(1)).await.unwrap();
     assert!(!is_stored(&h.st, entry_id(1)).await);
 
-    assert!(store_details(&h.st, details).await.is_some());
+    assert!(store_details(&h.st, details, |_, _, _| {}).await.is_some());
 
     assert!(is_stored(&h.st, entry_id(1)).await);
     assert!(!is_stored(&h.st, entry_id(2)).await, "only that match");
@@ -636,6 +636,33 @@ async fn backfill_interrupted_keeps_anchor() {
 }
 
 #[tokio::test]
+async fn a_run_dropped_with_its_session_still_queues_its_players_for_the_names_fill() {
+    // R150: a run kept while VALORANT was closed holds the players of the
+    // matches it stored; the session ends (VALORANT restarts, the client
+    // exits). The next run skips those stored matches, so only this run can
+    // ask about them.
+    let h = harness().await;
+    {
+        let mut live = lock(&h.st.live);
+        live.self_puuid = Some(ME.into());
+        live.start_backfill(None, None);
+        live.backfill
+            .as_mut()
+            .unwrap()
+            .add_participants(entry_start(base_ms(), 3), vec![OTHER.into()]);
+    }
+    let mut poller = crate::poll::Poller::held(h.st.clone());
+    poller.drop_session().await;
+    let live = lock(&h.st.live);
+    assert!(live.backfill.is_none(), "the run itself is dropped (R101)");
+    assert!(
+        live.name_fill.iter().any(|a| a.puuid == OTHER),
+        "its players are asked: {:?}",
+        live.name_fill
+    );
+}
+
+#[tokio::test]
 async fn backfill_history_error_ends_the_run_and_keeps_the_anchor() {
     let h = harness().await;
     let base = base_ms();
@@ -657,6 +684,85 @@ async fn backfill_history_error_ends_the_run_and_keeps_the_anchor() {
     assert_eq!(count(&h.server, "GET", &history_path()).await, 2);
     // Page 0's matches were fetched and stay stored for the retry.
     assert_eq!(details_asked(&requests(&h.server).await).len(), 20);
+}
+
+#[tokio::test]
+async fn a_backfill_match_stored_after_its_run_was_dropped_still_asks_its_players() {
+    // The write ran on while `drop_session` took the run: its players go to
+    // the names fill instead of being lost (R150).
+    let h = harness().await;
+    lock(&h.st.live).self_puuid = Some(ME.into());
+    start_backfill_run(&h.st).await;
+    crate::sync::backfill_stored(&h.st, ME, 5_000, vec![OTHER.into()]);
+    assert!(
+        lock(&h.st.live).name_fill.is_empty(),
+        "a live run keeps them"
+    );
+    lock(&h.st.live).backfill = None;
+    crate::sync::backfill_stored(&h.st, ME, 6_000, vec![MATE.into()]);
+    let live = lock(&h.st.live);
+    assert!(
+        live.name_fill.iter().any(|a| a.puuid == MATE),
+        "{:?}",
+        live.name_fill
+    );
+}
+
+#[tokio::test]
+async fn backfill_a_missing_match_is_remembered_as_missing() {
+    // R165: Riot no longer has entry 4: a task that waited on the backfill's
+    // download reads the 404 instead of counting a failure.
+    let h = harness().await;
+    let mut feed = Feed::new(10);
+    feed.details_status.insert(4, 404);
+    mount_feed(&h.server, feed).await;
+    store_anchor(&h.st, 9, base_ms()).await;
+    run_backfill(&h).await;
+    assert!(h.st.details_404(&entry_id(4)));
+}
+
+#[tokio::test]
+async fn backfill_a_hold_pauses_the_run_and_it_resumes_after_it() {
+    // R160: a 429 elsewhere set the `other` family's hold (a minute). The
+    // run's page is refused locally: the run waits for the hold, it does
+    // not end until the next match.
+    let h = harness().await;
+    let base = base_ms();
+    Mock::given(method("GET"))
+        .and(path(history_path()))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "60"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    mount_feed(&h.server, Feed::new(10)).await;
+    store_anchor(&h.st, 9, base).await;
+    assert!(h
+        .session
+        .match_history(ME, Some(0), Some(2), None)
+        .await
+        .is_err());
+    assert_eq!(count(&h.server, "GET", &history_path()).await, 1, "the 429");
+
+    run_backfill(&h).await;
+    assert_eq!(
+        count(&h.server, "GET", &history_path()).await,
+        1,
+        "nothing sent while held"
+    );
+    assert!(run_active(&h.st), "the run waits, it did not end");
+    assert!(lock(&h.st.live).try_start_worker().is_none(), "no work yet");
+
+    h.session.end_holds();
+    super::rank::advance(&h, Duration::from_secs(70));
+    assert!(lock(&h.st.live).backfill_resume_due(), "the tick wakes it");
+    let id = lock(&h.st.live).try_start_worker().expect("work again");
+    run_worker(h.st.clone(), h.session.clone(), id).await;
+    assert_eq!(
+        stored_anchor(&h.st).await,
+        Some((entry_id(0), entry_start(base, 0))),
+        "the run finished"
+    );
 }
 
 #[tokio::test]

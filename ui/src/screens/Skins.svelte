@@ -3,37 +3,66 @@
   total store value in VP and ≈ SAR; BY WEAPON on the left (filters the grid); the edition card (stacked bar + toggle
   chips) above the skin grid, sorted by value then name. A filter pair with no skins says so. `null` (the owned list
   was never fetched): the dashed empty state in the design's empty-list style. While the answer is pending the frames
-  draw skeletons. The page fills <main>; the weapon list and the grid scroll inside their cards.
+  draw skeletons; a failed answer (the skin catalog could not be built) leaves them empty. Either of those two is asked
+  again every minute and when the live stage changes. The page fills <main>; the weapon list and the grid scroll
+  inside their cards.
 -->
 <script lang="ts">
+  import { untrack } from "svelte";
   import { collection } from "../lib/api";
   import EditionCard from "../components/skins/EditionCard.svelte";
   import SkinCard from "../components/skins/SkinCard.svelte";
   import WeaponFilter from "../components/skins/WeaponFilter.svelte";
   import { scrollHost } from "../lib/router.svelte";
+  import { live } from "../lib/stores";
   import { ALL, editionRows, fmtInt, sar, skinNames, totalVp, VALUE_TIP, visibleSkins, weaponRows } from "../lib/skins";
   import { tip } from "../lib/tooltip.svelte";
   import type { Collection, Edition } from "../lib/types";
   import { reportError } from "../lib/uilog";
   import Skel from "../components/Skel.svelte";
 
+  /** Rust waits 60s before it builds the catalog again after a failure: asking more often brings nothing new. */
+  const RETRY_MS = 60_000;
+
   let coll = $state<Collection | null | undefined>(undefined);
+  /** The last answer failed: not "never fetched", so the empty state would be false. */
+  let failed = $state(false);
   let weapon = $state<string>(ALL);
   let edition = $state<Edition | typeof ALL>(ALL);
+  /** Bumped to ask again. */
+  let ask = $state(0);
 
   $effect(() => {
-    let live = true;
+    void ask;
+    let alive = true;
     collection()
       .then((c) => {
-        if (live) coll = c;
+        if (!alive) return;
+        coll = c;
+        failed = false;
       })
       .catch((err) => {
         reportError("collection", err);
-        if (live) coll = null;
+        if (alive) failed = true;
       });
     return () => {
-      live = false;
+      alive = false;
     };
+  });
+
+  /** No collection to show yet (never fetched, or the answer failed): asked again. */
+  const missing = $derived(failed || coll === null);
+  $effect(() => {
+    if (!missing) return;
+    const id = setInterval(() => ask++, RETRY_MS);
+    return () => clearInterval(id);
+  });
+  // VALORANT started or a match ended: Rust may have fetched the owned list meanwhile.
+  let lastStage: string | null | undefined;
+  $effect(() => {
+    const st = $live?.stage ?? null;
+    if (lastStage !== undefined && st !== lastStage && untrack(() => missing)) ask++;
+    lastStage = st;
   });
 
   const items = $derived(coll?.items ?? []);
@@ -48,7 +77,7 @@
   <header class="head">
     <h1>Collection</h1>
     <span class="flex"></span>
-    {#if coll === undefined}
+    {#if coll === undefined && !failed}
       <div class="value"><Skel w={140} h={28} block /><Skel w={90} h={14} block /></div>
     {:else if coll}
       <div class="value" use:tip={VALUE_TIP}>
@@ -58,7 +87,7 @@
     {/if}
   </header>
 
-  {#if coll === null}
+  {#if coll === null && !failed}
     <div class="empty">
       <div class="emptyin">
         <div class="ewell">
@@ -67,13 +96,15 @@
           >
         </div>
         <span class="etitle">No collection yet</span>
-        <span class="ebody">Start VALORANT once to load your collection. Every skin you own shows up here with its store value.</span>
+        <span class="ebody">Open this page while VALORANT is running to load your collection. Every skin you own shows up here with its store value.</span>
       </div>
     </div>
   {:else}
     <div class="cols">
       <div class="left">
-        {#if coll === undefined}
+        {#if !coll && failed}
+          <section class="card skcard"></section>
+        {:else if !coll}
           <section class="card skcard" aria-busy="true">
             {#each [0, 1, 2, 3, 4, 5, 6, 7] as i (i)}<Skel w={240} h={14} block />{/each}
           </section>
@@ -82,14 +113,18 @@
         {/if}
       </div>
       <div class="right">
-        {#if coll === undefined}
+        {#if !coll && failed}
+          <section class="card tiers empty-tiers"></section>
+        {:else if !coll}
           <section class="card tiers" aria-busy="true"><Skel w={400} h={10} block /><Skel w={300} h={34} block /></section>
         {:else}
           <EditionCard rows={eRows} selected={edition} onselect={(e) => (edition = e)} />
         {/if}
         <section class="card gridcard" aria-label="Skins">
           <div class="scroll" use:scrollHost>
-            {#if coll === undefined}
+            {#if !coll && failed}
+              <!-- Nothing to show yet: the frame stays empty (no status text) until an answer comes. -->
+            {:else if !coll}
               <div class="grid" aria-busy="true">
                 {#each [0, 1, 2, 3, 4, 5, 6, 7] as i (i)}<div class="skelcard"></div>{/each}
               </div>
@@ -202,6 +237,11 @@
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+
+  /* The skeleton's height, so the grid card below does not move when the answer comes. */
+  .empty-tiers {
+    height: 86px;
   }
 
   .gridcard {

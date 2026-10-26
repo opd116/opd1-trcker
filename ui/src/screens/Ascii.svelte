@@ -2,8 +2,24 @@
   ASCII studio (design v2, TrackerApp.dc.html 862–917; logic 1849–2010, model in lib/ascii.ts): a 440px editor
   (controls 300px | canvas) over the gallery. The user's saved drawings live in the DB (`ascii_list` / `ascii_save` /
   `ascii_delete`) and come first in the gallery, then the built-in presets. Copy goes through the clipboard; every
-  outcome is said in the polite status line and on the button for 2.4 s.
+  outcome is said in the polite status line and on the button for 2.4 s. The editor's state outlives the page (a
+  match found switches to Live, which unmounts it): coming back brings the unsaved drawing back.
 -->
+<script lang="ts" module>
+  import type { Effect as DraftEffect, PaintMap as DraftPaint, Tool as DraftTool } from "../lib/ascii";
+
+  /** The editor as it was when the page was left; null until it was first opened (the app's lifetime only). */
+  let kept: {
+    text: string;
+    char: string;
+    fx: DraftEffect;
+    tool: DraftTool;
+    brush: string;
+    paint: DraftPaint;
+    paintW: number;
+  } | null = null;
+</script>
+
 <script lang="ts">
   import AsciiCanvas from "../components/ascii/AsciiCanvas.svelte";
   import CharGrid from "../components/ascii/CharGrid.svelte";
@@ -13,6 +29,7 @@
   import {
     artSize,
     BRUSHES,
+    CANVAS_MIN_W,
     composeCanvas,
     EFFECTS,
     type Effect,
@@ -24,6 +41,7 @@
     type PaintMap,
     paintAt,
     PRESETS,
+    rawCanvasW,
     type Tool,
   } from "../lib/ascii";
   import { scrollHost } from "../lib/router.svelte";
@@ -36,12 +54,17 @@
     { value: "erase", label: "Erase" },
   ];
 
-  let text = $state(INITIAL.text);
-  let char = $state(INITIAL.char);
-  let fx = $state<Effect>(INITIAL.effect);
-  let tool = $state<Tool>(INITIAL.tool);
-  let brush = $state(INITIAL.brush);
-  let paint = $state<PaintMap>({});
+  let text = $state(kept?.text ?? INITIAL.text);
+  let char = $state(kept?.char ?? INITIAL.char);
+  let fx = $state<Effect>(kept?.fx ?? INITIAL.effect);
+  let tool = $state<Tool>(kept?.tool ?? INITIAL.tool);
+  let brush = $state(kept?.brush ?? INITIAL.brush);
+  let paint = $state<PaintMap>(kept?.paint ?? {});
+  /** The canvas width a drawing loaded from the gallery needs (`rawCanvasW`); applies while there is paint. */
+  let paintW = $state(kept?.paintW ?? CANVAS_MIN_W);
+  $effect(() => {
+    kept = { text, char, fx, tool, brush, paint, paintW };
+  });
   let saved = $state<AsciiArt[]>([]);
 
   /**
@@ -51,8 +74,8 @@
   let flash = $state<{ key: string; ok: boolean; msg: string } | null>(null);
   let flashTimer: ReturnType<typeof setTimeout> | undefined;
 
-  const canvas = $derived(composeCanvas(text, char, fx, paint));
   const noPaint = $derived(Object.keys(paint).length === 0);
+  const canvas = $derived(composeCanvas(text, char, fx, paint, noPaint ? CANVAS_MIN_W : paintW));
 
   const CLIPBOARD_FAIL = "Couldn’t reach the clipboard.";
 
@@ -141,6 +164,7 @@
 
   function loadPaint(raw: string) {
     text = "";
+    paintW = rawCanvasW(raw);
     paint = loadRaw(raw);
   }
 
@@ -159,6 +183,7 @@
               char = p.char;
               fx = p.effect;
               paint = {};
+              paintW = CANVAS_MIN_W;
             }
           : () => loadPaint(p.raw),
     })),
@@ -203,7 +228,10 @@
             {/if}
           {/snippet}
         </Segmented>
-        <button type="button" class="clear" disabled={noPaint} aria-label="Clear drawing" data-tip="Clear drawing" onclick={() => (paint = {})}
+        <button type="button" class="clear" disabled={noPaint} aria-label="Clear drawing" data-tip="Clear drawing" onclick={() => {
+          paint = {};
+          paintW = CANVAS_MIN_W;
+        }}
           ><svg width="13" height="14" viewBox="0 0 13 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"
             ><path d="M1 3.5h11M4.5 3.5V1.8h4v1.7M2.5 3.5l.7 8.8h6.6l.7-8.8"></path></svg
           >Clear</button

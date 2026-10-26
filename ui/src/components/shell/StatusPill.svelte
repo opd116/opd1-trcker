@@ -3,7 +3,7 @@
   mode's title bar, 34), with the same tooltip. Nothing until the first status answer arrives.
 -->
 <script lang="ts">
-  import { appStatus } from "../../lib/appdata.svelte";
+  import { appStatus, statusArrivedAt } from "../../lib/appdata.svelte";
   import { live } from "../../lib/stores";
   import { tip } from "../../lib/tooltip.svelte";
   import Dot from "./Dot.svelte";
@@ -21,7 +21,12 @@
     return () => clearInterval(id);
   });
 
-  const view = $derived($appStatus ? pillView($appStatus, $live?.stage ?? null, nowMs) : null);
+  /** When the current status arrived (its retry wait counts from then, across remounts too). */
+  const arrivedMs = $derived.by(() => {
+    void $appStatus;
+    return statusArrivedAt();
+  });
+  const view = $derived($appStatus ? pillView($appStatus, $live?.stage ?? null, nowMs, arrivedMs) : null);
 </script>
 
 {#if view}

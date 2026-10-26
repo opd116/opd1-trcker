@@ -146,6 +146,40 @@ test("a drawer that throws while rendering leaves the screen, and recovers on th
   await expect(dialog(page)).toHaveAttribute("aria-label", "Mara profile");
 });
 
+// The crashed drawer used to stay a flex child of <main> (half its height) and kept the next drawer from opening.
+test("a crashed drawer takes no room from the screen, and opening another player tries again", async ({ page }) => {
+  await openScene(page, "ingame", { profile: MARA });
+  await expect(dialog(page)).toBeVisible();
+  await page.evaluate(
+    `import("/src/lib/stores.ts").then(({ openDetails }) => { let d; openDetails.subscribe((v) => (d = v))(); openDetails.event({ ...d, recent: [null] }); })`,
+  );
+  await expect(dialog(page)).toHaveCount(0);
+  const h = await page.evaluate(() => ({
+    main: document.querySelector("main")!.clientHeight,
+    live: document.querySelector("main .live")!.getBoundingClientRect().height,
+  }));
+  expect(h.live).toBe(h.main);
+  // No live update in between: the other player's row alone brings a drawer back.
+  await page.getByRole("button").filter({ hasText: "Sable" }).first().click();
+  await expect(dialog(page)).toHaveAttribute("aria-label", "Sable profile");
+});
+
+// Glance mode has no other way out than its own title bar (no native frame, always on top).
+test("a glance body that throws keeps the glance title bar, and the next live update recovers it", async ({ page }) => {
+  const errors = consoleErrors(page);
+  await page.setViewportSize({ width: 420, height: 800 });
+  await openScene(page, "ingame", { glance: "1" });
+  await expect(page.locator(".glance-body [data-row]")).toHaveCount(10);
+  await page.evaluate(BREAK_BOARD);
+  await expect(page.locator(".glance-body")).toHaveCount(0);
+  expect(errors.some((e) => e.startsWith("glance "))).toBe(true);
+  await expect(page.locator(".glance .bar")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Exit glance" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "Close", exact: true })).toBeVisible();
+  await page.evaluate(`import("/src/lib/stores.ts").then(({ live }) => live.set({ stage: "closed", mapId: null, players: [] }))`);
+  await expect(page.locator(".glance-body")).toHaveCount(1);
+});
+
 // Under Tauri the UI's own failures reach the app log (`ui_log`, Ctrl+Shift+L / Ctrl+Shift+D). The DEV browser has no
 // Rust, so the Tauri side is faked after the page loaded: `isTauri()` reads `globalThis.isTauri` when it is called, and
 // `invoke` is `window.__TAURI_INTERNALS__.invoke(cmd, args, options)` (@tauri-apps/api/core).
@@ -255,6 +289,16 @@ test.describe("double-click guard", () => {
     await expect.poll(() => guard(page)).toBe(false);
     await page.mouse.click(spot.x, spot.y);
     await expect(dialog(page)).toHaveCount(0);
+  });
+
+  test("a double-click on a Glance row opens the drawer once: the second click neither closes it nor hits the rail", async ({ page }) => {
+    await page.setViewportSize({ width: 420, height: 800 });
+    await openScene(page, "ingame", { glance: "1" });
+    const row = (await page.locator('.glance-body [data-row][role="button"]').first().boundingBox())!;
+    await page.mouse.dblclick(row.x + 150, row.y + row.height / 2);
+    await expect(dialog(page)).toBeVisible();
+    await expect.poll(() => guard(page)).toBe(false);
+    await expect(dialog(page)).toBeVisible();
   });
 
   test("the guard does not delay the first click on a row", async ({ page }) => {

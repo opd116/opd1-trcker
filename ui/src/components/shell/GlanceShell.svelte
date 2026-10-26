@@ -4,8 +4,11 @@
   header, the two team tables, the saved-player note) is components/live/GlanceView.svelte.
 -->
 <script lang="ts">
+  import { retryOnNextUpdate } from "../../lib/boundary";
   import { setGlance } from "../../lib/router.svelte";
+  import { live } from "../../lib/stores";
   import { tip } from "../../lib/tooltip.svelte";
+  import { reportError } from "../../lib/uilog";
   import GlanceView from "../live/GlanceView.svelte";
   import { close } from "./appWindow";
   import PinButton from "./PinButton.svelte";
@@ -30,7 +33,13 @@
         ><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><path d="M1 1l8 8M9 1L1 9"></path></svg></button
       >
     </header>
-    <GlanceView />
+    <!-- A body that crashes leaves this bar (drag, Exit glance, Close) and tries again on the next live update. -->
+    <svelte:boundary onerror={(err) => reportError("glance", err)}>
+      <GlanceView />
+      {#snippet failed(_error, reset)}
+        <div class="blank" {@attach retryOnNextUpdate(reset, live)}></div>
+      {/snippet}
+    </svelte:boundary>
   </div>
 </div>
 
@@ -52,6 +61,11 @@
     background: var(--bg);
     border-left: 1px solid var(--line-chrome);
     border-right: 1px solid var(--line-chrome);
+  }
+
+  .blank {
+    flex: 1;
+    min-height: 0;
   }
 
   .bar {

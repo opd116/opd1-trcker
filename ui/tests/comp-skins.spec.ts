@@ -123,16 +123,44 @@ test.describe("Collection", () => {
     await expect(cards).toHaveCount(4);
   });
 
-  test("art that cannot load shows the unavailable frame", async ({ page }) => {
-    await open(page, "scene=closed&screen=skins", (url) => (/weaponskinlevels/.test(url) ? { status: 404 } : null));
-    await expect(page.getByText("ARTWORK UNAVAILABLE")).toHaveCount(22);
+  test("art that cannot load is asked again, then shows the unavailable frame", async ({ page }) => {
+    await routeMedia(page, (url) => (/weaponskinlevels/.test(url) ? { status: 404 } : null));
+    await page.clock.install({ time: NOW });
+    await gotoApp(page, "/?scene=closed&screen=skins");
+    const frames = page.getByText("ARTWORK UNAVAILABLE");
+    // R163: the first failures are retried (2 s, 5 s, 15 s), not given up on.
+    await page.locator(".art img[alt]").first().waitFor({ state: "attached" });
+    await page.waitForTimeout(500);
+    await expect(frames).toHaveCount(0);
+    for (let i = 0; i < 12 && (await frames.count()) < 22; i++) {
+      await page.clock.runFor(5_000);
+      await page.waitForTimeout(150);
+    }
+    await expect(frames).toHaveCount(22);
   });
 
   test("a collection never fetched: the empty state, no figures", async ({ page }) => {
     await open(page, "scene=closed&screen=skins&empty=1");
     await expect(page.getByText("No collection yet")).toBeVisible();
-    await expect(page.getByText("Start VALORANT once to load your collection.", { exact: false })).toBeVisible();
+    await expect(page.getByText("Open this page while VALORANT is running to load your collection.", { exact: false })).toBeVisible();
     await expect(page.locator(".value")).toHaveCount(0);
+  });
+
+  test("a collection that failed is not shown as never fetched, and is asked again", async ({ page }) => {
+    await routeMedia(page);
+    await page.clock.install({ time: NOW });
+    await gotoApp(page, "/?scene=closed&screen=skins&fail=collection:1");
+    const cards = page.getByRole("region", { name: "Skins" }).locator(".card");
+    // Answered (no skeleton left), but with nothing to show: empty frames, no figures, no false empty state.
+    await expect(page.locator('main [aria-busy="true"]')).toHaveCount(0);
+    await expect(page.locator(".gridcard")).toBeVisible();
+    await expect(page.getByText("No collection yet")).toHaveCount(0);
+    await expect(page.locator(".value")).toHaveCount(0);
+    await expect(cards).toHaveCount(0);
+    // The next ask (a minute later) brings the collection.
+    await page.clock.runFor(60_000);
+    await expect(cards).toHaveCount(22);
+    await expect(page.locator(".value .num")).toHaveText("46,075");
   });
 
   for (const size of [
@@ -142,6 +170,9 @@ test.describe("Collection", () => {
     test(`fits ${size.width}×${size.height}: the page never scrolls, the lists scroll inside their cards`, async ({ page }) => {
       await page.setViewportSize(size);
       await open(page, "scene=closed&screen=skins");
+      // Measured on the loaded collection, not on the skeleton drawn before it answers.
+      await expect(page.getByRole("region", { name: "Skins" }).locator(".card")).toHaveCount(22);
+      await settle(page);
       const fit = await page.evaluate(() => {
         const s = document.querySelector<HTMLElement>("main .screen")!;
         return { y: s.scrollHeight > s.clientHeight, x: s.scrollWidth > s.clientWidth };

@@ -27,8 +27,11 @@ const ERROR_TIPS: Record<string, string> = {
   CLIENT_UNREACHABLE: "The Riot Client isn’t answering on its local port.",
 };
 
-/** The pill for a status, the live stage (for the "ok" detail) and the current time. */
-export function pillView(s: AppStatus, stage: Stage | null, nowMs: number): PillView {
+/**
+ * The pill for a status, the live stage (for the "ok" detail) and the current time. `arrivedMs`: when this status
+ * arrived; its `retryInMs` counts from then (an unchanged status is not sent again), so the wait shown counts down.
+ */
+export function pillView(s: AppStatus, stage: Stage | null, nowMs: number, arrivedMs: number = nowMs): PillView {
   switch (s.conn) {
     case "waiting":
       return {
@@ -63,7 +66,7 @@ export function pillView(s: AppStatus, stage: Stage | null, nowMs: number): Pill
     case "lost": {
       const lines: string[] = [];
       if (s.lastDataMs !== null) lines.push(`Last data received ${ageShort(nowMs - s.lastDataMs)} ago.`);
-      if (s.retryInMs !== null) lines.push(`Retrying in ${secs(s.retryInMs)} s.`);
+      if (s.retryInMs !== null) lines.push(`Retrying in ${secs(Math.max(0, s.retryInMs - (nowMs - arrivedMs)))} s.`);
       return {
         conn: "lost",
         label: "Reconnecting…",

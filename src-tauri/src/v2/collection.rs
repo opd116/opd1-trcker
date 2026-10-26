@@ -6,8 +6,9 @@
 //!   only while VALORANT runs, at most once per [`REFRESH_EVERY`] and only
 //!   when the Skins screen asks (never from the poll loop). A call refused by
 //!   a request hold is not counted: the next ask tries again.
-//! - The owned level ids are stored in `app_state` under [`STORE_KEY`] with
-//!   the owner's puuid and the fetch time, so the screen still shows with
+//! - The owned level ids are stored in `app_state` under [`store_key`], one
+//!   key per account, with the owner's puuid and the fetch time (a second
+//!   account never erases the first one's copy), so the screen still shows with
 //!   the game closed. Only ids are stored: names, weapons, editions and
 //!   prices come from valorant-api's skin catalog
 //!   (`AssetCache::collection`), cached on disk per valorant-api version.
@@ -26,8 +27,25 @@ use opd1_riot::session::RiotError;
 use super::AppStateRef;
 use crate::state::{lock, now_ms, AppState};
 
-/// The key in `app_state`.
+/// The key in `app_state` before it was kept per account: still read, for
+/// its owner, until that account's own key is written.
 pub const STORE_KEY: &str = "self_collection";
+
+/// `puuid`'s key in `app_state`.
+pub fn store_key(puuid: &str) -> String {
+    format!("{STORE_KEY}:{puuid}")
+}
+
+/// `puuid`'s stored copy: their own key, else the shared key of older
+/// versions when that copy is theirs.
+fn load_stored(repo: &opd1_core::db::repo::Repo, puuid: &str) -> Option<StoredOwned> {
+    [store_key(puuid), STORE_KEY.to_string()]
+        .iter()
+        .find_map(|key| {
+            let json = repo.get_state(key).ok().flatten()?;
+            StoredOwned::parse(&json, puuid)
+        })
+}
 
 /// The least time between two asks to Riot.
 pub const REFRESH_EVERY: Duration = Duration::from_secs(10 * 60);
@@ -97,10 +115,9 @@ pub async fn collection(state: AppStateRef<'_>) -> Result<Option<Collection>, St
 
     let owner = me.clone();
     let stored = st
-        .db(move |repo| repo.get_state(STORE_KEY))
+        .db(move |repo| Ok(load_stored(repo, &owner)))
         .await
-        .flatten()
-        .and_then(|json| StoredOwned::parse(&json, &owner));
+        .flatten();
     let Some(stored) = stored else {
         return Ok(None);
     };
@@ -163,7 +180,7 @@ async fn refresh_if_due(st: &Arc<AppState>, me: &str) {
         if lock(&owner.live).self_puuid.as_deref() != Some(me.as_str()) {
             return Ok(());
         }
-        repo.set_state(STORE_KEY, &json)
+        repo.set_state(&store_key(&me), &json)
     })
     .await;
 }
@@ -171,6 +188,30 @@ async fn refresh_if_due(st: &Arc<AppState>, me: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn each_account_keeps_its_own_stored_copy() {
+        use opd1_core::db::{open_db, repo::Repo};
+        let repo = Repo::new(open_db(std::path::Path::new(":memory:")).unwrap());
+        let other = "bbbbbbbb-0000-0000-0000-000000000002";
+        let copy = |puuid: &str| {
+            serde_json::to_string(&StoredOwned {
+                puuid: puuid.into(),
+                fetched_ms: 1,
+                levels: vec![],
+            })
+            .unwrap()
+        };
+        // An older version's shared key, ME's: still read for ME.
+        repo.set_state(STORE_KEY, &copy(ME)).unwrap();
+        assert!(load_stored(&repo, ME).is_some());
+        // The other account's fetch never erases ME's copy.
+        repo.set_state(&store_key(ME), &copy(ME)).unwrap();
+        repo.set_state(STORE_KEY, &copy(other)).unwrap();
+        repo.set_state(&store_key(other), &copy(other)).unwrap();
+        assert_eq!(load_stored(&repo, ME).unwrap().puuid, ME);
+        assert_eq!(load_stored(&repo, other).unwrap().puuid, other);
+    }
 
     const ME: &str = "aaaaaaaa-0000-0000-0000-000000000001";
     const L1: &str = "578e9077-4f88-260c-e54c-b988425c60e4";

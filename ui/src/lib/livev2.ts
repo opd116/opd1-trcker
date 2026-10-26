@@ -103,7 +103,8 @@ export interface PeakView {
 /** ▲N beside the rank when the peak is N divisions higher; the image tooltip names the peak, its act and how long ago. */
 export function peakOf(c: PlayerCard, meta: Meta | null): PeakView | null {
   const r = c.rank, p = c.peak;
-  if (!r || !p || !isRankedTier(p.tier)) return null;
+  // An unranked current rank has no divisions to count from (the profile's rank card still shows the peak).
+  if (!r || !p || !isRankedTier(p.tier) || !isRankedTier(r.tier)) return null;
   const delta = p.tier - r.tier;
   if (delta <= 0) return null;
   const when = p.sinceActEndMs === null ? "This act" : `${p.actLabel} · ${span(p.sinceActEndMs)} ago`;
@@ -336,10 +337,13 @@ export function matchup(live: LiveState): Matchup[] {
   });
 }
 
-/** LOADING PLAYERS n / m: shown until every expected player has every field. In Game expects 10, Agent Select 5. */
+/**
+ * LOADING PLAYERS n / m: shown until every expected player has every field. The roster arrives whole, so its size is
+ * the count (Skirmish 2v2 has 4); before it, In Game expects 10 and Agent Select 5.
+ */
 export function loadingProgress(live: LiveState): { loaded: number; total: number } | null {
   const cards = live.stage === "pregame" ? live.players.filter((p) => p.team === "ally") : live.players;
-  const total = Math.max(live.stage === "pregame" ? 5 : 10, cards.length);
+  const total = cards.length > 1 ? cards.length : live.stage === "pregame" ? 5 : 10;
   const loaded = cards.filter(cardLoaded).length;
   return loaded >= total ? null : { loaded, total };
 }
@@ -501,7 +505,8 @@ export function recapModel(v: MatchDetailsView, mystats: MyStats | null | undefi
     ours: ours?.roundsWon ?? null,
     theirs: theirs?.roundsWon ?? null,
     stats,
-    mvp: !!self && !!top && top.puuid === self.puuid,
+    // Deathmatch has one block and no team: no TEAM MVP.
+    mvp: v.teams.length >= 2 && !!self && !!top && top.puuid === self.puuid,
     rr,
   };
 }

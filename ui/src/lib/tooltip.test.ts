@@ -248,6 +248,37 @@ describe("tooltip engine (delegated mouseover, 450 ms)", () => {
     expect(tipState.tip?.text).toBe("Hidden name");
   });
 
+  it("the window losing focus (Alt+Tab into the game) hides a shown tip and cancels a pending one", () => {
+    const winListeners: Record<string, () => void> = {};
+    const root = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      ownerDocument: {
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        defaultView: {
+          addEventListener: (k: string, f: () => void) => (winListeners[k] = f),
+          removeEventListener: (k: string) => delete winListeners[k],
+        },
+      },
+      getBoundingClientRect: () => rect(0, 0, 1000, 800),
+    } as unknown as HTMLElement;
+    const detach = attachTooltips(root);
+    over(trigger({ "data-tip": "Shown" }, rect(100, 100, 100, 20)));
+    vi.advanceTimersByTime(450);
+    expect(tipState.tip?.text).toBe("Shown");
+    winListeners.blur!();
+    expect(tipState.tip).toBeNull();
+
+    over(trigger({ "data-tip": "Pending" }, rect(100, 100, 100, 20)));
+    vi.advanceTimersByTime(200);
+    winListeners.blur!();
+    vi.advanceTimersByTime(1000);
+    expect(tipState.tip).toBeNull();
+    detach();
+    expect(winListeners.blur).toBeUndefined();
+  });
+
   describe("retip: one hover surface, the tip follows its target (the RR chart)", () => {
     const fakeRoot = {
       addEventListener: vi.fn(),

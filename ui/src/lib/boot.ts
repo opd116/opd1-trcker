@@ -88,12 +88,22 @@ export async function loadMeta(
   }
 }
 
-/** Ctrl+Shift+L copies the log, Ctrl+Shift+D dumps the raw captures. No UI for either. */
-export function keyAction(
-  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey">,
-): "copyLog" | "dumpRaw" | null {
-  if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return null;
+type KeyLike = Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey"> & { code?: string };
+
+/**
+ * The letter a shortcut means: `key` when it is a Latin letter (so Dvorak's or AZERTY's own letters count), else the
+ * physical key (`code` "KeyL" → "l"): with an Arabic (or any non-Latin) layout active, Ctrl+Shift+L gives `key` "م".
+ */
+function shortcutLetter(e: KeyLike): string {
   const k = e.key.toLowerCase();
+  if (/^[a-z]$/.test(k)) return k;
+  return e.code && /^Key[A-Z]$/.test(e.code) ? e.code.slice(3).toLowerCase() : k;
+}
+
+/** Ctrl+Shift+L copies the log, Ctrl+Shift+D dumps the raw captures. No UI for either. */
+export function keyAction(e: KeyLike): "copyLog" | "dumpRaw" | null {
+  if (!e.ctrlKey || !e.shiftKey || e.altKey || e.metaKey) return null;
+  const k = shortcutLetter(e);
   return k === "l" ? "copyLog" : k === "d" ? "dumpRaw" : null;
 }
 
@@ -103,12 +113,10 @@ export function keyAction(
  * Never Ctrl+Shift+L or Ctrl+Shift+D (`keyAction` above); Ctrl+Alt chords are AltGr characters on some layouts, and
  * Tab, Enter and Space are the keyboard's way into the UI.
  */
-export function browserKeyBlocked(
-  e: Pick<KeyboardEvent, "key" | "ctrlKey" | "shiftKey" | "altKey" | "metaKey">,
-): boolean {
+export function browserKeyBlocked(e: KeyLike): boolean {
   if (e.key === "F5" || e.key === "F7") return true;
   if (!e.ctrlKey || e.altKey || e.metaKey) return false;
-  const k = e.key.toLowerCase();
+  const k = shortcutLetter(e);
   return k === "r" || (!e.shiftKey && (k === "p" || k === "f" || k === "u"));
 }
 
@@ -176,6 +184,34 @@ export async function retryOnce<T>(call: () => Promise<T>, delayMs: number, want
     await new Promise<void>((resolve) => setTimeout(resolve, delayMs));
     if (!wanted()) throw first;
     return call();
+  }
+}
+
+/**
+ * The recap's `match_details` retries (R189): Riot publishes a match some seconds after it ends, so the first read
+ * at the match end usually misses. The waits follow the poll loop's own re-syncs (`POST_MATCH_DELAYS`, +10 s … +80 s),
+ * after which the match is stored and a read finds it.
+ */
+export const RECAP_RETRY_MS = [10_000, 10_000, 20_000, 40_000, 80_000] as const;
+
+/**
+ * `call()`, asked again after each wait in `delaysMs` while it rejects; the last rejection is the answer. `wanted` is
+ * asked after every wait: when it says no, the latest error is thrown and nothing more is asked. An `invalid …`
+ * rejection is never repeated (R163).
+ */
+export async function retryWithDelays<T>(
+  call: () => Promise<T>,
+  delaysMs: readonly number[],
+  wanted: () => boolean = () => true,
+): Promise<T> {
+  for (let i = 0; ; i++) {
+    try {
+      return await call();
+    } catch (err) {
+      if (i >= delaysMs.length || isInvalidRejection(err)) throw err;
+      await new Promise<void>((resolve) => setTimeout(resolve, delaysMs[i]));
+      if (!wanted()) throw err;
+    }
   }
 }
 

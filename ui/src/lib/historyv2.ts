@@ -2,7 +2,7 @@
 // 1593–1616, `scoreboard` 1627–1674, `extraVals` 1741–1769). Pure: the screens render what these return. Local time,
 // en-US / en-GB written out by hand (no Intl, like format.ts: it would put a narrow no-break space before AM/PM).
 import { DASH, durationMin, rrDelta, time12 } from "./format";
-import type { HistoryRow, MatchDetailsView, MatchTeamView, Result, ScoreRow } from "./types";
+import type { HistoryRow, MatchDetailsView, MatchTeamView, MyStats, Result, ScoreRow } from "./types";
 
 const MIN = 60_000;
 const DAY = 86_400_000;
@@ -236,6 +236,22 @@ export function mvpOf(v: MatchDetailsView): { match: string | null; team: Set<st
   if (v.teams.length < 2) team.clear();
   if (best) team.delete(best.puuid);
   return { match: best?.puuid ?? null, team };
+}
+
+/**
+ * YOUR RR on the user's own competitive scoreboard: the RR change and the rank after it. Only a history row knows that
+ * rank (`tierAfter`); My Stats' rows carry the rank during the match, which differs on a promotion or demotion game,
+ * so they give the RR change alone.
+ */
+export function yourRrOf(
+  matchId: string,
+  row: Pick<HistoryRow, "rrEarned" | "tierAfter"> | null | undefined,
+  ms: Pick<MyStats, "last5" | "session"> | null | undefined,
+): { rr: number; tier: number | null } | null {
+  if (row && row.rrEarned !== null) return { rr: row.rrEarned, tier: row.tierAfter };
+  const m = ms?.last5.find((x) => x.matchId === matchId) ?? ms?.session?.matches.find((x) => x.matchId === matchId);
+  if (m && m.rrEarned !== null) return { rr: m.rrEarned, tier: null };
+  return null;
 }
 
 /** `0.62`; deaths of 0 count as 1 (the design's K/D never divides by zero); `—` without a stats row. */

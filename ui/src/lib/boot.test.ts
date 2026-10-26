@@ -12,6 +12,7 @@ import {
   loadMeta,
   matchSlot,
   retryOnce,
+  retryWithDelays,
   runKeyAction,
   startLive,
   startMyStats,
@@ -193,6 +194,15 @@ describe("keyAction", () => {
     expect(keyAction(k("D", { ctrlKey: true, shiftKey: true }))).toBe("dumpRaw");
   });
 
+  it("works with an Arabic layout active: the physical key counts when the letter is not Latin", () => {
+    const both = { ctrlKey: true, shiftKey: true };
+    expect(keyAction({ ...k("م", both), code: "KeyL" })).toBe("copyLog");
+    expect(keyAction({ ...k("ي", both), code: "KeyD" })).toBe("dumpRaw");
+    // A Latin layout's own letters win over the position (Dvorak's L is on QWERTY's P key).
+    expect(keyAction({ ...k("l", both), code: "KeyP" })).toBe("copyLog");
+    expect(browserKeyBlocked({ ...k("ق", { ctrlKey: true }), code: "KeyR" })).toBe(true);
+  });
+
   it("nothing else does", () => {
     expect(keyAction(k("L", { ctrlKey: true }))).toBeNull();
     expect(keyAction(k("L", { shiftKey: true }))).toBeNull();
@@ -344,6 +354,61 @@ describe("retryOnce", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     await seen;
     expect(call).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("retryWithDelays", () => {
+  afterEach(() => vi.useRealTimers());
+
+  it("asks again after each wait until an answer, and returns it", async () => {
+    vi.useFakeTimers();
+    let n = 0;
+    const call = vi.fn(async () => {
+      if (n++ < 2) throw new Error("not yet");
+      return "found";
+    });
+    const done = retryWithDelays(call, [100, 200, 400]);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(call).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(199);
+    expect(call).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(done).resolves.toBe("found");
+    expect(call).toHaveBeenCalledTimes(3);
+  });
+
+  it("gives up with the last error once the waits run out", async () => {
+    vi.useFakeTimers();
+    let n = 0;
+    const call = vi.fn(async () => {
+      throw new Error(`miss ${++n}`);
+    });
+    const done = retryWithDelays(call, [100, 100]);
+    const seen = expect(done).rejects.toThrow("miss 3");
+    await vi.advanceTimersByTimeAsync(200);
+    await seen;
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(call).toHaveBeenCalledTimes(3);
+  });
+
+  it("stops when nobody wants the answer, and never repeats an invalid id", async () => {
+    vi.useFakeTimers();
+    let wanted = true;
+    const miss = vi.fn(async () => {
+      throw new Error("miss");
+    });
+    const left = retryWithDelays(miss, [100, 100], () => wanted);
+    const leftSeen = expect(left).rejects.toThrow("miss");
+    wanted = false;
+    await vi.advanceTimersByTimeAsync(100);
+    await leftSeen;
+    expect(miss).toHaveBeenCalledTimes(1);
+
+    const invalid = vi.fn(async () => {
+      throw "invalid match id";
+    });
+    await expect(retryWithDelays(invalid, [100])).rejects.toBe("invalid match id");
+    expect(invalid).toHaveBeenCalledTimes(1);
   });
 });
 

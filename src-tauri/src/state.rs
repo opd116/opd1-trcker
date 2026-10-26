@@ -373,6 +373,9 @@ pub struct BackfillRun {
     /// fill when the run ends (`sync::end_run`), so one run asks in a few
     /// batched requests, not one per match.
     pub participants: Vec<NameAsk>,
+    /// R160: a request hold met the run; its next page or match waits until
+    /// then ([`LiveModel::pause_backfill`]), the cursor and `pending` kept.
+    pub resume_at: Option<Instant>,
 }
 
 impl BackfillRun {
@@ -468,7 +471,9 @@ pub struct LiveModel {
     /// Select, emptied on every Lobby fetch, on the transition to Menus or
     /// Closed, and when VALORANT closes or the account changes.
     pub match_tiers: MatchTiers,
-    /// Names from `names()` this run (visible, non-self players only).
+    /// Names from `names()` since the last match ended (visible, non-self
+    /// players only); emptied with `names_attempted` there and on an account
+    /// switch.
     pub known_names: HashMap<String, (String, String)>,
     /// Players whose card showed them hidden the last time they were on
     /// screen this run, with the agent it showed (once locked, R99) — see
@@ -564,6 +569,10 @@ pub struct LiveModel {
     /// The last built/emitted state (`live_state()` returns it).
     pub current: LiveState,
     last_bytes: Vec<u8>,
+    /// The current act the last published cards were built with
+    /// ([`AppState::publish`]): an act change is told by it, not by a table
+    /// that may already have switched before the change was looked at.
+    pub(crate) built_act_id: Option<String>,
 }
 
 impl LiveModel {
@@ -610,6 +619,7 @@ impl LiveModel {
                 settled: false,
             },
             last_bytes: Vec::new(),
+            built_act_id: None,
         }
     }
 
@@ -976,7 +986,31 @@ impl LiveModel {
     /// stays the Lobby (R41): the raw presence (`in_match`) decides. The
     /// run's cursor survives the pause.
     pub fn backfill_ready(&self) -> bool {
-        self.backfill.is_some() && self.between_matches()
+        self.between_matches()
+            && self
+                .backfill
+                .as_ref()
+                .is_some_and(|run| run.resume_at.is_none_or(|at| self.now() >= at))
+    }
+
+    /// R160: a paused own-history run's hold has run out: the poll tick
+    /// starts a worker, as [`Self::comp_backfill_resume_due`] does. It stays
+    /// true until the run's next step clears the pause.
+    pub fn backfill_resume_due(&self) -> bool {
+        self.backfill
+            .as_ref()
+            .and_then(|run| run.resume_at)
+            .is_some_and(|at| self.now() >= at)
+            && self.between_matches()
+    }
+
+    /// R160: the run met a request hold with `wait` left: it waits for it
+    /// instead of ending (nothing was sent, so nothing says the run is done).
+    pub fn pause_backfill(&mut self, wait: Duration) {
+        let at = self.now() + wait;
+        if let Some(run) = self.backfill.as_mut() {
+            run.resume_at = Some(run.resume_at.map_or(at, |t| t.max(at)));
+        }
     }
 
     /// B1: the own competitive-updates backfill has a page to fetch: a run is
@@ -1070,6 +1104,20 @@ impl LiveModel {
             wake |= !self.names_needed().is_empty();
         }
         wake
+    }
+
+    /// Everyone gets a fresh first pass: a match ended, VALORANT closed, or
+    /// the session was rebuilt (which drops the pending rank retries, R155).
+    /// The names asked and their answers go too: the next match asks its
+    /// visible players again (one name-service call), so a renamed player is
+    /// not shown by an old name for the app's lifetime.
+    pub fn forget_synced(&mut self) {
+        self.synced.clear();
+        self.party_ready.clear();
+        self.names_attempted.clear();
+        self.known_names.clear();
+        // R165: the failure counts went with it; so does the wake-up.
+        self.clear_names_retry_wake();
     }
 
     /// R165: drops the armed names-retry wake-up (the stage reset forgets the
@@ -1257,6 +1305,16 @@ impl LiveModel {
             || self.comp_backfill_ready()
     }
 
+    /// R101/R150: drops the own-history run and hands back the players of
+    /// the matches it stored, for the names fill — however the run ended (a
+    /// finished run, `sync::end_run`, or one dropped with its session).
+    pub fn take_backfill_asks(&mut self) -> Vec<NameAsk> {
+        self.backfill
+            .take()
+            .map(|run| run.participants)
+            .unwrap_or_default()
+    }
+
     /// R150: queues asks for the names fill, one per puuid. Asks
     /// [`Self::fill_allowed`] refuses (the user, an empty id) are not queued
     /// at all — and are checked again when taken. Asks are accepted at any
@@ -1419,6 +1477,7 @@ impl LiveModel {
             done: false,
             total: None,
             participants: Vec::new(),
+            resume_at: None,
         });
     }
 
@@ -1792,6 +1851,11 @@ pub struct AppState {
     /// weapons are still "resolving" (absent keys); once it leaves, an
     /// unknown name is `null`.
     skins_inflight: Mutex<HashMap<String, usize>>,
+    /// R97: the skins whose names were already asked for the open Player
+    /// Details (its puuid, the skin ids). A name that failed is asked again
+    /// at the next open of the page, not at every roster change while it
+    /// stays open (Agent Select re-polls every 3 s). Reset by every open.
+    skins_tried: Mutex<Option<(String, HashSet<String>)>>,
     /// The Player Details the UI asked for last (`player_details`), as it
     /// was last given to the UI (the answer, or the last `details` event).
     /// A rebuild is emitted only for this player and only when it differs:
@@ -1899,6 +1963,7 @@ impl AppState {
             details_synced: Mutex::new(HashMap::new()),
             details_rerun: Mutex::new(HashSet::new()),
             skins_inflight: Mutex::new(HashMap::new()),
+            skins_tried: Mutex::new(None),
             open_details: Mutex::new(None),
             details_inflight: Mutex::new(HashMap::new()),
             details_404: Mutex::new(HashSet::new()),
@@ -1948,10 +2013,18 @@ impl AppState {
     /// R189: the local API just answered. The exact time is kept for
     /// `app_status`; a `"status"` event goes out for it alone only when the
     /// last emitted time is [`STATUS_DATA_EVERY_MS`] old (the presence is read
-    /// every 2 s, which must not mean an event every 2 s).
+    /// every 2 s, which must not mean an event every 2 s). Only while the pill
+    /// shows it (`ok`, `lost`): waiting for VALORANT, nothing reads the time,
+    /// and the next state change carries the exact one anyway (`set_status`).
     pub fn note_local_data(&self, now: i64) {
         self.last_data_ms.store(now, Ordering::Release);
         self.set_status(|s| {
+            if !matches!(
+                s.conn,
+                opd1_core::wire::ConnState::Ok | opd1_core::wire::ConnState::Lost
+            ) {
+                return;
+            }
             let stale = s
                 .last_data_ms
                 .is_none_or(|t| now < t || now - t >= STATUS_DATA_EVERY_MS);
@@ -2225,7 +2298,6 @@ impl AppState {
         }
         let result = session.content().await;
         let now = now_ms();
-        let before = self.current_act().map(|a| a.id);
         // R185: a request hold (nothing was sent, e.g. one carried into this
         // session) is "not now", not a failure.
         let mut held = None;
@@ -2290,12 +2362,34 @@ impl AppState {
             }
             c.logged = Some(key);
         }
-        if current.map(|a| a.id) != before {
-            // The live cards, an open Player Details and My Stats (B2) read
-            // the act.
-            self.publish();
-            crate::my_stats::notify(self);
-            crate::details::refresh_open(self).await;
+        // The live cards, an open Player Details and My Stats (B2) read the
+        // act. Compared with what the cards were built with: the table may
+        // have switched by date before this answer came (or without one).
+        if self.act_changed_since_publish(current.map(|a| a.id)) {
+            self.on_act_change().await;
+        }
+    }
+
+    /// Whether `current` differs from the act the published cards used.
+    fn act_changed_since_publish(&self, current: Option<String>) -> bool {
+        lock(&self.live).built_act_id != current
+    }
+
+    /// Rebuilds what reads the current act: the cards (`publish` dedupes), My
+    /// Stats and an open Player Details.
+    async fn on_act_change(self: &Arc<Self>) {
+        self.publish();
+        crate::my_stats::notify(self);
+        crate::details::refresh_open(self).await;
+    }
+
+    /// The slow tick's act check: an act can end with no content answer
+    /// (failing, held) and while VALORANT is closed (no content refresh
+    /// then), so the cards are rebuilt when the act by date moved on.
+    pub async fn act_tick(self: &Arc<Self>) {
+        let current = self.current_act().map(|a| a.id);
+        if self.act_changed_since_publish(current) {
+            self.on_act_change().await;
         }
     }
 
@@ -2414,15 +2508,20 @@ impl AppState {
     /// Holding the lock across the emit is fine: Tauri's `emit` only
     /// serializes and queues the event for the webview.
     pub fn publish(&self) {
-        let acts = self.acts();
         let mut live = lock(&self.live);
+        // Under the lock: a publish that waited for it never builds from an
+        // act table older than the one a publish before it used (`acts` is a
+        // leaf lock; nothing takes `live` while holding it).
+        let acts = self.acts();
         live.observe_match_end();
         if live.map_id.is_none() {
             if let Some(path) = live.map_path.clone() {
                 live.map_id = self.map_uuid(&path);
             }
         }
-        let state = live.build(&acts, card_clock(now_ms()), &|p| self.map_uuid(p));
+        let clock = card_clock(now_ms());
+        live.built_act_id = current_act(&acts, clock).map(|a| a.id.clone());
+        let state = live.build(&acts, clock, &|p| self.map_uuid(p));
         let bytes = serde_json::to_vec(&state).unwrap_or_default();
         if bytes == live.last_bytes {
             return;
@@ -2441,7 +2540,25 @@ impl AppState {
     /// must hand to [`Self::set_open_details`] once its build is done. Any
     /// earlier ticket is void from now on (R163).
     pub fn begin_open_details(&self, puuid: &str) -> u64 {
+        // R97: a new open asks again for every skin name still unknown.
+        *lock(&self.skins_tried) = Some((puuid.to_string(), HashSet::new()));
         lock(&self.details_gate).begin(puuid)
+    }
+
+    /// R97: records that the names of `ids` were asked for `puuid`'s open page.
+    pub fn note_skins_tried(&self, puuid: &str, ids: impl IntoIterator<Item = String>) {
+        let mut tried = lock(&self.skins_tried);
+        match tried.as_mut() {
+            Some((p, set)) if p == puuid => set.extend(ids),
+            _ => *tried = Some((puuid.to_string(), ids.into_iter().collect())),
+        }
+    }
+
+    /// R97: whether `id`'s name was already asked for `puuid`'s open page.
+    pub fn skin_tried(&self, puuid: &str, id: &str) -> bool {
+        lock(&self.skins_tried)
+            .as_ref()
+            .is_some_and(|(p, set)| p == puuid && set.contains(id))
     }
 
     /// Records `details` as the open Player Details, as the UI was just
@@ -2966,7 +3083,8 @@ mod tests {
             deaths: 5,
             assists: 1,
             score: 1,
-            rounds: None,
+            // A stored stats row (with one, `rounds` is always known, R102).
+            rounds: Some(13),
             hs: 1,
             bs: 1,
             ls: 0,
@@ -3951,6 +4069,25 @@ mod tests {
     }
 
     #[test]
+    fn a_paused_backfill_is_no_work_until_its_hold_ends_and_then_wakes_the_tick() {
+        let mut m = model(vec![slot("me", false)]);
+        m.stage = Stage::Menus;
+        m.synced.insert("me".into());
+        m.start_backfill(None, None);
+        m.pause_backfill(10 * S);
+        assert!(!m.backfill_ready());
+        assert!(!m.backfill_resume_due());
+        assert!(m.try_start_worker().is_none(), "a pause alone is no work");
+        assert!(m.backfill.is_some(), "the cursor waits");
+
+        m.advance_clock(11 * S);
+        assert!(m.backfill_ready());
+        assert!(m.backfill_resume_due(), "the tick starts a worker");
+        let id = m.try_start_worker().expect("work again");
+        assert_eq!(m.next_job(id), Some(Job::Backfill));
+    }
+
+    #[test]
     fn a_paused_comp_backfill_is_no_work_until_its_hold_ends_and_then_wakes_the_tick() {
         let mut m = model(vec![slot("me", false)]);
         m.stage = Stage::Menus;
@@ -4624,6 +4761,32 @@ mod tests {
         let emitted = lock(&rec.0).clone();
         assert_eq!(emitted.len(), 2);
         assert_eq!(emitted.last(), Some(&st.live_state()));
+    }
+
+    #[test]
+    fn a_publish_waiting_for_the_lock_builds_from_the_newest_acts() {
+        // A publisher blocks on `live`; meanwhile the act tables load. What it
+        // emits last must carry them, not the empty table it would have read
+        // before waiting.
+        let (st, rec, _dir) = test_state();
+        let held = lock(&st.live);
+        let waiting = {
+            let st = st.clone();
+            std::thread::spawn(move || st.publish())
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        let now = now_ms();
+        st.set_acts_for_test(vec![Act {
+            id: "act-now".into(),
+            name: "ACT I".into(),
+            episode_name: "EPISODE 1".into(),
+            start_ms: now - 3_600_000,
+            end_ms: now + 3_600_000,
+        }]);
+        drop(held);
+        waiting.join().unwrap();
+        assert!(!lock(&rec.0).is_empty(), "it emitted");
+        assert_eq!(lock(&st.live).built_act_id.as_deref(), Some("act-now"));
     }
 
     #[test]

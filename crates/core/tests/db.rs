@@ -1032,6 +1032,96 @@ fn top_teammates_orders_by_count() {
 }
 
 #[test]
+fn top_teammates_ties_come_out_the_same_on_every_call() {
+    // One match, four teammates: equal counts and starts. The pick and its
+    // order must not follow the HashMap's iteration order.
+    let repo = repo_in_memory();
+    repo.upsert_match(
+        &sample_match("m1", 2_000, None),
+        &[],
+        &[
+            sample_player("self", "Blue", "Self", "111"),
+            sample_player("dd", "Blue", "D", "D"),
+            sample_player("bb", "Blue", "B", "B"),
+            sample_player("aa", "Blue", "A", "A"),
+            sample_player("cc", "Blue", "C", "C"),
+        ],
+    )
+    .unwrap();
+    let first: Vec<String> = repo
+        .top_teammates("self", 1_000, 3)
+        .unwrap()
+        .into_iter()
+        .map(|t| t.puuid)
+        .collect();
+    assert_eq!(first, ["aa", "bb", "cc"]);
+    for _ in 0..50 {
+        let again: Vec<String> = repo
+            .top_teammates("self", 1_000, 3)
+            .unwrap()
+            .into_iter()
+            .map(|t| t.puuid)
+            .collect();
+        assert_eq!(again, first);
+    }
+}
+
+#[test]
+fn top_teammates_count_competitive_only_newest_first() {
+    // A and B each share two competitive matches with the user: A's newest
+    // is the most recent, so A ranks first and shows the name of that match.
+    // An unrated match counts for no one.
+    let repo = repo_in_memory();
+    let shared = |id: &str, start: i64, queue: &str, mate: MatchPlayer| {
+        let mut m = sample_match(id, start, Some("Blue"));
+        m.queue_id = queue.to_string();
+        repo.upsert_match(
+            &m,
+            &[],
+            &[sample_player("self", "Blue", "Self", "111"), mate],
+        )
+        .unwrap();
+    };
+    shared(
+        "a-old",
+        1_000,
+        "competitive",
+        sample_player("a", "Blue", "OldA", "1"),
+    );
+    shared(
+        "b-1",
+        2_000,
+        "competitive",
+        sample_player("b", "Blue", "B", "2"),
+    );
+    shared(
+        "b-2",
+        3_000,
+        "competitive",
+        sample_player("b", "Blue", "B", "2"),
+    );
+    shared(
+        "a-new",
+        4_000,
+        "competitive",
+        sample_player("a", "Blue", "NewA", "1"),
+    );
+    for (i, start) in [5_000, 6_000, 7_000].into_iter().enumerate() {
+        shared(
+            &format!("u{i}"),
+            start,
+            "unrated",
+            sample_player("c", "Blue", "C", "3"),
+        );
+    }
+
+    let top = repo.top_teammates("self", 0, 3).unwrap();
+    let who: Vec<_> = top.iter().map(|t| (t.puuid.as_str(), t.count)).collect();
+    assert_eq!(who, [("a", 2), ("b", 2)], "unrated matches never count");
+    assert_eq!(top[0].game_name.as_deref(), Some("NewA"));
+}
+
+#[test]
 fn top_teammates_count_the_players_wins_and_losses_together() {
     // From the player's side: two wins, one loss and a draw (no winner)
     // shared with the same teammate; a draw is neither.

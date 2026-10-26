@@ -158,6 +158,7 @@ fn input<'a>(
         matches,
         comp_updates,
         current_rank: None,
+        mmr_tier_without_rr: None,
         // A stored snapshot answered (with no rank): no fallback unless a
         // test turns it off.
         has_mmr: true,
@@ -209,6 +210,26 @@ fn mystats_current_act_only() {
     assert_eq!(s.by_daypart.iter().map(|c| c.games).sum::<u32>(), 2);
     // A day apart: the session is the newest match alone.
     assert_eq!(s.session.unwrap().started_ms, ACT_START + 2 * DAY);
+}
+
+#[test]
+fn an_mmr_tier_without_its_rr_shows_like_the_live_card_r166() {
+    let a = act();
+    let n = names();
+    // The newest update is at another tier: the tier stands, the RR is unknown.
+    let updates = vec![update("m1", ACT, ACT_START + DAY, (13, 14), 80, 20)];
+    let s = build(MyStatsInput {
+        mmr_tier_without_rr: Some(15),
+        ..input(&a, &[], &updates, &n)
+    });
+    assert_eq!((s.rank.tier, s.rank.rr), (Some(15), None));
+    // An update at that tier gives the RR.
+    let updates = vec![update("m2", ACT, ACT_START + DAY, (14, 15), 42, 20)];
+    let s = build(MyStatsInput {
+        mmr_tier_without_rr: Some(15),
+        ..input(&a, &[], &updates, &n)
+    });
+    assert_eq!((s.rank.tier, s.rank.rr), (Some(15), Some(42)));
 }
 
 #[test]
@@ -350,6 +371,7 @@ fn daypart_buckets() {
         row("evening-end", at(21, 59), R::L),
         row("night-late", at(22, 0), R::L),
         row("midnight", at(24, 0), R::L),
+        row("evening-draw", at(19, 0), R::D),
     ];
     let a = act();
     let n = names();
@@ -359,9 +381,12 @@ fn daypart_buckets() {
     });
 
     let games: Vec<u32> = s.by_daypart.iter().map(|c| c.games).collect();
-    assert_eq!(games, [2, 2, 2, 3], "Morning, Afternoon, Evening, Night");
+    assert_eq!(games, [2, 2, 3, 3], "Morning, Afternoon, Evening, Night");
     let wins: Vec<u32> = s.by_daypart.iter().map(|c| c.wins).collect();
     assert_eq!(wins, [1, 2, 0, 0]);
+    // A draw is neither: the evening's 3 games are 0 W and 2 L.
+    let losses: Vec<u32> = s.by_daypart.iter().map(|c| c.losses).collect();
+    assert_eq!(losses, [1, 0, 2, 3]);
     assert_eq!(s.by_daypart[0].winrate, Some(0.5));
     assert_eq!(s.by_daypart[1].winrate, Some(1.0));
     // A counted zero stays a zero.
@@ -684,7 +709,7 @@ fn maps_and_agents_tables() {
     assert_eq!((ascent.games, ascent.wins, ascent.losses), (3, 2, 1));
     assert!((ascent.winrate - 2.0 / 3.0).abs() < 1e-6);
     assert_eq!(ascent.net_rr, Some(25));
-    assert_eq!(ascent.kd, 2.0);
+    assert_eq!(ascent.kd, Some(2.0));
     assert_eq!(ascent.acs, Some(200.0));
     let bind = &s.maps[1];
     assert_eq!((bind.games, bind.wins, bind.losses), (1, 0, 0));
@@ -878,7 +903,7 @@ fn json_is_camel_case_with_nulls_for_unknowns() {
     assert_eq!(empty["agents"], json!([]));
     assert_eq!(empty["insights"], json!([]));
     assert_eq!(empty["byWeekday"].as_array().unwrap().len(), 7);
-    let no_games = json!({"games": 0, "wins": 0, "winrate": null});
+    let no_games = json!({"games": 0, "wins": 0, "losses": 0, "winrate": null});
     assert_eq!(empty["byDaypart"], json!(vec![no_games; 4]));
 
     let matches = vec![row("m1", ACT_START + DAY, R::W)];

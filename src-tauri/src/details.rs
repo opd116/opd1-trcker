@@ -18,7 +18,7 @@ use crate::roster::{EquippedSkin, RawLoadout, RosterPlayer};
 use crate::state::{
     card_clock, closed_self_slot, lock, now_ms, AppState, LiveModel, SkinResolveGuard, Slot,
 };
-use crate::store::{act_hero_stats, load_player_db, recent_matches};
+use crate::store::{act_hero_stats, load_player_db, recent_matches, StoredPlayer};
 use crate::sync::RECENT_COUNT;
 
 /// CLAUDE.md: "Top 3 Teammates".
@@ -130,6 +130,14 @@ pub fn skins_pending(st: &AppState, puuid: &str) -> bool {
     !unnamed_skins(st, puuid).is_empty()
 }
 
+/// [`skins_pending`], counting only skins not yet asked for the open page
+/// (R97): a name that failed waits for the next open.
+fn untried_skins_pending(st: &AppState, puuid: &str) -> bool {
+    unnamed_skins(st, puuid)
+        .iter()
+        .any(|s| !st.skin_tried(puuid, &s.skin_id))
+}
+
 /// Fetches the names of `puuid`'s unnamed skins from valorant-api (R83):
 /// up to four small JSON requests at once, each cached forever, independent
 /// of the 120s Riot details sync. `true` when at least one name became
@@ -137,7 +145,9 @@ pub fn skins_pending(st: &AppState, puuid: &str) -> bool {
 /// on the next open of the Details, not before (R97).
 pub async fn resolve_skins(st: &Arc<AppState>, puuid: &str) -> bool {
     let mut set = tokio::task::JoinSet::new();
-    for skin in unnamed_skins(st, puuid) {
+    let skins = unnamed_skins(st, puuid);
+    st.note_skins_tried(puuid, skins.iter().map(|s| s.skin_id.clone()));
+    for skin in skins {
         let assets = st.assets.clone();
         set.spawn(async move {
             let named = assets.weapon_skin(&skin.skin_id, &skin.chroma_id).await;
@@ -192,8 +202,25 @@ fn encounter_row(e: EncounterRow, lookup: &dyn Fn(&str) -> Option<String>) -> En
 /// (R145) the best name the DB knows from any source, in the remembered
 /// style; that includes the `players` row's name from an earlier visible
 /// sighting (its `Seen` kind), never shown in the visible style.
-fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Option<PlayerCard> {
-    let mut slot: Slot = closed_self_slot(puuid, db)?;
+///
+/// A player the DB knows only from stored matches (saved from a History
+/// scoreboard or a recap, never on a live roster) has no `players` row, or
+/// one without a name: the card then has no level or card art, and a
+/// visible name comes from those matches (`PlayerDb::remembered`).
+fn offscreen_card(st: &AppState, puuid: &str, mut db: crate::store::PlayerDb) -> PlayerCard {
+    let row = db.row.get_or_insert_with(|| StoredPlayer {
+        game_name: String::new(),
+        tag_line: String::new(),
+        account_level: 0,
+        card_id: String::new(),
+    });
+    if row.name().is_none() {
+        if let Some(known) = &db.remembered {
+            row.game_name = known.name.clone();
+            row.tag_line = known.tag.clone();
+        }
+    }
+    let mut slot: Slot = closed_self_slot(puuid, db).expect("the row was just filled in");
     let live = lock(&st.live);
     let is_self = live.self_puuid.as_deref() == Some(puuid);
     let hidden = (!is_self).then(|| live.seen_hidden.get(puuid)).flatten();
@@ -215,7 +242,7 @@ fn offscreen_card(st: &AppState, puuid: &str, db: crate::store::PlayerDb) -> Opt
     let mut card = live.card_for(&slot, &acts, &act_id, now, None, &|p| st.map_uuid(p));
     // Nothing is being fetched for it right now: unknown means `—`.
     crate::state::settle_card(&mut card, true, true);
-    Some(card)
+    card
 }
 
 /// Names `puuid`'s unnamed skins in the background (R83, R97) and rebuilds
@@ -238,15 +265,34 @@ pub fn resolve_skins_in_background(st: &Arc<AppState>, puuid: &str, guard: SkinR
 /// real change. Skins that just became known are named like an open does
 /// ([`resolve_skins_in_background`], with the mark taken before the
 /// rebuild). A no-op with nothing open, and for a player who is not on the
-/// roster (nothing changed for them).
+/// roster unless their Top 3 is (then rebuilt without the skins).
 pub async fn refresh_open_after_live_change(st: &Arc<AppState>) {
     let Some(puuid) = st.open_details_puuid() else {
         return;
     };
-    if !lock(&st.live).slots.iter().any(|s| s.roster.puuid == puuid) {
+    let on_screen: Vec<String> = lock(&st.live)
+        .slots
+        .iter()
+        .map(|s| s.roster.puuid.clone())
+        .collect();
+    if !on_screen.contains(&puuid) {
+        // Not on the roster: nothing changed for them, unless their Top 3
+        // holds someone who is on it now, or who was shown hidden (R18: who
+        // is hidden on screen decides how a teammate shows).
+        let touched = st.open_details_of(&puuid).is_some_and(|d| {
+            d.top_teammates.iter().any(|t| {
+                on_screen.contains(&t.puuid) || !matches!(t.name, DisplayName::Visible { .. })
+            })
+        });
+        if touched {
+            refresh(st, &puuid).await;
+        }
         return;
     }
-    let resolving = skins_pending(st, &puuid).then(|| st.begin_skin_resolve(&puuid));
+    // Only skins this open has not asked yet: a name that failed is asked
+    // again at the next open (R97), not at every roster change (Agent Select
+    // re-polls every 3 s).
+    let resolving = untried_skins_pending(st, &puuid).then(|| st.begin_skin_resolve(&puuid));
     refresh(st, &puuid).await;
     if let Some(guard) = resolving {
         resolve_skins_in_background(st, &puuid, guard);
@@ -349,7 +395,7 @@ pub async fn build(st: &Arc<AppState>, puuid: &str) -> Result<PlayerDetails, Str
     let card = match on_screen {
         Some(card) => card,
         None => db
-            .and_then(|db| offscreen_card(st, puuid, db))
+            .map(|db| offscreen_card(st, puuid, db))
             .ok_or_else(|| "unknown player".to_string())?,
     };
 

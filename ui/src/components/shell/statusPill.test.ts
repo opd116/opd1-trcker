@@ -50,6 +50,10 @@ describe("status pill (design v2 2055–2060)", () => {
       dot: "#ff9a3c",
       pulse: true,
     });
+    // The wait counts from when the status arrived: 3 s later, 2 s are left; past it, 0.
+    const lost = { ...base, conn: "lost" as const, attempt: 2, retryInMs: 5000 };
+    expect(pillView(lost, "ingame", 55_000, 52_000).tip).toBe("Last data received 45 s ago.\nRetrying in 2 s.");
+    expect(pillView(lost, "ingame", 60_000, 52_000).tip).toContain("Retrying in 0 s.");
     expect(pillView({ ...base, conn: "error", errorCode: "LOCKFILE_NOT_FOUND" }, null, 0)).toMatchObject({
       label: "Riot Client unreachable",
       detail: "LOCKFILE NOT FOUND",

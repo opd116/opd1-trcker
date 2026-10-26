@@ -10,6 +10,7 @@
 
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -60,6 +61,11 @@ const TOKEN_MAX_AGE: Duration = Duration::from_secs(50 * 60);
 /// (the call itself goes on with the cached token), so a broken local endpoint
 /// is not asked by every call in turn.
 const PROACTIVE_RETRY_PAUSE: Duration = Duration::from_secs(60);
+
+/// After a refresh that a rejected call asked for fails, the callers queued
+/// behind it for the same token give up at once for this long instead of
+/// each waiting out its own local timeout in turn (a hung local client).
+const REACTIVE_FAIL_PAUSE: Duration = Duration::from_secs(10);
 
 /// R160: the longest an `other`-family call waits in the call for a hold, or
 /// for a 429's `Retry-After` before retrying. A hold with more left makes the
@@ -195,6 +201,9 @@ struct AuthState {
     fetched_at: Instant,
     /// The earliest the next *proactive* refresh may be tried after one failed.
     proactive_retry_at: Instant,
+    /// The generation a refresh failed for, and when (see
+    /// [`REACTIVE_FAIL_PAUSE`]).
+    refresh_failed: Option<(u64, Instant)>,
 }
 
 /// Where the `X-Riot-ClientVersion` a session sends came from (R158): logged
@@ -242,6 +251,10 @@ enum RemoteKind {
 pub struct RiotSession {
     local_app_data: PathBuf,
     lockfile_snapshot: LockfileSnapshot,
+    /// A token refresh answered for another account: every later call, local
+    /// ones included (the poll loop's presence read), is `ClientGone`, so the
+    /// poll loop reconnects for the new account at its next tick.
+    account_changed: AtomicBool,
     local_base: String,
     basic_auth: String,
     local_client: Client,
@@ -386,10 +399,6 @@ impl RiotSession {
             .map_err(|_| RiotError::ClientGone)?;
         let lockfile = parse_lockfile(&raw_lockfile).map_err(|_| RiotError::ClientGone)?;
 
-        let raw_log = std::fs::read_to_string(shooter_log_path(local_app_data))
-            .map_err(|_| RiotError::ShardsUnavailable)?;
-        let shards = parse_shards(&raw_log).ok_or(RiotError::ShardsUnavailable)?;
-
         let local_base = format!("{}://127.0.0.1:{}", lockfile.protocol, lockfile.port);
         let basic_auth = format!(
             "Basic {}",
@@ -402,12 +411,27 @@ impl RiotSession {
         // validation. `no_gzip`: with reqwest's `gzip` feature on, every
         // client asks for gzip by default; the local client talks to
         // 127.0.0.1, where compression only costs CPU, so it opts out.
+        // `no_proxy`: a system or `HTTP(S)_PROXY`/`ALL_PROXY` proxy must never
+        // see the local calls (they carry the lockfile's Basic auth).
         let local_client = Client::builder()
             .danger_accept_invalid_certs(true)
             .timeout(local_timeout)
             .no_gzip()
+            .no_proxy()
             .build()
             .map_err(http_error)?;
+        // First, before the game's log is read: a signed-out client (no
+        // account, retried every 5 s) costs one small local call, not a read
+        // of a log that can be megabytes (R47).
+        let entitlements = fetch_entitlements(&local_client, &local_base, &basic_auth).await?;
+
+        // Bytes, decoded lossily: one invalid UTF-8 byte anywhere in the game's
+        // log (a localized line, a crash dump) must not hide the shard lines.
+        let raw_log = std::fs::read(shooter_log_path(local_app_data))
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+            .map_err(|_| RiotError::ShardsUnavailable)?;
+        let shards = parse_shards(&raw_log).ok_or(RiotError::ShardsUnavailable)?;
+
         // `gzip`: pd/glz bodies (match-details is about 1 MB) come back
         // compressed, as they do for Valorant-Scout's `requests`; reqwest
         // decodes them before `buffer_response`, so captures and parsing see
@@ -435,8 +459,6 @@ impl RiotSession {
         let valorant_api_base =
             valorant_api_base_override.unwrap_or_else(|| "https://valorant-api.com".to_string());
 
-        let entitlements = fetch_entitlements(&local_client, &local_base, &basic_auth).await?;
-
         let (client_version, client_version_source) = fetch_client_version(
             &local_client,
             &remote_client,
@@ -457,6 +479,7 @@ impl RiotSession {
 
         Ok(Self {
             local_app_data: local_app_data.to_path_buf(),
+            account_changed: AtomicBool::new(false),
             lockfile_snapshot: LockfileSnapshot {
                 port: lockfile.port,
                 password: lockfile.password,
@@ -478,6 +501,7 @@ impl RiotSession {
                 generation: 0,
                 fetched_at: Instant::now(),
                 proactive_retry_at: Instant::now(),
+                refresh_failed: None,
             }),
             global_throttle: Throttle::new(GLOBAL_BURST, GLOBAL_RPS),
             mmr_throttle: Throttle::new(MMR_BURST, MMR_RPS),
@@ -686,7 +710,31 @@ impl RiotSession {
     /// `connect()` time. Cheap (one small file read), called before every
     /// local/pd/glz call so a closed or restarted Riot client is caught
     /// immediately instead of failing on a dead connection.
+    /// The account the local client is signed in as now, against this
+    /// session's (one local call, no remote request): another account latches
+    /// `account_changed` and is `ClientGone`, so the caller reconnects for it.
+    /// A client that gives no answer or no subject (signed out, busy) is no
+    /// verdict: the presence failures and the lockfile cover a dead client.
+    pub async fn check_account(&self) -> Result<(), RiotError> {
+        self.check_alive()?;
+        match fetch_entitlements(&self.local_client, &self.local_base, &self.basic_auth).await {
+            Ok(e) if e.subject != self.puuid => {
+                log::info!("the Riot Client now answers for another account");
+                self.account_changed.store(true, Ordering::Release);
+                Err(RiotError::ClientGone)
+            }
+            Ok(_) => Ok(()),
+            Err(e) => {
+                log::debug!("account check: {e}");
+                Ok(())
+            }
+        }
+    }
+
     fn check_alive(&self) -> Result<(), RiotError> {
+        if self.account_changed.load(Ordering::Acquire) {
+            return Err(RiotError::ClientGone);
+        }
         let raw = std::fs::read_to_string(lockfile_path(&self.local_app_data))
             .map_err(|_| RiotError::ClientGone)?;
         let lockfile = parse_lockfile(&raw).map_err(|_| RiotError::ClientGone)?;
@@ -893,8 +941,8 @@ impl RiotSession {
             Ok(()) => Ok(()),
             Err(RiotError::ClientGone) => Err(RiotError::ClientGone),
             Err(e) => {
+                // `refresh_entitlements_after` has put the next try off already.
                 log::warn!("fresh token not fetched ({e}); going on with the cached one");
-                locked(&self.auth).proactive_retry_at = Instant::now() + PROACTIVE_RETRY_PAUSE;
                 Ok(())
             }
         }
@@ -905,9 +953,11 @@ impl RiotSession {
     /// another caller already did since `seen_generation` was read: one refresh
     /// at a time, and a burst of rejected calls costs one fetch (R166).
     ///
-    /// `proactive` callers also re-check, once they hold the gate, that no
-    /// failed attempt put the next one off meanwhile: with a hung local client
-    /// the first failure spares the callers queued behind it their own timeout.
+    /// Callers also re-check, once they hold the gate, that no attempt for the
+    /// same token failed meanwhile: with a hung local client the first failure
+    /// spares the callers queued behind it their own timeout (a proactive one
+    /// goes on with the cached token, a rejected call gets the error). Both
+    /// marks are set before the gate is released.
     async fn refresh_entitlements_after(
         &self,
         seen_generation: u64,
@@ -921,11 +971,39 @@ impl RiotSession {
             {
                 return Ok(());
             }
+            let failed_just_now = auth.refresh_failed.is_some_and(|(generation, at)| {
+                generation == seen_generation && at.elapsed() < REACTIVE_FAIL_PAUSE
+            });
+            if failed_just_now && !proactive {
+                return Err(RiotError::AuthFailed(
+                    "a fresh token could not be fetched moments ago".into(),
+                ));
+            }
         }
         self.check_alive()?;
-        let entitlements =
-            fetch_entitlements(&self.local_client, &self.local_base, &self.basic_auth).await?;
+        let fetched =
+            fetch_entitlements(&self.local_client, &self.local_base, &self.basic_auth).await;
+        let entitlements = match fetched {
+            Ok(e) => e,
+            Err(e) => {
+                let mut auth = locked(&self.auth);
+                auth.refresh_failed = Some((seen_generation, Instant::now()));
+                if proactive {
+                    auth.proactive_retry_at = Instant::now() + PROACTIVE_RETRY_PAUSE;
+                }
+                return Err(e);
+            }
+        };
+        // The local client signed into another account meanwhile: this
+        // session's puuid (every own call's subject) is no longer its user.
+        // Reconnecting rebuilds the session for the new account.
+        if entitlements.subject != self.puuid {
+            log::info!("the Riot Client now answers for another account");
+            self.account_changed.store(true, Ordering::Release);
+            return Err(RiotError::ClientGone);
+        }
         let mut auth = locked(&self.auth);
+        auth.refresh_failed = None;
         auth.access_token = entitlements.access_token;
         auth.entitlements_jwt = entitlements.token;
         auth.generation += 1;
@@ -976,6 +1054,11 @@ async fn buffer_response(resp: Response) -> Result<CapturedResponse, RiotError> 
     })
 }
 
+/// The [`RiotError::AuthFailed`] text of a client answering with no account
+/// (signed out, busy): the poll loop retries it at the base pace, so a
+/// sign-in is seen within seconds however long the client sat signed out.
+pub const SIGNED_OUT: &str = "the Riot Client is signed out";
+
 async fn fetch_entitlements(
     local_client: &Client,
     local_base: &str,
@@ -988,7 +1071,14 @@ async fn fetch_entitlements(
         .await
         .map_err(http_error)?;
     let captured = buffer_response(resp).await?;
-    parse_json(&captured).map_err(|e| RiotError::AuthFailed(e.to_string()))
+    let e: EntitlementsResponse =
+        parse_json(&captured).map_err(|e| RiotError::AuthFailed(e.to_string()))?;
+    // A signed-out or busy client answers with no account: no token at all,
+    // never another account (one rule for connect, refresh and the check).
+    if e.subject.is_empty() || e.access_token.is_empty() {
+        return Err(RiotError::AuthFailed(SIGNED_OUT.into()));
+    }
+    Ok(e)
 }
 
 /// A reqwest failure as [`RiotError::Http`], without the request URL:
@@ -1028,8 +1118,10 @@ fn parse_json<T: DeserializeOwned>(resp: &CapturedResponse) -> Result<T, RiotErr
         .map_err(|e| RiotError::Decode(excerpt(e.to_string().as_bytes(), LOG_EXCERPT_CHARS)))
 }
 
-/// Parses `Retry-After` as a plain number of seconds (Riot doesn't use the
-/// HTTP-date form). Returns `None` for anything non-finite or negative
+/// Parses `Retry-After`: a number of seconds (what Riot sends), or the
+/// HTTP-date form the header also allows (the seconds left until then, so a
+/// proxy or a changed Riot answer still gets its full hold, R160). Returns
+/// `None` for anything non-finite or negative
 /// (`"inf"`, `"nan"`, a malformed header) so the caller falls back to its
 /// own escalating backoff instead of feeding a bogus value to
 /// [`Hold::hold_for`](crate::throttle::Hold::hold_for) — which
@@ -1037,13 +1129,24 @@ fn parse_json<T: DeserializeOwned>(resp: &CapturedResponse) -> Result<T, RiotErr
 /// become a valid `Duration`. A huge-but-finite value is clamped to
 /// [`MAX_RETRY_AFTER_SECS`] rather than trusted outright.
 fn retry_after_seconds(headers: &HeaderMap) -> Option<f64> {
-    let raw: f64 = headers
-        .get(RETRY_AFTER)?
-        .to_str()
-        .ok()?
-        .trim()
-        .parse()
-        .ok()?;
+    let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
+    let raw: f64 = match value.parse() {
+        Ok(seconds) => seconds,
+        Err(_) => {
+            let at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .ok()?
+                .as_secs_f64();
+            // A date already past (or a clock ahead of Riot's) says nothing
+            // about how long to wait: the caller's own backoff applies.
+            let left = at.timestamp() as f64 - now;
+            if left <= 0.0 {
+                return None;
+            }
+            left
+        }
+    };
     if !raw.is_finite() || raw < 0.0 {
         return None;
     }
@@ -1190,6 +1293,25 @@ mod tests {
             retry_after_seconds(&headers_with_retry_after("86400")),
             Some(120.0),
             "garbage is capped at the ceiling"
+        );
+        // The HTTP-date form: the seconds left until then.
+        let in_90s = chrono::DateTime::from_timestamp(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs() as i64
+                + 90,
+            0,
+        )
+        .unwrap()
+        .format("%a, %d %b %Y %H:%M:%S GMT")
+        .to_string();
+        let left = retry_after_seconds(&headers_with_retry_after(&in_90s)).unwrap();
+        assert!((88.0..=90.0).contains(&left), "{in_90s}: {left}");
+        assert_eq!(
+            retry_after_seconds(&headers_with_retry_after("Wed, 21 Oct 2015 07:28:00 GMT")),
+            None,
+            "a date in the past: the caller's backoff, not no wait at all"
         );
         for bad in ["inf", "nan", "-3", "soon"] {
             assert_eq!(

@@ -10,6 +10,7 @@ import {
   loadRaw,
   paintAt,
   PRESETS,
+  rawCanvasW,
   tileFontPx,
   trimArt,
 } from "./ascii";
@@ -132,6 +133,13 @@ describe("painting helpers", () => {
     const out = composeCanvas("", "█", "shadow", loadRaw(raw));
     expect(out.art).toBe(trimArt(raw.split("\n").map((l) => [...l])));
     expect(Object.values(loadRaw("a b")).sort()).toEqual(["a", "b"]);
+  });
+  it("a saved art wider than 64 columns comes back whole on its own width", () => {
+    const art = asciiText("CLUTCH", "█", "shadow");
+    expect(rawCanvasW(art)).toBeGreaterThan(64);
+    const out = composeCanvas("", "█", "shadow", loadRaw(art), rawCanvasW(art));
+    expect(out.art).toBe(art);
+    expect(rawCanvasW("short")).toBe(64);
   });
 });
 

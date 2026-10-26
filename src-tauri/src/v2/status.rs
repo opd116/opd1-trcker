@@ -31,9 +31,16 @@ pub fn launch_valorant() -> Result<(), String> {
     launch()
 }
 
-/// Where Riot keeps the list of its installs.
-#[cfg(windows)]
-const RIOT_INSTALLS: &str = r"C:\ProgramData\Riot Games\RiotClientInstalls.json";
+/// Where Riot keeps the list of its installs: under `%ProgramData%`, which
+/// is on another drive when Windows is (`C:\ProgramData` only when unset).
+#[cfg_attr(not(windows), allow(dead_code))] // Windows only; the tests use it everywhere.
+fn riot_installs(program_data: Option<std::ffi::OsString>) -> PathBuf {
+    program_data
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\ProgramData"))
+        .join("Riot Games")
+        .join("RiotClientInstalls.json")
+}
 
 #[cfg(windows)]
 fn launch() -> Result<(), String> {
@@ -41,7 +48,7 @@ fn launch() -> Result<(), String> {
     /// No console window flashes up for the child.
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-    let exe = riot_client_exe(Path::new(RIOT_INSTALLS))?;
+    let exe = riot_client_exe(&riot_installs(std::env::var_os("ProgramData")))?;
     std::process::Command::new(&exe)
         .args(LAUNCH_ARGS)
         .creation_flags(CREATE_NO_WINDOW)
@@ -93,6 +100,17 @@ fn candidates(text: &str) -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_install_list_is_read_from_program_data_on_any_drive() {
+        assert_eq!(
+            riot_installs(Some(r"D:\ProgramData".into())),
+            Path::new(r"D:\ProgramData")
+                .join("Riot Games")
+                .join("RiotClientInstalls.json")
+        );
+        assert!(riot_installs(None).starts_with(r"C:\ProgramData"));
+    }
 
     #[test]
     fn the_install_list_names_the_client_rc_default_first() {

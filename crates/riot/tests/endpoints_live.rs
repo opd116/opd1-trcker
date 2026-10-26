@@ -2,7 +2,9 @@
 //! method/base/path routing (pd vs glz vs local), query-string building,
 //! and the PUT body for `names()`. Response *shapes* are covered by
 //! `tests/endpoints_fixtures.rs`; these tests are about wiring, so they
-//! mostly return trivial bodies.
+//! mostly return trivial bodies. Most share one mock server for every
+//! base; `every_endpoint_goes_to_its_own_host` gives each base its own, so
+//! a call sent to the wrong host fails there.
 
 mod support;
 
@@ -27,6 +29,104 @@ async fn setup() -> (TempDir, MockServer, opd1_riot::session::RiotSession) {
     mount_entitlements(&server, SELF_PUUID).await;
     let session = connect_against(tmp.path(), &server).await;
     (tmp, server, session)
+}
+
+#[tokio::test]
+async fn every_endpoint_goes_to_its_own_host() {
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let (local, pd, glz) = (
+        MockServer::start().await,
+        MockServer::start().await,
+        MockServer::start().await,
+    );
+    write_lockfile(tmp.path(), "http", local.address().port(), "pw");
+    mount_entitlements(&local, SELF_PUUID).await;
+    // Each route answers only on its own host; anywhere else it is a 404.
+    let routes: [(&MockServer, &str, String, serde_json::Value); 9] = [
+        (
+            &local,
+            "GET",
+            "/chat/v4/presences".into(),
+            json!({"presences": []}),
+        ),
+        (
+            &pd,
+            "GET",
+            format!("/mmr/v1/players/{SELF_PUUID}"),
+            json!({"Subject": SELF_PUUID}),
+        ),
+        (
+            &pd,
+            "GET",
+            format!("/match-history/v1/history/{SELF_PUUID}"),
+            json!({"Subject": SELF_PUUID, "History": []}),
+        ),
+        (&pd, "PUT", "/name-service/v2/players".into(), json!([])),
+        // The content service is on the shared host, which a pd override
+        // also moves.
+        (
+            &pd,
+            "GET",
+            "/content-service/v3/content".into(),
+            json!({"Seasons": []}),
+        ),
+        (
+            &glz,
+            "GET",
+            format!("/pregame/v1/players/{SELF_PUUID}"),
+            json!({"Subject": SELF_PUUID, "MatchID": MATCH_ID}),
+        ),
+        (
+            &glz,
+            "GET",
+            format!("/core-game/v1/matches/{MATCH_ID}"),
+            json!({"MapID": "/Game/Maps/Ascent/Ascent", "Players": []}),
+        ),
+        (
+            &glz,
+            "GET",
+            format!("/parties/v1/players/{SELF_PUUID}"),
+            json!({"Subject": SELF_PUUID, "CurrentPartyID": PARTY_ID}),
+        ),
+        (
+            &glz,
+            "GET",
+            format!("/parties/v1/parties/{PARTY_ID}"),
+            json!({"ID": PARTY_ID, "Members": []}),
+        ),
+    ];
+    for (server, verb, route, body) in routes {
+        Mock::given(method(verb))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(server)
+            .await;
+    }
+    let session = opd1_riot::session::RiotSession::connect_with_overrides(
+        tmp.path(),
+        opd1_riot::session::ConnectOverrides {
+            pd_base: Some(pd.uri()),
+            glz_base: Some(glz.uri()),
+            valorant_api_base: Some(local.uri()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("connect");
+
+    session.presences().await.expect("local");
+    session.mmr(SELF_PUUID).await.expect("pd");
+    session
+        .match_history(SELF_PUUID, None, None, None)
+        .await
+        .expect("pd");
+    session.names(&one_visible()).await.expect("pd");
+    session.content().await.expect("shared");
+    session.pregame_player(SELF_PUUID).await.expect("glz");
+    session.coregame_match(MATCH_ID).await.expect("glz");
+    session.party_of(SELF_PUUID).await.expect("glz");
+    session.party(PARTY_ID).await.expect("glz");
 }
 
 #[tokio::test]

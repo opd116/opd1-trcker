@@ -91,7 +91,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -115,6 +115,10 @@ const JSON_TIMEOUT: Duration = Duration::from_secs(8);
 /// splash before downscaling is ~3MB; 8s was too tight a budget for that
 /// over a slow connection, so images get their own, longer-lived client.
 const IMAGE_TIMEOUT: Duration = Duration::from_secs(30);
+/// R189: after a failed skin catalog build, the next one waits this long, so
+/// a broken `/v1/weapons` (~3.6MB) is not downloaded again on every call (the
+/// Skins screen asks once per uncached icon).
+const CATALOG_RETRY_AFTER: Duration = Duration::from_secs(60);
 
 const DEFAULT_BASE: &str = "https://valorant-api.com";
 /// Where valorant-api serves its images (R189: the skin level icons'
@@ -906,6 +910,10 @@ pub struct AssetCache {
     media_base: String,
     dir: PathBuf,
     tables: RwLock<Tables>,
+    /// The version of the tables in memory when the disk refused them (their
+    /// `manifest.json` never written); `None` while disk and memory agree.
+    /// The skin catalog's version comes from here first.
+    unwritten_version: RwLock<Option<String>>,
     image_locks: ImageLocks,
     /// Every weapon skin seen so far (lower-case skin uuid -> its reduced
     /// entry): what [`AssetCache::weapon_skin_cached`] answers from, with
@@ -920,6 +928,10 @@ pub struct AssetCache {
     /// R189: the skin catalog once used ([`AssetCache::skin_catalog`]);
     /// the async lock also coalesces concurrent builds into one download.
     catalog: tokio::sync::Mutex<Option<Arc<SkinCatalog>>>,
+    /// The version whose catalog build last failed, and when.
+    catalog_failed: Mutex<Option<(String, Instant)>>,
+    /// [`CATALOG_RETRY_AFTER`]; tests shorten it.
+    catalog_retry_after: Duration,
 }
 
 impl AssetCache {
@@ -969,12 +981,22 @@ impl AssetCache {
             media_base,
             dir: cache_dir,
             tables: RwLock::new(Tables::default()),
+            unwritten_version: RwLock::new(None),
             image_locks: Mutex::new(HashMap::new()),
             skins: RwLock::new(HashMap::new()),
             skin_locks: Mutex::new(HashMap::new()),
             stale: AtomicBool::new(false),
             catalog: tokio::sync::Mutex::new(None),
+            catalog_failed: Mutex::new(None),
+            catalog_retry_after: CATALOG_RETRY_AFTER,
         }
+    }
+
+    /// Test-only: how long a failed skin catalog build waits before the next.
+    #[doc(hidden)]
+    pub fn with_catalog_retry_after(mut self, wait: Duration) -> Self {
+        self.catalog_retry_after = wait;
+        self
     }
 
     // -- bulk tables --------------------------------------------------
@@ -1003,7 +1025,7 @@ impl AssetCache {
                         move || load_tables_from_disk_sync(&dir)
                     })
                     .await?;
-                    *write_lock(&self.tables) = tables;
+                    self.set_tables(tables, None);
                     Ok(false)
                 } else {
                     Err(network_err)
@@ -1014,14 +1036,22 @@ impl AssetCache {
 
     async fn refresh_with_known_version(&self, version: String) -> Result<bool, AssetError> {
         if self.disk_cache_matches(&version) {
-            self.stale.store(false, Ordering::Relaxed);
-            let tables = blocking({
+            let loaded = blocking({
                 let dir = self.dir.clone();
-                move || load_tables_from_disk_sync(&dir)
+                move || load_tables_from_disk_sync_strict(&dir)
             })
-            .await?;
-            *write_lock(&self.tables) = tables;
-            return Ok(false);
+            .await;
+            match loaded {
+                Ok(tables) => {
+                    self.stale.store(false, Ordering::Relaxed);
+                    self.set_tables(tables, None);
+                    return Ok(false);
+                }
+                // A damaged file (a power cut mid-write, another program):
+                // the current version is downloaded again below, which
+                // rewrites every table and the manifest.
+                Err(e) => log::warn!("cached asset tables unreadable, downloading again: {e}"),
+            }
         }
 
         // A cache from before content tiers existed: its four tables are
@@ -1040,18 +1070,23 @@ impl AssetCache {
                 Ok(content_tiers) => content_tiers,
                 Err(e) => {
                     log::warn!("content tiers fetch failed, keeping the cached tables: {e}");
-                    *write_lock(&self.tables) = tables;
+                    self.set_tables(tables, None);
                     return Ok(false);
                 }
             };
-            blocking({
+            // Best effort: a disk that cannot take the file costs the next
+            // start one download, never this session its tables.
+            let written = blocking({
                 let dir = self.dir.clone();
                 let content_tiers = content_tiers.clone();
                 move || write_json(&dir.join("contenttiers.json"), &content_tiers)
             })
-            .await?;
+            .await;
+            if let Err(e) = written {
+                log::warn!("content tiers not written to disk: {e}");
+            }
             tables.content_tiers = content_tiers;
-            *write_lock(&self.tables) = tables;
+            self.set_tables(tables, None);
             return Ok(true);
         }
 
@@ -1081,14 +1116,20 @@ impl AssetCache {
                     move || load_tables_from_disk_sync(&dir)
                 })
                 .await?;
-                *write_lock(&self.tables) = tables;
+                self.set_tables(tables, None);
                 return Ok(false);
             }
             Err(e) => return Err(e),
         };
         self.stale.store(false, Ordering::Relaxed);
 
-        blocking({
+        // Best effort: a disk that cannot take the tables (full, read-only, a
+        // file locked by another program) must not throw away what was just
+        // downloaded, or the app would have no names or acts and download
+        // everything again at each retry. The manifest is written last, so a
+        // partial write leaves the old version and the next start fetches again.
+        let version_kept = version.clone();
+        let written = blocking({
             let dir = self.dir.clone();
             let agents = agents.clone();
             let maps = maps.clone();
@@ -1106,16 +1147,31 @@ impl AssetCache {
                 Ok(())
             }
         })
-        .await?;
-
-        *write_lock(&self.tables) = Tables {
-            agents,
-            maps,
-            tiers,
-            seasons,
-            content_tiers,
+        .await;
+        let unwritten = match written {
+            Ok(()) => None,
+            Err(e) => {
+                log::warn!("asset tables not written to disk: {e}");
+                Some(version_kept)
+            }
         };
+
+        self.set_tables(
+            Tables {
+                agents,
+                maps,
+                tiers,
+                seasons,
+                content_tiers,
+            },
+            unwritten,
+        );
         Ok(true)
+    }
+
+    fn set_tables(&self, tables: Tables, unwritten_version: Option<String>) {
+        *write_lock(&self.tables) = tables;
+        *write_lock(&self.unwritten_version) = unwritten_version;
     }
 
     /// A single small file read + a handful of `is_file` stats — cheap
@@ -1359,7 +1415,7 @@ impl AssetCache {
 
         // Re-check after acquiring the lock: another caller may have just
         // finished downloading this exact asset while we were waiting.
-        if file_path.is_file() {
+        if cached_image_ok(&file_path) {
             return Ok(file_path);
         }
 
@@ -1622,11 +1678,16 @@ impl AssetCache {
                     .get("data")
                     .and_then(SkinEntry::from_response)
                     .ok_or_else(|| AssetError::Decode("missing skin displayName".to_string()))?;
-                blocking({
+                // Best effort: the name needs no file to be shown, and a
+                // disk that refuses it must not cost a download per call.
+                let written = blocking({
                     let entry = entry.clone();
                     move || write_json(&path, &entry)
                 })
-                .await?;
+                .await;
+                if let Err(e) = written {
+                    log::warn!("skin {skin} not written to disk: {e}");
+                }
                 entry
             }
         };
@@ -1648,15 +1709,21 @@ impl AssetCache {
     /// the tables' manifest): from memory, else `skincatalog.json`, else
     /// built from one `/v1/weapons` download (see the module docs) and
     /// written there. When the download fails, an older catalog (memory or
-    /// disk) stands in until the next call tries again. `TablesNotLoaded`
-    /// while no table set was ever stored (the version is unknown).
+    /// disk) stands in, and no new build is tried for
+    /// [`CATALOG_RETRY_AFTER`] (without an older one, the calls in that window
+    /// fail at once). `TablesNotLoaded` while no table set was ever stored
+    /// (the version is unknown).
     pub async fn skin_catalog(&self) -> Result<Arc<SkinCatalog>, AssetError> {
-        let version = blocking({
-            let path = self.dir.join("manifest.json");
-            move || Ok(read_json::<Manifest>(&path).ok().map(|m| m.version))
-        })
-        .await?
-        .ok_or(AssetError::TablesNotLoaded)?;
+        let unwritten = read_lock(&self.unwritten_version).clone();
+        let version = match unwritten {
+            Some(version) => version,
+            None => blocking({
+                let path = self.dir.join("manifest.json");
+                move || Ok(read_json::<Manifest>(&path).ok().map(|m| m.version))
+            })
+            .await?
+            .ok_or(AssetError::TablesNotLoaded)?,
+        };
 
         let mut slot = self.catalog.lock().await;
         if let Some(cat) = slot.as_ref().filter(|c| c.version == version) {
@@ -1674,6 +1741,22 @@ impl AssetCache {
             return Ok(cat);
         }
 
+        let older = slot.clone().or_else(|| on_disk.map(Arc::new));
+        let recently_failed = locked(&self.catalog_failed)
+            .as_ref()
+            .is_some_and(|(v, at)| *v == version && at.elapsed() < self.catalog_retry_after);
+        if recently_failed {
+            return match older {
+                Some(cat) => {
+                    *slot = Some(cat.clone());
+                    Ok(cat)
+                }
+                None => Err(AssetError::Network(
+                    "skin catalog download failed; trying again shortly".into(),
+                )),
+            };
+        }
+
         // The longer-timeout client: the answer is ~3.6MB before gzip.
         let built = async {
             let bytes = self.download(&format!("{}/v1/weapons", self.base)).await?;
@@ -1683,19 +1766,25 @@ impl AssetCache {
         .await;
         match built {
             Ok(cat) => {
-                blocking({
+                // A disk that cannot take the file costs the next start one
+                // download; this session keeps the catalog in memory either way.
+                let written = blocking({
                     let cat = cat.clone();
                     move || write_json(&path, &cat)
                 })
-                .await?;
+                .await;
+                if let Err(e) = written {
+                    log::warn!("skin catalog not written to disk: {e}");
+                }
                 let cat = Arc::new(cat);
                 *slot = Some(cat.clone());
+                *locked(&self.catalog_failed) = None;
                 Ok(cat)
             }
             Err(e) => {
-                // An older catalog is better than none; the next call asks
-                // again (the version still differs).
-                let older = slot.clone().or_else(|| on_disk.map(Arc::new));
+                // An older catalog is better than none; a call after the
+                // wait asks again (the version still differs).
+                *locked(&self.catalog_failed) = Some((version.clone(), Instant::now()));
                 match older {
                     Some(cat) => {
                         log::warn!("skin catalog fetch failed, using an older one: {e}");
@@ -1752,6 +1841,19 @@ impl AssetCache {
     }
 }
 
+/// A cached image is there and starts like an image file: an empty or damaged
+/// one (a power cut mid-write, another program) is downloaded again rather
+/// than served forever. Reads only the first bytes.
+fn cached_image_ok(path: &Path) -> bool {
+    use std::io::Read;
+    let mut head = [0u8; 16];
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return false;
+    };
+    let n = file.read(&mut head).unwrap_or(0);
+    n > 0 && image::guess_format(&head[..n]).is_ok()
+}
+
 /// Downscales `bytes` to `kind`'s target width (see
 /// [`AssetKind::downscale_target_width`]), preserving aspect ratio, if the
 /// source is wider than that target. Re-encodes as PNG regardless of the
@@ -1794,6 +1896,22 @@ fn downscale_image(kind: AssetKind, bytes: Vec<u8>) -> Result<Vec<u8>, AssetErro
     Ok(out)
 }
 
+/// [`load_tables_from_disk_sync`], where a download can replace what does
+/// not decode: a damaged `contenttiers.json` is an error too (a missing one,
+/// from before content tiers, still is none known).
+fn load_tables_from_disk_sync_strict(dir: &Path) -> Result<Tables, AssetError> {
+    let path = dir.join("contenttiers.json");
+    let content_tiers = if path.is_file() {
+        read_json(&path)?
+    } else {
+        Default::default()
+    };
+    Ok(Tables {
+        content_tiers,
+        ..load_tables_from_disk_sync(dir)?
+    })
+}
+
 fn load_tables_from_disk_sync(dir: &Path) -> Result<Tables, AssetError> {
     Ok(Tables {
         agents: read_json(&dir.join("agents.json"))?,
@@ -1833,8 +1951,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), AssetError> {
     }
     let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
     let tmp_path = path.with_extension(format!("tmp-{}-{n}", std::process::id()));
-    std::fs::write(&tmp_path, bytes).map_err(io_err)?;
-    std::fs::rename(&tmp_path, path).map_err(io_err)?;
+    // A failed write or rename takes its temp file with it: every retry has
+    // a new name, so leftovers would pile up.
+    let done = std::fs::write(&tmp_path, bytes).and_then(|()| std::fs::rename(&tmp_path, path));
+    if let Err(e) = done {
+        let _ = std::fs::remove_file(&tmp_path);
+        return Err(io_err(e));
+    }
     Ok(())
 }
 

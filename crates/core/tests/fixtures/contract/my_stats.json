@@ -25,21 +25,25 @@
     "byDaypart": [
       {
         "games": 0,
+        "losses": 0,
         "winrate": null,
         "wins": 0
       },
       {
         "games": 8,
+        "losses": 3,
         "winrate": 0.625,
         "wins": 5
       },
       {
         "games": 8,
+        "losses": 5,
         "winrate": 0.375,
         "wins": 3
       },
       {
         "games": 1,
+        "losses": 0,
         "winrate": 0.0,
         "wins": 0
       }
@@ -47,36 +51,43 @@
     "byWeekday": [
       {
         "games": 2,
+        "losses": 1,
         "winrate": 0.5,
         "wins": 1
       },
       {
         "games": 2,
+        "losses": 1,
         "winrate": 0.5,
         "wins": 1
       },
       {
         "games": 4,
+        "losses": 3,
         "winrate": 0.25,
         "wins": 1
       },
       {
         "games": 1,
+        "losses": 0,
         "winrate": 0.0,
         "wins": 0
       },
       {
         "games": 0,
+        "losses": 0,
         "winrate": null,
         "wins": 0
       },
       {
         "games": 4,
+        "losses": 1,
         "winrate": 0.75,
         "wins": 3
       },
       {
         "games": 4,
+        "losses": 2,
         "winrate": 0.5,
         "wins": 2
       }
@@ -392,7 +403,7 @@
         "acs": null,
         "games": 1,
         "id": "agent-omen",
-        "kd": 0.0,
+        "kd": null,
         "losses": 1,
         "netRr": null,
         "winrate": 0.0,
@@ -402,21 +413,25 @@
     "byDaypart": [
       {
         "games": 1,
+        "losses": 0,
         "winrate": 1.0,
         "wins": 1
       },
       {
         "games": 0,
+        "losses": 0,
         "winrate": null,
         "wins": 0
       },
       {
         "games": 1,
+        "losses": 0,
         "winrate": 0.0,
         "wins": 0
       },
       {
         "games": 1,
+        "losses": 1,
         "winrate": 0.0,
         "wins": 0
       }
@@ -424,36 +439,43 @@
     "byWeekday": [
       {
         "games": 0,
+        "losses": 0,
         "winrate": null,
         "wins": 0
       },
       {
         "games": 0,
+        "losses": 0,
         "winrate": null,
         "wins": 0
       },
       {
         "games": 0,
+        "losses": 0,
         "winrate": null,
         "wins": 0
       },
       {
         "games": 1,
+        "losses": 0,
         "winrate": 0.0,
         "wins": 0
       },
       {
         "games": 0,
+        "losses": 0,
         "winrate": null,
         "wins": 0
       },
       {
         "games": 1,
+        "losses": 0,
         "winrate": 1.0,
         "wins": 1
       },
       {
         "games": 1,
+        "losses": 1,
         "winrate": 0.0,
         "wins": 0
       }
@@ -517,7 +539,7 @@
         "acs": null,
         "games": 1,
         "id": "7eaecc1b-4337-bbf6-6ab9-04b8f06b3319",
-        "kd": 0.0,
+        "kd": null,
         "losses": 1,
         "netRr": null,
         "winrate": 0.0,

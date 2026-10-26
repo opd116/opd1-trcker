@@ -176,6 +176,42 @@ async fn the_client_up_with_the_game_closed_is_waiting_and_the_game_up_is_ok() {
 }
 
 #[tokio::test]
+async fn another_account_in_the_same_client_is_noticed_while_valorant_is_closed() {
+    // VALORANT closed; the user signs into another account in a Riot Client
+    // that stays open (same lockfile). Our presence is looked up by our puuid,
+    // so only the account check sees it: the session is rebuilt for them.
+    let h = harness().await;
+    let (cell, _) = presence(&h, blob("MENUS", "unrated")).await;
+    *cell.lock().unwrap() = None;
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Closed);
+
+    // Same account at the next check: nothing happens.
+    poller.next_account_check = tokio::time::Instant::now();
+    poller.presence_tick(&h.session).await.unwrap();
+
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "a2", "entitlements": [], "issuer": "i",
+            "subject": "bbbbbbbb-0000-0000-0000-00000000000b", "token": "t2",
+        })))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    // Not before the check is due.
+    poller.presence_tick(&h.session).await.unwrap();
+    poller.next_account_check = tokio::time::Instant::now();
+    assert!(matches!(
+        poller.presence_tick(&h.session).await,
+        Err(crate::poll::Stop::Reconnect(why)) if why == "account changed"
+    ));
+}
+
+#[tokio::test]
 async fn a_presence_every_two_seconds_does_not_emit_a_status_every_two_seconds() {
     let h = harness().await;
     presence(&h, blob("MENUS", "unrated")).await;
@@ -229,6 +265,70 @@ async fn failing_polls_while_the_game_runs_are_lost_with_attempts_then_the_lockf
     assert_eq!(s.conn, ConnState::Error);
     assert_eq!(s.error_code.as_deref(), Some(LOCKFILE_NOT_FOUND));
     assert_eq!(s.attempt, 0);
+}
+
+#[tokio::test]
+async fn a_reconnect_whose_presence_still_fails_is_unreachable_not_waiting() {
+    let h = harness().await;
+    let (_, fail) = presence(&h, blob("MENUS", "unrated")).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    for _ in 1..LOST_MAX_ATTEMPTS {
+        poller.presence_tick(&h.session).await.unwrap();
+    }
+    assert!(poller.presence_tick(&h.session).await.is_err());
+    poller.note_session_lost("presence keeps failing");
+    poller.drop_session().await;
+
+    // The client answers a connect, but its presence still fails: the game
+    // may be running, so the pill never says "waiting for VALORANT".
+    poller.on_connected(h.session.clone()).await;
+    assert_eq!(status(&h).conn, ConnState::Lost);
+    poller.presence_tick(&h.session).await.unwrap();
+    let s = status(&h);
+    assert_eq!(s.conn, ConnState::Error);
+    assert_eq!(s.error_code.as_deref(), Some(CLIENT_UNREACHABLE));
+
+    // A presence answers again: the pill follows the game.
+    fail.store(false, std::sync::atomic::Ordering::SeqCst);
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(status(&h).conn, ConnState::Ok);
+}
+
+/// Presence ticks until the poller gives the session up.
+async fn fail_until_drop(poller: &mut Poller, session: &Arc<RiotSession>) {
+    for _ in 0..crate::poll::LOST_MAX_ATTEMPTS * 2 {
+        if poller.presence_tick(session).await.is_err() {
+            return;
+        }
+    }
+    panic!("never dropped");
+}
+
+#[tokio::test]
+async fn repeated_presence_failure_drops_back_off_instead_of_reconnecting_at_once() {
+    let h = harness().await;
+    let (_, fail) = presence(&h, blob("MENUS", "unrated")).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    // The first drop reconnects at once (the existing rule).
+    fail_until_drop(&mut poller, &h.session).await;
+    poller.note_session_lost("presence keeps failing");
+    poller.drop_session().await;
+    assert_ne!(status(&h).retry_in_ms, Some(5_000));
+    // The second waits the connect backoff's first step, and says so.
+    poller.on_connected(h.session.clone()).await;
+    fail_until_drop(&mut poller, &h.session).await;
+    poller.note_session_lost("presence keeps failing");
+    poller.drop_session().await;
+    let s = status(&h);
+    assert_eq!(s.conn, ConnState::Error);
+    assert_eq!(s.error_code.as_deref(), Some(CLIENT_UNREACHABLE));
+    assert_eq!(s.retry_in_ms, Some(5_000));
 }
 
 #[tokio::test]
@@ -298,6 +398,39 @@ async fn valorant_starting_is_no_lost_connection_and_neither_is_a_failure_with_t
     fail.store(true, std::sync::atomic::Ordering::SeqCst);
     poller.presence_tick(&h.session).await.unwrap();
     assert_eq!(status(&h).conn, ConnState::Waiting);
+}
+
+#[tokio::test]
+async fn a_signed_out_client_is_asked_again_at_the_base_pace() {
+    // The client answers with no account: no backoff builds up (and what the
+    // failures before it built is dropped), so a sign-in after a long
+    // signed-out spell is seen within 5 s.
+    let h = harness().await;
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(3)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "", "entitlements": [], "issuer": "i", "subject": "", "token": ""
+        })))
+        .with_priority(2)
+        .mount(&h.server)
+        .await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.local_app_data = Some(h._dir.path().to_path_buf());
+    for _ in 0..3 {
+        disconnected_tick_now(&h, &mut poller).await;
+    }
+    assert_eq!(status(&h).retry_in_ms, Some(20_000), "three failures");
+    for _ in 0..2 {
+        disconnected_tick_now(&h, &mut poller).await;
+    }
+    assert_eq!(status(&h).retry_in_ms, Some(5_000));
 }
 
 #[tokio::test]
@@ -543,6 +676,83 @@ async fn wait_until_async(h: &Harness, match_id: &str) {
 }
 
 #[tokio::test]
+async fn a_match_end_forgets_this_matchs_name_answers() {
+    let h = harness().await;
+    mock_coregame(&h).await;
+    let (cell, _) = presence(&h, blob("INGAME", "unrated")).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.ingame_loadouts_timeout = Duration::from_millis(50);
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Ingame);
+    lock(&h.st.live)
+        .known_names
+        .insert(OTHER.into(), ("Old".into(), "NAME".into()));
+
+    // Back in the menus: the next match asks name-service again, so a
+    // renamed player shows the new name.
+    *cell.lock().unwrap() = Some(blob("MENUS", "unrated"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert!(lock(&h.st.live).known_names.is_empty());
+}
+
+#[tokio::test]
+async fn a_deathmatch_end_points_the_recap_at_it_without_fetching_the_others() {
+    // R41: the Lobby view stays through a free-for-all, so no stage change
+    // records its match; R189's recap follows it all the same.
+    let h = harness().await;
+    mock_coregame(&h).await;
+    let (cell, _) = presence(&h, blob("MENUS", "deathmatch")).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    *cell.lock().unwrap() = Some(blob("INGAME", "deathmatch"));
+    poller.presence_tick(&h.session).await.unwrap();
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(
+        h.st.live_state().stage,
+        Stage::Menus,
+        "the Lobby view stays"
+    );
+    assert_eq!(status(&h).recap_match_id, None, "not before the match ends");
+    *cell.lock().unwrap() = Some(blob("MENUS", "deathmatch"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(status(&h).recap_match_id, Some(entry_id(0)));
+    assert_eq!(
+        count(&h.server, "GET", &format!("/core-game/v1/players/{ME}")).await,
+        1,
+        "the match id is asked once"
+    );
+    assert_eq!(
+        count(
+            &h.server,
+            "GET",
+            &format!("/core-game/v1/matches/{}", entry_id(0))
+        )
+        .await,
+        0,
+        "R41: nothing about the other players"
+    );
+}
+
+#[tokio::test]
+async fn the_game_closing_on_a_deathmatch_points_the_recap_at_it_too() {
+    let h = harness().await;
+    mock_coregame(&h).await;
+    let (cell, _) = presence(&h, blob("MENUS", "deathmatch")).await;
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    *cell.lock().unwrap() = Some(blob("INGAME", "deathmatch"));
+    poller.presence_tick(&h.session).await.unwrap();
+    *cell.lock().unwrap() = None;
+    poller.presence_tick(&h.session).await.unwrap();
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Closed);
+    assert_eq!(status(&h).recap_match_id, Some(entry_id(0)));
+}
+
+#[tokio::test]
 async fn the_game_closing_in_game_points_the_recap_at_the_match_too() {
     let h = harness().await;
     mock_coregame(&h).await;
@@ -557,6 +767,26 @@ async fn the_game_closing_in_game_points_the_recap_at_the_match_too() {
     assert_eq!(h.st.live_state().stage, Stage::Closed);
     assert_eq!(status(&h).recap_match_id, Some(entry_id(0)));
     assert_eq!(status(&h).conn, ConnState::Waiting);
+}
+
+#[tokio::test]
+async fn an_account_switch_ends_the_previous_accounts_recap() {
+    let h = harness().await;
+    lock(&h.st.live).self_puuid = Some("previous-account".into());
+    h.st.set_status(|s| s.recap_match_id = Some("old-match".into()));
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    assert_eq!(status(&h).recap_match_id, None);
+}
+
+#[tokio::test]
+async fn a_reconnect_of_the_same_account_keeps_its_recap() {
+    let h = harness().await;
+    lock(&h.st.live).self_puuid = Some(ME.into());
+    h.st.set_status(|s| s.recap_match_id = Some("my-match".into()));
+    let mut poller = Poller::held(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    assert_eq!(status(&h).recap_match_id.as_deref(), Some("my-match"));
 }
 
 // ---------------------------------------------------------------------
@@ -808,12 +1038,14 @@ async fn profile_extras_gives_the_act_maps_and_who_on_screen_was_in_each_recent_
     want.sort_unstable();
     assert_eq!(mine.live_mates[0].puuids, want);
 
-    // Closed: no live match, no chips.
-    lock(&h.st.live).stage = Stage::Closed;
-    let closed = crate::v2::profile::build(&h.st, OTHER.into())
-        .await
-        .unwrap();
-    assert!(closed.live_mates.is_empty());
+    // Closed, or only in the menus: no live match, no chips.
+    for stage in [Stage::Closed, Stage::Menus] {
+        lock(&h.st.live).stage = stage;
+        let none = crate::v2::profile::build(&h.st, OTHER.into())
+            .await
+            .unwrap();
+        assert!(none.live_mates.is_empty(), "{stage:?}");
+    }
 }
 
 #[tokio::test]
@@ -839,7 +1071,7 @@ async fn profile_extras_ranks_the_maps_by_games_with_the_asset_tables() {
     let split = &extras.maps[0];
     assert_eq!(split.id, SPLIT_UUID);
     assert_eq!((split.games, split.wins, split.losses), (3, 3, 0));
-    assert_eq!(split.kd, 2.0);
+    assert_eq!(split.kd, Some(2.0));
     assert_eq!(split.acs, Some(200.0));
 }
 

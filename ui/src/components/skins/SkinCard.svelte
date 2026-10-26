@@ -5,6 +5,7 @@
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { IMG_RETRY_MS, retryImg } from "../../lib/imgRetry";
   import { artTint, editionColor, editionLabel, priceTip, sarText, vpText } from "../../lib/skins";
   import { tip } from "../../lib/tooltip.svelte";
   import type { OwnedSkin } from "../../lib/types";
@@ -12,7 +13,12 @@
   /** `name`: the full name ("Reaver Vandal", `skinName`). */
   let { skin, name }: { skin: OwnedSkin; name: string } = $props();
 
-  let broken = $state(false);
+  /**
+   * R163: Rust answers 503 while a valorant-api download fails (offline, a cold start), and `retryImg` asks again on
+   * its backoff. The frame says "unavailable" only once those retries are spent; until then the art just isn't drawn.
+   */
+  let errors = $state(0);
+  const broken = $derived(errors > IMG_RETRY_MS.length);
   const hasArt = $derived(!!skin.levelId && !broken);
 </script>
 
@@ -20,11 +26,12 @@
   <div class="art" style:background="radial-gradient(120% 100% at 50% 40%,{artTint(skin.edition)},transparent 72%)">
     {#if hasArt}
       <img
+        {@attach retryImg}
         src={assetUrl("skinLevel", skin.levelId)}
         alt={name}
-        onerror={() => {
-          broken = true;
-        }}
+        class:waiting={errors > 0}
+        onload={() => (errors = 0)}
+        onerror={() => errors++}
       />
     {:else}
       <div class="noart">
@@ -63,6 +70,9 @@
     padding: 12px 16px;
   }
 
+  .art img.waiting {
+    visibility: hidden;
+  }
   .art img {
     max-width: 100%;
     max-height: 100%;

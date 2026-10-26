@@ -9,6 +9,7 @@ import { closeDetails, closeMatch, getMatchDetails, getPlayerDetails, setGlance 
 import { DETAILS_RETRY_MS, DETAILS_TIMEOUT_MS, openDetails, openMatch as matchSlot } from "./boot";
 import { emptyMatch, settledDetails } from "./details";
 import { hideTip } from "./tooltip.svelte";
+import { cardOpenGuard } from "./clickGuard";
 import type { PlayerCard, Stage } from "./types";
 import { reportError } from "./uilog";
 
@@ -102,6 +103,7 @@ function activeElement(): HTMLElement | null {
  */
 export function openProfile(puuid: string, trigger?: HTMLElement | null): void {
   hideTip();
+  cardOpenGuard.arm();
   profileTrigger = trigger === undefined ? activeElement() : trigger;
   if (router.profile === puuid) return;
   router.profile = puuid;
@@ -160,8 +162,14 @@ function dropMatch(): void {
  * it was opened from keeps its scroll position for Back. `encFrom` (the profile to reopen on Back) defaults to the
  * drawer open right now, for `from: "encounter" | "profile"`.
  */
+/** The scoreboard was opened from the keyboard (its opener had a visible focus): it starts with the focus on Back. */
+let matchByKeyboard = false;
+export const matchOpenedByKeyboard = (): boolean => matchByKeyboard;
+
 export function openMatch(matchId: string, opts: { from: MatchFrom; focusPuuid: string; encFrom?: EncFrom }): void {
   hideTip();
+  cardOpenGuard.arm();
+  matchByKeyboard = activeElement()?.matches(":focus-visible") ?? false;
   const encFrom =
     opts.encFrom ??
     ((opts.from === "encounter" || opts.from === "profile") && router.profile !== null
@@ -193,6 +201,7 @@ export function openMatch(matchId: string, opts: { from: MatchFrom; focusPuuid: 
 export function backFromMatch(): void {
   if (router.matchId === null) return;
   hideTip();
+  const matchId = router.matchId;
   const from = router.matchFrom;
   const enc = router.encFrom;
   dropMatch();
@@ -207,6 +216,15 @@ export function backFromMatch(): void {
   restoreTo = savedScroll.get(to) ?? 0;
   router.screen = to;
   if (enc && (from === "encounter" || from === "profile")) openProfile(enc.puuid, null);
+  // The page under the scoreboard is drawn again: a keyboard user's focus goes back to the row that opened it (a
+  // History row, Live's LAST MATCH and the recap's full-scoreboard button carry its `data-match-id`), so the next Tab
+  // continues from there and not from the title bar.
+  else if (matchByKeyboard && typeof document !== "undefined") {
+    setTimeout(() => {
+      const row = document.querySelector<HTMLElement>(`[data-match-id="${CSS.escape(matchId)}"]`);
+      row?.focus({ preventScroll: true });
+    }, 0);
+  }
 }
 
 // ── screens ──────────────────────────────────────────────────────────────────────

@@ -519,9 +519,10 @@ const failsLeft = new Map<string, number>();
 
 /**
  * DEV retry tests: `?fail=details:N` makes the first N `player_details` calls reject, `?fail=match:N` the first N
- * `match_details` calls (N = 1 succeeds on the 1s retry, N = 2 settles the page on its empty state).
+ * `match_details` calls (N = 1 succeeds on the 1s retry, N = 2 settles the page on its empty state), and
+ * `?fail=collection:N` the first N `collection` calls (demo/v2).
  */
-function failNow(cmd: "details" | "match"): boolean {
+export function failNow(cmd: "details" | "match" | "collection"): boolean {
   if (!failsLeft.has(cmd)) {
     const param = typeof location === "undefined" ? "" : (new URLSearchParams(location.search).get("fail") ?? "");
     const m = new RegExp(`(?:^|,)${cmd}:(\\d+)`).exec(param);

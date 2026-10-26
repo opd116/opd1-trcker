@@ -30,9 +30,11 @@ serde_json = "1"
 # `log::Log`; already in the tree via tauri, so no new crate.
 log = "0.4"
 # `time` (poll-loop timers), `sync` (tables-load mutex), `rt` (`JoinSet`
-# for the per-player match-details fan-out). Same tokio tauri already runs
-# on — no new crates, only feature edges.
-tokio = { version = "1", features = ["time", "sync", "rt"] }
+# for the per-player match-details fan-out), `macros` (`select!`: the names
+# fill gives up when a match begins, `sync::fill_names_step`). Same tokio
+# tauri already runs on — no new crates, only feature edges (tokio-macros is
+# already in the lockfile, compile time only).
+tokio = { version = "1", features = ["time", "sync", "rt", "macros"] }
 # Decoding the presence `private` blob for the party key (`roster.rs`) —
 # same version opd1-core/opd1-riot already use.
 base64 = "0.22"
@@ -54,6 +56,10 @@ windows-version = "0.1"
 # goes to the current user's Run key and the exe path is quoted
 # (`v2::window::set_autostart`).
 auto-launch = "0.6"
+# Reads the `Run` value at startup (`v2::window::autostart_at_start`), so an
+# entry the user switched off in Task Manager is not re-enabled. Already in
+# the tree via `auto-launch` (same 0.6.1 in Cargo.lock): no new crate.
+windows-registry = "0.6"
 
 [dev-dependencies]
 # `test-support`: `RiotSession::with_global_rate` for the pipeline tests (a

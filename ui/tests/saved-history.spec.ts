@@ -2,7 +2,9 @@
 // note editor, opening a scoreboard and coming back (button and Esc), the hidden-name rows and the layout at the
 // default and minimum window sizes (no page or sideways scroll, nothing cut).
 import { expect, test, type Page } from "@playwright/test";
-import { openScene } from "./harness";
+import { AFTER_MATCH_MS } from "../src/lib/matchEnd";
+import { PUUID } from "../src/lib/demo/cdv8";
+import { gotoApp, NOW, openScene, routeMedia } from "./harness";
 
 const SIZES = [
   [1280, 800],
@@ -22,6 +24,27 @@ async function noOverflow(page: Page): Promise<void> {
     return out;
   });
   expect(bad).toEqual([]);
+}
+
+/** DEV: how often the open screen asked for its rows (demo/v2 `countAsk`). */
+const asks = (page: Page, key: "historyAsks" | "savedAsks") => page.evaluate((k) => Number(document.documentElement.dataset[k] ?? 0), key);
+
+/**
+ * The match ends (the live state goes In Game → Lobby) with the screen open. The match is stored only after a later sync, so
+ * the screen asks again on AFTER_MATCH_MS, and no more once that schedule is used up.
+ */
+async function asksAfterMatchEnd(page: Page, key: "historyAsks" | "savedAsks"): Promise<void> {
+  const before = await asks(page, key);
+  await page.evaluate(`import("/src/lib/stores.ts").then(({ live }) => live.set({ stage: "menus", mapId: null, players: [] }))`);
+  let t = 0;
+  for (const [i, at] of AFTER_MATCH_MS.entries()) {
+    await page.clock.runFor(at - t);
+    t = at;
+    await expect.poll(() => asks(page, key)).toBeGreaterThanOrEqual(before + i + 1);
+  }
+  const done = await asks(page, key);
+  await page.clock.runFor(300_000);
+  expect(await asks(page, key)).toBe(done);
 }
 
 test.describe("Saved players", () => {
@@ -99,6 +122,53 @@ test.describe("Saved players", () => {
     await expect(page.locator(".row[data-row]")).toHaveCount(1);
   });
 
+  test("a note edited under a search it stops matching keeps its row and its field", async ({ page }) => {
+    await openScene(page, "closed", { screen: "saved" });
+    await page.getByLabel("Search saved players").fill("dry-peeks");
+    await page.getByRole("button", { name: "Edit note on Mara" }).click();
+    const area = page.locator(".notecell textarea");
+    await expect(area).toBeFocused();
+    await area.press("ControlOrMeta+a");
+    await area.pressSequentially("Lurks B");
+    await expect(area).toBeFocused();
+    await expect(area).toHaveValue("Lurks B");
+    // Closed: the search applies to it again.
+    await page.keyboard.press("Escape");
+    await expect(page.locator(".row[data-row]")).toHaveCount(0);
+    await page.getByLabel("Search saved players").fill("");
+    await expect(page.locator(".row[data-row]", { hasText: "Mara" }).locator(".note")).toHaveText("Lurks B");
+  });
+
+  test("an open Saved page asks for its rows again after the match ends", async ({ page }) => {
+    await openScene(page, "ingame", { screen: "saved" }, { clock: "manual" });
+    await asksAfterMatchEnd(page, "savedAsks");
+  });
+
+  test("Back from a scoreboard puts a long list where it was, though its rows answer late", async ({ page }) => {
+    await routeMedia(page);
+    await page.clock.setFixedTime(NOW);
+    // saved_players answers 600 ms late (a slow DB read), long after the scroll restore's first tries.
+    await gotoApp(page, "/?scene=closed&screen=saved&delay=saved:600");
+    // 20 more saved players, so the list scrolls.
+    await page.evaluate(`import("/src/lib/demo/v2/store.ts").then(({ state, marksChannel, cloneMarks }) => {
+      for (let i = 0; i < 20; i++) state.marks.saved.push("00000000-0000-4000-8000-" + String(i).padStart(12, "0"));
+      marksChannel.emit(cloneMarks());
+    })`);
+    const card = page.locator("main .page > .card");
+    const rows = card.locator(".row[data-row]");
+    await expect(rows).toHaveCount(22);
+    const y = await card.evaluate((el) => ((el.scrollTop = 400), el.scrollTop));
+    expect(y).toBeGreaterThan(100);
+    // Mara's profile (scrolled out of view), one of her encounters, then Back.
+    await page.evaluate(`import("/src/lib/router.svelte.ts").then(({ openProfile }) => openProfile(${JSON.stringify(PUUID.mara)}))`);
+    await page.getByRole("dialog").getByRole("button", { name: /Open scoreboard$/ }).first().click();
+    await expect(page.locator('main .match[aria-busy="false"]')).toHaveCount(1);
+    await page.locator("main .match .back").click();
+    await expect(page.getByRole("dialog")).toHaveAttribute("aria-label", "Mara profile");
+    await expect(rows).toHaveCount(22);
+    await expect.poll(() => card.evaluate((el) => el.scrollTop)).toBe(y);
+  });
+
   test("a row opens the profile (click and Enter)", async ({ page }) => {
     await openScene(page, "closed", { screen: "saved" });
     const row = page.locator(".row[data-row]").first();
@@ -170,6 +240,11 @@ test.describe("Match history", () => {
     await expect(page.locator(".dlabel").first()).toHaveText("Today");
   });
 
+  test("an open list asks again after the match ends, until the match is stored", async ({ page }) => {
+    await openScene(page, "ingame", { screen: "history" }, { clock: "manual" });
+    await asksAfterMatchEnd(page, "historyAsks");
+  });
+
   test("empty", async ({ page }) => {
     await openScene(page, "closed", { screen: "history", empty: "1" });
     await expect(page.locator(".etitle")).toHaveText("No matches stored yet");
@@ -211,5 +286,40 @@ test.describe("Scoreboard", () => {
   test("loading: the skeleton, busy", async ({ page }) => {
     await openScene(page, "match-loading");
     await expect(page.locator('.match[aria-busy="true"] .hero.skel')).toBeVisible();
+  });
+});
+
+test.describe("the double-click guard covers every opener", () => {
+  test("a Saved row double-clicked opens the drawer and leaves it open", async ({ page }) => {
+    await routeMedia(page);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openScene(page, "closed", { screen: "saved" });
+    const row = page.locator(".row[data-row]").first();
+    await expect(row).toBeVisible();
+    const box = (await row.locator(".player").boundingBox())!;
+    await page.mouse.dblclick(box.x + 60, box.y + box.height / 2);
+    await page.waitForTimeout(500);
+    await expect(page.locator('[role="dialog"]')).toHaveCount(1);
+  });
+
+  test("a History row double-clicked by its chevron never saves the player under the second click", async ({ page }) => {
+    await routeMedia(page);
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await openScene(page, "closed", { screen: "history" });
+    for (const n of [4, 6]) {
+      const row = page.locator(".row[data-match-id]").nth(n);
+      await expect(row).toBeVisible();
+      const b = (await row.boundingBox())!;
+      const [x, y] = [b.x + b.width - 20, b.y + b.height / 2];
+      await page.mouse.click(x, y);
+      await page.waitForTimeout(150);
+      const pressed = page.locator('button.save[aria-pressed="true"]');
+      const before = await pressed.count();
+      await page.mouse.click(x, y);
+      await page.waitForTimeout(300);
+      await expect(pressed).toHaveCount(before);
+      await page.keyboard.press("Escape");
+      await expect(page.locator(".row[data-match-id]").first()).toBeVisible();
+    }
   });
 });

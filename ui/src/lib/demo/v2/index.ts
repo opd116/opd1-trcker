@@ -14,6 +14,7 @@ import type {
   Settings,
 } from "../../types";
 import { DEMO_NOW, MAPS, PUUID } from "../cdv8";
+import { failNow } from "../scenes";
 import { demoCollection } from "./collection";
 import { demoHistory } from "./history";
 import { demoSavedPlayers } from "./saved";
@@ -41,7 +42,19 @@ export function v2Marks(): PlayerMarks {
   return cloneMarks();
 }
 
-export function v2SavedPlayers(): SavedPlayer[] {
+/** DEV: how often a screen asked for its rows (`data-history-asks` / `data-saved-asks` on <html>; Playwright reads it). */
+function countAsk(key: "historyAsks" | "savedAsks"): void {
+  const d = document.documentElement.dataset;
+  d[key] = String(Number(d[key] ?? 0) + 1);
+}
+
+/** DEV scroll tests: `?delay=saved:N` answers `saved_players` N ms late, as a slow DB read would. */
+const savedDelayMs = () => Number(/(?:^|,)saved:(\d+)/.exec(q().get("delay") ?? "")?.[1] ?? 0);
+
+export async function v2SavedPlayers(): Promise<SavedPlayer[]> {
+  countAsk("savedAsks");
+  const ms = savedDelayMs();
+  if (ms > 0) await new Promise((r) => setTimeout(r, ms));
   return empty() ? [] : demoSavedPlayers();
 }
 
@@ -67,6 +80,7 @@ export function v2DismissSmurf(puuid: string): void {
 }
 
 export function v2History(queue: HistoryQueue, offset: number, limit: number): HistoryPage {
+  countAsk("historyAsks");
   return demoHistory(queue, offset, limit, empty());
 }
 
@@ -107,6 +121,7 @@ export function v2AppInfo(): AppInfo {
 }
 
 export function v2Collection(): Collection | null {
+  if (failNow("collection")) throw new Error("demo: skins unavailable");
   return empty() ? null : demoCollection();
 }
 

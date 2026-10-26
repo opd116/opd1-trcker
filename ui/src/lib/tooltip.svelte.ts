@@ -208,7 +208,7 @@ export function retip(trigger: Element, owner?: Element, announce = true): void 
 }
 
 /**
- * Wire the engine to #app. Leaving the app, a mouse press or click, or scrolling any container hides the tip
+ * Wire the engine to #app. Leaving the app or the window losing focus, a mouse press or click, or scrolling any container hides the tip
  * (scroll does not bubble, so it is caught in the capture phase). A scroll does not cancel a keyboard focus's tip that
  * has not shown yet: moving focus scrolls its target into view, and the tip is placed when it shows. Keyboard focus
  * shows a tip and Escape hides it (`tipFocus`, `tipBlur`, `tipKey`). Returns the cleanup.
@@ -231,7 +231,12 @@ export function attachTooltips(root: HTMLElement): () => void {
   root.addEventListener("focusin", focusin);
   root.addEventListener("focusout", focusout);
   doc.addEventListener("keydown", tipKey);
+  // Alt+Tab into the game: the window loses focus with the pointer still on a target, and the app stays on top, so
+  // a shown (or still pending) tip would sit over the game until the pointer came back.
+  const win = doc.defaultView;
+  win?.addEventListener("blur", hideTip);
   return () => {
+    win?.removeEventListener("blur", hideTip);
     root.removeEventListener("mouseover", over);
     root.removeEventListener("mouseleave", hideTip);
     root.removeEventListener("mousedown", hideTip);

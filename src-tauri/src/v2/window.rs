@@ -109,8 +109,33 @@ fn show_main(app: &AppHandle) {
     if let Some(w) = main_window(app) {
         let _ = w.unminimize();
         let _ = w.show();
+        set_webview_visible(&w, true);
         let _ = w.set_focus();
     }
+}
+
+/// Tells WebView2 whether the page is on screen. Hiding the native window
+/// (close to tray) or minimizing it does not: WebView2 keeps the page
+/// "visible" until its controller hears otherwise, so the waiting screen's
+/// radar, the pulsing dots and the 1 s clocks kept rendering in the tray for
+/// days. Hidden, the page reads `document.hidden` and Chromium stops drawing
+/// and throttles its timers; Rust (the poll loop, the toasts) is unaffected.
+fn set_webview_visible(w: &WebviewWindow, visible: bool) {
+    #[cfg(windows)]
+    {
+        let done = w.with_webview(move |wv| {
+            // SAFETY: a plain COM call on the live controller WebView2 handed
+            // Tauri, made on the main thread `with_webview` runs it on.
+            if let Err(e) = unsafe { wv.controller().SetIsVisible(visible) } {
+                log::debug!("webview visibility ({visible}): {e}");
+            }
+        });
+        if let Err(e) = done {
+            log::debug!("webview visibility ({visible}): {e}");
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = (w, visible);
 }
 
 /// Startup: the tray, the stored settings applied
@@ -123,6 +148,7 @@ pub fn setup(app: &tauri::App, st: &AppState) -> tauri::Result<()> {
 
     let settings = st.db_blocking(super::settings::load).unwrap_or_default();
     apply_settings(app.handle(), &settings);
+    autostart_at_start(settings.boot);
 
     let minimized = std::env::args().any(|a| a == MINIMIZED_ARG);
     if let Some(w) = main_window(app.handle()) {
@@ -137,8 +163,11 @@ pub fn setup(app: &tauri::App, st: &AppState) -> tauri::Result<()> {
         } else if !settings.tray {
             w.show()?;
             w.minimize()?;
+            set_webview_visible(&w, false);
+        } else {
+            // Hidden in the tray until "Show" or a click on the icon.
+            set_webview_visible(&w, false);
         }
-        // else: hidden in the tray until "Show" or a click on the icon.
     }
     Ok(())
 }
@@ -176,28 +205,41 @@ fn setup_tray(app: &tauri::App) -> tauri::Result<()> {
 
 /// `on_window_event`: the main window's close request (the title bar's ×)
 /// hides it to the tray when the `tray` setting is on; otherwise the app
-/// quits.
+/// quits. A resize tells WebView2 whether the page is on screen (minimized
+/// or restored, from the title bar, the taskbar or Win+D).
 pub fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
-    let tauri::WindowEvent::CloseRequested { api, .. } = event else {
-        return;
-    };
     if window.label() != MAIN_WINDOW {
         return;
     }
+    if let tauri::WindowEvent::Resized(_) = event {
+        if let Some(w) = main_window(window.app_handle()) {
+            let on_screen = !w.is_minimized().unwrap_or(false) && w.is_visible().unwrap_or(true);
+            set_webview_visible(&w, on_screen);
+        }
+        return;
+    }
+    let tauri::WindowEvent::CloseRequested { api, .. } = event else {
+        return;
+    };
     let to_tray = window
         .try_state::<WindowFlags>()
         .is_some_and(|f| f.close_to_tray.load(Ordering::Relaxed));
     if to_tray {
         api.prevent_close();
         let _ = window.hide();
+        if let Some(w) = main_window(window.app_handle()) {
+            set_webview_visible(&w, false);
+        }
     } else {
         window.app_handle().exit(0);
     }
 }
 
-/// Applies `onTop` (kept on while Glance is on), `boot` (autostart, with
-/// [`MINIMIZED_ARG`]) and `tray` (close to tray; the tray icon shows only
-/// with it). Failures are logged.
+/// Applies `onTop` (kept on while Glance is on) and `tray` (close to tray;
+/// the tray icon shows only with it). Failures are logged. `boot` is not
+/// applied here: [`set_autostart`] runs only when it changes, and
+/// [`autostart_at_start`] at startup, so a switch-off in Task Manager is
+/// never undone by an unrelated save or a restart.
 pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     let mut glance = false;
     if let Some(flags) = app.try_state::<WindowFlags>() {
@@ -215,7 +257,53 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let _ = tray.set_visible(settings.tray);
     }
-    set_autostart(app, settings.boot);
+}
+
+/// Startup: with `boot` on, only the current user's `Run` value is made
+/// right (written when missing, after a first install or a reinstall, or
+/// when it names another exe path); Task Manager's `StartupApproved` entry
+/// is never touched here. `AutoLaunch::enable` would also mark it enabled,
+/// undoing the user switching the app off in Task Manager at every start.
+/// With `boot` off the entry is removed.
+pub fn autostart_at_start(on: bool) {
+    if !on {
+        set_autostart(false);
+        return;
+    }
+    if cfg!(debug_assertions) {
+        return;
+    }
+    if let Err(e) = refresh_run_value() {
+        log::warn!("autostart refresh: {e}");
+    }
+}
+
+#[cfg(windows)]
+const RUN_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+
+/// Writes the `Run` value (the same command line `AutoLaunch` writes) unless
+/// it already holds it.
+#[cfg(windows)]
+fn refresh_run_value() -> Result<(), String> {
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    let (path, args) = autostart_command(&exe);
+    let want = format!("{} {}", path, args.join(" "));
+    let have = windows_registry::CURRENT_USER
+        .open(RUN_KEY)
+        .and_then(|key| key.get_string(AUTOSTART_NAME))
+        .ok();
+    if have.as_deref() == Some(want.as_str()) {
+        return Ok(());
+    }
+    windows_registry::CURRENT_USER
+        .create(RUN_KEY)
+        .and_then(|key| key.set_string(AUTOSTART_NAME, &want))
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(windows))]
+fn refresh_run_value() -> Result<(), String> {
+    Ok(())
 }
 
 /// The `boot` setting: the autostart entry written (it also refreshes the
@@ -228,8 +316,7 @@ pub fn apply_settings(app: &AppHandle, settings: &Settings) {
 /// one when the app runs elevated, which the per-user uninstaller cannot
 /// remove), and the exe path is quoted (it contains a space). Removing
 /// clears both keys, so an older machine-wide entry goes too.
-fn set_autostart(app: &AppHandle, on: bool) {
-    let _ = app;
+pub fn set_autostart(on: bool) {
     if cfg!(debug_assertions) {
         log::debug!("autostart not changed in a debug build (boot: {on})");
         return;

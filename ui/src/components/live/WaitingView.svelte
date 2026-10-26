@@ -7,6 +7,7 @@
   import { launchValorant } from "../../lib/api";
   import { appStatus } from "../../lib/appdata.svelte";
   import { assetUrl } from "../../lib/assets";
+  import { sessionOpen } from "../../lib/compv2";
   import { queueLabel } from "../../lib/historyv2";
   import { pct0, rrDelta } from "../../lib/format";
   import { retryImg } from "../../lib/imgRetry";
@@ -45,7 +46,6 @@
   const party = $derived(menus && live ? selfFirst(live.players).slice(0, 5) : []);
   const ms = $derived($mystats ?? null);
   const last = $derived(ms?.last5[0] ?? null);
-  const session = $derived(ms?.session ?? null);
   const rank = $derived(ms && typeof ms.rank.tier === "number" ? ms.rank : null);
 
   // A clock for "45 MIN AGO" and the queue timer: every second while searching, else every 30 s. The session length
@@ -56,6 +56,8 @@
     const id = setInterval(() => (nowMs = Date.now()), queue ? 1000 : 30_000);
     return () => clearInterval(id);
   });
+  // TODAY is the session still going: one that ended 6 h ago is no longer today's (the snapshot can be hours old).
+  const session = $derived(ms?.session && sessionOpen(ms.session, nowMs) ? ms.session : null);
 
   let launching = $state(false);
   let launchError = $state<string | null>(null);
@@ -70,6 +72,11 @@
       launching = false;
     }
   }
+
+  // The game reached the menus (started some other way): an older launch error no longer applies when it closes again.
+  $effect(() => {
+    if (menus) launchError = null;
+  });
 
   function openLast() {
     if (!ms || !last) return;
@@ -165,7 +172,8 @@
           <div class="st"><span class="mono">HS%</span><span class="sv">{pct0(last.hsPct)}</span></div>
           <div class="st"><span class="mono">RR</span><span class="sv" style:color={rrColor(last.rrEarned)}>{rrDelta(last.rrEarned)}</span></div>
         </div>
-        <div class="lm-open" role="button" tabindex="0" onclick={openLast} onkeydown={lastKey}>
+        <!-- data-match-id: Back from the scoreboard puts a keyboard user's focus here again (router `backFromMatch`). -->
+        <div class="lm-open" role="button" tabindex="0" data-match-id={last.matchId} onclick={openLast} onkeydown={lastKey}>
           View scoreboard<svg width="7" height="12" viewBox="0 0 7 12" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M1.5 1.5L5.5 6l-4 4.5"></path></svg>
         </div>
       </div>

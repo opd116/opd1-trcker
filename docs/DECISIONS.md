@@ -334,6 +334,7 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **What:** Repeated connect failures back off (5s, then up to 30-60s) (a reviewer Minor upgraded).
 - **Why:** Idle lightness: a failing connect re-reads `ShooterGame.log` every 5s forever.
 - **Cost:** Slower reconnect after a Riot Client crash.
+- **Amended (2026-10-26, bug hunt):** a client that answers with no account (signed out) gets no backoff: it is asked every 5 s so a sign-in is seen at once. Connect asks `/entitlements/v1/token` before it reads the log, so such an attempt is one small local call.
 - **Status:** active
 
 ### R48 — Post-match follow-up checks comp_updates
@@ -1356,6 +1357,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **What:** User decision 2026-10-22 (overrides "No tray. No autostart"): add the Tauri `tray-icon` feature, `tauri-plugin-autostart` and `tauri-plugin-notification`, so Settings' "Close to tray", "Launch with Windows" and "Saved player in my match" (with optional sound) work. `tauri-plugin-dialog` is not approved; the error screen's "Choose Riot Client folder…" waits for it.
 - **Why:** The user approved the new dependencies.
 - **Cost:** Three dependencies; settings are stored in `app_state` (`ui_settings`) and survive updates (R177).
+- **Status:** active
+
+### R194 — Bug-hunt round: installer clean-up and Launch with Windows
+
+- **What:** Claude's calls, 2026-10-24. (1) `hooks.nsh` asks to close a running copy before its clean-up, and deletes `$INSTDIR` recursively only when the folder is named after the product (the default); any other folder holding a previous install loses only the three files the app installs (R4's intent; the old code wiped the whole folder). (2) Launch with Windows: the `Run` value is written at startup only when it is missing or names another exe, and through `AutoLaunch` only when the `boot` setting changes, so Task Manager's `StartupApproved` switch is never undone; the uninstaller removes only the `Run` value (an upgrade runs it first, without `/UPDATE`), never `StartupApproved`.
+- **Why:** A reinstall pointed at a shared folder deleted everything in it; a Cancel at the "app is running" prompt left a broken install; switching the app off in Task Manager came back on at the next start or settings save.
+- **Cost:** A non-default install folder can keep stray files from an older version. The hook change reaches the user's machine only from the next installed version (an update runs the old uninstaller). `windows-registry` becomes a direct dependency (already in the tree via `auto-launch`).
 - **Status:** active
 
 ## User decisions index

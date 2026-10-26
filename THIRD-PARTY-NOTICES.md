@@ -4,7 +4,7 @@ OPD1 TRCKER is proprietary (see `LICENSE`). The components below are used under 
 
 ## Fonts: Barlow, Saira Condensed, Geist Mono, Cascadia Mono
 
-The UI bundles latin-subset woff2 files of four typefaces, at the weights it uses: Barlow (400, 500, 600, 700, and 500 italic), Saira Condensed (500, 600, 700), Geist Mono (400, 500, 600) and Cascadia Mono (400, plus its box-drawing and block-element subset, for the ASCII studio). Each one is licensed under the SIL Open Font License, Version 1.1 (OFL). The files come from the `@fontsource/barlow`, `@fontsource/saira-condensed`, `@fontsource/geist-mono` and `@fontsource/cascadia-mono` npm packages (5.3.0). The full licence texts, with each font's copyright line, are in `ui/src/assets/fonts/OFL.txt`.
+The UI bundles latin-subset woff2 files of four typefaces, at the weights it uses: Barlow (400, 500, 600, 700, and 500 italic), Saira Condensed (500, 600, 700), Geist Mono (400, 500, 600) and Cascadia Mono (400, plus its box-drawing and block-element subset, for the ASCII studio). Each one is licensed under the SIL Open Font License, Version 1.1 (OFL). The files come from the `@fontsource/barlow`, `@fontsource/saira-condensed`, `@fontsource/geist-mono` and `@fontsource/cascadia-mono` npm packages (5.3.0). The full licence texts, with each font's copyright line, are in `OFL.txt`, installed next to this file (`ui/src/assets/fonts/OFL.txt` in the source).
 
 | Typeface | Licence |
 |---|---|

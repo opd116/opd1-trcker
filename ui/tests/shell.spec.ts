@@ -2,7 +2,8 @@
 // (.superpowers/design/v2/TrackerApp.dc.html 97–139), keyboard navigation, the tooltip's placement, no scrollbars.
 import { expect, test, type Page } from "@playwright/test";
 import { PUUID } from "../src/lib/demo/cdv8";
-import { openScene } from "./harness";
+import { IMG_RETRY_MS } from "../src/lib/imgRetry";
+import { gotoApp, NOW, openScene, routeMedia } from "./harness";
 
 const box = async (page: Page, sel: string) => (await page.locator(sel).first().boundingBox())!;
 
@@ -44,6 +45,19 @@ test("nav rail: Enter / Space navigate, aria-current follows, the live dot shows
   // The rank widget opens Competitive.
   await page.locator('nav.rail button[aria-label="Your rank: open Competitive"]').click();
   await expect(nav("Comp")).toHaveAttribute("aria-current", "page");
+});
+
+test("nav rail: a rank icon that failed to load is asked again (R163)", async ({ page }) => {
+  // Every tier icon fails once (the 503 Rust answers while valorant-api can't be reached); its retry (`?r=1`) loads.
+  await routeMedia(page, (url) => (/\/competitivetiers\/.*smallicon\.png$/.test(url) ? { status: 503 } : null));
+  await page.clock.install({ time: NOW });
+  await gotoApp(page, "/?scene=ingame");
+  const icon = page.locator("nav.rail .rank img");
+  await icon.waitFor({ state: "attached" });
+  await page.waitForTimeout(300);
+  await page.clock.runFor(IMG_RETRY_MS[0]!);
+  await expect(icon).toHaveAttribute("src", /[?&]r=1$/);
+  await expect.poll(() => icon.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth > 0)).toBe(true);
 });
 
 test("status pill: Connected, with AGENT SELECT in pregame", async ({ page }) => {

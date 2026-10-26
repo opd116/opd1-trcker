@@ -21,6 +21,12 @@ if (import.meta.env.DEV && !isTauri()) (await import("./lib/demo/feed")).alignDe
 const root = document.getElementById("app")!;
 const app = mount(App, { target: root });
 attachTooltips(root);
-void startFeeds().then(() => startAppData());
+// The status pill, settings and marks do not wait for the feeds (whose My Stats can wait on a valorant-api download).
+// The DEV demo keeps its order: its status follows the scene the feeds start.
+if (import.meta.env.DEV && !isTauri()) void startFeeds().then(() => startAppData());
+else {
+  void startFeeds();
+  void startAppData();
+}
 
 export default app;

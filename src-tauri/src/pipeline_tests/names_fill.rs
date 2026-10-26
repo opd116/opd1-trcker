@@ -171,7 +171,7 @@ async fn run_fill(h: &Harness) {
 /// or the backfill does.
 async fn store_match(h: &Harness, match_id: &str) {
     let details: MatchDetailsResponse = h.session.match_details(match_id).await.unwrap();
-    assert!(store_details(&h.st, details).await.is_some());
+    assert!(store_details(&h.st, details, |_, _, _| {}).await.is_some());
 }
 
 async fn marker(st: &AppState, puuid: String) -> Option<i64> {
@@ -858,6 +858,51 @@ async fn a_match_that_starts_between_taking_the_asks_and_the_request_sends_nothi
     assert_eq!(
         seen(&h.st, HIDDEN.to_string()).await,
         Some(("Real".to_string(), "HID".to_string()))
+    );
+}
+
+#[tokio::test]
+async fn a_names_call_waiting_on_a_429_gives_up_when_a_deathmatch_begins() {
+    // R150/R153: nothing is asked during a match, a Deathmatch included. A
+    // free-for-all keeps the Lobby view (R41), so no stage change stops this
+    // worker: the first PUT meets a 429 and the call waits to send it again;
+    // the Deathmatch begins meanwhile, and the resend never goes out.
+    let h = harness().await;
+    Mock::given(method("PUT"))
+        .and(path("/name-service/v2/players"))
+        .respond_with(ResponseTemplate::new(429).insert_header("Retry-After", "2"))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+    mount_name_service(&h.server, &[(OTHER.to_string(), "Other", "OTH")]).await;
+    back_to_the_lobby(&h, None).await;
+    lock(&h.st.live).queue_name_fill([ask(OTHER, Some(1))]);
+    let step = tokio::spawn({
+        let (st, session) = (h.st.clone(), h.session.clone());
+        async move { fill_names_step(&st, &session).await }
+    });
+    for _ in 0..200 {
+        if !puts(&h.server).await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(puts(&h.server).await.len(), 1, "the first PUT met the 429");
+
+    // The Deathmatch begins: the raw presence is in a match, the view stays.
+    lock(&h.st.live).in_match = true;
+    tokio::time::timeout(Duration::from_secs(1), step)
+        .await
+        .expect("the call gave up at once, not after the 2 s wait")
+        .unwrap()
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(2_300)).await;
+    assert_eq!(puts(&h.server).await.len(), 1, "no resend during the match");
+    assert_eq!(
+        queue_of(&h),
+        vec![(OTHER.to_string(), Some(1))],
+        "asks kept"
     );
 }
 

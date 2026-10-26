@@ -441,6 +441,122 @@ async fn a_player_who_left_the_roster_is_not_retried() {
 }
 
 #[tokio::test]
+async fn a_self_only_placeholder_keeps_the_others_pending_rank_retry() {
+    // In Game: OTHER's rank sync fails (the harness's default), so a retry is
+    // due in 20 s. The next roster fetch fails once: the user's card alone
+    // shows meanwhile. The roster comes back with OTHER: the retry still runs.
+    let h = harness().await;
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.self_puuid = Some(ME.into());
+        live.self_roster = Some(roster(ME, false));
+        live.slots = vec![
+            Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            },
+            Slot {
+                roster: roster(OTHER, false),
+                db: PlayerDb::default(),
+            },
+        ];
+    }
+    drain(&h).await;
+    assert_eq!(count(&h.server, "GET", &comp_path(OTHER)).await, 1);
+
+    let mut poller = crate::poll::Poller::held(h.st.clone());
+    poller.stage = Stage::Ingame;
+    poller.show_self_only(&h.session).await;
+    {
+        let mut live = lock(&h.st.live);
+        assert_eq!(live.slots.len(), 1, "the placeholder");
+        live.slots.push(Slot {
+            roster: roster(OTHER, false),
+            db: PlayerDb::default(),
+        });
+        live.prune_rank_retries(); // what the next `apply_roster` does
+    }
+    advance(&h, 20 * S);
+    assert_eq!(lock(&h.st.live).due_rank_retry().as_deref(), Some(OTHER));
+}
+
+#[tokio::test]
+async fn a_reconnect_mid_match_syncs_the_roster_again_and_its_failed_rank_is_asked() {
+    // In Game: OTHER's rank sync fails (the harness's default) with a retry
+    // pending. The session drops and comes back on the same match: OTHER is
+    // synced again rather than left counted synced with no retry.
+    let h = harness().await;
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Ingame;
+        live.self_puuid = Some(ME.into());
+        live.slots = vec![
+            Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            },
+            Slot {
+                roster: roster(OTHER, false),
+                db: PlayerDb::default(),
+            },
+        ];
+    }
+    drain(&h).await;
+    assert_eq!(count(&h.server, "GET", &comp_path(OTHER)).await, 1);
+
+    let mut poller = crate::poll::Poller::held(h.st.clone());
+    poller.drop_session().await;
+    assert!(!lock(&h.st.live).synced.contains(OTHER));
+    poller.on_connected(h.session.clone()).await;
+    poller
+        .apply_roster(
+            &h.session,
+            Stage::Ingame,
+            None,
+            vec![roster(ME, false), roster(OTHER, false)],
+        )
+        .await;
+    advance(&h, 100 * S);
+    assert!(drain(&h).await, "work for OTHER again");
+    assert!(count(&h.server, "GET", &comp_path(OTHER)).await >= 2);
+}
+
+#[tokio::test]
+async fn a_profile_sync_refreshes_a_snapshot_older_than_the_newest_comp_match() {
+    // A player off screen (Saved, History): the live sync never refreshes
+    // their rank. Their stored snapshot is from before their newest match
+    // (another act, say): the profile's own sync asks MMR again, once.
+    let h = harness().await;
+    h.st.db(|repo| {
+        repo.save_mmr_snapshot(&opd1_core::db::repo::MmrSnapshot {
+            puuid: ME.into(),
+            json: "{}".into(),
+            last_comp_match_id: Some("an-older-match".into()),
+            fetched_ms: 1,
+        })
+    })
+    .await
+    .unwrap();
+    crate::sync::sync_details(&h.st, &h.session, ME)
+        .await
+        .unwrap();
+    assert_eq!(count(&h.server, "GET", &mmr_path(ME)).await, 1);
+    let snap =
+        h.st.db(|repo| repo.load_mmr_snapshot(ME))
+            .await
+            .flatten()
+            .expect("stored");
+    assert_eq!(snap.last_comp_match_id.as_deref(), Some("m1"));
+
+    // Nothing newer since: no second call (sync, don't refetch).
+    crate::sync::sync_details(&h.st, &h.session, ME)
+        .await
+        .unwrap();
+    assert_eq!(count(&h.server, "GET", &mmr_path(ME)).await, 1);
+}
+
+#[tokio::test]
 async fn no_retry_runs_while_valorant_is_closed() {
     let h = harness().await;
     mmr_answers(&h, ME, 500, None).await;

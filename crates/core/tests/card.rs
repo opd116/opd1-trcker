@@ -1349,6 +1349,100 @@ fn live_tier_is_below_a_snapshot_and_below_a_current_act_rr_row() {
 }
 
 #[test]
+fn an_mmr_tier_without_its_rr_takes_the_rr_from_the_stored_updates_r166() {
+    use opd1_core::stats::SeasonInfo;
+    use std::collections::HashMap;
+
+    // MMR names tier 15 this act but left `RankedRating` out.
+    let tier_only = || {
+        let mut seasons = HashMap::new();
+        seasons.insert(
+            CURRENT_ACT_ID.to_string(),
+            SeasonInfo {
+                competitive_tier: 15,
+                wins_by_tier: HashMap::new(),
+                number_of_wins: 3,
+                number_of_games: 5,
+            },
+        );
+        Field::Value(MmrInput {
+            seasons,
+            current_rank: None,
+        })
+    };
+    // A stored current-act update at that tier has the exact RR.
+    let card = build_card(no_snapshot(
+        tier_only(),
+        vec![update("m", CURRENT_ACT_ID, 2_400, 15, 42)],
+    ));
+    assert_eq!(card.rank, rank(15, Some(42)));
+    // No update at that tier: the tier stands, the RR is unknown (never 0).
+    let card = build_card(no_snapshot(
+        tier_only(),
+        vec![update("m", CURRENT_ACT_ID, 2_400, 14, 80)],
+    ));
+    assert_eq!(card.rank, rank(15, None));
+    assert_eq!(
+        build_card(no_snapshot(tier_only(), vec![])).rank,
+        rank(15, None)
+    );
+}
+
+#[test]
+fn the_peak_floor_holds_for_an_mmr_tier_without_its_rr_r164_r166() {
+    use opd1_core::stats::SeasonInfo;
+    use std::collections::HashMap;
+
+    // Rank 18 this act (no RankedRating); every win recorded at tier 15.
+    let mut seasons = HashMap::new();
+    seasons.insert(
+        CURRENT_ACT_ID.to_string(),
+        SeasonInfo {
+            competitive_tier: 18,
+            wins_by_tier: HashMap::from([(15, 4)]),
+            number_of_wins: 4,
+            number_of_games: 6,
+        },
+    );
+    let mmr = Field::Value(MmrInput {
+        seasons,
+        current_rank: None,
+    });
+    let card = build_card(no_snapshot(mmr, vec![]));
+    assert_eq!(card.rank, rank(18, None));
+    let Field::Value(peak) = card.peak else {
+        panic!("peak {:?}", card.peak)
+    };
+    assert!(peak.tier >= 18, "peak {} below the current rank", peak.tier);
+}
+
+#[test]
+fn last5_kd_over_matches_without_a_stats_row_is_unknown_not_zero_r102() {
+    let no_stats = |id: &str, start_ms: i64| MatchPlayerRow {
+        kills: 0,
+        deaths: 0,
+        hs: 0,
+        bs: 0,
+        ls: 0,
+        rounds: None,
+        ..match_row(id, start_ms, "Blue", Some("Blue"))
+    };
+    let mut input = base_input(identity());
+    input.last5 = Field::Value(vec![no_stats("m1", 2_100), no_stats("m2", 2_200)]);
+    let card = build_card(input);
+    assert_eq!(card.kd, Field::Missing);
+    assert_eq!(card.hs_pct, Field::Missing);
+
+    // One row with stats: the K/D is that row's, the empty one adds no zeros.
+    let mut input = base_input(identity());
+    input.last5 = Field::Value(vec![
+        no_stats("m1", 2_100),
+        match_row("m2", 2_200, "Blue", Some("Blue")),
+    ]);
+    assert_eq!(build_card(input).kd, Field::Value(2.0));
+}
+
+#[test]
 fn live_tier_is_above_a_stored_match_tier() {
     let mut input = live(Field::Missing, Some(22));
     input.stored_tier = Some(StoredTier {

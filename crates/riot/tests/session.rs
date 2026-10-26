@@ -33,6 +33,25 @@ async fn session_connects_and_exposes_self_puuid() {
 }
 
 #[tokio::test]
+async fn a_game_log_with_an_invalid_utf8_byte_still_gives_the_shards() {
+    let tmp = TempDir::new();
+    let log_dir = tmp.path().join("VALORANT").join("Saved").join("Logs");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    let mut log = b"[0000] LogInit: caf\xe9 \xff\n".to_vec();
+    log.extend_from_slice(
+        b"[0001] LogPlatform: Info: https://pd.eu.a.pvp.net/account-xp/v1/players/abc\n\
+          [0002] LogPlatform: Info: https://glz-eu-1.eu.a.pvp.net/pregame/v1/players/abc\n",
+    );
+    std::fs::write(log_dir.join("ShooterGame.log"), log).unwrap();
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    mount_entitlements(&server, SELF_PUUID).await;
+
+    let session = connect_against(tmp.path(), &server).await;
+    assert_eq!(session.self_puuid(), SELF_PUUID);
+}
+
+#[tokio::test]
 async fn session_connect_fails_when_lockfile_missing() {
     let tmp = TempDir::new();
     write_shooter_log(tmp.path());
@@ -1679,6 +1698,235 @@ async fn concurrent_calls_share_one_refresh() {
         8,
         "no call needed a retry"
     );
+}
+
+#[tokio::test]
+async fn rejected_calls_behind_a_failed_refresh_give_up_at_once() {
+    // The token expired and the local endpoint fails: the first rejected call
+    // asks once; the seven queued behind it get the error without asking again.
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "access-token-1", "entitlements": [], "issuer": "i",
+            "subject": SELF_PUUID, "token": "jwt-1",
+        })))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(bad_claims())
+        .mount(&server)
+        .await;
+    let session = connect_with_age(&tmp, &server, None).await;
+    for result in fan_out(session, 8).await {
+        assert!(result.is_err());
+    }
+    assert_eq!(
+        count(&server, "/entitlements/v1/token").await,
+        2,
+        "connect + the one failed refresh"
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_token_for_another_account_ends_the_session() {
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    for (subject, once) in [
+        (SELF_PUUID, true),
+        ("bbbbbbbb-0000-0000-0000-000000000002", false),
+    ] {
+        let m = Mock::given(method("GET"))
+            .and(path("/entitlements/v1/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "accessToken": "a", "entitlements": [], "issuer": "i",
+                "subject": subject, "token": "t",
+            })));
+        if once {
+            m.up_to_n_times(1).mount(&server).await;
+        } else {
+            m.mount(&server).await;
+        }
+    }
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let session = connect_with_age(&tmp, &server, None).await;
+    let err = session.pd::<Value>(&mmr_path()).await.unwrap_err();
+    assert!(matches!(err, RiotError::ClientGone), "{err:?}");
+    // The poll loop's own reads (local, no token) see it too, so it reconnects.
+    let err = session
+        .local::<Value>("/chat/v4/presences")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, RiotError::ClientGone), "{err:?}");
+}
+
+#[tokio::test]
+async fn a_signed_out_client_is_no_account_on_connect_or_refresh() {
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    let signed_out = || {
+        ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "", "entitlements": [], "issuer": "i",
+            "subject": "", "token": "",
+        }))
+    };
+    // Connect: no session for an empty account (the poll loop retries).
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(signed_out())
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let base = server.uri();
+    let Err(err) = RiotSession::connect_with_overrides(
+        tmp.path(),
+        ConnectOverrides {
+            pd_base: Some(base.clone()),
+            glz_base: Some(base.clone()),
+            valorant_api_base: Some(base),
+            ..Default::default()
+        },
+    )
+    .await
+    else {
+        panic!("no session for a signed-out client");
+    };
+    assert!(matches!(err, RiotError::AuthFailed(_)), "{err:?}");
+
+    // Refresh: a signed-out moment is a failed refresh, not another account.
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "a", "entitlements": [], "issuer": "i",
+            "subject": SELF_PUUID, "token": "t",
+        })))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(signed_out())
+        .with_priority(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(mmr_path()))
+        .respond_with(ResponseTemplate::new(401))
+        .mount(&server)
+        .await;
+    let session = connect_with_age(&tmp, &server, None).await;
+    let err = session.pd::<Value>(&mmr_path()).await.unwrap_err();
+    assert!(!matches!(err, RiotError::ClientGone), "{err:?}");
+    assert_eq!(session.self_puuid(), SELF_PUUID);
+    Mock::given(method("GET"))
+        .and(path("/chat/v4/presences"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"presences": []})))
+        .mount(&server)
+        .await;
+    session
+        .local::<Value>("/chat/v4/presences")
+        .await
+        .expect("the session stays");
+}
+
+#[tokio::test]
+async fn a_signed_out_client_is_found_before_the_games_log_is_read() {
+    // R47 amended: the signed-out retry is one local call; with no log at all
+    // the answer is still "signed out", not "shards unavailable".
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "accessToken": "", "entitlements": [], "issuer": "i", "subject": "", "token": ""
+        })))
+        .mount(&server)
+        .await;
+    let Err(err) =
+        RiotSession::connect_with_overrides(tmp.path(), ConnectOverrides::default()).await
+    else {
+        panic!("no session for a signed-out client");
+    };
+    assert!(
+        matches!(&err, RiotError::AuthFailed(m) if m == opd1_riot::session::SIGNED_OUT),
+        "{err:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_account_check_reconnects_only_for_another_account() {
+    let tmp = TempDir::new();
+    write_shooter_log(tmp.path());
+    let server = MockServer::start().await;
+    write_lockfile(tmp.path(), "http", server.address().port(), "pw");
+    let answer = |status: u16, subject: &str| {
+        ResponseTemplate::new(status).set_body_json(json!({
+            "accessToken": "a", "entitlements": [], "issuer": "i",
+            "subject": subject, "token": "t",
+        }))
+    };
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(answer(200, SELF_PUUID))
+        .up_to_n_times(2)
+        .mount(&server)
+        .await;
+    let session = connect_with_age(&tmp, &server, None).await;
+    // The same account: no verdict to act on.
+    session.check_account().await.expect("same account");
+    // Signed out (no answer, or no subject): not a reason to reconnect.
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    session.check_account().await.expect("no answer");
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(answer(200, ""))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    session.check_account().await.expect("no subject");
+    // Another account: gone, and so is every later call.
+    Mock::given(method("GET"))
+        .and(path("/entitlements/v1/token"))
+        .respond_with(answer(200, "bbbbbbbb-0000-0000-0000-000000000002"))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    assert!(matches!(
+        session.check_account().await,
+        Err(RiotError::ClientGone)
+    ));
+    assert!(matches!(
+        session.local::<Value>("/chat/v4/presences").await,
+        Err(RiotError::ClientGone)
+    ));
 }
 
 /// `n` overlapping calls of the `/mmr` path on one session.

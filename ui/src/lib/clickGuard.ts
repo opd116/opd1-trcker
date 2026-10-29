@@ -1,16 +1,14 @@
-// The double-click guard (v0.2.0 polish). A card click opens Details, which replaces the card grid; the second click
-// of a double-click then lands on whatever sits under the pointer on the new page (Back where the top-left card was,
-// a recent row under a middle one). For 400 ms after anything opens the profile drawer or a scoreboard (the router
-// arms it: a Live or Glance card, a Saved or History row, any other opener), App swallows every click in the capture
-// phase.
+// A page opener can replace what is under the pointer before a double-click's second click arrives.
+// Only repeated mouse clicks (MouseEvent.detail > 1) are blocked during that transition.
+// A fresh single click, keyboard activation (detail 0), or programmatic click must still work.
 
 export const DOUBLE_CLICK_MS = 400;
 
 export interface ClickGuard {
   /** A card just opened Details. */
   arm(): void;
-  /** True while a click must be swallowed. */
-  swallows(): boolean;
+  /** Without a detail, reports whether the guard is active. With one, filters only repeated mouse clicks. */
+  swallows(detail?: number): boolean;
 }
 
 export function createClickGuard(now: () => number = () => performance.now()): ClickGuard {
@@ -19,8 +17,8 @@ export function createClickGuard(now: () => number = () => performance.now()): C
     arm() {
       armedAt = now();
     },
-    swallows() {
-      return now() - armedAt < DOUBLE_CLICK_MS;
+    swallows(detail = 2) {
+      return detail > 1 && now() - armedAt < DOUBLE_CLICK_MS;
     },
   };
 }

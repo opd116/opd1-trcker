@@ -261,7 +261,7 @@ test("an unknown stage renders the waiting view instead of crashing", async ({ p
 });
 
 // A row click opens the drawer; the second click of a double-click lands on the scrim (the drawer covers <main> but
-// for its left strip), which would close it again. App swallows clicks for 400 ms after a row opens the drawer.
+// for its left strip), which would close it again. App swallows only repeated mouse clicks for 400 ms after a row opens the drawer.
 test.describe("double-click guard", () => {
   /** A spot on the user's row that the drawer's scrim covers once it is open. */
   async function scrimSpot(page: Page): Promise<{ x: number; y: number }> {
@@ -299,6 +299,34 @@ test.describe("double-click guard", () => {
     await expect(dialog(page)).toBeVisible();
     await expect.poll(() => guard(page)).toBe(false);
     await expect(dialog(page)).toBeVisible();
+  });
+
+  // Hold only performance.now (the guard's clock) still, so waiting or a slow CI runner cannot hide the bug.
+  // Real app timers, rendering and keyboard focus continue to run normally.
+  test("a fresh click can close the drawer while the double-click guard is still armed", async ({ page }) => {
+    await openScene(page, "ingame");
+    await page.evaluate(() => Object.defineProperty(performance, "now", { value: () => 1_000 }));
+    await page.locator("main [data-row]").first().click();
+    await expect(dialog(page)).toBeVisible();
+    expect(await guard(page)).toBe(true);
+    await dialog(page).getByRole("button", { name: "Close profile" }).click();
+    await expect(dialog(page)).toHaveCount(0);
+    expect(await guard(page)).toBe(true);
+  });
+
+  test("keyboard Back works while the double-click guard is still armed", async ({ page }) => {
+    await openScene(page, "closed");
+    await page.evaluate(() => Object.defineProperty(performance, "now", { value: () => 1_000 }));
+    const opener = page.locator(".lm-open");
+    await opener.focus();
+    await page.keyboard.press("Enter");
+    const back = page.locator('main .match[aria-busy="false"] .back');
+    await expect(back).toBeFocused();
+    expect(await guard(page)).toBe(true);
+    await page.keyboard.press("Enter");
+    await expect(page.locator("main .match")).toHaveCount(0);
+    await expect(opener).toBeFocused();
+    expect(await guard(page)).toBe(true);
   });
 
   test("the guard does not delay the first click on a row", async ({ page }) => {

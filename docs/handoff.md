@@ -1,96 +1,50 @@
-# Handoff: OPD1 TRCKER after v0.3.1 (2026-10-04)
+# Current handoff — 2026-10-29
 
-Written by hand at the end of the v0.3.1 session (the user's Claude limit was running out, so the round was cut short and shipped as v0.3.1). It replaces the v0.3.0 note.
+## Read first
 
-**Next session's job:** follow `docs/next-session-prompt.md` (ready to paste). In short:
-1. Finish B8 (idle cost, PRAGMA optimize on exit).
-2. Root-cause one rare test flake.
-3. Dependency bumps.
-4. The missing v0.2.0 and v0.3.0 releases.
-5. Phase D (file split and code health).
-6. The user's five features (History, Settings, notes, the hide hotkey, a richer encounter tooltip), then v0.4.0.
+Read `AGENTS.md`, `CLAUDE.md`, then the relevant user requirements and decisions. No agent plugin, external design folder or special handoff command is required. This note supersedes the 2026-10-04 task brief.
 
-The act-change work is parked by the user.
+## Code and release state
 
-## Release status
+- Reviewed code: `bf41497278578c37527216c9611365dbedbb8a5c`, merged PR #4 on 2026-10-26 (bug hunt after the v2 UI).
+- The source version fields still say 0.3.1. The published `v0.3.1` release is from 2026-10-04 and does **not** contain the later v2 UI and fixes.
+- The v2 screens, saved players/notes, settings, tray/autostart, profile drawer and scoreboard are implemented. Do not restart their old implementation tasks.
+- `CHANGELOG.md` lists this work under Unreleased.
+- This maintenance pass removes retired agent integrations and refreshes onboarding documentation; it does not fix app behavior or change the app version.
 
-- **`main` = the v0.3.1 release commit** (fast-forwarded from `claude/amazing-carson-gse33k`).
-- **CI:**
-  - `checks` (Linux, in the pinned Playwright image) runs on every push.
-  - `build` (Windows installer) runs on `main` and on manual runs.
-  - `release.yml` publishes a GitHub Release with `OPD1-TRCKER-<version>-setup.exe`.
-- **The user's last word:** v0.3.0 tested "everything fine" (R177).
+## Known verification blocker
 
-## What this session did (details in `docs/DECISIONS.md`)
+Build run [40299043306](https://github.com/opd116/opd1-trcker/actions/runs/40299043306), for the reviewed code:
 
-| Ruling | What |
-|---|---|
-| R177 | The user's scope: the brief plus five picked features; Settings as a fourth tab whose choices survive updates |
-| R178 | Linux `checks` on every branch, Windows installer only on `main` |
-| R179 | Tests that don't need the sync worker never start it (the flaky CI test) |
-| R180 | GitHub Releases from `release.yml`, a versioned installer name, monthly audits, the visual-baseline workflow |
-| R181 | The map list picture is stored at 384 px wide |
-| R182 | UI failures reach the log (`ui_log`); a header line on the copied log and the dump |
-| R183 | Session chips show map, RR change and time, and open their match |
-| R184 | Tooltips reach the keyboard; the RR chart is one keyboard stop |
-| R185 | Request holds survive a new session |
-| R186 | The My Stats push checks the account and emits under the model lock |
-| R187 | Scale and plan tests for the DB; the encounter queries start from the other player |
-| R188 | The rank carries over into a new act (user); then everything about the new act is **parked** |
+- Windows installer build and Windows Rust tests: passed.
+- Linux UI build, release guards, formatting, clippy, Rust tests, Vitest and svelte-check: passed.
+- Playwright: **281 passed, 8 failed**. Overall checks failed.
 
-Not done (in the next-session prompt):
-- B8.
-- The sync_order flake.
-- The dependency bumps.
-- The old tags.
-- Phase D and Phase E.
+Failures are in `close-match.spec.ts` (2), `focus-ring.spec.ts` (1), `live-v2.spec.ts` (2), `profile.spec.ts` (1), `saved-history.spec.ts` (2). They concern scoreboard navigation/return, focus restoration, drawer dismissal and returning to saved/history lists. These are observed test failures, not yet a proven root cause. Reproduce and investigate implementation and harness before changing either.
 
-## Where the truth lives
+The installer artifact of that run exists, but successful packaging is not evidence of a passing release. Always check CI for the exact new commit.
 
-| What | Path |
-|---|---|
-| Project rules | `CLAUDE.md` |
-| The user's words (newest lines 2026-10-04) | `docs/requirements-raw.md` |
-| Every ruling, R1–R188 | `docs/DECISIONS.md` |
-| UI build spec (§9 My Stats, §8.7 visual baselines) | `docs/design-spec.md` |
-| How the parts fit | `docs/ARCHITECTURE.md` |
-| Release notes | `CHANGELOG.md` `[0.3.1]` |
-| The user's test list (Arabic) + controller checks | `docs/test-checklist.md` |
-| Parked act-change work | `docs/parked/` |
-| Ready-to-paste brief for the next session | `docs/next-session-prompt.md` |
+## Next work
 
-## Open items
+1. Handle the user's requested task within current rules; if the goal is release readiness, investigate the eight Playwright failures first.
+2. Run the relevant tests, then the required full checks before publishing. Keep intentional screenshot changes separate from functional fixes.
+3. Refresh release notes, version fields and user checklist together when actually releasing. Do not publish or tag just because an old prompt told you to.
+4. Keep this file current at session end.
 
-- **Still unverified on the user's PC** (checklist controller section):
-  - the R99 lock value, the R100 level, pregame `Loadouts[].Subject`, the v3 `Guns[]` shape;
-  - hidden names in match-details (R74, R94), the MMR 500 (R159), R173 paging;
-  - the first content-service answer after 2026-10-14 (R162), whether MMR has the new act's entry before a first match (R188);
-  - the RAM figure, and the new header line (R182).
-- **The act change on 2026-10-14:**
-  - Without the parked work, a player whose rank snapshot lacks the new act shows `—` for the current rank until they play.
-  - The switch reaches the screen at the next publish or the 15-minute My Stats tick.
-  - The user knows (checklist item 10).
-- **Visual baselines:**
-  - 7 PNGs in `ui/tests/baselines/`, rendered in CI.
-  - Any intended visual change needs a `Build` run with `update_baselines: true` on the branch, then a pull.
+## References and history
 
-## Environment notes (cloud container)
+- Rules: `CLAUDE.md`; user decisions: `docs/requirements-raw.md`; ruling ledger: `docs/DECISIONS.md`.
+- Design: latest v2 sections of `docs/design-spec.md`, current `ui/src/`, regression images `ui/tests/baselines/`.
+- `docs/plan.md` is the historical implementation record; its unchecked boxes, paths, branches and plugin instructions are not a current backlog.
+- `docs/ARCHITECTURE.md` has a current orientation followed by a labeled legacy technical reference.
+- Original design exports are not required and are not in the repository. Do not install tooling to recreate their old folder.
+- `docs/parked/` retains the historical act-change patch. Do not apply it automatically; inspect current behavior and ask the user before reviving that postponed product work.
+- Real Riot client behavior must be verified on Windows with VALORANT; use Ctrl+Shift+L for logs and Ctrl+Shift+D for redacted diagnostics.
 
-- **Tauri Linux deps:** run `apt-get update` first (the package lists go stale), then `apt-get install -y libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev build-essential pkg-config libssl-dev`, then `npm ci` and `npm --prefix ui run build` before any cargo command.
-- **Playwright:** 1.63 expects Chromium build 1243 and `/opt/pw-browsers` has 1194. Never run `playwright install`. Workaround:
-  1. `mkdir /opt/pw-browsers/chromium_headless_shell-1243`.
-  2. Link `chrome-headless-shell-linux64` in it to `/opt/pw-browsers/chromium_headless_shell-1194/chrome-linux`.
-  3. Inside that folder, link `chrome-headless-shell` → `headless_shell`.
-  4. Touch `INSTALLATION_COMPLETE` and `DEPENDENCIES_VALIDATED`.
-- **Port 4173:** Playwright's dev server uses it, so two agents running Playwright at once collide. Run them one at a time, or with a temporary config on another port.
-- **Node:** the container has Node 22 / npm 10. Bump the three version fields in `package-lock.json` by hand (npm 10 rewrites the `libc` fields).
-- **Missing here:** `graft` (MCP fails to connect) and `.superpowers/` (the design file), so the two design-compare specs skip.
-- **Worktree agents:** branch from a stale ref. Have them `git fetch` and merge the working branch first; fast-forward or cherry-pick their commits back.
-- **GitHub:** pushes by the `baselines-commit` job land on the branch without a new run. Pull (`git rebase --autostash`) before the next push.
+## Environment
 
-## Notes about the user
+Use Node 24 and Rust stable, `npm ci`, then build the UI before compiling Tauri. Follow `AGENTS.md` and the current CI workflows for commands and Linux dependencies. Playwright must match the workflow's pinned image. Do not reuse old absolute paths, browser symlink tricks or branch-lane assignments.
 
-- Short Gulf Arabic, blunt. Show pictures, not jargon.
-- Wants progress updates, not "should I continue?" questions.
-- Doesn't code; tests on Windows with VALORANT and sends the log or a dump when something is wrong.
-- Their Claude limit can run out mid-round: keep the branch releasable at every step.
+## Removed optional tooling
+
+The user requested removal of Graft and obsolete Superpowers dependencies on 2026-10-29. Graft hooks, status lines, MCP registration, skill and search overrides have been removed. Its generated graph was not tracked. Re-adding it later is optional: install/configure it afresh and regenerate its cache from the checkout; no app data depends on it. No global software on the user's PC was uninstalled by this repository change.

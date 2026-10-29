@@ -1,6 +1,9 @@
+# Historical implementation plan
+
+> Archived context, 2026-10-29: this file records earlier implementation rounds. Its unchecked tasks, old window rules, lane branches, absolute paths and external-tool instructions are not current requirements. Start with `AGENTS.md`, `CLAUDE.md` and `docs/handoff.md`. Preserve this record for rationale; do not execute it as a new-session plan.
+
 # OPD1 TRCKER Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** A ~5–10MB Windows installer for a fixed 1000×800 always-on-top VALORANT tracker that reads the local Riot client, remembers every player in a local SQLite DB, and shows Live (Lobby / Agent Select / In Game) cards plus the user's own My Stats page.
 
@@ -574,7 +577,7 @@ ui/
   - On `main`, the push starts the run.
   - Lane B: a push to `p2-backend` starts nothing, so dispatch the run first: `cd /home/project-1/.worktrees/p2-backend && gh workflow run Build --ref p2-backend`, then the loop above from the same directory. A dispatched run uses the branch's own `build.yml` and carries the branch head as its commit.
   - If `sleep` is blocked in the shell, poll the same `gh run list -c` call with Monitor instead.
-- **Skills (CLAUDE.md: load the best-in-class skill first):** each task's Step 0 loads the skills it names. Rust tasks: `test-driven-development`, plus `tauri-v2` for commands, events or `tauri.conf.json`. UI tasks: `svelte-code-writer` (mandatory for every `.svelte` / `.svelte.ts` edit), `svelte-core-bestpractices`, `test-driven-development`, `webapp-testing` for Playwright. Use graft for code facts. graft indexes `/home/project-1` (`main`); inside a worktree its answers describe `main`'s code, so confirm each line against the worktree's file before editing.
+- **Skills (CLAUDE.md: load the best-in-class skill first):** each task's Step 0 loads the skills it names. Rust tasks: `test-driven-development`, plus `tauri-v2` for commands, events or `tauri.conf.json`. UI tasks: `svelte-code-writer` (mandatory for every `.svelte` / `.svelte.ts` edit), `svelte-core-bestpractices`, `test-driven-development`, `webapp-testing` for Playwright. Read current source for code facts. graft indexes `/home/project-1` (`main`); inside a worktree its answers describe `main`'s code, so confirm each line against the worktree's file before editing.
 - **Precedence (R92):** requirements-raw.md 2026-09-29 > the design file > older CLAUDE.md visual rules. `docs/design-spec.md` transcribes the design. It outranks the design file only for its [C]/[bound] gap-fills (R74–R86). If the spec and the design disagree on something the design covers, the design wins and the spec is corrected. Any change to a visual the design covers goes to the user first: the user approved the design, not the spec.
 - **Demo data:** DEV only (`import.meta.env.DEV`). It keeps the `demo-feed` marker (R15) and never ships. There is no Rust `demo` feature (R40).
   - The feed, `demo/cdv8.ts` and `demo/scenes.ts` are reached only through a dynamic import behind the DEV flag (`if (import.meta.env.DEV) await import('./demo/scenes')`), in `api.ts` and in boot. Never a static import: `vite build` must drop every mock roster.
@@ -1689,7 +1692,7 @@ Done before Phase 2 started (R87): the review was Approved, the math review ran,
   - The card's Prev row (R125, user-delegated) is masked in both renders as an approved deviation: the design draws `Prev` · icon · name, we draw icon · `Prev` · name. The visual spec asserts that the two masked rects are identical, so the mask cannot grow past the row.
   - A diff above 0.02% that comes from a documented intentional difference (a spec [C]/[bound] item, or an inconsistency in the design mock) is handled by narrowing the hide-style with a comment saying why. Never raise the threshold.
 
-- [ ] **Step 0:** Load `svelte-code-writer` (mandatory for every `.svelte` edit), `svelte-core-bestpractices`, `test-driven-development` and `webapp-testing`. Code facts from graft. Every command runs as `cd /home/project-1/.worktrees/ui && …` (Playwright: `cd /home/project-1/.worktrees/ui/ui && npx playwright test …`).
+- [ ] **Step 0:** Load `svelte-code-writer` (mandatory for every `.svelte` edit), `svelte-core-bestpractices`, `test-driven-development` and `webapp-testing`. Read the current source for code facts. Every command runs as `cd /home/project-1/.worktrees/ui && …` (Playwright: `cd /home/project-1/.worktrees/ui/ui && npx playwright test …`).
 - [ ] **Step 1:** Write the failing tests.
   - `live.test.ts`:
     - `closed → self only in slot 1`
@@ -1805,7 +1808,7 @@ Done before Phase 2 started (R87): the review was Approved, the math review ran,
   - `Match.svelte` props: `{ matchId: string; focusPuuid: string; from: 'recent' | 'encounter' }`.
   - A recent row click → `go({ name: 'match', …, from: 'recent' })`. An encounter row click → `from: 'encounter'`. Back per spec §2.4.
 
-- [ ] **Step 0:** Load `svelte-code-writer` (mandatory for every `.svelte` edit), `svelte-core-bestpractices`, `test-driven-development` and `webapp-testing`. Code facts from graft. Every command runs as `cd /home/project-1/.worktrees/ui && …` (Playwright: `cd /home/project-1/.worktrees/ui/ui && npx playwright test …`).
+- [ ] **Step 0:** Load `svelte-code-writer` (mandatory for every `.svelte` edit), `svelte-core-bestpractices`, `test-driven-development` and `webapp-testing`. Read the current source for code facts. Every command runs as `cd /home/project-1/.worktrees/ui && …` (Playwright: `cd /home/project-1/.worktrees/ui/ui && npx playwright test …`).
 - [ ] **Step 1:** Write the failing tests.
   - `details.test.ts`:
     - `recentShown 3 then 8 and hides the button`
@@ -1891,7 +1894,7 @@ Done before Phase 2 started (R87): the review was Approved, the math review ran,
     f=$(ls target/release/bundle/nsis/*.exe); s=$(stat -c %s "$f"); echo "installer $s bytes"; [ "$s" -le 10485760 ]
     ```
 
-- [ ] **Step 0:** Load `tauri-v2` (release profile, NSIS bundle) and `verification-before-completion`. Code facts from graft.
+- [ ] **Step 0:** Load `tauri-v2` (release profile, NSIS bundle) and `verification-before-completion`. Read the current source for code facts.
 - [ ] **Step 1:** Run the failing checks. Each must fail now:
   - `grep -q '^\[profile.release\]' Cargo.toml`
   - `grep -q "demo-feed" .github/workflows/build.yml && grep -q "VesperUnbreakabl" .github/workflows/build.yml && grep -q "fonts.gstatic" .github/workflows/build.yml && grep -q "unpkg.com" .github/workflows/build.yml`

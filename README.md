@@ -4,7 +4,11 @@ A very light Windows desktop tracker for VALORANT. It reads the **local Riot cli
 
 The name is spelled `OPD1 TRCKER` on purpose.
 
-## Screenshots
+## Historical screenshots
+
+These images show the earlier UI. For the implemented v2 screens, see `ui/src/screens/` and current regression images in `ui/tests/baselines/`.
+
+### Earlier release
 
 | | |
 |---|---|
@@ -14,16 +18,17 @@ The name is spelled `OPD1 TRCKER` on purpose.
 
 ## Features
 
-- **One Live page** for all three stages. Lobby shows you and your party, Agent Select shows your team with five empty slots for the other side, and In Game shows both teams with the map. No scrolling.
-- **Player card** in every stage: Player Card image, Riot ID with a distinct tag, account level, current rank with exact RR, previous act rank, peak rank with the act it was reached in, K/D and HS% from the last 5 competitive matches, current-act win rate, and the last 5 results. Extra detail is in hover tips.
-- **Hidden names** are respected. Only the Riot ID and tag are hidden (`Hidden Player`, then the agent name once locked). The app never asks for a hidden player's name.
-- **Party detection** on both teams from recent matches, shown as a coloured stripe (dashed for likely, solid for confirmed).
-- **Encounters**: how many past matches you shared with a player, with or against.
-- **Player Details** (click any card): recent competitive matches, top 3 teammates this act, loadout, and your history with that player.
-- **Match Details**: the full scoreboard of a match.
-- **My Stats**: your own act at a glance: rank, RR, W / L and the RR to the next tier, the RR chart, the current session, your last 5 competitive matches, Maps and Agents tables, win rate by weekday and time of day, and automatic insights. With VALORANT closed the app opens here.
-- **Local memory**: every player and match is stored once in SQLite, so the app only fetches what is new and shows saved data when VALORANT is closed.
-- Fixed 1000×800 window, always on top. Close quits. No tray, no autostart, no auto-updater.
+- Live lobby, Agent Select and In Game views, last-match summary, post-match recap and narrow Glance mode.
+- Player ranks, competitive stats, party and encounter indicators with hover detail.
+- Player profile drawer, saved players and private notes.
+- Match History and scoreboards, Competitive stats, skins collection and ASCII studio.
+- Settings, tray behavior, launch with Windows and saved-player notifications.
+- Local SQLite history and cached assets; Riot requests run in Rust, not the UI.
+- English UI, resizable 1280×800 window (minimum 1180×760), locally bundled fonts.
+
+## Starting an AI coding session
+
+Read [AGENTS.md](AGENTS.md), [CLAUDE.md](CLAUDE.md) and [the current handoff](docs/handoff.md). They provide commands, rules, known failures and the starting point. No additional agent plugin is required. The old implementation plan is history, not a task queue.
 
 ## Install (for friends)
 
@@ -52,7 +57,7 @@ npm --prefix ui run build    # the Rust crate needs ui/dist to exist
 cargo test -p opd1-core -p opd1-riot -p opd1-trcker
 npm --prefix ui run test
 npm --prefix ui run check
-(cd ui && npx playwright test)   # layout, tooltip and navigation checks at 1000×800 (also run by CI on Linux)
+(cd ui && npx playwright test)   # layout, tooltip and navigation checks at 1280×800, with additional size coverage (also run by CI on Linux)
 ```
 
 Anything that talks to the real Riot client can only be verified on Windows with VALORANT installed. Press Ctrl+Shift+L in the app to copy its log. Ctrl+Shift+D writes the redacted raw Riot answers to a folder, and that dump now includes `log.txt` and the error body of each failed call.
@@ -75,11 +80,13 @@ Tauri 2 (system WebView2) · Rust core (all Riot and valorant-api HTTP, polling,
 
 ## Status and roadmap
 
-The scope of v0.3.1: the Live page (Lobby, Agent Select, In Game), Player Details, Match Details and My Stats, with the design options at their defaults. Next (picked by the user for v0.4.0): a History tab, a Settings tab, private player notes, a hide hotkey and a richer encounter tooltip; see `docs/next-session-prompt.md`.
+The published v0.3.1 release is from 2026-10-04. Main includes the later v2 UI and bug fixes under `CHANGELOG.md` Unreleased, while the version fields still say 0.3.1. They are not the same build.
+
+At reviewed commit `bf41497278578c37527216c9611365dbedbb8a5c` (PR #4), the Windows installer built successfully, but Playwright had 8 failures and 281 passes. See [handoff](docs/handoff.md) for the exact run and failure groups. Check the exact current commit's CI before calling it release-ready.
 
 ## Privacy
 
-Local only. The app talks to the Riot client on your PC, to Riot's game servers with your own session (the same calls the game makes), and to valorant-api.com for names and images. It has no account system, no telemetry and no server of its own. It never requests the name of a player who hides their identity.
+Local only. The app talks to the Riot client on your PC, to Riot's game servers with your own session (the same calls the game makes), and to valorant-api.com for names and images. It has no account system, no telemetry and no server of its own. It never requests a live-incognito player's name during a live stage; post-match name handling follows the rules in `CLAUDE.md`.
 
 ## Licence
 

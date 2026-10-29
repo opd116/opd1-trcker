@@ -1,4 +1,25 @@
-# Architecture
+# Current architecture orientation — 2026-10-29
+
+The implementation has three Rust packages and one Svelte 5 SPA:
+
+| Path | Responsibility |
+|---|---|
+| `crates/core/` | Domain models, parsing, stats, party/name rules, SQLite repository and migrations |
+| `crates/riot/` | Riot sessions, tolerant API decoding, throttling, assets and diagnostic redaction |
+| `src-tauri/src/` | Polling, roster, sync, state, commands, image protocol and shell |
+| `src-tauri/src/v2/` | v2 commands for settings, window/tray/autostart, profiles, history, marks, collection and status |
+| `ui/src/screens/` | Live, Saved, History, Competitive, Skins, ASCII, Settings and About |
+| `ui/src/lib/router.svelte.ts` | Navigation, profile drawer, scoreboard return paths and scroll/focus state |
+| `ui/tests/` | Browser interaction, fit and visual regression coverage |
+
+All Riot/asset HTTP and caching stay in Rust; the UI consumes Tauri events and commands. The default window is 1280×800, minimum 1180×760, resizable; Glance is 420px wide. The profile drawer and History scoreboard replace the old standalone Details/Match pages. Close-to-tray, autostart and notification behavior are configurable.
+
+Read `CLAUDE.md` for behavioral contracts and `docs/handoff.md` for verification status. No agent integration is part of the runtime architecture.
+
+## Legacy technical reference
+
+The material below describes earlier v0.3.x internals and is retained for rationale. Its old screen names, window behavior, command inventory, diagrams and file map are not a complete map of v2. Confirm a specific implementation detail in current source before changing it. In particular, `architecture.html` and `architecture.json` are historical diagrams.
+
 
 OPD1 TRCKER reads the local Riot client API and shows live Lobby / Agent Select / In Game player cards, plus the user's own competitive stats. Lightness is priority #1 (RAM, CPU, bundle size, request count); design is #2.
 

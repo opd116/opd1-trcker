@@ -1,64 +1,44 @@
-# AGENTS.md
+# Coding agent guide
 
-Guide for coding agents other than Claude Code. The full project rules are in `CLAUDE.md`.
+Read `CLAUDE.md` for product rules and `docs/handoff.md` for current status before changing anything. Read the relevant dated user requirements in `docs/requirements-raw.md` and rulings in `docs/DECISIONS.md`. Newer explicit user decisions win over older text.
 
-1. **Read `CLAUDE.md` first. It is binding.** It holds the product spec, stack, design rules, hidden-name rules and hard limits. The user-facing requirements (in Arabic) are `docs/requirements-raw.md`; a newer dated user decision there beats an older rule elsewhere.
-2. **The build spec is `docs/design-spec.md`.** It transcribes the approved visual design (sizes, states, tokens, tests). If it disagrees with the design file on something the design covers, the design wins and the spec is fixed. Any change to a visual the design covers goes to the user first.
-3. Every decision is recorded in `docs/DECISIONS.md` (rulings R1 onward). Read the relevant ruling before changing behaviour it covers.
+## Current checkout
 
-## Name
+- Project name: **OPD1 TRCKER** (intentional spelling).
+- Tauri 2 + Rust + Svelte 5 + Vite + SQLite. English UI; brief Gulf Arabic communication.
+- Current UI: Live, Saved, History, Comp, Skins, ASCII, Settings, About; profile drawer and History scoreboard.
+- Default 1280×800; minimum 1180×760; resizable; Glance 420px wide.
+- `docs/design-spec.md`, current Svelte/CSS and `ui/tests/baselines/` are the available design references. No external design folder or agent plugin is required.
+- `docs/plan.md` is historical, not an executable backlog. No old branch ownership or machine-specific worktree paths apply.
+- Keep the app light. Protect hidden names, credentials and saved SQLite data. Do not add runtime dependencies without the user's approval.
 
-The name is `OPD1 TRCKER`, on purpose. Never "correct" the spelling. The Rust packages are `opd1-core`, `opd1-riot` and `opd1-trcker`; the npm workspace is `opd1-trcker-ui`; the repo is `opd1-trcker`.
+## Commands (from repository root)
 
-## Build and test
-
-Lightness (RAM, CPU, bundle size, request count) is priority #1 and the tie-breaker for every decision. The UI's only runtime dependency is `@tauri-apps/api`. In Phase 2 add no runtime dependency and no Rust crate; later ones need the user's OK and must keep the app light.
+Use Node 24, Rust stable and the checked-in lockfiles.
 
 ```bash
-# Rust (needs ui/dist to exist, so build the UI first; a new checkout needs `npm ci` once)
 npm ci
 npm --prefix ui run build
+cargo fmt --check
+cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p opd1-core -p opd1-riot -p opd1-trcker
-
-# UI
 npm --prefix ui run test
 npm --prefix ui run check
-
-# UI in a browser with the DEV demo scenes (?scene=...)
-npm --prefix ui run dev
-
-# Playwright, Chromium, viewport 1000x800
-cd ui && npx playwright test
-
-# Windows installer (NSIS); CI builds it on windows-latest
-npx tauri build
+(cd ui && npx playwright test)
 ```
 
-Linux needs `libwebkit2gtk-4.1-dev libsoup-3.0-dev librsvg2-dev` to build the Tauri crate. Anything that touches the real Riot client can only be verified on the user's Windows PC with VALORANT installed.
+Playwright defaults to 1280×800; fit tests also cover the minimum size and Glance. Match its browser version to the pinned CI image; do not use old machine-specific browser symlink workarounds.
 
-## Git
+Linux Tauri builds require WebKitGTK 4.1, libsoup 3, librsvg, build-essential, pkg-config and OpenSSL development packages. Windows installer: `npx tauri build`. Browser UI development: `npm --prefix ui run dev`.
 
-- Every step is committed with a clear conventional message (`feat(core): ...`, `fix(ui): ...`, `docs: ...`) and pushed right away with `git push origin <branch>`.
-- Commit explicit paths only, so nothing else that is staged or modified goes in: `git add <paths> && git commit -m "<message>" -- <paths>`. Never `git add -A` or `git add .`.
-- Never force-push. If a push is rejected: `git pull --rebase --autostash origin <branch>`, re-run the tests, push again.
-- Never commit `.superpowers/` or any `*.zip`.
-- Never put an email address, token or other secret in a committed file.
-- Watch CI by commit sha, so an older green run cannot answer for the new push:
+Only Windows with VALORANT can verify the real Riot client. Browser fixtures cannot establish live-client correctness.
 
-```bash
-sha=$(git rev-parse HEAD); id=""
-for i in $(seq 1 30); do id=$(gh run list -w Build -c "$sha" -L 1 --json databaseId -q '.[0].databaseId'); [ -n "$id" ] && break; sleep 10; done
-test -n "$id" && gh run watch "$id" --exit-status
-```
+## Changes and verification
 
-## Lanes (Phase 2, R98)
-
-Three checkouts run in parallel. Start every shell command in a worktree with an explicit `cd <worktree> &&`.
-
-| Branch | Directory | Owns |
-|---|---|---|
-| `main` | `/home/project-1` | docs and the release |
-| `p2-backend` | `/home/project-1/.worktrees/p2-backend` | `crates/`, `src-tauri/` and CI (`.github/`) |
-| `ui-lane` | `/home/project-1/.worktrees/ui` | `ui/` |
-
-Write only the paths your lane owns. `p2-backend` lands on `main` at the end of Task 15 and again after Task 15b, before the release; `ui-lane` merges into `main` in Task 19 (the release task).
+- Work from the actual current branch; use a focused branch for review when appropriate.
+- Commit explicit paths only. Never force-push, commit credentials, or include unrelated changes.
+- Keep user decisions, rules and handoff in step with the implementation.
+- Verify CI for the exact changed commit. The baseline reviewed on 2026-10-29 is **not green**; see the handoff.
+- Do not weaken tests or regenerate screenshot baselines merely to make CI pass.
+- Publish a release only after its exact commit passes the required checks. An installer artifact alone is not a passing release.
+- Update `docs/handoff.md` directly at the end of a session; no slash command, plugin or skill installation is required.

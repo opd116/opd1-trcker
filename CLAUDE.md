@@ -7,20 +7,20 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - User-facing spec, in Arabic, the source of truth: `docs/requirements-raw.md`
 - Reference screenshots (content only, never copy their styling): `docs/refs/`
 - Asset lookup table: `docs/refs/valorant-api-assets.md`
-- Implementation plan: `docs/plan.md`
-- Visual design (source of truth, R189, 2026-10-22): the v2 handoff `.superpowers/design/v2/TrackerApp.dc.html` + `support.js` + `README.md` (the state board is `OPD1 Tracker.dc.html`). It replaces the v8 file `.superpowers/design/cd-v8/project/OPD1 Tracker v8.dc.html`, which is history now (project https://claude.ai/design/p/f22fa2f6-6e0d-4aad-ade4-7dda498b5c0a; original zip in the repo root). Rebuild it in Svelte; match its layout, sizes, colours and tooltips. The HTML/JS is the truth; its screens/*.png may be stale. Earlier rounds (local v1–v8, ارشيف/, the Lovable zip) are history only.
-- Precedence: a newer dated user decision (requirements-raw.md or the design file) beats an older rule here; update this file in the same change. The design never overrides Hidden names, Smart data or Hard limits (the user let v2 override Window and "No status text", R190/R191). Take any other clash to the user.
-- Build spec: `docs/design-spec.md` (sizes, states, tokens and tests derived from the design; its [C]/[bound] items are Claude calls R74–R86 in `docs/DECISIONS.md`). Keep it in step with the code. It outranks the design file only for those [C]/[bound] gap-fills; if it disagrees with the design on something the design covers, the design wins and the spec is fixed, and any change to a visual the design covers goes to the user first (R92).
+- Historical implementation plan (not a current task list): `docs/plan.md`
+- Current session status and known failures: `docs/handoff.md`
+- Available visual references: `docs/design-spec.md`, current `ui/src/` Svelte/CSS and `ui/tests/baselines/`. The original external design handoff is not part of a fresh checkout and is no longer a required dependency (user, 2026-10-29). Preserve the implemented v2 design; ask for a new reference only when the requested visual change actually needs one.
+- Precedence: newer dated user decisions in `docs/requirements-raw.md` beat older rules. Read the relevant ruling in `docs/DECISIONS.md`; historical plans do not override current instructions. Keep these rules updated when a decision changes.
+- Build spec: `docs/design-spec.md`; use the latest v2 sections and current regression baselines. Older v8 sections describe history, not instructions to restore the old UI. Preserve Hidden names, Smart data and Hard limits when changing visuals.
 
 ## Working with the user
 
-- The user doesn't code. Talk to them in Arabic (Gulf dialect is fine), short and plain, no jargon walls. Use `/archify` diagrams when a picture explains better.
+- The user doesn't code. Talk to them in Arabic (Gulf dialect is fine), short and plain, no jargon walls. Use a diagram when a picture explains better.
 - The user tests on their Windows PC with VALORANT. Claude works on a Linux VPS with no game client. Anything touching the real Riot client is verified by the user. Ask for their result or the in-app "copy log" output (Ctrl+Shift+L). Ctrl+Shift+D writes the redacted raw answers to a folder, now with `log.txt` and the error bodies (`<endpoint>.error.json`) of failed calls (R158).
-- Before a task a skill could help with, search for the best-in-class skill (including community skills via `npx skills find`) and load it.
-- Use `graft` for codebase context once code exists (`npx @nanonets/graft init --agents claude`).
-- Before context gets long, or at the end of a phase, ask the user to run `/handoff` (it's user-invoked only) so nothing important is lost. Keep `docs/requirements-raw.md` updated with every new decision as it's made.
-- Anything the design file doesn't cover (Agent Select states, Lobby, Closed, Hidden Player, edge states) is Claude's call, built only from the design file's own parts and tokens. Don't ask the user about typography or spacing. Show them the result.
-- Every step is committed with a clear conventional message and pushed to the private GitHub repo right away (2026-09-29). Commit explicit paths only (`git commit -m "…" -- <paths>`); never commit `.superpowers/` or root `*.zip`.
+- Use available tools and skills when helpful; no specific plugin or skill is required to open or maintain this project.
+- Update `docs/handoff.md` directly before context gets long and at session end. Record the commit, work done, verification, known failures and next task. Keep `docs/requirements-raw.md` updated with new user decisions.
+- Resolve routine typography and spacing from the existing v2 tokens and components. Ask the user only about product choices or visual changes that need a decision.
+- Every step is committed with a clear conventional message and pushed to the private GitHub repo right away (2026-09-29). Commit explicit paths only (`git commit -m "…" -- <paths>`); never commit temporary design exports or root `*.zip`.
 - Repo files: README.md, CHANGELOG.md (Keep a Changelog; the release section is filled at release from `git log`), docs/ARCHITECTURE.md, docs/DECISIONS.md, docs/design-spec.md, AGENTS.md, LICENSE (proprietary), THIRD-PARTY-NOTICES.md, .editorconfig, .gitattributes.
 
 ## Stack (decided, don't revisit without the user)
@@ -49,19 +49,13 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 
 ## Screens
 
-**Nav rail (R189):** Live, Saved, History, Comp, Skins, ASCII, Settings, About. The app auto-switches to `Live` when a match is found (Agent Select). The v2 design (`.superpowers/design/v2/`) is the reference for every screen below; where this section's older v8 wording disagrees with it (Lobby layout, no post-match screen, the Details page, the Match page, My Stats as a tab), the v2 design wins: the profile drawer replaces Details, the History scoreboard replaces Match, Competitive replaces My Stats, and a recap follows the user's match until they queue again.
+**Nav rail (R189):** Live, Saved, History, Comp, Skins, ASCII, Settings, About. The v2 implementation replaces the old standalone Details/My Stats pages with a profile drawer, a History scoreboard and Competitive stats.
 
-**When VALORANT is closed:**
-- The app opens on `My Stats` with the last saved data (decided by the first live state the app receives; any other stage opens `Live`). R71's "open on Live until My Stats exists" ended when My Stats was built; the page is `docs/design-spec.md` §9.
-- `Live` shows only the user's own card.
-- Everything refreshes silently when the game opens.
-
-**Live stages** — one page in the In Game layout of the design file; the card is identical everywhere. **No scrolling** in any Live stage.
-- **Lobby:** me + my party (1–5) stacked in the left column (same card size as In Game; the rest of the column stays empty — R75). Average Party Rank when 2+ players (placed in the top bar where the map sits in game). Queueing changes nothing: no timer, no searching indicator.
-- **Agent Select:** my team (5) in the left column; the right column shows 5 empty card-shaped slots with a light dashed frame and no text. Map name + image in the top bar as soon as pregame knows the map.
-- **In Game:** my team left, enemy team right (ranks and stats shown). Map name + image at the right end of the top bar. No live match stats or round score.
-- **Deathmatch / FFA:** keep the Lobby (party) view; don't fetch or show the other players. Party detection still uses DM matches from history.
-- **Match end:** return straight to Lobby. No automatic post-match screen.
+- Live includes waiting/last-match state, party/lobby, Agent Select and In Game views, connection/error states and the post-match recap.
+- Agent Select brings the user to Live; the recap remains until the next queue. Do not restore the old rule that immediately returned to Lobby with no recap.
+- The profile drawer opens from player rows; matches open the scoreboard with a return path to their source.
+- Saved players and private notes, History, Competitive stats, Skins, ASCII, Settings and About are implemented already.
+- For precise layouts and stage behavior read the current screen components, tests and latest v2 spec. No scrolling in normal Live views; profile and list pages may scroll.
 
 **Player card fields:**
 - Player Card image
@@ -73,7 +67,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Peak Rank: icon + tier name + the act it was reached in (`V26 A4 · 1mo`, `E9 A3 · 1y`); time is since that act ended, not the day the peak was hit. Current act → `This Act`. Hover shows the full act name and dates (the design's tooltip shows dates only — add the act name). If the peak tier was reached in several acts, show the most recent (R7).
 - K/D and HS% from the last 5 Competitive matches
 - Current-act Win Rate
-- Last 5 Competitive results as W / L / D markers only, oldest → newest left to right. The newest (rightmost) is emphasised as in the design (filled chip + arrow under the row; "Underline" option = underline instead). With fewer than 5 matches, empty dashed slots sit on the left. RR change and time since are on hover.
+- Last 5 Competitive results as W / L / D markers only, oldest → newest left to right. The newest (rightmost) is emphasised as in the design. With fewer than 5 matches, empty dashed slots sit on the left. RR change and time since are on hover.
 - Agent **head icon** (`displayIcon`) only after the agent is locked (hovering doesn't count — R99). Never show a placeholder agent.
 
 **Card indicators** (one meaning, one look, each explained by a tooltip; no visible legend):
@@ -83,8 +77,8 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Eye-off icon + dotted-underlined name + tag = hidden player's name remembered by the DB, from any source (R145). The tooltip names the source: `Hidden name · known from your match` or `Hidden name · known from a past match`, each + map · date; `Hidden name · seen before` + date only.
 - Eye-off icon + italic agent name = hidden name. Tooltip `Hidden name`.
 
-**Player details** (click any card in any stage; **scrolling allowed**):
-- **Back** button.
+**Player profile data** (shown in the v2 profile drawer; scrolling allowed; retain these data scopes, not the old standalone page layout):
+- Close returns to the underlying screen; scoreboard Back returns to its source.
 - **Recent Competitive Matches:** 3 shown, each with map image and result. **Show More** reveals more, up to 8 total, newest first. No count picker.
 - **Top 3 Teammates** for the current act, with full names and shared match count. Computed from the last 20 current-act comp matches plus any older matches already in the DB.
 - **Loadout:** Vandal, Phantom, Operator, and Sheriff skins, in the equipped chroma. The user's own loadout comes from personalization v3 (`/personalization/v3/players/{puuid}/playerloadout`; v2 returns 404 on every shard, R148).
@@ -92,7 +86,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Hero stats: Win%, Games, W / L for the current act; K/D and HS% from the last ≤20 current-act competitive matches (tooltip `Last N competitive · this act`) (R116, user 2026-09-29).
 - Clicking a recent match or an encounter row opens **Match Details** (the design's scoreboard: ACS, K/D/A, +/−, ADR, HS%, half scores, rank per player). Hidden-name rules apply inside it (see Hidden names).
 
-**My Stats** (the user's own account; **scrolling allowed**; period is the current act):
+**Competitive data** (the Comp screen, formerly My Stats; scrolling allowed; period is the current act):
 1. Rank card: tier, RR, W–L, RR to next tier, net RR, average win/loss RR, recent rank changes
 2. RR progression chart
 3. Session: net RR and W/L streak. A new session starts after a 6h gap with no comp match

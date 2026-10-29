@@ -34,7 +34,10 @@
   // A click that opens a page or the drawer must not have its double-click's second click land on what replaced it.
   // Capture phase, so it is gone before any handler on the new page sees it.
   function swallowDoubleClick(e: MouseEvent) {
-    if (!cardOpenGuard.swallows(e.detail)) return;
+    if (!cardOpenGuard.swallows(e.detail, e.clientX, e.clientY)) {
+      cardOpenGuard.noteClick(e.detail, e.clientX, e.clientY);
+      return;
+    }
     e.stopPropagation();
     e.preventDefault();
   }

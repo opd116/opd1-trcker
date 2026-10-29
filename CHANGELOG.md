@@ -20,7 +20,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Fast single clicks on Back, navigation, profile Close and scoreboard controls now work immediately after opening a page; keyboard activation also works. The 400 ms guard only suppresses repeated mouse clicks, so double-clicking a player still cannot click through the new drawer.
+- Fast single clicks on Back, navigation, profile Close and scoreboard controls now work immediately after opening a page; keyboard activation also works. The 400 ms guard only suppresses repeated mouse clicks or a second click at the opening position, so double-clicking a player still cannot click through the new drawer.
 
 - Reinstalling into a folder you picked by hand (say `D:\Games`) no longer deletes everything else in that folder; the installer also asks to close a running copy before it removes anything.
 - A rank Riot sends without its RR now shows (with the RR from your stored matches when they have it) instead of `—`.

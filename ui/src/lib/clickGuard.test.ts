@@ -60,3 +60,41 @@ describe("createClickGuard", () => {
     expect(g.swallows()).toBe(true);
   });
 });
+
+describe("opening pointer position", () => {
+  it("blocks a second click at the opening spot, but allows fresh controls elsewhere and keyboard clicks", () => {
+    const g = createClickGuard(() => 1_000);
+    g.noteClick(1, 100, 200);
+    g.arm();
+    expect(g.swallows(1, 100, 200)).toBe(true);
+    expect(g.swallows(1, 103, 198)).toBe(true);
+    expect(g.swallows(1, 150, 200)).toBe(false);
+    expect(g.swallows(0, 100, 200)).toBe(false);
+  });
+
+  it("a later programmatic open does not inherit a stale click position", async () => {
+    const g = createClickGuard(() => 1_000);
+    g.noteClick(1, 100, 200);
+    await Promise.resolve();
+    g.arm();
+    expect(g.swallows(1, 100, 200)).toBe(false);
+    expect(g.swallows(2, 100, 200)).toBe(true);
+  });
+
+  it("a keyboard activation clears the pointer origin", () => {
+    const g = createClickGuard(() => 1_000);
+    g.noteClick(1, 100, 200);
+    g.noteClick(0, 0, 0);
+    g.arm();
+    expect(g.swallows(1, 100, 200)).toBe(false);
+  });
+
+  it("the opening point expires at 400 ms", () => {
+    let t = 0;
+    const g = createClickGuard(() => t);
+    g.noteClick(1, 100, 200);
+    g.arm();
+    t = DOUBLE_CLICK_MS;
+    expect(g.swallows(1, 100, 200)).toBe(false);
+  });
+});

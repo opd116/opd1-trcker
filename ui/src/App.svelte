@@ -35,7 +35,7 @@
   // Capture phase, so it is gone before any handler on the new page sees it.
   function swallowDoubleClick(e: MouseEvent) {
     if (!cardOpenGuard.swallows(e.detail, e.clientX, e.clientY)) {
-      cardOpenGuard.noteClick(e.detail, e.clientX, e.clientY);
+      cardOpenGuard.noteClick(e);
       return;
     }
     e.stopPropagation();

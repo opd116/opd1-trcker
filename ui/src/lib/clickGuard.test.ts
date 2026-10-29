@@ -64,7 +64,7 @@ describe("createClickGuard", () => {
 describe("opening pointer position", () => {
   it("blocks a second click at the opening spot, but allows fresh controls elsewhere and keyboard clicks", () => {
     const g = createClickGuard(() => 1_000);
-    g.noteClick(1, 100, 200);
+    g.noteClick({ detail: 1, clientX: 100, clientY: 200, eventPhase: 2 });
     g.arm();
     expect(g.swallows(1, 100, 200)).toBe(true);
     expect(g.swallows(1, 103, 198)).toBe(true);
@@ -74,7 +74,9 @@ describe("opening pointer position", () => {
 
   it("a later programmatic open does not inherit a stale click position", async () => {
     const g = createClickGuard(() => 1_000);
-    g.noteClick(1, 100, 200);
+    const event = { detail: 1, clientX: 100, clientY: 200, eventPhase: 2 };
+    g.noteClick(event);
+    event.eventPhase = 0;
     await Promise.resolve();
     g.arm();
     expect(g.swallows(1, 100, 200)).toBe(false);
@@ -83,16 +85,26 @@ describe("opening pointer position", () => {
 
   it("a keyboard activation clears the pointer origin", () => {
     const g = createClickGuard(() => 1_000);
-    g.noteClick(1, 100, 200);
-    g.noteClick(0, 0, 0);
+    g.noteClick({ detail: 1, clientX: 100, clientY: 200, eventPhase: 2 });
+    g.noteClick({ detail: 0, clientX: 0, clientY: 0, eventPhase: 2 });
     g.arm();
     expect(g.swallows(1, 100, 200)).toBe(false);
+  });
+
+  it("keeps the opening click through a microtask between capture and the target listener", async () => {
+    const g = createClickGuard(() => 1_000);
+    const event = { detail: 1, clientX: 100, clientY: 200, eventPhase: 1 };
+    g.noteClick(event);
+    await Promise.resolve();
+    event.eventPhase = 2;
+    g.arm();
+    expect(g.swallows(1, 100, 200)).toBe(true);
   });
 
   it("the opening point expires at 400 ms", () => {
     let t = 0;
     const g = createClickGuard(() => t);
-    g.noteClick(1, 100, 200);
+    g.noteClick({ detail: 1, clientX: 100, clientY: 200, eventPhase: 2 });
     g.arm();
     t = DOUBLE_CLICK_MS;
     expect(g.swallows(1, 100, 200)).toBe(false);

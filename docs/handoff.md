@@ -12,7 +12,7 @@ Read `AGENTS.md`, `CLAUDE.md`, then the relevant user requirements and decisions
 - `CHANGELOG.md` lists this work under Unreleased.
 - This maintenance pass removes retired agent integrations and refreshes onboarding documentation; it does not fix app behavior or change the app version.
 
-## Known verification blocker
+## Previous verification failures (before the navigation fix)
 
 Build run [40299043306](https://github.com/opd116/opd1-trcker/actions/runs/40299043306), for the reviewed code:
 
@@ -24,9 +24,19 @@ Failures are in `close-match.spec.ts` (2), `focus-ring.spec.ts` (1), `live-v2.sp
 
 The installer artifact of that run exists, but successful packaging is not evidence of a passing release. Always check CI for the exact new commit.
 
+## Navigation fix — 2026-10-29
+
+The shared cause found in `App.svelte` / `clickGuard.ts`: for 400 ms after opening a drawer or scoreboard, the capture handler blocked **all** clicks, including independent single clicks and keyboard-generated clicks (detail 0). This also explains timing-dependent failures: the 2026-10-29 documentation-only run had 14 failures rather than 8.
+
+The fix passes the click's detail into the guard: only repeated mouse clicks (detail > 1) are suppressed within the interval. Fresh single clicks, keyboard activation and programmatic clicks remain usable. The existing double-click tests remain; new unit and browser regressions cover immediate single-click Close and keyboard Back while the guard clock is held armed.
+
+Local deterministic reproduction confirmed the old guard blocked detail 0 and 1; the corrected module passed single/keyboard/repeat/expiry/re-arm checks. Full app validation runs in GitHub Actions because dependency downloads are unavailable in the local container and Browser reported no originating browser context. Do not infer full-suite success from this local check: inspect the exact current commit's Build run and installer job.
+
+The runtime change is confined to the UI click guard; no Rust, database schema, product design or dependency changed. See `docs/test-checklist.md` for the separate real Windows/VALORANT acceptance checks.
+
 ## Next work
 
-1. Handle the user's requested task within current rules; if the goal is release readiness, investigate the eight Playwright failures first.
+1. Check the exact current commit's CI results. If any navigation test still fails, investigate it before calling the build ready.
 2. Run the relevant tests, then the required full checks before publishing. Keep intentional screenshot changes separate from functional fixes.
 3. Refresh release notes, version fields and user checklist together when actually releasing. Do not publish or tag just because an old prompt told you to.
 4. Keep this file current at session end.

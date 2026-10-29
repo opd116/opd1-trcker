@@ -38,7 +38,7 @@ Only Windows with VALORANT can verify the real Riot client. Browser fixtures can
 - Work from the actual current branch; use a focused branch for review when appropriate.
 - Commit explicit paths only. Never force-push, commit credentials, or include unrelated changes.
 - Keep user decisions, rules and handoff in step with the implementation.
-- Verify CI for the exact changed commit. The baseline reviewed on 2026-10-29 is **not green**; see the handoff.
+- Verify CI for the exact changed commit; do not use an older run as proof. The handoff records the pre-fix failures and navigation fix.
 - Do not weaken tests or regenerate screenshot baselines merely to make CI pass.
 - Publish a release only after its exact commit passes the required checks. An installer artifact alone is not a passing release.
 - Update `docs/handoff.md` directly at the end of a session; no slash command, plugin or skill installation is required.

@@ -34,6 +34,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
 use opd1_core::model::{DisplayName, Field, LiveState, RememberedSource};
+use opd1_core::names::KnownName;
 use opd1_core::presence::Stage;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
@@ -420,6 +421,34 @@ fn assert_lobby_shows_remembered_for_hidden(h: &Harness, events_before: usize, w
     }
 }
 
+/// Stores a match ME and HIDDEN played at `start_ms`, with HIDDEN's Riot ID
+/// (`Repo::upsert_match`, the same write `sync::store_details` does).
+async fn store_match_naming_hidden(
+    st: &AppState,
+    match_id: &str,
+    start_ms: i64,
+    name: &str,
+    tag: &str,
+) {
+    let m = Match {
+        match_id: match_id.into(),
+        map_id: SPLIT_PATH.into(),
+        queue_id: "unrated".into(),
+        start_ms,
+        winning_team: None,
+        is_ranked: false,
+        rounds_played: None,
+        game_length_ms: None,
+    };
+    let players = vec![
+        player_row(ME, "Blue", "Me", "TAG"),
+        player_row(HIDDEN, "Blue", name, tag),
+    ];
+    st.db(move |repo| repo.upsert_match(&m, &[], &players))
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn a_hidden_player_carried_through_a_reset_shows_the_remembered_name_the_db_now_knows() {
     // R145: a hidden player's card shows `slot.db.remembered`, refreshed at a
@@ -526,6 +555,53 @@ async fn a_hidden_player_carried_through_a_reset_shows_the_remembered_name_the_d
     assert_eq!(h.st.live_state().stage, Stage::Menus);
     assert_lobby_shows_remembered_for_hidden(&h, events_before, &want);
 
+    // Overwrite branch: the slot now shows the older remembered name, and a
+    // newer match naming HIDDEN is stored. The next reset must upgrade the
+    // card to the newer name, source kind and start time.
+    let newer_start = start + 60_000;
+    store_match_naming_hidden(&h.st, "m-newer", newer_start, "NewerName", "NEW").await;
+    let newer_known =
+        h.st.db(|repo| repo.known_name(ME, HIDDEN))
+            .await
+            .flatten()
+            .expect("the DB knows the newer name now");
+    assert_eq!(
+        (
+            newer_known.name.as_str(),
+            newer_known.tag.as_str(),
+            newer_known.start_ms
+        ),
+        ("NewerName", "NEW", Some(newer_start))
+    );
+    {
+        let live = lock(&h.st.live);
+        let slot = live
+            .slots
+            .iter()
+            .find(|s| s.roster.puuid == HIDDEN)
+            .unwrap();
+        assert_eq!(
+            slot.db.remembered.as_ref().map(|k| k.name.as_str()),
+            Some("SecretName"),
+            "the slot still shows the older remembered name"
+        );
+    }
+    let events_before = h.live_events().len();
+    *cell.lock().unwrap() = Some(blob("PREGAME", "competitive"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Pregame);
+    *cell.lock().unwrap() = Some(blob("MENUS", "competitive"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Menus);
+    let want_newer = DisplayName::Remembered {
+        name: "NewerName".into(),
+        tag: "NEW".into(),
+        source: RememberedSource::OwnMatch,
+        from_map_id: None,
+        from_start_ms: Some(newer_start),
+    };
+    assert_lobby_shows_remembered_for_hidden(&h, events_before, &want_newer);
+
     // Privacy: a live-incognito player's name is never requested.
     for r in h.server.received_requests().await.unwrap() {
         if r.method.as_str() == "PUT" && r.url.path() == "/name-service/v2/players" {
@@ -536,5 +612,68 @@ async fn a_hidden_player_carried_through_a_reset_shows_the_remembered_name_the_d
             );
         }
     }
+    poller.stop_worker();
+}
+
+#[tokio::test]
+async fn a_remembered_name_newer_than_the_reread_is_not_downgraded_by_a_reset() {
+    // The DB only ever grows, so a plain DB read cannot be older than what a
+    // slot already shows. The reset reread can still race an on-demand
+    // `reload_slot`/`reload_slots` (a fill or an open Details) that installs a
+    // newer bundle after the read. This pins the guard's comparison by
+    // constructing the post-race state directly — the slot carries a newer
+    // remembered name than the DB read will return — and holds HIDDEN's rank
+    // phase so no sync publish replaces the slot's bundle afterwards.
+    let h = harness().await;
+    hold_rank_phase(&h, HIDDEN).await;
+    mount_party_of(&h, HIDDEN, true).await;
+    // The DB's remembered name: the stored match naming HIDDEN, at `start`.
+    let start = store_split_match(&h.st).await;
+    presence(&h, blob("MENUS", "competitive")).await;
+    let mut poller = Poller::new(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+
+    // The live model while Agent Select shows HIDDEN, with a newer remembered
+    // name already installed in its slot (as a racing reload would leave it).
+    let newer = KnownName {
+        name: "NewerName".into(),
+        tag: "NEW".into(),
+        map_id: None,
+        start_ms: Some(start + 60_000),
+        source: RememberedSource::Seen,
+    };
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Pregame;
+        live.in_match = true;
+        live.slots = vec![
+            Slot {
+                roster: roster(ME, false),
+                db: PlayerDb::default(),
+            },
+            Slot {
+                roster: roster(HIDDEN, true),
+                db: PlayerDb {
+                    remembered: Some(newer),
+                    ..Default::default()
+                },
+            },
+        ];
+    }
+    poller.stage = Stage::Pregame;
+
+    // The dodge: the reset transition rereads the DB (older) and must keep the
+    // slot's newer remembered name.
+    let events_before = h.live_events().len();
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Menus);
+    let want = DisplayName::Remembered {
+        name: "NewerName".into(),
+        tag: "NEW".into(),
+        source: RememberedSource::Seen,
+        from_map_id: None,
+        from_start_ms: Some(start + 60_000),
+    };
+    assert_lobby_shows_remembered_for_hidden(&h, events_before, &want);
     poller.stop_worker();
 }

@@ -387,6 +387,25 @@ impl Drop for Poller {
     }
 }
 
+/// Whether a remembered name read from the DB replaces the slot's own (the
+/// reset reread, R145). Symmetric with the `players` row rule: the DB's answer
+/// is taken when the slot has none, or when it is at least as recent.
+/// `start_ms` is the time [`Repo::known_name`] itself orders the name sources
+/// by — a source match's start, or when a `seen` name was last confirmed — so
+/// comparing it applies the same recency rule inside one slot. An unknown time
+/// (`None`) counts as older than every known time; on a tie (same time, or two
+/// unknown times) the DB's answer wins, being the newest read of the sources.
+///
+/// The reset reread can race an on-demand `reload_slot`/`reload_slots` (a fill
+/// or an open Details), which installs a newer DB bundle; this older read must
+/// never downgrade what that newer bundle already shows.
+fn remembered_is_newer(slot: Option<&KnownName>, known: &KnownName) -> bool {
+    let Some(slot) = slot else {
+        return true;
+    };
+    known.start_ms.unwrap_or(i64::MIN) >= slot.start_ms.unwrap_or(i64::MIN)
+}
+
 impl Poller {
     pub(crate) fn new(st: Arc<AppState>) -> Self {
         let local_app_data = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
@@ -1576,9 +1595,14 @@ impl Poller {
                                 // `db.remembered`, which a match row stored
                                 // while the slot was carried can have made
                                 // stale. Take the DB's best known name when it
-                                // has one; never blank the slot's.
+                                // is at least as recent as the slot's (never
+                                // blanking it and never letting this older
+                                // read downgrade a newer bundle a racing
+                                // reload installed).
                                 if let Some(known) = remembered {
-                                    db.remembered = Some(known);
+                                    if remembered_is_newer(db.remembered.as_ref(), &known) {
+                                        db.remembered = Some(known);
+                                    }
                                 }
                             }
                             db
@@ -2089,6 +2113,54 @@ mod tests {
     };
     use crate::pipeline_tests::{card_json, harness, roster, session_with_other_wait, Harness, ME};
     use crate::store::{save_player, PlayerUpdate};
+
+    // -- the remembered-name recency rule (R145) ----------------------
+
+    /// A known name at `start_ms` (the time `Repo::known_name` orders by).
+    fn known(name: &str, start_ms: Option<i64>) -> KnownName {
+        KnownName {
+            name: name.into(),
+            tag: "TAG".into(),
+            map_id: None,
+            start_ms,
+            source: opd1_core::model::RememberedSource::Seen,
+        }
+    }
+
+    #[test]
+    fn the_remembered_recency_rule_only_ever_moves_forward() {
+        // No remembered name in the slot: the DB's is taken.
+        assert!(remembered_is_newer(None, &known("db", Some(200))));
+        // The DB's is newer — or the same time: the newest read is
+        // authoritative, so it is taken too.
+        assert!(remembered_is_newer(
+            Some(&known("slot", Some(100))),
+            &known("db", Some(200))
+        ));
+        assert!(remembered_is_newer(
+            Some(&known("slot", Some(200))),
+            &known("db", Some(200))
+        ));
+        // The slot's is newer (a racing reload installed it): never downgraded.
+        assert!(!remembered_is_newer(
+            Some(&known("slot", Some(200))),
+            &known("db", Some(100))
+        ));
+        // An unknown time counts as older than every known time...
+        assert!(!remembered_is_newer(
+            Some(&known("slot", Some(100))),
+            &known("db", None)
+        ));
+        assert!(remembered_is_newer(
+            Some(&known("slot", None)),
+            &known("db", Some(100))
+        ));
+        // ...and two unknown times take the DB's answer.
+        assert!(remembered_is_newer(
+            Some(&known("slot", None)),
+            &known("db", None)
+        ));
+    }
 
     // -- the supervisor (A1) -----------------------------------------
 

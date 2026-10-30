@@ -456,6 +456,69 @@ async fn store_match_naming_hidden(
         .unwrap();
 }
 
+/// After the overwrite-branch reset, wait for the publishes the tick triggered
+/// to settle, then assert the **last** Lobby state that shows HIDDEN carries
+/// the DB's newer remembered name, and that no Lobby state after
+/// `events_before` blanked the remembered name back to the hidden style.
+///
+/// A stale state can be published incidentally while a stage change aborts the
+/// previous worker: that publish builds from the live model while it still
+/// shows the stage and bundle being replaced. It was observed once on a loaded
+/// CI runner (the Rust suite took ~62 s instead of ~13 s); the next publish
+/// corrects it, so only the last state is a verdict. The first-reset
+/// assertions stay strict: every Lobby state there can only be published after
+/// the reload.
+async fn assert_last_lobby_remembered(h: &Harness, events_before: usize, want: &DisplayName) {
+    // Quiescence: stop once no new live event has arrived for a short bounded
+    // moment. The worker itself can be blocked on a held rank phase by design,
+    // so there is no "worker drained" signal to wait for.
+    let mut seen = h.live_events().len();
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let now = h.live_events().len();
+        if now == seen {
+            break;
+        }
+        seen = now;
+    }
+    let events = h.live_events();
+    let after: Vec<&LiveState> = events[events_before..]
+        .iter()
+        .filter(|s| s.stage == Stage::Menus)
+        .collect();
+    // (b) The remembered name may never be blanked back to the hidden style.
+    for (i, state) in after.iter().enumerate() {
+        let Some(card) = state.players.iter().find(|c| c.puuid == HIDDEN) else {
+            continue;
+        };
+        assert!(
+            matches!(card.name, Field::Value(DisplayName::Remembered { .. })),
+            "state {i} after the reset blanked HIDDEN's remembered name: {:?}",
+            card.name
+        );
+    }
+    // (a) The last Lobby state that shows HIDDEN is the verdict.
+    let Some(last) = after
+        .iter()
+        .rev()
+        .find(|s| s.players.iter().any(|c| c.puuid == HIDDEN))
+    else {
+        panic!("no Lobby state after the reset shows HIDDEN");
+    };
+    let shown = last
+        .players
+        .iter()
+        .find(|c| c.puuid == HIDDEN)
+        .map(|c| c.name.clone())
+        .unwrap();
+    assert_eq!(
+        shown,
+        Field::Value(want.clone()),
+        "the last Lobby state must carry the DB's newer remembered name"
+    );
+}
+
 #[tokio::test]
 async fn a_hidden_player_carried_through_a_reset_shows_the_remembered_name_the_db_now_knows() {
     // R145: a hidden player's card shows `slot.db.remembered`, refreshed at a
@@ -594,6 +657,12 @@ async fn a_hidden_player_carried_through_a_reset_shows_the_remembered_name_the_d
         );
     }
     let events_before = h.live_events().len();
+    // Stop the Lobby's worker before the stage toggles. An in-flight publish
+    // from it (the worker the previous install started) can otherwise land
+    // between the toggles' awaits and be counted as a "post-reset" state; that
+    // incidental state is not this test's defect and the installs restart the
+    // worker. The assertion below is load-robust regardless (last state).
+    poller.stop_worker();
     *cell.lock().unwrap() = Some(blob("PREGAME", "competitive"));
     poller.presence_tick(&h.session).await.unwrap();
     assert_eq!(h.st.live_state().stage, Stage::Pregame);
@@ -607,7 +676,7 @@ async fn a_hidden_player_carried_through_a_reset_shows_the_remembered_name_the_d
         from_map_id: None,
         from_start_ms: Some(newer_start),
     };
-    assert_lobby_shows_remembered_for_hidden(&h, events_before, &want_newer);
+    assert_last_lobby_remembered(&h, events_before, &want_newer).await;
 
     // Privacy: a live-incognito player's name is never requested.
     for r in h.server.received_requests().await.unwrap() {

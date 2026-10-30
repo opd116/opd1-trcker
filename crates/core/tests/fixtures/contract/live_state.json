@@ -496,6 +496,7 @@
       "team": "enemy"
     }
   ],
+  "selfPuuid": "puuid-self",
   "settled": true,
   "stage": "ingame"
 }

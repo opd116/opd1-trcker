@@ -13,9 +13,9 @@
   import StatCard from "../components/comp/StatCard.svelte";
   import { knownMatches, rrChart, subtitle } from "../lib/compv2";
   import { openMatch, scrollHost } from "../lib/router.svelte";
-  import { mystats, now, refreshMyStats } from "../lib/stores";
+  import { myStatsForSelf, now, refreshMyStats } from "../lib/stores";
 
-  const s = $derived($mystats);
+  const s = $derived($myStatsForSelf);
   const known = $derived(s ? knownMatches(s) : new Map());
   /** The session's matches are shaded on the chart when any of them is among its points. */
   const shaded = $derived(!!s?.session && (rrChart(s.rrSeries, known, s.session)?.todayLeftPct ?? null) !== null);

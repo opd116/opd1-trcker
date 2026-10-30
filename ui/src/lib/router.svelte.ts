@@ -197,8 +197,10 @@ export function openMatch(matchId: string, opts: { from: MatchFrom; focusPuuid: 
 /**
  * Back from a scoreboard: encounter / profile → the screen under the drawer, drawer reopened on that player;
  * recap / lastMatch → Live; comp → Competitive; history → the History list. The list comes back at its old scroll.
+ * `reopenProfile: false` returns to that screen without reopening the encounter's drawer (an account switch closes
+ * the overlays; it did not ask for the drawer again).
  */
-export function backFromMatch(): void {
+export function backFromMatch(opts: { reopenProfile?: boolean } = {}): void {
   if (router.matchId === null) return;
   hideTip();
   const matchId = router.matchId;
@@ -215,7 +217,7 @@ export function backFromMatch(): void {
           : "history";
   restoreTo = savedScroll.get(to) ?? 0;
   router.screen = to;
-  if (enc && (from === "encounter" || from === "profile")) openProfile(enc.puuid, null);
+  if (enc && (from === "encounter" || from === "profile") && opts.reopenProfile !== false) openProfile(enc.puuid, null);
   // The page under the scoreboard is drawn again: a keyboard user's focus goes back to the row that opened it (a
   // History row, Live's LAST MATCH and the recap's full-scoreboard button carry its `data-match-id`), so the next Tab
   // continues from there and not from the title bar.

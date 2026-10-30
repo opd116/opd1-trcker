@@ -564,6 +564,11 @@ impl Poller {
                 live.party_ready.clear();
                 live.names_attempted.clear();
                 live.known_names.clear();
+                // The previous session's roster (and the user's slot in it) is
+                // not this account's: `self_name`/`enter_closed` below publish
+                // before the slots are replaced, and no old account's card may
+                // go out under the new puuid.
+                live.slots.clear();
                 live.self_roster = None;
                 live.self_name = None;
                 live.self_loadout = None;

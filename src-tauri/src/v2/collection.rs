@@ -350,6 +350,14 @@ mod tests {
             stored(&h).await.expect("the second ask answered").levels,
             [L1]
         );
+        // …but a stored answer still counts as the ten-minute refresh: the
+        // next ask is not sent (the gate is relaxed only after a failure).
+        refresh_if_due(&h.st, ME).await;
+        assert_eq!(
+            store_requests(&h, &store_key_path()).await,
+            2,
+            "a stored answer gates the next ask"
+        );
     }
 
     /// No ask at all (no session, or the game closed and the session stale,

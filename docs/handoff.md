@@ -6,11 +6,11 @@ Read `AGENTS.md`, `CLAUDE.md`, then the relevant user requirements and decisions
 
 ## Code and release state
 
-- Reviewed code: `bf41497278578c37527216c9611365dbedbb8a5c`, merged PR #4 on 2026-10-26 (bug hunt after the v2 UI).
-- The source version fields still say 0.3.1. The published `v0.3.1` release is from 2026-10-04 and does **not** contain the later v2 UI and fixes.
+- **Current release: v0.4.0 (2026-10-31).** The reviewed fixes (#5 skins, #6 names, #8 account switch, #9 queue-timer test) and the docs (#7) are merged into `main`; the pre-merge checkpoint is branch `backup/pre-merge-2026-10-31-0428c52` at `0428c52e803f0aa2f6bb97ecaf4f429836aa8da6`.
+- The exact release commit, final CI run ids and the Windows installer artifact are recorded on the release/cleanup PR and in the release report; the installer is `OPD1-TRCKER-0.4.0-setup.exe` (unsigned, as always).
 - The v2 screens, saved players/notes, settings, tray/autostart, profile drawer and scoreboard are implemented. Do not restart their old implementation tasks.
-- `CHANGELOG.md` lists this work under Unreleased.
-- This maintenance pass removes retired agent integrations and refreshes onboarding documentation; it does not fix app behavior or change the app version.
+- `CHANGELOG.md` has the 0.4.0 release section; names learned locally are shared across Riot accounts by PUUID while account-scoped data (history/My Stats/encounters/collection) follows the current account (R198).
+- Remaining checks are the real Windows + VALORANT items in `docs/test-checklist.md` and the checkpoint section below.
 
 ## Previous verification failures (before the navigation fix)
 
@@ -100,8 +100,8 @@ User-requested merge preparation; no new bug hunt. Nothing merged/tagged/publish
 - **Actions billing blocker verified and resolved.** The last blocked runs (2026-10-30 20:03/20:05 UTC, docs heads) carried the annotation `The job was not started because recent account payments have failed or your spending limit needs to be increased` (the billing endpoint is not queryable with the current token scope; no runs were retried while blocked). Actions became available again: the new PR #8 head and the integration runs below started and passed normally.
 - **Combined integration branch published.** `origin/integrate/bug-hunt-round1` at HEAD **`2a8529f`**, merging exactly the final heads #5 `da0404c`, #6 `ce00357`, #8 `2643284`, #9 `2fe60e6` on `0428c52` (no conflicts). Push run 41134033026: **success**. Manual `workflow_dispatch` run 41134042312 on the same branch: **success** — Linux `checks` (job 124331938300) and the Windows installer build (job 124331938861). Installer artifact: **`OPD1-TRCKER-0.3.1-setup`** (4,220,585 bytes; artifact id 13016835292, downloadable from the run page / API) — unsigned as always, a smoke install is a manual check.
 - **Local combined results on `2a8529f`:** UI build ok, Vitest **633 passed, 1 skipped**, `svelte-check`/`tsc` clean, `cargo fmt --check` and `cargo clippy -D warnings` clean, `cargo test -p opd1-core -p opd1-riot -p opd1-trcker` = **1171 passed, 0 failed** (baseline 1155 + 16 new regression/unit tests, including the cross-account test), functional Playwright key specs **84 passed** (incl. 11 account-switch cases), full local functional pass (minus CI visual baselines and `fit-v2`) **159 passed**.
-- **Final PR heads (all open, unmerged, mergeable):** #5 `da0404c`, #6 `ce00357`, #8 `2643284`, #9 `2fe60e6`, docs #7 = the commit that adds this paragraph on `docs/bug-hunt-round1` (CI run on it after Actions recovery). Recommended review/merge order: **#5, #6, #8, #9, then docs #7** (#5's Skins in-flight guard relies on #8's UI re-ask; fix PRs contain code+tests only, all documentation is in #7).
-- **Remaining manual checks (real Windows + VALORANT):** forced store-entitlement failure recovery within a minute; dodge/match-end and hidden-player remembered names; account switch with the app open in every screen state and with VALORANT closed, including a never-seen account and a non-computable account (My Stats settles to `—`, cross-account names still shown, B's stats remain B's); and a smoke install of `OPD1-TRCKER-0.3.1-setup`.
+- **Merged for release (2026-10-31):** #5 `da0404c`, #6 `ce00357`, #8 `2643284`, #9 `2fe60e6`, docs #7 `ccaf1f0`, followed by the release/cleanup PR that bumps the version to **0.4.0** and updates these instructions. The pre-merge checkpoint is branch `backup/pre-merge-2026-10-31-0428c52`. The exact final SHA, CI run ids and installer artifact are in the release/cleanup PR body and the release report.
+- **Remaining manual checks (real Windows + VALORANT):** forced store-entitlement failure recovery within a minute; dodge/match-end and hidden-player remembered names; account switch with the app open in every screen state and with VALORANT closed, including a never-seen account and a non-computable account (My Stats settles to `—`, cross-account names still shown, B's stats remain B's); and a smoke install of `OPD1-TRCKER-0.4.0-setup.exe`.
 
 ## Next work
 

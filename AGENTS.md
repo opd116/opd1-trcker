@@ -5,6 +5,7 @@ Read `CLAUDE.md` for product rules and `docs/handoff.md` for current status befo
 ## Current checkout
 
 - Project name: **OPD1 TRCKER** (intentional spelling).
+- Final reviewed release: **v0.4.0** on `main` (2026-10-31). Names learned locally are shared across Riot accounts by PUUID while account-scoped data (history/My Stats/encounters/collection) follows the current session; see `CLAUDE.md` and `docs/handoff.md`.
 - Tauri 2 + Rust + Svelte 5 + Vite + SQLite. English UI; brief Gulf Arabic communication.
 - Current UI: Live, Saved, History, Comp, Skins, ASCII, Settings, About; profile drawer and History scoreboard.
 - Default 1280×800; minimum 1180×760; resizable; Glance 420px wide.

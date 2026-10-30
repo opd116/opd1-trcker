@@ -1387,6 +1387,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** one roster scan O(players×slots) per stored match plus one bundle read/build/publish per matching carried hidden player, only when the store can be newer; no network, no event when the bytes do not change. An older store (backfill, historical Match Details) is skipped by the recency predicate. Residual: a concurrent older reload could still overwrite until the next refresh (pre-existing sequential-read window, documented), and real Windows/VALORANT observation is pending (PR #6, not merged as of this entry).
 - **Status:** active
 
+### R198 — Local name memory is shared across Riot accounts; account data stays per account
+
+- **What:** User requirement, 2026-10-30 (merge checkpoint). Player names learned locally are shared across Riot accounts on the installation: the `players`/`match_players` rows are keyed by PUUID and `Repo::known_name` reads every stored match/name row, labelling the source `ownMatch`, `otherMatch` or `seen` (R145). Account-scoped data follows the current Riot account: the match-history index, My Stats/Competitive stats, encounters, the owned-skins collection and saved/derived account state; saved-player notes and the shared name memory stay keyed by PUUID. Hidden-name privacy is unchanged: a live-incognito player's name is never requested.
+- **Why:** Riot accounts share one installation and its SQLite memory; the user wants the tracker to recognise a player they have met from any account, while keeping each account's own history, statistics and collection. The existing `known_name` query already had the required shape, so this is protected by the round-7 real-`Poller` test rather than new code.
+- **Cost:** Nothing new is stored; the account-scoped screens must always key off the current `self_puuid` (the round-2/4/5 account-switch fixes enforce this), and the shared name memory grows with the installation (intended, R145). Real Windows/VALORANT validation remains for the account-switch flows.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

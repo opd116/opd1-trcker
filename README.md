@@ -80,9 +80,9 @@ Tauri 2 (system WebView2) · Rust core (all Riot and valorant-api HTTP, polling,
 
 ## Status and roadmap
 
-The published v0.3.1 release is from 2026-10-04. Main includes the later v2 UI and bug fixes under `CHANGELOG.md` Unreleased, while the version fields still say 0.3.1. They are not the same build.
+The current reviewed build is **v0.4.0** (2026-10-31). It contains the v2 UI and the bug-fix releases merged after 0.3.1 (see `CHANGELOG.md`); the Windows installer is built by GitHub Actions from the exact release commit. The published 0.3.1 installer from 2026-10-04 does not contain these changes.
 
-At reviewed commit `bf41497278578c37527216c9611365dbedbb8a5c` (PR #4), the Windows installer built successfully, but Playwright had 8 failures and 281 passes. See [handoff](docs/handoff.md) for the exact run and failure groups. Check the exact current commit's CI before calling it release-ready.
+Every release is verified by the full CI on its exact commit (Linux Rust/UI/Playwright checks plus the Windows installer build). Installer artifacts live on the GitHub Actions run page; no release is published automatically. The acceptance checklist for a real Windows/VALORANT session is `docs/test-checklist.md`, and the current state plus remaining manual checks are in [handoff](docs/handoff.md).
 
 ## Privacy
 

@@ -44,6 +44,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - Cancelling a new save keeps the note the player already had; saves, notes and dismissals that fail are put back, and quick ones are stored in order.
 - The scoreboard's YOUR RR shows the rank after the match.
 - A crash in the profile drawer or in Glance no longer leaves an empty half screen or a Glance window with no title bar.
+- The Skins screen no longer claims the collection was never fetched while VALORANT is running: one failed Riot error is retried on the screen's next one-minute retry instead of hiding the collection for ten minutes.
+- A player's name no longer drops back to the loading skeleton after a dodge or a match end when the app already has it stored; a stage reset now re-reads the stored player row for the cards that stay on screen.
+- Switching Riot accounts while the app is open no longer leaves the previous account's data on the History, Skins and Saved screens; an open profile or scoreboard closes instead of showing the old user's numbers, and Competitive/NavRail/the waiting screen stop drawing the previous account's My Stats until the new account's stats arrive. This also works when VALORANT is closed and the new account has never been seen before.
+- A hidden player whose name the app has learned in the meantime shows that name on their card again after a dodge or a match end, or as soon as a stored match names them while they are on screen, instead of waiting for the next roster reload.
 
 ### Security
 

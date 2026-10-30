@@ -354,6 +354,12 @@ pub(crate) struct Poller {
     queue_seen_ms: Option<i64>,
     /// R189: the saved-player alert of the current match.
     alerts: SavedAlerts,
+    /// The next roster install must read every player's `players` row again
+    /// (not just the new ones): a reset transition forgot the names resolved
+    /// this stage, and a slot installed before its name was stored would
+    /// otherwise show no name although the DB has it. Set by `change_stage`,
+    /// taken by `apply_roster`.
+    reload_roster_rows: bool,
 }
 
 /// R189: the saved-player alert's memory for one match: who is saved (read
@@ -418,6 +424,7 @@ impl Poller {
             presence_drops: 0,
             queue_seen_ms: None,
             alerts: SavedAlerts::default(),
+            reload_roster_rows: false,
         }
     }
 
@@ -1080,6 +1087,15 @@ impl Poller {
             }
             ended
         };
+        // The reset forgot the names resolved this stage (a renamed player is
+        // asked again). The `players` rows keep them, but a slot installed
+        // before its name was stored still holds the older bundle: the next
+        // roster install reads the stored rows again, so the card shows the
+        // name it already had instead of a loading skeleton until the fresh
+        // lookup answers.
+        if t.reset_synced {
+            self.reload_roster_rows = true;
+        }
         // R189: the user's own match just ended (In Game to the Lobby, or the
         // game closed): the recap points at it.
         let recap = match (self.stage, next) {
@@ -1137,6 +1153,10 @@ impl Poller {
 
         match t.fetch {
             RosterFetch::None => {
+                // Closed shows only the user's own card; there is no roster
+                // install to read rows for (the next stage installs a fresh
+                // one anyway).
+                self.reload_roster_rows = false;
                 self.enter_closed().await;
                 Ok(())
             }
@@ -1429,7 +1449,10 @@ impl Poller {
     /// Installs a roster: cached-first slots (DB) → publish → worker.
     /// Players already on screen keep their DB bundle; only new ones are
     /// read (and get a `players` row upsert), plus the user's own row when
-    /// their level is new or changed (R100).
+    /// their level is new or changed (R100). After a reset transition every
+    /// player's `players` row is read again (see
+    /// [`Poller::reload_roster_rows`]): the bundle keeps the rest of its data,
+    /// the row (level, card, name) is the stored one.
     pub(crate) async fn apply_roster(
         &mut self,
         session: &Arc<RiotSession>,
@@ -1440,6 +1463,7 @@ impl Poller {
         let me = session.self_puuid().to_string();
         let roster = order_players(roster, &me);
 
+        let reread_rows = std::mem::take(&mut self.reload_roster_rows);
         let new_players: Vec<RosterPlayer> = {
             let live = lock(&self.st.live);
             roster
@@ -1459,8 +1483,17 @@ impl Poller {
                 .cloned()
                 .collect()
         };
+        // Whose bundle is read now: the new players (as before), or the whole
+        // roster after a reset transition (their stored name may have been
+        // written during the stage that just ended, after their bundle was
+        // installed).
+        let load_players: Vec<RosterPlayer> = if reread_rows {
+            roster.clone()
+        } else {
+            new_players.clone()
+        };
         let mut loaded: HashMap<String, PlayerDb> = HashMap::new();
-        if !new_players.is_empty() {
+        if !load_players.is_empty() {
             let now = now_ms();
             let me = me.clone();
             loaded = self
@@ -1472,6 +1505,8 @@ impl Poller {
                         if p.hides_level_from(&me) {
                             forget_level(repo.conn(), &p.puuid)?;
                         }
+                    }
+                    for p in &load_players {
                         out.insert(p.puuid.clone(), load_player_db(repo, Some(&me), &p.puuid)?);
                     }
                     Ok(out)
@@ -1490,11 +1525,19 @@ impl Poller {
                     let db = match live.slots.iter().find(|s| s.roster.puuid == r.puuid) {
                         Some(s) => {
                             let mut db = s.db.clone();
-                            // The user's freshly saved `players` row (own
-                            // level, R100) replaces the stale one; the rest
-                            // of the bundle stays the worker's.
+                            // The freshly read `players` row replaces the
+                            // slot's (a name stored after the slot was
+                            // installed, the user's own level, R100); the
+                            // rest of the bundle stays the worker's. A row
+                            // without a name never replaces one with it: a
+                            // slot that already shows the name keeps it.
                             if let Some(fresh) = loaded.remove(&r.puuid) {
-                                db.row = fresh.row;
+                                let named = |x: &PlayerDb| {
+                                    x.row.as_ref().is_some_and(|r| r.name().is_some())
+                                };
+                                if named(&fresh) || !named(&db) {
+                                    db.row = fresh.row;
+                                }
                             }
                             db
                         }

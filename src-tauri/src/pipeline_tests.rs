@@ -1416,3 +1416,8 @@ mod sync_order;
 /// own file; builds its own DB, not the harness).
 #[cfg(test)]
 mod db_scale;
+
+/// Names on screen across a stage change: a name the DB already stores is
+/// not blanked by a reset transition (their own file; same harness).
+#[cfg(test)]
+mod name_stability;

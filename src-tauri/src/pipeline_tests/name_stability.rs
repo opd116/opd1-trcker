@@ -5,11 +5,24 @@
 //! slot's `players` row is read again the card has no name even though the
 //! DB stored it seconds earlier.
 //!
-//! The test below puts the app in Agent Select (the app opened while the
-//! queue was already drafting), waits until a name is on screen while its
-//! rank phase still runs (the bundle provably holds the older row), then
-//! dodges back to the Lobby: the player stays on the roster and the DB knows
-//! the name, so no published state may show the name as loading/missing.
+//! Three tests, all through the real `Poller`:
+//! - the dodge case (Agent Select -> Lobby) — the regression for the fix;
+//! - the match-end case (In Game -> Lobby) — the other reset transition the
+//!   defect reaches, with the same stale-slot setup;
+//! - the failed roster fetch after a reset (`show_self_only`, then the retry):
+//!   it shows the DB name on the retry install. This one passes on the
+//!   baseline too, and on purpose: `show_self_only` replaces every slot with
+//!   the user's card, so the retry installs every other player as a *new*
+//!   slot and reads their full DB bundle — the carried stale row this fix
+//!   covers cannot survive that path. It is kept as coverage of the retry
+//!   transition, not as a reproducer of the defect.
+//!
+//! Each test starts with the app opening into a live stage (mid Agent Select
+//! or mid match), waits until a name is on screen while its rank phase is
+//! still in flight (the slot provably holds the older row), then lets the
+//! stage go back to the Lobby: the player stays on the roster and the DB
+//! knows the name, so no published Lobby state may show the name as
+//! loading/missing.
 
 use std::time::Duration;
 
@@ -24,6 +37,11 @@ use wiremock::{Mock, ResponseTemplate};
 use super::*;
 use crate::poll::Poller;
 use crate::state::lock;
+
+/// The name `OTHER`'s card shows once its Riot ID resolved.
+fn want_name() -> Option<(String, String)> {
+    Some(("Other".to_string(), "OTH".to_string()))
+}
 
 /// The switchable presence blob of the user's own VALORANT presence.
 type Blob = Arc<Mutex<Option<Value>>>;
@@ -100,6 +118,41 @@ async fn mount_pregame(h: &Harness) {
     .await;
 }
 
+/// In Game `cg-1` with ME and OTHER on the same team.
+async fn mount_coregame(h: &Harness) {
+    get(
+        &h.server,
+        &format!("/core-game/v1/players/{ME}"),
+        json!({"Subject": ME, "MatchID": "cg-1"}),
+    )
+    .await;
+    let player = |puuid: &str| {
+        json!({"Subject": puuid, "TeamID": "Blue", "CharacterID": "agent",
+               "PlayerIdentity": identity()})
+    };
+    get(
+        &h.server,
+        "/core-game/v1/matches/cg-1",
+        json!({"MapID": SPLIT_PATH, "Players": [player(ME), player(OTHER)]}),
+    )
+    .await;
+}
+
+/// OTHER's rank phase must not finish inside a test: the stage change happens
+/// once its name is on screen, so its slot still holds the bundle read before
+/// the name was stored. A 60 s answer is effectively non-completing (the
+/// worker is aborted at the stage change and no test awaits it), which keeps
+/// the window open regardless of the machine's load; a short delay could lose
+/// the race on a slow runner.
+async fn hold_other_rank_phase(h: &Harness) {
+    Mock::given(method("GET"))
+        .and(path(format!("/mmr/v1/players/{OTHER}/competitiveupdates")))
+        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(60)))
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+}
+
 /// The name `OTHER`'s card shows in `state`, and whether it is a real name
 /// (not the loading / missing wire state).
 fn shown_name(state: &LiveState) -> Option<(String, String)> {
@@ -110,56 +163,20 @@ fn shown_name(state: &LiveState) -> Option<(String, String)> {
     }
 }
 
-async fn puts(h: &Harness) -> usize {
-    h.server
-        .received_requests()
-        .await
-        .unwrap()
-        .iter()
-        .filter(|r: &&Request| {
-            r.method.as_str() == "PUT" && r.url.path() == "/name-service/v2/players"
-        })
-        .count()
-}
-
-#[tokio::test]
-async fn a_dodge_back_to_the_lobby_keeps_a_name_the_db_already_stores() {
-    let h = harness().await;
-    // The rank phase of OTHER must not finish before the assertions below:
-    // the dodge happens once the name is on screen, so the slot still holds
-    // the bundle read before the name was stored. A 60 s answer is
-    // effectively non-completing (the worker is aborted at the dodge and this
-    // test never awaits it), which keeps the window open regardless of the
-    // machine's load; a short delay could lose the race on a slow runner.
-    Mock::given(method("GET"))
-        .and(path(format!("/mmr/v1/players/{OTHER}/competitiveupdates")))
-        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(60)))
-        .with_priority(1)
-        .mount(&h.server)
-        .await;
-    mount_party(&h).await;
-    mount_pregame(&h).await;
-    let cell = presence(&h, blob("PREGAME", "competitive")).await;
-
-    let mut poller = Poller::new(h.st.clone());
-    poller.on_connected(h.session.clone()).await;
-    poller.presence_tick(&h.session).await.unwrap();
-    assert_eq!(h.st.live_state().stage, Stage::Pregame);
-
-    // The live names answer arrives and is published: OTHER's name is on
-    // screen. The DB has it too (`names_step` stores before it publishes).
-    let want = Some(("Other".to_string(), "OTH".to_string()));
-    wait_until("OTHER's name on the Agent Select card", || {
+/// Waits for OTHER's name to be published, then asserts the DB stores it and
+/// the slot's bundle is still the stale one (read before the name).
+async fn wait_for_named_but_stale(h: &Harness) {
+    wait_until("OTHER's name on the live card", || {
         shown_name(&h.st.live_state()).is_some()
     })
     .await;
-    assert_eq!(shown_name(&h.st.live_state()), want);
+    assert_eq!(shown_name(&h.st.live_state()), want_name());
     let stored =
         h.st.db(|repo| crate::store::load_player(repo.conn(), OTHER))
             .await
             .flatten()
             .and_then(|row| row.name());
-    assert_eq!(stored, want);
+    assert_eq!(stored, want_name(), "the DB stores the resolved name");
     {
         let live = lock(&h.st.live);
         let slot = live.slots.iter().find(|s| s.roster.puuid == OTHER).unwrap();
@@ -168,22 +185,12 @@ async fn a_dodge_back_to_the_lobby_keeps_a_name_the_db_already_stores() {
             "the slot's DB bundle is stale while the rank phase runs"
         );
     }
+}
 
-    // A dodge: the Lobby again. OTHER stays on the roster (same party), the
-    // sync state — and with it the in-memory names — resets.
-    let events_before = h.live_events().len();
-    let puts_before = puts(&h).await;
-    *cell.lock().unwrap() = Some(blob("MENUS", "competitive"));
-    poller.presence_tick(&h.session).await.unwrap();
-    assert_eq!(h.st.live_state().stage, Stage::Menus);
-    assert!(lock(&h.st.live)
-        .slots
-        .iter()
-        .any(|s| s.roster.puuid == OTHER));
-
-    // Every state published for the Lobby that still shows OTHER must carry
-    // the name the DB stored: a name that was on screen a moment ago may not
-    // go back to a loading skeleton (or `—`) because the stage changed.
+/// Asserts every published state from `events_before` on that still shows
+/// OTHER (stage `menus`) carries the name the DB stores.
+fn assert_lobby_never_blanks_other(h: &Harness, events_before: usize) {
+    let want = want_name();
     let events = h.live_events();
     let after: Vec<&LiveState> = events[events_before..]
         .iter()
@@ -199,19 +206,176 @@ async fn a_dodge_back_to_the_lobby_keeps_a_name_the_db_already_stores() {
         assert_eq!(
             shown_name(state),
             want,
-            "state {i} after the dodge shows OTHER's name as {shown:?}, but the DB stores it"
+            "state {i} after the reset shows OTHER's name as {shown:?}, but the DB stores it"
         );
     }
+}
 
-    // The rename rule is untouched: the stage reset asks name-service again,
-    // so a player who changed their Riot ID gets the new name.
+async fn puts(h: &Harness) -> usize {
+    h.server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r: &&Request| {
+            r.method.as_str() == "PUT" && r.url.path() == "/name-service/v2/players"
+        })
+        .count()
+}
+
+/// The rename rule is untouched: a stage reset asks name-service again.
+async fn assert_names_asked_again(h: &Harness, puts_before: usize) {
     wait_until("the Lobby asks name-service again after the reset", || {
         lock(&h.st.live).known_names.contains_key(OTHER)
     })
     .await;
     assert!(
-        puts(&h).await > puts_before,
+        puts(h).await > puts_before,
         "a fresh name-service request goes out after the reset"
     );
+}
+
+#[tokio::test]
+async fn a_dodge_back_to_the_lobby_keeps_a_name_the_db_already_stores() {
+    let h = harness().await;
+    hold_other_rank_phase(&h).await;
+    mount_party(&h).await;
+    mount_pregame(&h).await;
+    let cell = presence(&h, blob("PREGAME", "competitive")).await;
+
+    let mut poller = Poller::new(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Pregame);
+    wait_for_named_but_stale(&h).await;
+
+    // A dodge: the Lobby again. OTHER stays on the roster (same party), the
+    // sync state — and with it the in-memory names — resets.
+    let events_before = h.live_events().len();
+    let puts_before = puts(&h).await;
+    *cell.lock().unwrap() = Some(blob("MENUS", "competitive"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Menus);
+    assert!(lock(&h.st.live)
+        .slots
+        .iter()
+        .any(|s| s.roster.puuid == OTHER));
+
+    assert_lobby_never_blanks_other(&h, events_before);
+    assert_names_asked_again(&h, puts_before).await;
+    poller.stop_worker();
+}
+
+#[tokio::test]
+async fn a_match_end_keeps_a_name_the_db_already_stores() {
+    // The other reset transition: In Game -> Lobby. The app opened mid-match,
+    // so every slot was installed before the live names lookup stored the
+    // name; the rank phase is still in flight when the match ends.
+    let h = harness().await;
+    hold_other_rank_phase(&h).await;
+    mount_party(&h).await;
+    mount_coregame(&h).await;
+    let cell = presence(&h, blob("INGAME", "unrated")).await;
+
+    let mut poller = Poller::new(h.st.clone());
+    poller.ingame_loadouts_timeout = Duration::from_millis(50);
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Ingame);
+    wait_for_named_but_stale(&h).await;
+
+    // The match ends: `match_ended` + the reset transition to the Lobby. The
+    // party is still ME + OTHER, so OTHER stays on the roster.
+    let events_before = h.live_events().len();
+    let puts_before = puts(&h).await;
+    *cell.lock().unwrap() = Some(blob("MENUS", "unrated"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Menus);
+    assert!(lock(&h.st.live)
+        .slots
+        .iter()
+        .any(|s| s.roster.puuid == OTHER));
+
+    assert_lobby_never_blanks_other(&h, events_before);
+    assert_names_asked_again(&h, puts_before).await;
+    poller.stop_worker();
+}
+
+#[tokio::test]
+async fn a_failed_roster_fetch_after_the_reset_shows_the_stored_name_on_the_retry() {
+    // A reset transition whose Lobby roster fetch fails once: `show_self_only`
+    // publishes the user's card alone (and drops every other slot), then the
+    // retry installs the party again.
+    //
+    // This test passes on the baseline too, deliberately: because the failed
+    // fetch replaced the slots, the retry installs OTHER as a NEW slot and
+    // reads its full DB bundle, so the carried stale row cannot reach the
+    // screen through this path. It is coverage of the retry transition (the
+    // stored name is shown, never a skeleton), not a reproducer of the fixed
+    // defect — which needs a carried slot, i.e. a transition whose fetch
+    // succeeds (the dodge and match-end tests).
+    let h = harness().await;
+    hold_other_rank_phase(&h).await;
+    mount_party(&h).await;
+    mount_pregame(&h).await;
+    let cell = presence(&h, blob("PREGAME", "competitive")).await;
+
+    let mut poller = Poller::new(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Pregame);
+    wait_for_named_but_stale(&h).await;
+
+    // The next party fetch (the reset transition's roster fetch) fails once.
+    Mock::given(method("GET"))
+        .and(path("/parties/v1/parties/party-1"))
+        .respond_with(ResponseTemplate::new(500))
+        .up_to_n_times(1)
+        .with_priority(1)
+        .mount(&h.server)
+        .await;
+
+    let events_before = h.live_events().len();
+    let puts_before = puts(&h).await;
+    *cell.lock().unwrap() = Some(blob("MENUS", "competitive"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Menus, "still the Lobby");
+    {
+        let state = h.st.live_state();
+        assert_eq!(
+            state.players.len(),
+            1,
+            "the failed fetch shows the user only"
+        );
+        assert!(state.players[0].is_self);
+        assert_eq!(
+            shown_name(&state),
+            None,
+            "OTHER is not on the failed roster"
+        );
+    }
+    // Nothing published in that window may have shown OTHER without a name
+    // (it was not shown at all).
+    for state in &h.live_events()[events_before..] {
+        if state.players.iter().any(|c| c.puuid == OTHER) {
+            assert_eq!(
+                shown_name(state),
+                want_name(),
+                "a state that shows OTHER must carry the stored name"
+            );
+        }
+    }
+
+    // The retry has the fetch's own path (`fetch_or_retry` -> `fetch_roster` ->
+    // `fetch_party`); called directly instead of waiting out the 2 s retry
+    // timer, so the test needs no wall-clock wait.
+    poller.fetch_party(&h.session, ME).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Menus);
+    assert_eq!(
+        shown_name(&h.st.live_state()),
+        want_name(),
+        "the retry install shows the name the DB stores"
+    );
+    assert_names_asked_again(&h, puts_before).await;
     poller.stop_worker();
 }

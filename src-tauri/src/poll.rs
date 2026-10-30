@@ -47,6 +47,7 @@ use tokio::time::{sleep, Instant};
 
 use opd1_core::db::repo::Repo;
 use opd1_core::model::{DisplayName, Field};
+use opd1_core::names::KnownName;
 use opd1_core::presence::{decode_presence, Stage};
 use opd1_core::wire::{ConnState, QueueInfo};
 use opd1_riot::session::VersionSource;
@@ -1454,9 +1455,10 @@ impl Poller {
     /// Players already on screen keep their DB bundle; only new ones are
     /// read (and get a `players` row upsert), plus the user's own row when
     /// their level is new or changed (R100). After a reset transition a
-    /// carried player's `players` row is read again (one keyed read; see
-    /// [`Poller::reload_roster_rows`]) because their stored name may have been
-    /// written after their bundle was installed.
+    /// carried player's `players` row and remembered name (R145, for a hidden
+    /// player's card) are read again — two keyed reads; see
+    /// [`Poller::reload_roster_rows`] — because the DB may have learned them
+    /// after the bundle was installed.
     pub(crate) async fn apply_roster(
         &mut self,
         session: &Arc<RiotSession>,
@@ -1500,7 +1502,7 @@ impl Poller {
             Vec::new()
         };
         let mut loaded: HashMap<String, PlayerDb> = HashMap::new();
-        let mut reread: HashMap<String, StoredPlayer> = HashMap::new();
+        let mut reread: HashMap<String, (Option<StoredPlayer>, Option<KnownName>)> = HashMap::new();
         if !new_players.is_empty() || !reread_puuids.is_empty() {
             let now = now_ms();
             let me = me.clone();
@@ -1515,14 +1517,19 @@ impl Poller {
                         }
                         bundles.insert(p.puuid.clone(), load_player_db(repo, Some(&me), &p.puuid)?);
                     }
-                    // One keyed `players` SELECT per carried player, not the
-                    // whole bundle: only the row (the name) can be missing
-                    // from the slot.
+                    // Keyed reads per carried player, not the whole bundle:
+                    // the `players` row (a name stored after the slot was
+                    // installed) and the remembered name a hidden player's
+                    // card shows (R145; a match row naming them may have been
+                    // stored since).
                     let mut rows = HashMap::new();
                     for p in &reread_puuids {
-                        if let Some(row) = load_player(repo.conn(), p)? {
-                            rows.insert(p.clone(), row);
-                        }
+                        let remembered = if p.as_str() == me.as_str() {
+                            None
+                        } else {
+                            repo.known_name(&me, p)?
+                        };
+                        rows.insert(p.clone(), (load_player(repo.conn(), p)?, remembered));
                     }
                     Ok((bundles, rows))
                 })
@@ -1552,15 +1559,26 @@ impl Poller {
                                 // own level, R100) replaces the slot's; the
                                 // rest of the bundle stays the worker's.
                                 db.row = fresh.row;
-                            } else if let Some(row) = reread.remove(&r.puuid) {
+                            } else if let Some((row, remembered)) = reread.remove(&r.puuid) {
                                 // A reset reread only restores a name the slot
                                 // is missing. A slot that already has one is
                                 // left alone: another task (a fill's
                                 // `reload_slot`) may have written a newer row
                                 // meanwhile, and the re-asked lookup is what
-                                // refreshes a renamed player.
-                                if db.row.as_ref().and_then(|x| x.name()).is_none() {
-                                    db.row = Some(row);
+                                // refreshes a renamed player. A row that is not
+                                // there at all leaves the slot's own row.
+                                if let Some(row) = row {
+                                    if db.row.as_ref().and_then(|x| x.name()).is_none() {
+                                        db.row = Some(row);
+                                    }
+                                }
+                                // R145: a hidden player's card reads
+                                // `db.remembered`, which a match row stored
+                                // while the slot was carried can have made
+                                // stale. Take the DB's best known name when it
+                                // has one; never blank the slot's.
+                                if let Some(known) = remembered {
+                                    db.remembered = Some(known);
                                 }
                             }
                             db

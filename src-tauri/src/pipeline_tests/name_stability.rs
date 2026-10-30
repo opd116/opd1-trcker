@@ -5,7 +5,7 @@
 //! slot's `players` row is read again the card has no name even though the
 //! DB stored it seconds earlier.
 //!
-//! Three tests, all through the real `Poller`:
+//! Four tests, all through the real `Poller`:
 //! - the dodge case (Agent Select -> Lobby) — the regression for the fix;
 //! - the match-end case (In Game -> Lobby) — the other reset transition the
 //!   defect reaches, with the same stale-slot setup;
@@ -16,6 +16,10 @@
 //!   slot and reads their full DB bundle — the carried stale row this fix
 //!   covers cannot survive that path. It is kept as coverage of the retry
 //!   transition, not as a reproducer of the defect.
+//! - the hidden player's remembered name (R145): a match row naming an
+//!   incognito party member is stored while its slot is carried, so the DB
+//!   knows a newer remembered name than the slot's bundle; the reset install
+//!   must show it (and still never asks name-service for the hidden player).
 //!
 //! Each test starts with the app opening into a live stage (mid Agent Select
 //! or mid match), waits until a name is on screen while its rank phase is
@@ -29,7 +33,7 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
-use opd1_core::model::{DisplayName, Field, LiveState};
+use opd1_core::model::{DisplayName, Field, LiveState, RememberedSource};
 use opd1_core::presence::Stage;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, ResponseTemplate};
@@ -72,13 +76,17 @@ async fn presence(h: &Harness, start: Value) -> Blob {
     cell
 }
 
-fn identity() -> Value {
-    json!({"Incognito": false, "HideAccountLevel": false,
+fn identity_of(incognito: bool) -> Value {
+    json!({"Incognito": incognito, "HideAccountLevel": false,
            "AccountLevel": 10, "PlayerCardID": "card"})
 }
 
-/// The user's party: ME and OTHER (both visible), id `party-1`.
-async fn mount_party(h: &Harness) {
+fn identity() -> Value {
+    identity_of(false)
+}
+
+/// The user's party: ME (visible) and `other`, id `party-1`.
+async fn mount_party_of(h: &Harness, other: &str, incognito: bool) {
     get(
         &h.server,
         &format!("/parties/v1/players/{ME}"),
@@ -90,14 +98,19 @@ async fn mount_party(h: &Harness) {
         "/parties/v1/parties/party-1",
         json!({"ID": "party-1", "Members": [
             {"Subject": ME, "PlayerIdentity": identity()},
-            {"Subject": OTHER, "PlayerIdentity": identity()}
+            {"Subject": other, "PlayerIdentity": identity_of(incognito)}
         ]}),
     )
     .await;
 }
 
-/// Agent Select `pg-1` with ME and OTHER as the allies.
-async fn mount_pregame(h: &Harness) {
+/// The user's party: ME and OTHER (both visible), id `party-1`.
+async fn mount_party(h: &Harness) {
+    mount_party_of(h, OTHER, false).await;
+}
+
+/// Agent Select `pg-1` with ME and `other` as the allies.
+async fn mount_pregame_of(h: &Harness, other: &str, incognito: bool) {
     get(
         &h.server,
         &format!("/pregame/v1/players/{ME}"),
@@ -107,8 +120,8 @@ async fn mount_pregame(h: &Harness) {
     let ally = json!({"TeamID": "Blue", "Players": [
         {"Subject": ME, "CharacterID": "agent", "CharacterSelectionState": "locked",
          "PlayerIdentity": identity()},
-        {"Subject": OTHER, "CharacterID": "agent", "CharacterSelectionState": "locked",
-         "PlayerIdentity": identity()}
+        {"Subject": other, "CharacterID": "agent", "CharacterSelectionState": "locked",
+         "PlayerIdentity": identity_of(incognito)}
     ]});
     get(
         &h.server,
@@ -116,6 +129,11 @@ async fn mount_pregame(h: &Harness) {
         json!({"MapID": SPLIT_PATH, "AllyTeam": ally, "Teams": [ally]}),
     )
     .await;
+}
+
+/// Agent Select `pg-1` with ME and OTHER as the allies.
+async fn mount_pregame(h: &Harness) {
+    mount_pregame_of(h, OTHER, false).await;
 }
 
 /// In Game `cg-1` with ME and OTHER on the same team.
@@ -138,15 +156,15 @@ async fn mount_coregame(h: &Harness) {
     .await;
 }
 
-/// OTHER's rank phase must not finish inside a test: the stage change happens
-/// once its name is on screen, so its slot still holds the bundle read before
-/// the name was stored. A 60 s answer is effectively non-completing (the
-/// worker is aborted at the stage change and no test awaits it), which keeps
-/// the window open regardless of the machine's load; a short delay could lose
-/// the race on a slow runner.
-async fn hold_other_rank_phase(h: &Harness) {
+/// `puuid`'s rank phase must not finish inside a test: the stage change
+/// happens once its name/state is on screen, so its slot still holds the
+/// bundle read before the DB learned anything new. A 60 s answer is
+/// effectively non-completing (the worker is aborted at the stage change and
+/// no test awaits it), which keeps the window open regardless of the machine's
+/// load; a short delay could lose the race on a slow runner.
+async fn hold_rank_phase(h: &Harness, puuid: &str) {
     Mock::given(method("GET"))
-        .and(path(format!("/mmr/v1/players/{OTHER}/competitiveupdates")))
+        .and(path(format!("/mmr/v1/players/{puuid}/competitiveupdates")))
         .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(60)))
         .with_priority(1)
         .mount(&h.server)
@@ -238,7 +256,7 @@ async fn assert_names_asked_again(h: &Harness, puts_before: usize) {
 #[tokio::test]
 async fn a_dodge_back_to_the_lobby_keeps_a_name_the_db_already_stores() {
     let h = harness().await;
-    hold_other_rank_phase(&h).await;
+    hold_rank_phase(&h, OTHER).await;
     mount_party(&h).await;
     mount_pregame(&h).await;
     let cell = presence(&h, blob("PREGAME", "competitive")).await;
@@ -272,7 +290,7 @@ async fn a_match_end_keeps_a_name_the_db_already_stores() {
     // so every slot was installed before the live names lookup stored the
     // name; the rank phase is still in flight when the match ends.
     let h = harness().await;
-    hold_other_rank_phase(&h).await;
+    hold_rank_phase(&h, OTHER).await;
     mount_party(&h).await;
     mount_coregame(&h).await;
     let cell = presence(&h, blob("INGAME", "unrated")).await;
@@ -315,7 +333,7 @@ async fn a_failed_roster_fetch_after_the_reset_shows_the_stored_name_on_the_retr
     // defect — which needs a carried slot, i.e. a transition whose fetch
     // succeeds (the dodge and match-end tests).
     let h = harness().await;
-    hold_other_rank_phase(&h).await;
+    hold_rank_phase(&h, OTHER).await;
     mount_party(&h).await;
     mount_pregame(&h).await;
     let cell = presence(&h, blob("PREGAME", "competitive")).await;
@@ -377,5 +395,146 @@ async fn a_failed_roster_fetch_after_the_reset_shows_the_stored_name_on_the_retr
         "the retry install shows the name the DB stores"
     );
     assert_names_asked_again(&h, puts_before).await;
+    poller.stop_worker();
+}
+
+/// Asserts every Lobby state published from `events_before` on that still
+/// shows HIDDEN carries the remembered name the DB holds.
+fn assert_lobby_shows_remembered_for_hidden(h: &Harness, events_before: usize, want: &DisplayName) {
+    let events = h.live_events();
+    let after: Vec<&LiveState> = events[events_before..]
+        .iter()
+        .filter(|s| s.stage == Stage::Menus)
+        .collect();
+    assert!(!after.is_empty(), "the Lobby was published");
+    for (i, state) in after.iter().enumerate() {
+        let Some(card) = state.players.iter().find(|c| c.puuid == HIDDEN) else {
+            continue;
+        };
+        match &card.name {
+            Field::Value(shown) if shown == want => {}
+            other => panic!(
+                "state {i} after the reset shows HIDDEN's card name as {other:?}, but the DB knows {want:?}"
+            ),
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_hidden_player_carried_through_a_reset_shows_the_remembered_name_the_db_now_knows() {
+    // R145: a hidden player's card shows `slot.db.remembered`, refreshed at a
+    // roster install, by that player's own sync publish, or by a names fill
+    // (`reload_slots`). A match row naming them can be stored in between
+    // (another roster player's matches phase, the post-match store, the
+    // backfill: all `Repo::upsert_match` through `sync::store_details`), and
+    // the reset install only re-read the `players` row, so the newer
+    // remembered data would not reach the card: it kept `HiddenPlayer`
+    // although the DB knew a name.
+    let h = harness().await;
+    // HIDDEN is the user's party member and stays incognito; its rank phase is
+    // held, so nothing reloads its bundle after the roster install.
+    hold_rank_phase(&h, HIDDEN).await;
+    mount_party_of(&h, HIDDEN, true).await;
+    mount_pregame_of(&h, HIDDEN, true).await;
+    let cell = presence(&h, blob("PREGAME", "competitive")).await;
+
+    let mut poller = Poller::new(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Pregame);
+
+    // The installed bundle knows no name yet: the card is in the hidden style.
+    {
+        let live = lock(&h.st.live);
+        let slot = live
+            .slots
+            .iter()
+            .find(|s| s.roster.puuid == HIDDEN)
+            .unwrap();
+        assert!(
+            slot.db.remembered.is_none(),
+            "nothing known at the bundle read"
+        );
+    }
+    let hidden_style =
+        h.st.live_state()
+            .players
+            .iter()
+            .find(|c| c.puuid == HIDDEN)
+            .map(|c| c.name.clone())
+            .unwrap();
+    assert!(
+        matches!(
+            hidden_style,
+            Field::Value(DisplayName::HiddenAgent { .. }) | Field::Value(DisplayName::HiddenPlayer)
+        ),
+        "the card is in the hidden style, not a name: {hidden_style:?}"
+    );
+
+    // The DB learns the name while the slot is carried. `store_split_match`
+    // writes a match ME and HIDDEN played (`Repo::upsert_match`, the same
+    // write `sync::store_details` does), so `known_name` is `OwnMatch`.
+    let start = store_split_match(&h.st).await;
+    let known =
+        h.st.db(|repo| repo.known_name(ME, HIDDEN))
+            .await
+            .flatten()
+            .expect("the DB knows HIDDEN now");
+    assert_eq!(
+        (known.name.as_str(), known.tag.as_str(), known.source),
+        ("SecretName", "HID", RememberedSource::OwnMatch)
+    );
+    {
+        let live = lock(&h.st.live);
+        let slot = live
+            .slots
+            .iter()
+            .find(|s| s.roster.puuid == HIDDEN)
+            .unwrap();
+        assert!(
+            slot.db.remembered.is_none(),
+            "the carried slot still has the bundle read before the store"
+        );
+    }
+    let want = DisplayName::Remembered {
+        name: "SecretName".into(),
+        tag: "HID".into(),
+        source: RememberedSource::OwnMatch,
+        from_map_id: None, // the asset tables are not loaded here
+        from_start_ms: Some(start),
+    };
+
+    // A dodge: the Lobby. HIDDEN stays in the party and the sync state resets.
+    let events_before = h.live_events().len();
+    *cell.lock().unwrap() = Some(blob("MENUS", "competitive"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Menus);
+    assert!(lock(&h.st.live)
+        .slots
+        .iter()
+        .any(|s| s.roster.puuid == HIDDEN));
+    assert_lobby_shows_remembered_for_hidden(&h, events_before, &want);
+
+    // A second reset transition (Lobby -> Agent Select, no reset -> Lobby,
+    // reset) keeps it as well.
+    let events_before = h.live_events().len();
+    *cell.lock().unwrap() = Some(blob("PREGAME", "competitive"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Pregame);
+    *cell.lock().unwrap() = Some(blob("MENUS", "competitive"));
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Menus);
+    assert_lobby_shows_remembered_for_hidden(&h, events_before, &want);
+
+    // Privacy: a live-incognito player's name is never requested.
+    for r in h.server.received_requests().await.unwrap() {
+        if r.method.as_str() == "PUT" && r.url.path() == "/name-service/v2/players" {
+            let body = String::from_utf8_lossy(&r.body);
+            assert!(
+                !body.contains(HIDDEN),
+                "a hidden player was sent to name-service: {body}"
+            );
+        }
+    }
     poller.stop_worker();
 }

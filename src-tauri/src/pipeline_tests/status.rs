@@ -563,8 +563,18 @@ async fn matchmaking_in_the_lobby_shows_the_queue_timer_and_ends_the_recap() {
     assert_eq!(status(&h).queue, None);
     h.st.set_status(|s| s.recap_match_id = Some("old-match".into()));
 
+    // When this first tick shows the search (with an entry time), the poller
+    // records "first saw the search". Capture that instant *now* and the
+    // first instant after the tick: the "no entry time" check below is about
+    // that start, which must lie between the two — taking `now_ms()` only
+    // after the tick made the comparison depend on this test finishing a few
+    // status reads inside the same millisecond (a loaded CI runner once took
+    // longer and failed `since >= before` although the app kept the correct
+    // start).
+    let searched_at = now_ms();
     *cell.lock().unwrap() = Some(queueing("MATCHMAKING", "2026.10.22-18.05.09"));
     poller.presence_tick(&h.session).await.unwrap();
+    let first_seen_by = now_ms();
     let s = status(&h);
     assert_eq!(
         s.queue,
@@ -575,13 +585,18 @@ async fn matchmaking_in_the_lobby_shows_the_queue_timer_and_ends_the_recap() {
     );
     assert_eq!(s.recap_match_id, None, "queueing again ends the recap");
 
-    // No entry time: the timer starts when the app first saw the search,
-    // and keeps that start.
+    // No entry time: the timer keeps the start from when the app first saw the
+    // search, and never moves later. A restarted timer (the no-entry tick's
+    // own `now`) is outside this window, so this catches it rather than just
+    // accepting a start that is at or after the first sighting.
     *cell.lock().unwrap() = Some(queueing("MATCHMAKING", "0001.01.01-00.00.00"));
-    let before = now_ms();
     poller.presence_tick(&h.session).await.unwrap();
     let since = status(&h).queue.unwrap().searching_since_ms;
-    assert!(since >= before);
+    assert!(
+        since >= searched_at && since <= first_seen_by,
+        "the timer keeps the first-sighting start ({since} not in {searched_at}..={first_seen_by})"
+    );
+    assert!(since <= now_ms(), "the timer never starts in the future");
     poller.presence_tick(&h.session).await.unwrap();
     assert_eq!(status(&h).queue.unwrap().searching_since_ms, since);
 

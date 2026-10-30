@@ -180,7 +180,8 @@ export async function appInfo(): Promise<AppInfo> {
 /**
  * The user's owned skins. `null` while no refresh was attempted yet (the game has not run since this account was
  * first seen); an attempted refresh that left nothing stored rejects with Rust's `Err`, so the screen shows its retry
- * state instead of the "never fetched" empty state.
+ * state instead of the "never fetched" empty state. A call superseded by an account switch also rejects, so the screen
+ * keeps the retry state while it re-asks for the current account.
  */
 export async function collection(): Promise<Collection | null> {
   if (dev()) return (await demoV2()).v2Collection();

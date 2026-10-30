@@ -20,6 +20,9 @@
 //!   yet" empty state. A refresh attempt that left no stored answer (Riot
 //!   error, request hold, store failure) is `Err` instead: the screen must not
 //!   tell the user to open the page while the game runs when it already was.
+//!   A call superseded by an account switch is `Err` too: it is not an
+//!   answer for the account on screen, so the screen keeps its retry state
+//!   and re-asks for the current account.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -114,7 +117,8 @@ fn due(last: Option<&(String, Instant)>, puuid: &str, now: Instant) -> bool {
 
 /// The user's owned skins; `None` while no refresh was attempted for this
 /// account yet (the game has not run since it was first seen), `Err` when a
-/// refresh attempt left no stored answer.
+/// refresh attempt left no stored answer or the account switched while the
+/// call was in flight.
 #[tauri::command]
 pub async fn collection(state: AppStateRef<'_>) -> Result<Option<Collection>, String> {
     let st = state.inner().clone();
@@ -131,11 +135,12 @@ async fn collection_for(st: &Arc<AppState>) -> Result<Option<Collection>, String
 
     // The Riot client can switch account while Riot answers: this call was
     // made for the account on screen when it started, and its stored copy (or
-    // its failure) belongs to that account, not to the one on screen now.
-    // `None` sends the Skins screen to ask again for the current account (it
-    // is the only caller of this command, and drops a stale answer).
+    // its failure) belongs to that account, not to the one on screen now. An
+    // `Err` is not an answer for the new account either, so the screen keeps
+    // its retry state (never the "no collection yet" empty state) and the
+    // account handler re-asks for the account that is on screen now.
     if lock(&st.live).self_puuid.as_deref() != Some(me.as_str()) {
-        return Ok(None);
+        return Err("skins unavailable".into());
     }
 
     let owner = me.clone();
@@ -538,15 +543,25 @@ mod tests {
             .mount(&h.server)
             .await;
 
-        // A starts the call; B takes over while Riot is still answering.
+        // A starts the call; B takes over while Riot is still answering. The
+        // mock records a request before waiting its configured delay, so
+        // waiting for the request (not for wall-clock time) makes the switch
+        // land mid-answer on any runner.
         let st = h.st.clone();
         let in_flight = tokio::spawn(async move { collection_for(&st).await });
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while store_requests(&h, &store_key_path()).await == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the entitlements request never reached the mock"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         lock(&h.st.live).self_puuid = Some(OTHER_ACCOUNT.into());
         assert_eq!(
             in_flight.await.unwrap(),
-            Ok(None),
-            "the old account's copy must not be served for the new one"
+            Err("skins unavailable".to_string()),
+            "a superseded call keeps the retry state, never the old account's copy"
         );
 
         // The screen's next call for the account on screen now gets its copy.

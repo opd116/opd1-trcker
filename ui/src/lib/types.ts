@@ -517,7 +517,7 @@ export interface OwnedSkin {
 
 /**
  * `invoke("collection")`: `null` while no refresh was attempted yet (the game has not run); an attempted refresh
- * that left nothing stored is a rejected invoke (Rust `Err`), not `null`.
+ * that left nothing stored, or one superseded by an account switch, is a rejected invoke (Rust `Err`), not `null`.
  */
 export interface Collection {
   items: OwnedSkin[];

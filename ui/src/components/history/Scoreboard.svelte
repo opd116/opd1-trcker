@@ -20,7 +20,7 @@
   import { isRankedTier, mapName } from "../../lib/meta";
   import { backFromMatch, matchOpenedByKeyboard, router, scrollHost } from "../../lib/router.svelte";
   import { nameParts } from "../../lib/savedv2";
-  import { live, meta, mystats, now, openMatch } from "../../lib/stores";
+  import { live, meta, myStatsForSelf, now, openMatch } from "../../lib/stores";
   import { tierColor, tierName } from "../../lib/theme";
   import { ACS_TIP, ADR_TIP, PM_TIP } from "../../lib/tips";
   import { tip } from "../../lib/tooltip.svelte";
@@ -91,11 +91,12 @@
   const halves = $derived(view ? halvesLine(view) : null);
   const map = $derived(view && view.mapId ? mapName($meta, view.mapId) : null);
 
-  /** The user's RR change and rank after it, for their own competitive match: their history row, else My Stats. */
+  /** The user's RR change and rank after it, for their own competitive match: their history row, else My Stats of the
+   * account on screen (a previous account's snapshot is not the user's). */
   let fetchedRow = $state<{ id: string; rrEarned: number | null; tierAfter: number | null } | null>(null);
   const yourRr = $derived.by(() => {
     if (!view || view.perspective !== "self" || view.queueId !== "competitive") return null;
-    return yourRrOf(matchId, cachedRow(matchId) ?? (fetchedRow?.id === matchId ? fetchedRow : null), $mystats);
+    return yourRrOf(matchId, cachedRow(matchId) ?? (fetchedRow?.id === matchId ? fetchedRow : null), $myStatsForSelf);
   });
 
   // Not in what is loaded: ask the newest page of the user's competitive history once (a local DB read).

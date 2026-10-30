@@ -217,6 +217,38 @@ describe("stores", () => {
     });
   });
 
+  describe("myStatsForSelf", () => {
+    const statsOf = (puuid: string) => ({ puuid }) as MyStats;
+    const closedWith = (puuid: string): LiveState => ({ stage: "closed", mapId: null, players: [], selfPuuid: puuid, settled: true });
+
+    it("passes a snapshot only for the account on screen, keeping the tri-state each consumer relies on", async () => {
+      const { applyLive, myStatsForSelf, mystats, selfId } = await load();
+      expect(get(myStatsForSelf)).toBeUndefined(); // nothing answered yet
+      mystats.set(null);
+      expect(get(myStatsForSelf)).toBeNull(); // Rust answered "unknown": — frames, no numbers
+      // Answered before any live state: the startup ordering — the snapshot is the only account known so far.
+      mystats.set(statsOf("a"));
+      expect(get(selfId)).toBe("a");
+      expect(get(myStatsForSelf)).toEqual(statsOf("a"));
+      applyLive(closedWith("a"));
+      expect(get(myStatsForSelf)).toEqual(statsOf("a")); // the same account: kept
+      applyLive(closedWith("b"));
+      // The switch, while Rust's push for B is in flight: A's numbers are never passed through.
+      expect(get(myStatsForSelf)).toBeUndefined();
+      mystats.set(statsOf("b"));
+      expect(get(myStatsForSelf)).toEqual(statsOf("b"));
+    });
+
+    it("a null answer stays null after a switch (— frames, never another account's numbers)", async () => {
+      const { applyLive, myStatsForSelf, mystats } = await load();
+      applyLive(closedWith("a"));
+      mystats.set(statsOf("a"));
+      applyLive(closedWith("b"));
+      mystats.set(null);
+      expect(get(myStatsForSelf)).toBeNull();
+    });
+  });
+
   describe("startFeeds under Tauri", () => {
     const good: Meta = { agents: {}, maps: { m1: { name: "Ascent" } }, tiers: {} };
 

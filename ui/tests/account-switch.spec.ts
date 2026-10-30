@@ -1,8 +1,10 @@
 // Riot account switch (fix/account-switch-data): the app supports switching Riot accounts while it stays open (the
 // Riot client's session drops and reconnects for the new account; Rust replaces the whole live state, so its self card's
 // puuid changes). An open screen must not keep the previous account's data: History, Skins and Saved re-ask for the
-// self card's account and drop a response that was issued for the old one, and the profile drawer / scoreboard (whose
-// values are relative to the user) close instead of showing the old account's numbers.
+// self card's account and drop a response that was issued for the old one, the profile drawer / scoreboard (whose
+// values are relative to the user) close instead of showing the old account's numbers, and the My Stats-driven
+// surfaces (Competitive, the nav rail's rank, the waiting view's last match/session) only draw the snapshot of the
+// account on screen until Rust's push for the new account lands.
 //
 // The DEV browser has no Rust, so this spec puts a fake behind Tauri's own door (window.isTauri,
 // __TAURI_INTERNALS__.invoke) exactly like close-match.spec.ts. The fake commands are account-aware: a `__account`
@@ -11,6 +13,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { detailsFor, emptyDetails, historyMatchId, matchFor, MAPS, PUUID } from "../src/lib/demo/cdv8";
+import { myStatsFull } from "../src/lib/demo/mystats";
 import { SCENES } from "../src/lib/demo/scenes";
 import { demoStatus } from "../src/lib/demo/v2/status";
 import { DEFAULT_SETTINGS } from "../src/lib/demo/v2/store";
@@ -19,6 +22,7 @@ import type {
   HistoryPage,
   HistoryRow,
   LiveState,
+  MyStats,
   OwnedSkin,
   SavedPlayer,
 } from "../src/lib/types";
@@ -132,6 +136,18 @@ const HISTORY = { a: historyPage(ROW_A, START), b: historyPage(ROW_B, START - HO
 const COLLECTION = { a: collectionA, b: collectionB };
 const SAVED = { a: [savedRow(3, 2, 2)], b: [savedRow(9, 8, 5)] };
 
+/** Per-account My Stats with distinct rank RR figures: a stale snapshot is visible by its numbers (111 vs 222). */
+const statsFor = (puuid: string, tier: number, rr: number): MyStats => {
+  const s = structuredClone(myStatsFull());
+  s.puuid = puuid;
+  s.rank.tier = tier;
+  s.rank.rr = rr;
+  return s;
+};
+const STATS_A = statsFor(A_PUUID, 15, 111);
+const STATS_B = statsFor(B_PUUID, 21, 222);
+const STATS = { a: STATS_A, b: STATS_B };
+
 /** Mara's drawer: its encounter rows open scoreboards (the drawer → scoreboard → switch case). */
 const MARA_DETAILS = detailsFor("mara", LIVE_A.players.find((c) => c.puuid === MARA), LIVE_A.players);
 
@@ -156,6 +172,7 @@ const data = {
   history: HISTORY,
   collection: COLLECTION,
   saved: SAVED,
+  stats: STATS,
   details: { [MARA]: MARA_DETAILS, [SAVED_PUUID]: SAVED_DETAILS },
   matches: {
     [ROW_A]: matchFor(ROW_A, LIVE_A.players),
@@ -232,7 +249,7 @@ async function bootInTauri(page: Page, start: Start = "ingame"): Promise<void> {
           case "player_marks":
             return { saved: [], notes: {}, notSmurf: [] };
           case "my_stats":
-            return null;
+            return structuredClone(d.stats[account]);
           case "profile_extras":
             return { puuid: args?.puuid, maps: [], liveMates: [] };
           case "player_details":
@@ -422,5 +439,33 @@ test.describe("Riot account switch", () => {
       await expect(dialog).toHaveCount(0);
       await expect(row.locator(".rec").first().locator(".games")).toHaveText("9 games");
     });
+  });
+
+  // Rust re-pushes My Stats for the new account on a switch, but until that push lands the previous account's numbers
+  // must not be drawn. The fake keeps account A's snapshot after the switch (the event for B is emitted at the end).
+  test("a switch with My Stats still on account A shows no A numbers until B's push lands", async ({ page }) => {
+    await bootInTauri(page, "closed");
+    // A's snapshot is on screen: the nav rail's rank, the waiting view's last match and its rank card.
+    await expect(page.locator("nav.rail .rank .rr")).toHaveText("111 RR");
+    await expect(page.locator("main .lm-cap")).toHaveCount(1);
+    await expect(page.locator("main .rk-col .mono.dim")).toHaveText("111 / 100 RR");
+
+    // The account switches; My Stats for B has not arrived yet (the store still holds A's snapshot).
+    await switchAccount(page, CLOSED_B);
+    await expect(page.locator("nav.rail .rank .rr")).toHaveText("— RR");
+    await expect(page.locator("main .lm-cap")).toHaveCount(0); // the last match card is left out: not B's
+    await expect(page.locator("main .rk-col .mono.dim")).toHaveCount(0);
+    await expect(page.locator("main")).not.toContainText("111 / 100 RR");
+
+    // Competitive: the skeleton, not A's rank/numbers (nothing answered yet for B).
+    await nav(page, "Comp").click();
+    await expect(page.locator("main .mystats")).toHaveAttribute("aria-busy", "true");
+    await expect(page.locator("main")).not.toContainText("111 / 100 RR");
+
+    // Rust's push for B arrives.
+    await page.evaluate((stats) => (window as unknown as Fake).__emit("mystats", stats), STATS_B);
+    await expect(page.locator("main .mystats")).toHaveAttribute("aria-busy", "false");
+    await expect(page.locator("main")).toContainText("222 / 100 RR");
+    await expect(page.locator("nav.rail .rank .rr")).toHaveText("222 RR");
   });
 });

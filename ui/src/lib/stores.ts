@@ -48,6 +48,19 @@ export const selfId = derived(
 );
 
 /**
+ * My Stats only while the snapshot belongs to the account the app is showing (`mystats.puuid === selfId`). On an account
+ * switch Rust re-pushes My Stats for the new account, but until that push lands the previous account's snapshot must not
+ * be drawn by any user-relative surface: this keeps the tri-state each of them relies on — `undefined` = nothing answered
+ * yet *for this account* (skeletons), `null` = Rust answered "unknown" (the `—` frames; a null answer carries no account
+ * and is never another account's numbers), a snapshot = this account's. While no account is known yet (`selfId` null)
+ * the snapshot passes through: that is the startup ordering (`my_stats` answering before the first `live` state) and
+ * there is nothing to compare it with.
+ */
+export const myStatsForSelf = derived([mystats, selfId], ([$mystats, $selfId]) =>
+  $mystats && $selfId !== null && $mystats.puuid !== $selfId ? undefined : $mystats,
+);
+
+/**
  * Runs `fn` when the Riot account changes while the app is open: two different PUUIDs were the known account in turn.
  * A change to or from "unknown" (nothing known at startup, a dropped connection) is not a switch, so the first account
  * learned never fires it and Closed↔Menus never does. One case can fire it at boot: the first live snapshot carries the

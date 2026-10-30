@@ -9,7 +9,7 @@
   import { assetUrl } from "../../lib/assets";
   import { retryImg } from "../../lib/imgRetry";
   import { go, router, type Screen } from "../../lib/router.svelte";
-  import { live, meta, mystats } from "../../lib/stores";
+  import { live, meta, myStatsForSelf } from "../../lib/stores";
   import { tierColor, tierShort } from "../../lib/theme";
   import { tip } from "../../lib/tooltip.svelte";
   import Dot from "./Dot.svelte";
@@ -34,11 +34,11 @@
     ($live?.stage === "pregame" || $live?.stage === "ingame") && $appStatus?.conn !== "error",
   );
 
-  /** The user's rank: the live card's (freshest), else My Stats'. */
+  /** The user's rank: the live card's (freshest), else My Stats'. My Stats only counts for the account on screen. */
   const self = $derived.by(() => {
     const card = $live?.players.find((p) => p.isSelf);
     if (card?.rank) return { tier: card.rank.tier, rr: card.rank.rr };
-    const r = $mystats?.rank;
+    const r = $myStatsForSelf?.rank;
     if (r && r.tier !== null) return { tier: r.tier, rr: r.rr };
     return null;
   });

@@ -29,7 +29,7 @@
   } from "../../lib/livev2";
   import { mapName } from "../../lib/meta";
   import { openMatch } from "../../lib/router.svelte";
-  import { meta, mystats } from "../../lib/stores";
+  import { meta, myStatsForSelf } from "../../lib/stores";
   import { tierColor, tierName, tierShort } from "../../lib/theme";
   import { tip } from "../../lib/tooltip.svelte";
   import type { LiveState } from "../../lib/types";
@@ -44,7 +44,7 @@
   const checks = $derived(waitChecks($appStatus, live?.stage ?? null));
   const queue = $derived(menus ? ($appStatus?.queue ?? null) : null);
   const party = $derived(menus && live ? selfFirst(live.players).slice(0, 5) : []);
-  const ms = $derived($mystats ?? null);
+  const ms = $derived($myStatsForSelf ?? null);
   const last = $derived(ms?.last5[0] ?? null);
   const rank = $derived(ms && typeof ms.rank.tier === "number" ? ms.rank : null);
 

@@ -1,5 +1,6 @@
 // The History list's module cache must not outlive a Riot account switch: a remount (Back from a scoreboard, or the
-// screen reopened) draws it before its refresh answers, so the old account's rows would show for the new one.
+// screen reopened) draws it before its refresh answers, so the old account's rows would show for the new one — and an
+// instance the switch unmounted can still answer a request it made for the previous account.
 import { describe, expect, it, vi } from "vitest";
 import type { HistoryPage, LiveState, PlayerCard } from "../../lib/types";
 
@@ -41,25 +42,53 @@ const liveWith = (puuid: string, stage: LiveState["stage"] = "menus"): LiveState
 async function load() {
   vi.resetModules();
   const stores = await import("../../lib/stores");
-  const { historyCache } = await import("./cache");
-  return { ...stores, historyCache };
+  const cache = await import("./cache");
+  return { ...stores, ...cache };
 }
 
 describe("historyCache", () => {
-  it("is cleared when the Riot account changes", async () => {
-    const { applyLive, historyCache } = await load();
+  it("is cleared when the Riot account changes, and starts a new epoch", async () => {
+    const { applyLive, historyCache, putHistoryPage } = await load();
     applyLive(liveWith("account-a"));
-    historyCache.pages.competitive = page("a-match");
+    const epoch = historyCache.epoch;
+    expect(putHistoryPage(epoch, "competitive", page("a-match"))).toBe(true);
     expect(historyCache.pages.competitive?.rows[0]?.matchId).toBe("a-match");
     applyLive(liveWith("account-b"));
     expect(historyCache.pages).toEqual({});
+    expect(historyCache.epoch).not.toBe(epoch);
   });
 
   it("keeps its pages across a stage change of the same account", async () => {
-    const { applyLive, historyCache } = await load();
+    const { applyLive, historyCache, putHistoryPage } = await load();
     applyLive(liveWith("account-a", "ingame"));
-    historyCache.pages.competitive = page("a-match");
+    putHistoryPage(historyCache.epoch, "competitive", page("a-match"));
     applyLive(liveWith("account-a", "menus"));
     expect(historyCache.pages.competitive?.rows[0]?.matchId).toBe("a-match");
+  });
+
+  it("a page asked for under the old account's epoch cannot repopulate the cache after a switch", async () => {
+    const { applyLive, historyCache, putHistoryPage } = await load();
+    applyLive(liveWith("account-a"));
+    const oldEpoch = historyCache.epoch;
+    expect(putHistoryPage(oldEpoch, "competitive", page("a-match"))).toBe(true);
+    applyLive(liveWith("account-b")); // the switch: the module handler clears the cache and starts a new epoch
+    // The unmounted list's request for account A answers late: it must not write A's page back.
+    expect(putHistoryPage(oldEpoch, "competitive", page("a-late"))).toBe(false);
+    expect(historyCache.pages).toEqual({});
+    // The new account's request writes normally.
+    expect(putHistoryPage(historyCache.epoch, "competitive", page("b-match"))).toBe(true);
+    expect(historyCache.pages.competitive?.rows[0]?.matchId).toBe("b-match");
+  });
+
+  it("starts one epoch per account (a second handler call does not bump again)", async () => {
+    const { applyLive, historyCache, historyCacheEpoch } = await load();
+    applyLive(liveWith("account-a"));
+    expect(historyCache.epoch).toBe(0);
+    applyLive(liveWith("account-b")); // this module's own account handler starts B's epoch
+    const now = historyCache.epoch;
+    expect(now).toBe(1);
+    // The mounted list's handler calls it too: same account, so no second bump.
+    expect(historyCacheEpoch()).toBe(now);
+    expect(historyCache.epoch).toBe(now);
   });
 });

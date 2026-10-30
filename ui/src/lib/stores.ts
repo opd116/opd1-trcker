@@ -3,6 +3,7 @@ import { derived, get, readable, writable } from "svelte/store";
 import { myStats, tauriBridge } from "./api";
 import { loadMeta, openDetails, openMatch, startLive, startMyStats } from "./boot";
 import { backFromMatch, closeProfile, onStage, setLiveCardLookup, startPage } from "./router.svelte";
+import { hideTip } from "./tooltip.svelte";
 import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails, Stage } from "./types";
 import { reportError } from "./uilog";
 
@@ -20,20 +21,35 @@ setLiveCardLookup((puuid) => get(live)?.players.find((c) => c.puuid === puuid));
 export const mystats = writable<MyStats | null | undefined>(undefined);
 
 /**
+ * The puuid a live state names as the user, if it names one. A live state without a self card (a Closed state for an
+ * account the DB has no player row for yet) says nothing about the account.
+ */
+const liveSelf = derived(live, ($live) => $live?.players.find((p) => p.isSelf)?.puuid ?? null);
+
+/** The last account a live state named: a self-less live state must not move the account back through `mystats`. */
+let lastLiveSelf: string | null = null;
+liveSelf.subscribe((id) => {
+  if (id !== null) lastLiveSelf = id;
+});
+
+/**
  * The Riot account the app is showing: the live self card's puuid (Rust replaces the whole live state for the new
- * session on an account switch, so its self card is the new account at once), else the My Stats snapshot's puuid (while
- * no live state has arrived). null while neither is known.
+ * session on an account switch, so its self card is the new account at once), else the last account a live state named,
+ * else the My Stats snapshot's puuid — which is only a fallback before any live state has named one, so a stale My
+ * Stats snapshot can never move it back. null while none is known.
  */
 export const selfId = derived(
-  [live, mystats],
-  ([$live, $mystats]) => $live?.players.find((p) => p.isSelf)?.puuid ?? $mystats?.puuid ?? null,
+  [liveSelf, mystats],
+  ([$liveSelf, $mystats]) => $liveSelf ?? lastLiveSelf ?? $mystats?.puuid ?? null,
 );
 
 /**
- * Runs `fn` when the Riot account changes while the app is open: two different PUUIDs were the current account in turn.
- * A change to or from "unknown" (startup, a dropped connection, the live state still being rebuilt) is not a switch, so
- * startup and Closed↔Menus never fire it; the previous known account is kept until another one is known. Returns the
- * unsubscribe function.
+ * Runs `fn` when the Riot account changes while the app is open: two different PUUIDs were the known account in turn.
+ * A change to or from "unknown" (nothing known at startup, a dropped connection) is not a switch, so the first account
+ * learned never fires it and Closed↔Menus never does. One case can fire it at boot: the first live snapshot carries the
+ * account stored in the DB and the connection then reports a different one (Riot was switched while the app was closed)
+ * — that is a real account change, and the screens must not keep the stored account's data. Returns the unsubscribe
+ * function.
  */
 export function onAccountChange(fn: (from: string, to: string) => void): () => void {
   let last: string | null = null;
@@ -108,11 +124,13 @@ export function applyLive(s: LiveState | null): void {
 /**
  * A Riot account switch: the open profile drawer and scoreboard show values relative to the user (encounters
  * with/against, "your result", the user's own row) and were built for the previous account. They cannot be corrected in
- * place, so both close instead of staying up with the old account's numbers; the screen a scoreboard returns to is
- * refreshed for the new account by the screen itself (Saved / History / Skins). A drawer a scoreboard came from is not
- * reopened: the switch did not ask for it, and the screen under it is the new account's.
+ * place, so both close (and the open tooltip, which may describe the old account's card) instead of staying up with the
+ * old account's numbers; the screen a scoreboard returns to is refreshed for the new account by the screen itself
+ * (Saved / History / Skins). A drawer a scoreboard came from is not reopened: the switch did not ask for it, and the
+ * screen under it is the new account's.
  */
 onAccountChange(() => {
+  hideTip();
   closeProfile();
   backFromMatch({ reopenProfile: false });
 });

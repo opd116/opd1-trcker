@@ -34,7 +34,7 @@
   import type { HistoryPage, HistoryQueue, HistoryRow } from "../../lib/types";
   import { reportError } from "../../lib/uilog";
   import Skel from "../Skel.svelte";
-  import { historyCache } from "./cache";
+  import { historyCache, historyCacheEpoch, putHistoryPage } from "./cache";
 
   const PAGE = 50;
   const TABS: { q: HistoryQueue; label: string }[] = [
@@ -48,9 +48,13 @@
   /** Bumped by every queue switch and refresh: an answer for an older request is dropped. */
   let gen = 0;
 
-  function put(q: HistoryQueue, p: HistoryPage) {
-    historyCache.pages[q] = p;
-    if (q === queue) data = p;
+  /**
+   * Writes an answered page into the cache and the list when it was asked for under the cache's current epoch. A page
+   * of an older account's epoch is dropped: the instance that asked may have been unmounted by the switch, and its
+   * answer must not repopulate the cleared cache.
+   */
+  function put(q: HistoryQueue, p: HistoryPage, epoch: number) {
+    if (putHistoryPage(epoch, q, p) && q === queue) data = p;
   }
 
   /** Rust's page ceiling (`HISTORY_MAX_LIMIT`): one call never returns more rows. */
@@ -62,6 +66,7 @@
    */
   async function refresh(q: HistoryQueue, n = PAGE) {
     const g = ++gen;
+    const epoch = historyCache.epoch;
     busy = true;
     try {
       const p = await matchHistory(q, 0, Math.min(MAX_PAGE, Math.max(PAGE, n)));
@@ -69,8 +74,8 @@
       if (g === gen) {
         if (n > MAX_PAGE && had.length > p.rows.length) {
           const fresh = new Set(p.rows.map((r) => r.matchId));
-          put(q, { ...p, rows: [...p.rows, ...had.filter((r) => !fresh.has(r.matchId))] });
-        } else put(q, p);
+          put(q, { ...p, rows: [...p.rows, ...had.filter((r) => !fresh.has(r.matchId))] }, epoch);
+        } else put(q, p, epoch);
       }
     } catch (err) {
       reportError("match_history", err);
@@ -99,13 +104,14 @@
     if (busy || !d || d.rows.length >= d.total) return;
     const q = queue;
     const g = gen;
+    const epoch = historyCache.epoch;
     busy = true;
     let added = 0;
     try {
       const p = await matchHistory(q, d.rows.length, PAGE);
       const fresh = p.rows.filter((r) => !d.rows.some((x) => x.matchId === r.matchId));
       added = fresh.length;
-      if (g === gen && q === queue) put(q, { ...p, rows: [...d.rows, ...fresh] });
+      if (g === gen && q === queue) put(q, { ...p, rows: [...d.rows, ...fresh] }, epoch);
     } catch (err) {
       reportError("match_history", err);
     } finally {
@@ -147,11 +153,13 @@
     lastStage = st;
   });
 
-  // A Riot account switch: the rows on screen are the previous account's. They leave at once (the card's skeleton shows)
-  // and the new account's first page is asked for; a page still in flight for the old account is dropped by `refresh`'s
-  // `gen` (and the module cache is cleared by cache.ts, so a remount cannot draw the old rows either).
+  // A Riot account switch: the rows on screen are the previous account's. The cache starts its new epoch (both handlers
+  // call `historyCacheEpoch`, and it is idempotent per account, so their order does not matter), the shown page empties
+  // (the card's skeleton shows) and the new account's first page is asked for. `refresh` captures the new epoch and
+  // bumps `gen`, so a page asked for under the old account is dropped even when it lands after this instance is gone.
   onMount(() =>
     onAccountChange(() => {
+      historyCacheEpoch();
       data = null;
       void refresh(queue, PAGE);
     }),

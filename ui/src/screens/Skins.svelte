@@ -53,11 +53,14 @@
     };
   });
 
-  // A Riot account switch: the collection on screen is the previous account's. It leaves at once (the neutral skeleton
-  // shows while the new account's answer travels) and the new account's collection is asked for; Rust's stored copy is
-  // per puuid, so the ask is cheap when the new account has one.
+  // A Riot account switch: the collection on screen is the previous account's. `gen` is bumped here, synchronously, so
+  // an answer asked for the old account that lands before the effect re-runs is already stale (the effect's own `++gen`
+  // covers later asks). The collection leaves at once (the neutral skeleton shows while the new account's answer
+  // travels) and the new account's collection is asked for; Rust's stored copy is per puuid, so the ask is cheap when
+  // the new account has one.
   $effect(() =>
     onAccountChange(() => {
+      gen++;
       coll = undefined;
       failed = false;
       ask++;

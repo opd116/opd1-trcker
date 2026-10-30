@@ -36,6 +36,9 @@ const LIVE_B: LiveState = (() => {
   self.name = { kind: "visible", name: "Alt", tag: "B0B0" };
   return next;
 })();
+// The switch keeps the live stage on purpose: History and Skins already refresh on a stage change (a pre-existing path),
+// and that must not be what makes these cases pass — only the account change may.
+expect(LIVE_A.stage).toBe(LIVE_B.stage);
 
 /** The two accounts' own newest matches: different match ids, so a stale row is visible by id. */
 const ROW_A = historyMatchId(0);
@@ -115,6 +118,9 @@ const HISTORY = { a: historyPage(ROW_A, START), b: historyPage(ROW_B, START - HO
 const COLLECTION = { a: collectionA, b: collectionB };
 const SAVED = { a: [savedRow(3, 2, 2)], b: [savedRow(9, 8, 5)] };
 
+/** Mara's drawer: its encounter rows open scoreboards (the drawer → scoreboard → switch case). */
+const MARA_DETAILS = detailsFor("mara", LIVE_A.players.find((c) => c.puuid === MARA), LIVE_A.players);
+
 const data = {
   meta: JSON.parse(readFileSync(join(UI_DIR, "src", "lib", "demo", "meta.json"), "utf8")) as unknown,
   live: LIVE,
@@ -123,8 +129,12 @@ const data = {
   history: HISTORY,
   collection: COLLECTION,
   saved: SAVED,
-  details: { [MARA]: detailsFor("mara", LIVE_A.players.find((c) => c.puuid === MARA), LIVE_A.players) },
-  matches: { [ROW_A]: matchFor(ROW_A, LIVE_A.players), [ROW_B]: matchFor(ROW_B, LIVE_A.players) },
+  details: { [MARA]: MARA_DETAILS },
+  matches: {
+    [ROW_A]: matchFor(ROW_A, LIVE_A.players),
+    [ROW_B]: matchFor(ROW_B, LIVE_A.players),
+    ...Object.fromEntries(MARA_DETAILS.encounters.map((e) => [e.matchId, matchFor(e.matchId, LIVE_A.players)])),
+  },
 };
 
 type Account = "a" | "b";
@@ -140,6 +150,13 @@ type Fake = {
 
 const calls = (page: Page): Promise<string[]> => page.evaluate(() => (window as unknown as Fake).__calls.slice());
 const nav = (page: Page, label: string) => page.locator(`nav.rail button[aria-label="${label}"]`);
+
+/** The app's own double-click guard (lib/clickGuard.ts): a click within 400 ms of opening a drawer may be swallowed. */
+async function guardDone(page: Page): Promise<void> {
+  await expect
+    .poll(() => page.evaluate(`import("/src/lib/clickGuard.ts").then(({ cardOpenGuard }) => cardOpenGuard.swallows())`))
+    .toBe(false);
+}
 
 /** Boot the app as if inside Tauri, with account-aware answers for every command the screens ask. */
 async function bootInTauri(page: Page): Promise<void> {
@@ -249,17 +266,21 @@ test.describe("Riot account switch", () => {
     // Account A's first page never answers on its own: the switch happens while it is in flight.
     await page.evaluate(() => ((window as unknown as Fake).__hangHistory = true));
     await nav(page, "History").click();
+    // The request really is held in the fake and has not answered (not just "slow to mount").
+    await expect.poll(() => page.evaluate(() => (window as unknown as Fake).__hungHistory)).toBe(true);
     await expect(page.locator(`main [data-match-id="${ROW_A}"]`)).toHaveCount(0); // still loading: no rows yet
 
     await switchAccount(page);
     // The switch asks again, for B, and that page draws.
     await expect(page.locator(`main [data-match-id="${ROW_B}"]`)).toHaveCount(1);
 
-    // Now A's page arrives: it was issued for the previous account and must be dropped, not drawn.
+    // Now A's page arrives: it was issued for the previous account and must be dropped, not drawn. Releasing resolves
+    // the fake's promise; the list handles it in microtasks, and Svelte flushes before the next task, so one task plus
+    // two frames puts the assertions after any draw the stale answer could have caused (no fixed-duration sleep).
     await page.evaluate(async () => {
-      const w = window as unknown as Fake;
-      w.__releaseHistory?.();
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      (window as unknown as Fake).__releaseHistory?.();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
     });
     await expect(page.locator(`main [data-match-id="${ROW_A}"]`)).toHaveCount(0);
     await expect(page.locator(`main [data-match-id="${ROW_B}"]`)).toHaveCount(1);
@@ -308,5 +329,24 @@ test.describe("Riot account switch", () => {
 
     await expect(board).toHaveCount(0);
     await expect(page.locator(`main [data-match-id="${ROW_B}"]`)).toHaveCount(1);
+  });
+
+  test("a scoreboard opened from the drawer closes on the switch and its drawer does not reopen", async ({ page }) => {
+    await bootInTauri(page);
+    await page.locator("main [data-row]").filter({ hasText: "Mara" }).first().click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toHaveAttribute("aria-busy", "false");
+    await guardDone(page);
+    // An encounter row opens the scoreboard from the drawer (Back from it would reopen the drawer).
+    await dialog.getByRole("button", { name: /Open scoreboard$/ }).first().click();
+    const board = page.locator('main .match[aria-busy="false"]');
+    await expect(board).toHaveCount(1);
+    await expect(dialog).toHaveCount(0); // opening the scoreboard already closed the drawer
+
+    await switchAccount(page);
+
+    await expect(board).toHaveCount(0);
+    // The switch closes the scoreboard for the new account, not back through the old account's drawer.
+    await expect(dialog).toHaveCount(0);
   });
 });

@@ -93,15 +93,18 @@ describe("stores", () => {
       settled: true,
     });
 
-    it("selfId is the live self card, else the My Stats puuid while no live state names one", async () => {
+    it("selfId prefers the live self card, keeps the last one a live state named, and uses My Stats only before that", async () => {
       const { applyLive, mystats, selfId } = await load();
       expect(get(selfId)).toBeNull();
       mystats.set({ puuid: "snapshot-account" } as MyStats);
-      expect(get(selfId)).toBe("snapshot-account");
+      expect(get(selfId)).toBe("snapshot-account"); // nothing live yet: the snapshot is the only account known
       applyLive(liveWith("live-account"));
       expect(get(selfId)).toBe("live-account");
-      applyLive({ ...liveWith("live-account"), players: [] }); // a live state with no self card: the snapshot stands in
-      expect(get(selfId)).toBe("snapshot-account");
+      // A self-less live state (the Closed state for an account with no stored player row) must not move the account
+      // back through a stale My Stats snapshot.
+      mystats.set({ puuid: "stale-snapshot" } as MyStats);
+      applyLive({ ...liveWith("live-account"), players: [] });
+      expect(get(selfId)).toBe("live-account");
     });
 
     it("fires once for a real account switch, never on startup, a dropped connection or the same account", async () => {
@@ -126,6 +129,54 @@ describe("stores", () => {
       off();
       applyLive(liveWith("d"));
       expect(seen).toHaveLength(2);
+    });
+
+    it("a stale My Stats snapshot cannot move a known live account back (no switch fires)", async () => {
+      const { applyLive, mystats, onAccountChange, selfId } = await load();
+      applyLive(liveWith("a"));
+      const seen: [string, string][] = [];
+      const off = onAccountChange((from, to) => seen.push([from, to]));
+      mystats.set({ puuid: "stale-b" } as MyStats); // My Stats from another account, the live state still names A
+      expect(get(selfId)).toBe("a");
+      applyLive({ ...liveWith("a"), players: [] }); // and a live state that names nobody
+      expect(get(selfId)).toBe("a");
+      expect(seen).toEqual([]);
+      off();
+    });
+
+    it("live B self and My Stats B arriving in either order fire exactly once", async () => {
+      // Live first, then the My Stats push.
+      const first = await load();
+      first.applyLive(liveWith("a"));
+      const seen1: [string, string][] = [];
+      const off1 = first.onAccountChange((from, to) => seen1.push([from, to]));
+      first.applyLive(liveWith("b"));
+      first.mystats.set({ puuid: "b" } as MyStats);
+      expect(seen1).toEqual([["a", "b"]]);
+      off1();
+
+      // My Stats first (it does not move the account while the live self card still names A), then the live state.
+      const second = await load();
+      second.applyLive(liveWith("a"));
+      const seen2: [string, string][] = [];
+      const off2 = second.onAccountChange((from, to) => seen2.push([from, to]));
+      second.mystats.set({ puuid: "b" } as MyStats);
+      expect(seen2).toEqual([]);
+      second.applyLive(liveWith("b"));
+      expect(seen2).toEqual([["a", "b"]]);
+      off2();
+    });
+
+    it("a My Stats-only change before any live self fires once", async () => {
+      const { mystats, onAccountChange, selfId } = await load();
+      const seen: [string, string][] = [];
+      const off = onAccountChange((from, to) => seen.push([from, to]));
+      mystats.set({ puuid: "a" } as MyStats); // the first account learned: not a switch
+      expect(get(selfId)).toBe("a");
+      expect(seen).toEqual([]);
+      mystats.set({ puuid: "b" } as MyStats);
+      expect(seen).toEqual([["a", "b"]]);
+      off();
     });
 
     it("a switch closes the open drawer, and a scoreboard back to its source screen, instead of the old account's numbers", async () => {

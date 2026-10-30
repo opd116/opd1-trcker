@@ -5,7 +5,7 @@
 //! slot's `players` row is read again the card has no name even though the
 //! DB stored it seconds earlier.
 //!
-//! Four tests, all through the real `Poller`:
+//! Six tests, all through the real `Poller`:
 //! - the dodge case (Agent Select -> Lobby) — the regression for the fix;
 //! - the match-end case (In Game -> Lobby) — the other reset transition the
 //!   defect reaches, with the same stale-slot setup;
@@ -16,17 +16,24 @@
 //!   slot and reads their full DB bundle — the carried stale row this fix
 //!   covers cannot survive that path. It is kept as coverage of the retry
 //!   transition, not as a reproducer of the defect.
-//! - the hidden player's remembered name (R145): a match row naming an
-//!   incognito party member is stored while its slot is carried, so the DB
+//! - the hidden player's remembered name at a reset (R145): a match row naming
+//!   an incognito party member is stored while its slot is carried, so the DB
 //!   knows a newer remembered name than the slot's bundle; the reset install
-//!   must show it (and still never asks name-service for the hidden player).
+//!   must show it (None -> Some, and older -> newer), never blanks it, and
+//!   still never asks name-service for the hidden player;
+//! - the remembered-name recency guard: a slot whose remembered name is newer
+//!   than a racing reread keeps it;
+//! - the cross-player match store: a match stored while a hidden player is
+//!   already on screen and synced refreshes their carried card at once, and an
+//!   older store (or one naming no carried hidden player) refreshes nothing.
 //!
-//! Each test starts with the app opening into a live stage (mid Agent Select
-//! or mid match), waits until a name is on screen while its rank phase is
-//! still in flight (the slot provably holds the older row), then lets the
-//! stage go back to the Lobby: the player stays on the roster and the DB
-//! knows the name, so no published Lobby state may show the name as
-//! loading/missing.
+//! Five tests start with the app opening into a live stage (mid Agent Select
+//! or mid match), wait until a name is on screen while its rank phase is still
+//! in flight (the slot provably holds the older row), then let the stage go
+//! back to the Lobby: the player stays on the roster and the DB knows the
+//! name, so no published Lobby state may show the name as loading/missing.
+//! The cross-player store tests stay in Agent Select: the store (not a stage
+//! change) is what must refresh the card there.
 
 use std::time::Duration;
 
@@ -678,12 +685,12 @@ async fn a_remembered_name_newer_than_the_reread_is_not_downgraded_by_a_reset() 
     poller.stop_worker();
 }
 
-/// A match `m-late` the user and HIDDEN played, where match-details carries
-/// HIDDEN's name (post-match answers can show it, R142/R143/R145).
-fn late_match_body(start_ms: i64) -> Value {
+/// A match `match_id` the user and `puuid` played, where match-details carries
+/// `name#tag` for them (post-match answers can show it, R142/R143/R145).
+fn match_body(match_id: &str, start_ms: i64, puuid: &str, name: &str, tag: &str) -> Value {
     json!({
         "matchInfo": {
-            "matchId": "m-late", "mapId": SPLIT_PATH,
+            "matchId": match_id, "mapId": SPLIT_PATH,
             "gameStartMillis": start_ms, "queueId": "unrated",
             "isRanked": false, "completionState": "Completed"
         },
@@ -691,7 +698,7 @@ fn late_match_body(start_ms: i64) -> Value {
             {"subject": ME, "gameName": "Me", "tagLine": "TAG", "teamId": "Blue",
              "partyId": "p", "characterId": "agent",
              "stats": {"score": 1, "roundsPlayed": 20, "kills": 20, "deaths": 10, "assists": 3}},
-            {"subject": HIDDEN, "gameName": "LateName", "tagLine": "LATE", "teamId": "Blue",
+            {"subject": puuid, "gameName": name, "tagLine": tag, "teamId": "Blue",
              "partyId": "p", "characterId": "agent",
              "stats": {"score": 1, "roundsPlayed": 20, "kills": 5, "deaths": 15, "assists": 1}}
         ],
@@ -701,6 +708,20 @@ fn late_match_body(start_ms: i64) -> Value {
         ],
         "roundResults": []
     })
+}
+
+/// Mounts `match_id` with those names and stores it through the real
+/// `sync::store_details` (the path the worker, the backfill and Match Details
+/// all use).
+async fn store_late_match(h: &Harness, body: Value, match_id: &str) {
+    get(
+        &h.server,
+        &format!("/match-details/v1/matches/{match_id}"),
+        body,
+    )
+    .await;
+    let details = h.session.match_details(match_id).await.unwrap();
+    crate::sync::store_details(&h.st, details, |_, _, _| {}).await;
 }
 
 #[tokio::test]
@@ -743,14 +764,12 @@ async fn a_match_stored_while_a_hidden_player_is_carried_refreshes_their_remembe
     // A newer match naming HIDDEN is stored while the hidden card is carried,
     // through the same `store_details` the worker and Match Details use.
     let start_ms = now_ms() - 60_000;
-    get(
-        &h.server,
-        "/match-details/v1/matches/m-late",
-        late_match_body(start_ms),
+    store_late_match(
+        &h,
+        match_body("m-late", start_ms, HIDDEN, "LateName", "LATE"),
+        "m-late",
     )
     .await;
-    let details = h.session.match_details("m-late").await.unwrap();
-    crate::sync::store_details(&h.st, details, |_, _, _| {}).await;
 
     // The store refreshes the carried hidden slot from the DB: the card shows
     // the newer name/source/start at once (no wait for the next publish).
@@ -773,7 +792,8 @@ async fn a_match_stored_while_a_hidden_player_is_carried_refreshes_their_remembe
         "the stored match's name reaches the carried hidden card at once (before: {before:?})"
     );
 
-    // Privacy: no name-service request carries the hidden puuid.
+    // Privacy guard (not the reproducer): the refresh/store paths above must
+    // never request a live-incognito player's name from name-service.
     for r in h.server.received_requests().await.unwrap() {
         if r.method.as_str() == "PUT" && r.url.path() == "/name-service/v2/players" {
             let body = String::from_utf8_lossy(&r.body);
@@ -784,4 +804,113 @@ async fn a_match_stored_while_a_hidden_player_is_carried_refreshes_their_remembe
         }
     }
     poller.stop_worker();
+}
+
+#[tokio::test]
+async fn an_older_stored_match_does_not_refresh_a_newer_remembered_name() {
+    // Perf/recency guard on the store refresh: an own-history backfill can
+    // store hundreds of old matches, so only a match that could be a newer
+    // source relaxes a carried hidden slot's bundle (`start_ms` >= the slot's
+    // remembered name's; a tie reloads). This also covers the case where the
+    // slot already shows a NEWER remembered name than the DB's static read
+    // (only a racing reload can leave that): an older store must not trigger a
+    // reload that would downgrade it.
+    let h = harness().await;
+    // The DB knows SecretName#HID from the stored match at `start`.
+    let start = store_split_match(&h.st).await;
+    // The carried hidden slot already shows a newer remembered name.
+    let newer = KnownName {
+        name: "NewerName".into(),
+        tag: "NEW".into(),
+        map_id: None,
+        start_ms: Some(start + 60_000),
+        source: RememberedSource::Seen,
+    };
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Pregame;
+        live.in_match = true;
+        live.slots = vec![Slot {
+            roster: roster(HIDDEN, true),
+            db: PlayerDb {
+                remembered: Some(newer.clone()),
+                ..Default::default()
+            },
+        }];
+    }
+    h.st.publish();
+    let name_of = |h: &Harness| {
+        h.st.live_state()
+            .players
+            .iter()
+            .find(|c| c.puuid == HIDDEN)
+            .map(|c| c.name.clone())
+            .unwrap()
+    };
+    let want = Field::Value(DisplayName::Remembered {
+        name: "NewerName".into(),
+        tag: "NEW".into(),
+        source: RememberedSource::Seen,
+        from_map_id: None,
+        from_start_ms: Some(start + 60_000),
+    });
+    assert_eq!(name_of(&h), want);
+    let events = h.live_events().len();
+
+    // An OLDER match naming HIDDEN is stored (backfill/Match Details): it
+    // cannot improve the shown name, so nothing may be reloaded or published.
+    store_late_match(
+        &h,
+        match_body("m-older", start - 60_000, HIDDEN, "OldName", "OLD"),
+        "m-older",
+    )
+    .await;
+    assert_eq!(
+        name_of(&h),
+        want,
+        "an older store must not downgrade the slot's newer remembered name"
+    );
+    assert_eq!(
+        h.live_events().len(),
+        events,
+        "an older store publishes nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_stored_match_naming_a_visible_player_publishes_nothing() {
+    // Negative coverage: the store refresh only concerns carried incognito
+    // players. A match naming a visible on-screen player must leave the live
+    // state byte-identical (no reload, no publish).
+    let h = harness().await;
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Pregame;
+        live.in_match = true;
+        live.slots = vec![Slot {
+            roster: roster(OTHER, false),
+            db: PlayerDb::default(),
+        }];
+    }
+    h.st.publish();
+    let bytes = serde_json::to_vec(&h.st.live_state()).unwrap();
+    let events = h.live_events().len();
+
+    store_late_match(
+        &h,
+        match_body("m-visible", now_ms(), OTHER, "Other", "OTH"),
+        "m-visible",
+    )
+    .await;
+
+    assert_eq!(
+        serde_json::to_vec(&h.st.live_state()).unwrap(),
+        bytes,
+        "a visible-only store changes no live state"
+    );
+    assert_eq!(
+        h.live_events().len(),
+        events,
+        "a visible-only store publishes nothing"
+    );
 }

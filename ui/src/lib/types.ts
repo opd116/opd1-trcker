@@ -515,7 +515,10 @@ export interface OwnedSkin {
   vp: number | null;
 }
 
-/** `invoke("collection")`: null while the owned list was never fetched. */
+/**
+ * `invoke("collection")`: `null` while no refresh was attempted yet (the game has not run); an attempted refresh
+ * that left nothing stored is a rejected invoke (Rust `Err`), not `null`.
+ */
 export interface Collection {
   items: OwnedSkin[];
   weapons: { id: string; name: string }[];

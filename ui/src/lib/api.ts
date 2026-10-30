@@ -177,7 +177,11 @@ export async function appInfo(): Promise<AppInfo> {
   return invoke<AppInfo>("app_info");
 }
 
-/** The user's owned skins; null while the owned list was never fetched (the game has not run yet). */
+/**
+ * The user's owned skins. `null` while no refresh was attempted yet (the game has not run since this account was
+ * first seen); an attempted refresh that left nothing stored rejects with Rust's `Err`, so the screen shows its retry
+ * state instead of the "never fetched" empty state.
+ */
 export async function collection(): Promise<Collection | null> {
   if (dev()) return (await demoV2()).v2Collection();
   return invoke<Collection | null>("collection");

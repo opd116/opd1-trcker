@@ -5,19 +5,21 @@
 //!   levels}`, one read-only `GET` in the `other` throttle family) are asked
 //!   only while VALORANT runs, at most once per [`REFRESH_EVERY`] and only
 //!   when the Skins screen asks (never from the poll loop). Only a stored
-//!   answer counts as an ask: a call that failed or was refused by a request
-//!   hold is not counted, so the screen's own retry gets through instead of
-//!   waiting out the ten minutes behind one transient Riot error.
+//!   answer counts as the refresh: a refresh attempt that failed or was
+//!   refused by a request hold (nothing sent) is not counted, so the screen's
+//!   normal one-minute retry reaches Riot instead of waiting out the ten
+//!   minutes behind one transient Riot error.
 //! - The owned level ids are stored in `app_state` under [`store_key`], one
 //!   key per account, with the owner's puuid and the fetch time (a second
 //!   account never erases the first one's copy), so the screen still shows with
 //!   the game closed. Only ids are stored: names, weapons, editions and
 //!   prices come from valorant-api's skin catalog
 //!   (`AssetCache::collection`), cached on disk per valorant-api version.
-//! - `None` = no ask was made for this account yet (VALORANT has not run
-//!   since it was first seen), so the screen shows its "no collection yet"
-//!   empty state. A failed ask is `Err` instead: the screen must not tell the
-//!   user to open the page while the game runs when it already was running.
+//! - `None` = no refresh was attempted for this account yet (VALORANT has
+//!   not run since it was first seen), so the screen shows its "no collection
+//!   yet" empty state. A refresh attempt that left no stored answer (Riot
+//!   error, request hold, store failure) is `Err` instead: the screen must not
+//!   tell the user to open the page while the game runs when it already was.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -52,7 +54,8 @@ fn load_stored(repo: &opd1_core::db::repo::Repo, puuid: &str) -> Option<StoredOw
         })
 }
 
-/// The least time between two asks to Riot.
+/// The least time between two stored answers for the same account; a refresh
+/// attempt that stored nothing does not start this window.
 pub const REFRESH_EVERY: Duration = Duration::from_secs(10 * 60);
 
 /// The most owned level ids a stored copy may hold (the riot crate keeps at
@@ -93,14 +96,15 @@ fn is_uuid(s: &str) -> bool {
         })
 }
 
-/// The last ask to Riot: for whom and when (process memory only, so a
-/// restart may ask once more).
+/// The last stored answer: for whom and when (process memory only, so a
+/// restart may ask once more). A refresh attempt that stored nothing is not
+/// recorded here.
 static LAST_ASK: Mutex<Option<(String, Instant)>> = Mutex::new(None);
-/// One refresh at a time: a second `collection` call waits for the first
-/// and then finds it fresh.
+/// One refresh at a time: a second `collection` call waits for the first and
+/// then uses its stored answer, or retries when it stored nothing.
 static REFRESH: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Whether Riot may be asked again for `puuid` at `now`.
+/// Whether a refresh may be attempted for `puuid` at `now`.
 fn due(last: Option<&(String, Instant)>, puuid: &str, now: Instant) -> bool {
     match last {
         Some((who, at)) if who == puuid => now.saturating_duration_since(*at) >= REFRESH_EVERY,
@@ -108,9 +112,9 @@ fn due(last: Option<&(String, Instant)>, puuid: &str, now: Instant) -> bool {
     }
 }
 
-/// The user's owned skins; `None` while no ask was made for this account yet
-/// (the game has not run since it was first seen), `Err` when an ask was made
-/// and failed.
+/// The user's owned skins; `None` while no refresh was attempted for this
+/// account yet (the game has not run since it was first seen), `Err` when a
+/// refresh attempt left no stored answer.
 #[tauri::command]
 pub async fn collection(state: AppStateRef<'_>) -> Result<Option<Collection>, String> {
     let st = state.inner().clone();
@@ -123,7 +127,7 @@ async fn collection_for(st: &Arc<AppState>) -> Result<Option<Collection>, String
     let Some(me) = lock(&st.live).self_puuid.clone() else {
         return Ok(None);
     };
-    let unanswered = refresh_if_due(st, &me).await;
+    let no_stored_answer = refresh_if_due(st, &me).await;
 
     let owner = me.clone();
     let stored = st
@@ -131,10 +135,11 @@ async fn collection_for(st: &Arc<AppState>) -> Result<Option<Collection>, String
         .await
         .flatten();
     let Some(stored) = stored else {
-        // An ask that failed is not "never fetched": the screen shows its
-        // retry state and asks again in a minute, instead of the empty state
-        // that tells the user to open the page while VALORANT runs.
-        return if unanswered {
+        // A refresh attempt that stored nothing is not "never fetched": the
+        // screen shows its retry state and asks again in a minute, instead of
+        // the empty state that tells the user to open the page while
+        // VALORANT runs.
+        return if no_stored_answer {
             Err("skins unavailable".into())
         } else {
             Ok(None)
@@ -156,13 +161,14 @@ async fn collection_for(st: &Arc<AppState>) -> Result<Option<Collection>, String
 }
 
 /// Asks Riot for the owned skin levels when VALORANT runs for `me` and the
-/// last stored ask is [`REFRESH_EVERY`] old, and stores the answer. Every
+/// last stored answer is [`REFRESH_EVERY`] old, and stores the answer. Every
 /// failure is logged and leaves the stored copy as it was.
 ///
-/// Returns whether an ask was made and did not end in a stored answer (a Riot
-/// error, a request hold, or a store that did not happen). Not an ask at all
-/// (no session, the game closed, the last answer too recent) is `false`, so
-/// the caller keeps the "no collection yet" state for those.
+/// Returns whether a refresh attempt left no stored answer: a Riot error, a
+/// `Held` answer (nothing was sent), or a store that did not happen. `false`
+/// when no attempt was made at all (no session, the game closed, the last
+/// stored answer too recent), so the caller keeps the "no collection yet"
+/// state for those.
 async fn refresh_if_due(st: &Arc<AppState>, me: &str) -> bool {
     let Some(session) = st.session() else {
         return false;
@@ -177,9 +183,9 @@ async fn refresh_if_due(st: &Arc<AppState>, me: &str) -> bool {
     }
     let answer = session.owned_skin_levels().await;
     if let Err(RiotError::Held(left)) = &answer {
-        // R160: a hold is "not now", not an answer; nothing was sent and the
-        // next ask tries again. The screen still retries rather than claiming
-        // the collection was never fetched.
+        // R160: a hold is "not now", not an answer, and nothing was sent. No
+        // stored answer results, so the screen shows its retry state rather
+        // than claiming the collection was never fetched.
         log::debug!("owned skins not asked: hold, {left:?} left");
         return true;
     }
@@ -212,8 +218,9 @@ async fn refresh_if_due(st: &Arc<AppState>, me: &str) -> bool {
             Ok(true)
         })
         .await;
-    // Only a stored answer counts as the ten-minute refresh: a failure must
-    // not keep the screen's next retry from reaching Riot.
+    // Only a stored answer starts the ten-minute window: an attempt that
+    // stored nothing must not keep the screen's next retry from reaching
+    // Riot.
     if saved == Some(true) {
         *lock(&LAST_ASK) = Some((me, Instant::now()));
         false
@@ -289,12 +296,14 @@ mod tests {
     }
 
     /// Mounts the mock store endpoint: `status`, at most `times`, then
-    /// `body` as JSON when given.
+    /// `body` as JSON when given. `priority` decides between the overlapping
+    /// mocks of a test explicitly (wiremock: 1 beats 2).
     async fn mount_store(
         h: &crate::pipeline_tests::Harness,
         status: u16,
         times: Option<u64>,
         body: Option<serde_json::Value>,
+        priority: u8,
     ) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, ResponseTemplate};
@@ -305,11 +314,46 @@ mod tests {
         }
         let mut mock = Mock::given(method("GET"))
             .and(path(store_key_path()))
-            .respond_with(template);
+            .respond_with(template)
+            .with_priority(priority);
         if let Some(n) = times {
             mock = mock.up_to_n_times(n);
         }
         mock.mount(&h.server).await;
+    }
+
+    /// Mounts the one weapon the collection tests own a skin of: its default
+    /// skin (dropped by the catalog) and the Reaver Vandal on `L1` (Premium).
+    async fn mount_weapons(server: &wiremock::MockServer) {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+
+        Mock::given(method("GET"))
+            .and(path("/v1/weapons"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "status": 200,
+                "data": [{
+                    "uuid": "9c82e19d-4575-0200-1a81-3eacf00cf872",
+                    "displayName": "Vandal",
+                    "category": "EEquippableCategory::Rifle",
+                    "defaultSkinUuid": "27f21d97-4c4b-bd1c-1f08-31830ab0be84",
+                    "displayIcon": null,
+                    "skins": [{
+                        "uuid": "30388628-42f0-606c-82c0-73ad43de997f",
+                        "displayName": "Reaver Vandal",
+                        "contentTierUuid": "60bca009-4182-7998-dee7-b8a2558dc369",
+                        "levels": [{"uuid": L1, "displayIcon": null}]
+                    }, {
+                        "uuid": "27f21d97-4c4b-bd1c-1f08-31830ab0be84",
+                        "displayName": "Standard Vandal",
+                        "contentTierUuid": null,
+                        "levels": [{"uuid": "bbbb0000-0000-0000-0000-000000000001",
+                                    "displayIcon": null}]
+                    }]
+                }]
+            })))
+            .mount(server)
+            .await;
     }
 
     fn one_level() -> serde_json::Value {
@@ -332,8 +376,8 @@ mod tests {
         h.st.set_session(Some(h.session.clone()));
         lock(&h.st.live).stage = Stage::Menus;
         *lock(&LAST_ASK) = None;
-        mount_store(&h, 500, Some(1), None).await;
-        mount_store(&h, 200, None, Some(one_level())).await;
+        mount_store(&h, 500, Some(1), None, 1).await;
+        mount_store(&h, 200, None, Some(one_level()), 2).await;
 
         refresh_if_due(&h.st, ME).await;
         assert_eq!(store_requests(&h, &store_key_path()).await, 1);
@@ -360,9 +404,10 @@ mod tests {
         );
     }
 
-    /// No ask at all (no session, or the game closed and the session stale,
-    /// R46) stays the "no collection yet" empty state: `Ok(None)`, Riot not
-    /// asked. Only a failed ask is an error.
+    /// No refresh attempt at all (no session, or the game closed and the
+    /// session stale, R46) stays the "no collection yet" empty state:
+    /// `Ok(None)`, Riot not asked. Only an attempt that stored nothing is an
+    /// error.
     #[tokio::test]
     async fn no_ask_at_all_is_still_the_empty_state() {
         let _serial = COMMANDS.lock().await;
@@ -371,7 +416,7 @@ mod tests {
         // A session exists, but the game is closed: nothing is asked.
         h.st.set_session(Some(h.session.clone()));
         lock(&h.st.live).stage = Stage::Closed;
-        mount_store(&h, 200, None, Some(one_level())).await;
+        mount_store(&h, 200, None, Some(one_level()), 1).await;
         assert!(collection_for(&h.st).await.unwrap().is_none());
         assert_eq!(store_requests(&h, &store_key_path()).await, 0);
 
@@ -382,9 +427,9 @@ mod tests {
         assert_eq!(store_requests(&h, &store_key_path()).await, 0);
     }
 
-    /// An ask that failed with no stored copy is an error, not `None`: the
-    /// screen shows its retry state instead of "No collection yet" telling
-    /// the user to open the page while VALORANT is already running.
+    /// An attempt that stored nothing is an error, not `None`: the screen
+    /// shows its retry state instead of "No collection yet" telling the user
+    /// to open the page while VALORANT is already running.
     #[tokio::test]
     async fn a_failed_ask_is_not_reported_as_never_fetched() {
         let _serial = COMMANDS.lock().await;
@@ -392,11 +437,47 @@ mod tests {
         h.st.set_session(Some(h.session.clone()));
         lock(&h.st.live).stage = Stage::Menus;
         *lock(&LAST_ASK) = None;
-        mount_store(&h, 500, None, None).await;
+        mount_store(&h, 500, None, None, 1).await;
         assert_eq!(
             collection_for(&h.st).await.expect_err("a 500 is a failure"),
             "skins unavailable"
         );
+        assert_eq!(store_requests(&h, &store_key_path()).await, 1);
+    }
+
+    /// A failed refresh does not throw away what the screen already has: an
+    /// older stored copy is served, and the failure costs exactly one store
+    /// request.
+    #[tokio::test]
+    async fn a_failed_refresh_still_serves_the_stored_copy() {
+        let _serial = COMMANDS.lock().await;
+        let h = crate::pipeline_tests::harness().await;
+        h.st.set_session(Some(h.session.clone()));
+        lock(&h.st.live).stage = Stage::Menus;
+        *lock(&LAST_ASK) = None;
+        // An earlier answer, kept in `app_state` under ME's key.
+        let copy = StoredOwned {
+            puuid: ME.into(),
+            fetched_ms: 5,
+            levels: vec![L1.into()],
+        };
+        let json = serde_json::to_string(&copy).unwrap();
+        h.st.db(move |repo| repo.set_state(&store_key(ME), &json))
+            .await
+            .expect("the stored copy is written");
+        // The tables and the skin catalog, from the mocked valorant-api.
+        crate::pipeline_tests::mount_asset_tables(&h.assets_server).await;
+        mount_weapons(&h.assets_server).await;
+        // Riot's store endpoint fails now.
+        mount_store(&h, 500, None, None, 1).await;
+
+        let got = collection_for(&h.st)
+            .await
+            .expect("a failed refresh serves the stored copy, not an error")
+            .expect("the stored copy still shows");
+        assert_eq!(got.fetched_ms, 5);
+        assert_eq!(got.items.len(), 1);
+        assert_eq!(got.items[0].level_id, L1);
         assert_eq!(store_requests(&h, &store_key_path()).await, 1);
     }
 

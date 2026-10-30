@@ -266,7 +266,7 @@ pub(crate) struct Harness {
     /// valorant-api. No routes are mounted until a test calls
     /// [`mount_asset_tables`], so it answers 404: the asset tables stay
     /// unloaded and every map id resolves to `None`.
-    assets_server: MockServer,
+    pub(crate) assets_server: MockServer,
     _dir: tempfile::TempDir,
     pub(crate) session: Arc<RiotSession>,
     pub(crate) st: Arc<AppState>,
@@ -390,7 +390,7 @@ async fn count(server: &MockServer, verb: &str, p: &str) -> usize {
 /// Mounts minimal valorant-api tables (`crate::state::AppState::ensure_tables`
 /// then loads them): Split as the only map, one act (`ACT`) that spans every
 /// stored match, and one tier.
-async fn mount_asset_tables(server: &MockServer) {
+pub(crate) async fn mount_asset_tables(server: &MockServer) {
     get(
         server,
         "/v1/version",

@@ -78,15 +78,21 @@ export function onAccountChange(fn: (from: string, to: string) => void): () => v
 }
 
 /**
- * Called when the My Stats page opens: while it has no data (nothing answered yet, or Rust answered null because the
- * user or the act was not known at startup) the snapshot is asked for again, a local DB read. An event, or an answer
- * that landed meanwhile, is never overwritten. A failure keeps what is there.
+ * Called when the My Stats page opens (or right after an account switch): while it has no data (nothing answered yet,
+ * or Rust answered null because the user or the act was not known at startup) the snapshot is asked for again, a local
+ * DB read. An event, or an answer that landed meanwhile, is never overwritten. A failure keeps what is there. An answer
+ * for an account that is no longer the one on screen (a rapid A→B→C switch: the read was issued for B) is dropped
+ * instead of occupying the store — a non-null answer may only fill an empty store when it is the current account's;
+ * a null answer carries no account and is always the neutral "unknown" state.
  */
 export async function refreshMyStats(): Promise<void> {
   if (get(mystats)) return;
   try {
     const s = await myStats();
-    if (!get(mystats)) mystats.set(s);
+    if (get(mystats)) return;
+    const self = get(selfId);
+    if (s !== null && self !== null && s.puuid !== self) return;
+    mystats.set(s);
   } catch (err) {
     reportError("mystats", err);
   }
@@ -146,13 +152,15 @@ export function applyLive(s: LiveState | null): void {
  * (Saved / History / Skins). A drawer a scoreboard came from is not reopened: the switch did not ask for it, and the
  * screen under it is the new account's.
  *
- * The My Stats snapshot is the previous account's too, and Rust only re-pushes `mystats` when there is something to
- * compute: for a new account that is not computable yet (no current act) no event would ever clear it, leaving the
- * page on its skeleton for good. So the store resets to `undefined` ("nothing known yet for this account": the page
- * draws its skeleton briefly) and the DB-only `my_stats` command is asked once for the account on screen; its `null`
- * answer settles the page on its `—` frames, its data shows immediately, and Rust's later push updates as today. When
- * the snapshot already belongs to the new account (the switch was signalled by a `mystats` event itself: the normal
- * case is `selfId` from the live state, but the fallback exists), it is kept and nothing is asked.
+ * The My Stats snapshot is the previous account's too. Normally Rust's switch already asks for a push
+ * (`on_connected` → `my_stats::notify_now`), which emits the new account's stats and replaces it; but when the new
+ * account is not computable (no current act/content tables, or no self puuid) that push emits nothing, and no later
+ * event may ever come: the page would sit on its skeleton for good. So, as a cheap fallback for exactly that case (one
+ * DB-only read per real switch), the store resets to `undefined` ("nothing known yet for this account": the page draws
+ * its skeleton briefly) and the DB-only `my_stats` command is asked once for the account on screen; its `null` answer
+ * settles the page on its `—` frames, its data shows immediately, and Rust's push updates as today. When the snapshot
+ * already belongs to the new account (the switch was signalled by a `mystats` event itself: the normal case is `selfId`
+ * from the live state, but the fallback exists), it is kept and nothing is asked.
  */
 onAccountChange((_from, to) => {
   hideTip();

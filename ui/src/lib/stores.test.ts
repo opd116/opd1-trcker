@@ -15,20 +15,35 @@ async function load() {
 
 /**
  * Mocks the Tauri API graph for the tests that let the account-change handler ask `my_stats` (a full replacement, since
- * router.svelte imports the same module): `myStats` answers `answer`, the page commands are inert. Returns the ask spy.
+ * router.svelte imports the same module): `myStats` answers `answer`, the page commands answer minimal settled payloads
+ * (no timer, no rejection, no DEV demo resolver). Returns the ask spy.
  */
 function mockTauriApi(answer: () => Promise<MyStats | null>) {
   const ask = vi.fn(answer);
-  const unused = async () => {
-    throw new Error("not used");
-  };
   vi.doMock("./api", () => ({
     tauriBridge: { invoke: async () => null, listen: async () => () => {} },
     myStats: ask,
     closeDetails: async () => {},
     closeMatch: async () => {},
-    getMatchDetails: unused,
-    getPlayerDetails: unused,
+    getMatchDetails: async (matchId: string) => ({
+      matchId,
+      mapId: "",
+      queueId: "competitive",
+      startMs: 0,
+      durationMs: null,
+      perspective: "self",
+      teams: [],
+    }),
+    getPlayerDetails: async (puuid: string) => ({
+      card: { puuid },
+      recent: [],
+      topTeammates: [],
+      loadout: {},
+      encounters: [],
+      heroKd: null,
+      heroHs: null,
+      heroMatches: 0,
+    }),
     setGlance: async () => {},
   }));
   return ask;
@@ -112,6 +127,15 @@ describe("stores", () => {
       mapId: null,
       players: [{ puuid, isSelf: true } as PlayerCard],
       settled: true,
+    });
+
+    // The module account-change handler asks `my_stats` for the new account: mock it for the whole describe, so a
+    // switch in any of these tests is deterministic (no rejecting real invoke, no DEV demo resolver side effect).
+    beforeEach(() => {
+      mockTauriApi(async () => null);
+    });
+    afterEach(() => {
+      vi.doUnmock("./api");
     });
 
     it("selfId prefers the live self card, keeps the last one a live state named, and uses My Stats only before that", async () => {
@@ -303,6 +327,25 @@ describe("stores", () => {
       expect(ask).toHaveBeenCalledTimes(1);
       await vi.waitFor(() => expect(get(mystats)).toBeNull());
       expect(ask).toHaveBeenCalledTimes(1);
+    });
+
+    it("a late answer for the previous account is dropped; the current account's answer is stored", async () => {
+      const pending: Array<(v: MyStats | null) => void> = [];
+      mockTauriApi(() => new Promise<MyStats | null>((resolve) => pending.push(resolve)));
+      const { applyLive, mystats, refreshMyStats } = await load();
+      const statsOf = (puuid: string) => ({ puuid }) as MyStats;
+      const closed = (puuid: string): LiveState => ({ stage: "closed", mapId: null, players: [], selfPuuid: puuid, settled: true });
+      applyLive(closed("a"));
+      // The page asks while A is on screen; before it answers, the account rapidly switches to C (the handler asks
+      // again for C), so that read's answer is for an account that is no longer on screen.
+      const first = refreshMyStats();
+      applyLive(closed("c"));
+      expect(pending).toHaveLength(2);
+      pending[0]!(statsOf("a")); // the late old-account answer
+      await first;
+      expect(get(mystats)).toBeUndefined(); // dropped: it may not occupy the store (the page keeps its skeleton)
+      pending[1]!(statsOf("c")); // the answer for the account on screen
+      await vi.waitFor(() => expect(get(mystats)).toEqual(statsOf("c")));
     });
   });
 

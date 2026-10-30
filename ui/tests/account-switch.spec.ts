@@ -454,7 +454,7 @@ test.describe("Riot account switch", () => {
     await expect.poll(asks).toBe(1); // the startup snapshot only
 
     // The account switches. The fake's DB-only `my_stats` answers null for B (not computable yet): the store resets
-    // at once and is asked exactly once for the account on screen (not once per screen).
+    // at once and the switch asks once for the account on screen (not once per surface).
     await switchAccount(page, CLOSED_B);
     await expect(page.locator("nav.rail .rank .rr")).toHaveText("— RR");
     await expect(page.locator("main .lm-cap")).toHaveCount(0); // the last match card is left out: not B's
@@ -462,11 +462,13 @@ test.describe("Riot account switch", () => {
     await expect(page.locator("main")).not.toContainText("111 / 100 RR");
     await expect.poll(asks).toBe(2);
 
-    // Competitive leaves the skeleton: the null answer settles it on its `—` frames (never A's numbers).
+    // Competitive leaves the skeleton: the null answer settles it on its `—` frames (never A's numbers). Opening the
+    // page while the store is still empty also asks the existing page-open question (refreshMyStats's gate): +1.
     await nav(page, "Comp").click();
     await expect(page.locator("main .mystats")).toHaveAttribute("aria-busy", "false");
     await expect(page.locator("main")).not.toContainText("111 / 100 RR");
     await expect(page.locator("main")).not.toContainText("222 / 100 RR");
+    await expect.poll(asks).toBe(3);
 
     // Rust's push for B (once it becomes computable) fills the page again.
     await page.evaluate((stats) => (window as unknown as Fake).__emit("mystats", stats), STATS_B);

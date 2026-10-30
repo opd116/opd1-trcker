@@ -129,6 +129,7 @@ Match History, Settings, Saved players with notes, Skins, ASCII and About are bu
 ## Smart data (SQLite)
 
 - **Players are keyed by PUUID**, so they're recognized even after a name change.
+- **Cross-account memory (2026-10-30, R198):** names learned locally are shared across Riot accounts on the installation — `players`/`match_players` are keyed by PUUID and `known_name` reads every stored match/name row (source `ownMatch`, `otherMatch` or `seen`). Account-scoped data follows the current Riot account: the match-history index, My Stats/Competitive stats, encounters, the owned-skins collection and saved/derived account state; saved-player notes and the shared name memory stay keyed by PUUID. A live-incognito player's name is still never requested.
 - **Match details are immutable:** fetch once, store forever, never refetch. Store extracted compact rows (~1–2KB per match), not raw JSON.
 - **Sync, don't refetch:** for a known player, fetch the history list (one cheap call), diff it against stored match IDs, and fetch only the new matches. No new comp match means rank is unchanged, so skip the MMR call.
 - **Own history backfill (R101, user 2026-09-29):** on connect and after each match, page the user's own match history (all queues) back to the last match a finished backfill confirmed, and fetch match-details only for unknown ids. Throttled, lowest priority, behind live cards. The first run stops at the current act start or 200 matches (Claude's lightness bound, not the user's).

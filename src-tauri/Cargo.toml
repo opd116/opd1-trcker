@@ -1,6 +1,6 @@
 [package]
 name = "opd1-trcker"
-version = "0.3.1"
+version = "0.4.0"
 description = "OPD1 TRCKER"
 edition = "2021"
 

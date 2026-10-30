@@ -167,14 +167,20 @@ describe("stores", () => {
       off2();
     });
 
-    it("a My Stats-only change before any live self fires once", async () => {
-      const { mystats, onAccountChange, selfId } = await load();
+    it("a My Stats-only change signals a switch while the live state has no self card (the documented fallback)", async () => {
+      const { applyLive, mystats, onAccountChange, selfId } = await load();
+      // The fallback case: Rust's Closed live state for an account with no stored player row names nobody.
+      applyLive({ stage: "closed", mapId: null, players: [], settled: true });
       const seen: [string, string][] = [];
       const off = onAccountChange((from, to) => seen.push([from, to]));
       mystats.set({ puuid: "a" } as MyStats); // the first account learned: not a switch
       expect(get(selfId)).toBe("a");
       expect(seen).toEqual([]);
-      mystats.set({ puuid: "b" } as MyStats);
+      mystats.set({ puuid: "b" } as MyStats); // the switch is only visible through My Stats
+      expect(get(selfId)).toBe("b");
+      expect(seen).toEqual([["a", "b"]]);
+      // The live state naming B afterwards is the same account: no second switch.
+      applyLive(liveWith("b"));
       expect(seen).toEqual([["a", "b"]]);
       off();
     });

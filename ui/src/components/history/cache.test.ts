@@ -66,7 +66,7 @@ describe("historyCache", () => {
     expect(historyCache.pages.competitive?.rows[0]?.matchId).toBe("a-match");
   });
 
-  it("a page asked for under the old account's epoch cannot repopulate the cache after a switch", async () => {
+  it("a page asked for by an instance the switch unmounted cannot repopulate the cache", async () => {
     const { applyLive, historyCache, putHistoryPage } = await load();
     applyLive(liveWith("account-a"));
     const oldEpoch = historyCache.epoch;

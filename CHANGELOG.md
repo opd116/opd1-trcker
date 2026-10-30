@@ -46,6 +46,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - A crash in the profile drawer or in Glance no longer leaves an empty half screen or a Glance window with no title bar.
 - The Skins screen no longer claims the collection was never fetched while VALORANT is running: one failed Riot error is retried on the screen's next one-minute retry instead of hiding the collection for ten minutes.
 - A player's name no longer drops back to the loading skeleton after a dodge or a match end when the app already has it stored; a stage reset now re-reads the stored player row for the cards that stay on screen.
+- Switching Riot accounts while the app is open no longer leaves the previous account's data on the History, Skins and Saved screens; an open profile or scoreboard closes instead of showing the old user's numbers.
 
 ### Security
 

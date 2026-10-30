@@ -146,7 +146,8 @@ const statsFor = (puuid: string, tier: number, rr: number): MyStats => {
 };
 const STATS_A = statsFor(A_PUUID, 15, 111);
 const STATS_B = statsFor(B_PUUID, 21, 222);
-const STATS = { a: STATS_A, b: STATS_B };
+/** A's `my_stats` answer; B's is "not computable" (null) until its push lands — the account-switch reset must ask. */
+const STATS: { a: MyStats; b: MyStats | null } = { a: STATS_A, b: null };
 
 /** Mara's drawer: its encounter rows open scoreboards (the drawer → scoreboard → switch case). */
 const MARA_DETAILS = detailsFor("mara", LIVE_A.players.find((c) => c.puuid === MARA), LIVE_A.players);
@@ -443,28 +444,32 @@ test.describe("Riot account switch", () => {
 
   // Rust re-pushes My Stats for the new account on a switch, but until that push lands the previous account's numbers
   // must not be drawn. The fake keeps account A's snapshot after the switch (the event for B is emitted at the end).
-  test("a switch with My Stats still on account A shows no A numbers until B's push lands", async ({ page }) => {
+  test("a switch with My Stats still on account A resets it and asks the DB once", async ({ page }) => {
     await bootInTauri(page, "closed");
     // A's snapshot is on screen: the nav rail's rank, the waiting view's last match and its rank card.
     await expect(page.locator("nav.rail .rank .rr")).toHaveText("111 RR");
     await expect(page.locator("main .lm-cap")).toHaveCount(1);
     await expect(page.locator("main .rk-col .mono.dim")).toHaveText("111 / 100 RR");
+    const asks = async () => (await calls(page)).filter((c) => c === "my_stats").length;
+    await expect.poll(asks).toBe(1); // the startup snapshot only
 
-    // The account switches; My Stats for B has not arrived yet (the store still holds A's snapshot).
+    // The account switches. The fake's DB-only `my_stats` answers null for B (not computable yet): the store resets
+    // at once and is asked exactly once for the account on screen (not once per screen).
     await switchAccount(page, CLOSED_B);
     await expect(page.locator("nav.rail .rank .rr")).toHaveText("— RR");
     await expect(page.locator("main .lm-cap")).toHaveCount(0); // the last match card is left out: not B's
     await expect(page.locator("main .rk-col .mono.dim")).toHaveCount(0);
     await expect(page.locator("main")).not.toContainText("111 / 100 RR");
+    await expect.poll(asks).toBe(2);
 
-    // Competitive: the skeleton, not A's rank/numbers (nothing answered yet for B).
+    // Competitive leaves the skeleton: the null answer settles it on its `—` frames (never A's numbers).
     await nav(page, "Comp").click();
-    await expect(page.locator("main .mystats")).toHaveAttribute("aria-busy", "true");
-    await expect(page.locator("main")).not.toContainText("111 / 100 RR");
-
-    // Rust's push for B arrives.
-    await page.evaluate((stats) => (window as unknown as Fake).__emit("mystats", stats), STATS_B);
     await expect(page.locator("main .mystats")).toHaveAttribute("aria-busy", "false");
+    await expect(page.locator("main")).not.toContainText("111 / 100 RR");
+    await expect(page.locator("main")).not.toContainText("222 / 100 RR");
+
+    // Rust's push for B (once it becomes computable) fills the page again.
+    await page.evaluate((stats) => (window as unknown as Fake).__emit("mystats", stats), STATS_B);
     await expect(page.locator("main")).toContainText("222 / 100 RR");
     await expect(page.locator("nav.rail .rank .rr")).toHaveText("222 RR");
   });

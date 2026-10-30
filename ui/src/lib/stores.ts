@@ -145,11 +145,23 @@ export function applyLive(s: LiveState | null): void {
  * old account's numbers; the screen a scoreboard returns to is refreshed for the new account by the screen itself
  * (Saved / History / Skins). A drawer a scoreboard came from is not reopened: the switch did not ask for it, and the
  * screen under it is the new account's.
+ *
+ * The My Stats snapshot is the previous account's too, and Rust only re-pushes `mystats` when there is something to
+ * compute: for a new account that is not computable yet (no current act) no event would ever clear it, leaving the
+ * page on its skeleton for good. So the store resets to `undefined` ("nothing known yet for this account": the page
+ * draws its skeleton briefly) and the DB-only `my_stats` command is asked once for the account on screen; its `null`
+ * answer settles the page on its `—` frames, its data shows immediately, and Rust's later push updates as today. When
+ * the snapshot already belongs to the new account (the switch was signalled by a `mystats` event itself: the normal
+ * case is `selfId` from the live state, but the fallback exists), it is kept and nothing is asked.
  */
-onAccountChange(() => {
+onAccountChange((_from, to) => {
   hideTip();
   closeProfile();
   backFromMatch({ reopenProfile: false });
+  if (get(mystats)?.puuid !== to) {
+    mystats.set(undefined);
+    void refreshMyStats();
+  }
 });
 
 let started = false;

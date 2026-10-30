@@ -13,6 +13,27 @@ async function load() {
   return { ...stores, go, openMatchPage: openMatch, openProfile, router };
 }
 
+/**
+ * Mocks the Tauri API graph for the tests that let the account-change handler ask `my_stats` (a full replacement, since
+ * router.svelte imports the same module): `myStats` answers `answer`, the page commands are inert. Returns the ask spy.
+ */
+function mockTauriApi(answer: () => Promise<MyStats | null>) {
+  const ask = vi.fn(answer);
+  const unused = async () => {
+    throw new Error("not used");
+  };
+  vi.doMock("./api", () => ({
+    tauriBridge: { invoke: async () => null, listen: async () => () => {} },
+    myStats: ask,
+    closeDetails: async () => {},
+    closeMatch: async () => {},
+    getMatchDetails: unused,
+    getPlayerDetails: unused,
+    setGlance: async () => {},
+  }));
+  return ask;
+}
+
 describe("stores", () => {
   beforeEach(() => vi.resetModules());
 
@@ -221,6 +242,14 @@ describe("stores", () => {
     const statsOf = (puuid: string) => ({ puuid }) as MyStats;
     const closedWith = (puuid: string): LiveState => ({ stage: "closed", mapId: null, players: [], selfPuuid: puuid, settled: true });
 
+    // The account-change handler asks `my_stats`; keep that path deterministic (and out of the DEV demo resolver).
+    beforeEach(() => {
+      mockTauriApi(async () => null);
+    });
+    afterEach(() => {
+      vi.doUnmock("./api");
+    });
+
     it("passes a snapshot only for the account on screen, keeping the tri-state each consumer relies on", async () => {
       const { applyLive, myStatsForSelf, mystats, selfId } = await load();
       expect(get(myStatsForSelf)).toBeUndefined(); // nothing answered yet
@@ -246,6 +275,34 @@ describe("stores", () => {
       applyLive(closedWith("b"));
       mystats.set(null);
       expect(get(myStatsForSelf)).toBeNull();
+    });
+  });
+
+  describe("myStatsForSelf on an account change", () => {
+    afterEach(() => {
+      vi.doUnmock("./api");
+    });
+
+    it("the switch resets My Stats and asks the DB once; startup, a reconnect and the same account do not", async () => {
+      const ask = mockTauriApi(async () => null);
+      const { applyLive, mystats } = await load();
+      const statsOf = (puuid: string) => ({ puuid }) as MyStats;
+      const closed = (puuid: string): LiveState => ({ stage: "closed", mapId: null, players: [], selfPuuid: puuid, settled: true });
+      mystats.set(statsOf("a"));
+      applyLive(closed("a")); // the first account: not a switch
+      applyLive(null); // the client drops…
+      applyLive(closed("a")); // …and reconnects as the same account
+      await Promise.resolve();
+      expect(ask).not.toHaveBeenCalled();
+      expect(get(mystats)).toEqual(statsOf("a"));
+
+      applyLive(closed("b")); // the switch
+      // A's snapshot is dropped at once ("nothing known for B": a brief skeleton, never A's numbers), and the DB-only
+      // command is asked once for the account on screen — its null answer settles the page on the `—` frames.
+      expect(get(mystats)).toBeUndefined();
+      expect(ask).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(get(mystats)).toBeNull());
+      expect(ask).toHaveBeenCalledTimes(1);
     });
   });
 

@@ -17,7 +17,7 @@
   import { nameView, partyChip, statCells } from "../../lib/profile";
   import { closeProfile, go } from "../../lib/router.svelte";
   import { smurfSignal } from "../../lib/smurf";
-  import { live, meta, mystats, openDetails } from "../../lib/stores";
+  import { live, meta, myStatsForSelf, openDetails } from "../../lib/stores";
   import { tip } from "../../lib/tooltip.svelte";
   import type { PlayerCard, ProfileExtras } from "../../lib/types";
   import { reportError } from "../../lib/uilog";
@@ -58,10 +58,11 @@
     card
       ? statCells(card, details, {
           highlight: $settings.highlight,
-          netRr: $mystats === undefined ? undefined : ($mystats?.rank.netRr ?? null),
+          // My Stats only when it is the account on screen: the drawer's own net RR is relative to the user.
+          netRr: $myStatsForSelf === undefined ? undefined : ($myStatsForSelf?.rank.netRr ?? null),
           netGames:
-            $mystats && $mystats.rank.wins !== null && $mystats.rank.losses !== null
-              ? $mystats.rank.wins + $mystats.rank.losses
+            $myStatsForSelf && $myStatsForSelf.rank.wins !== null && $myStatsForSelf.rank.losses !== null
+              ? $myStatsForSelf.rank.wins + $myStatsForSelf.rank.losses
               : null,
         })
       : null,

@@ -442,16 +442,19 @@ fn live_state_matches_golden() {
         stage: Stage::Ingame,
         map_id: Some(SPLIT_UUID.into()),
         players,
+        self_puuid: Some("puuid-self".into()),
         settled: true,
     };
     check_golden("live_state", &serde_json::to_value(&state).unwrap());
 
     // `settled` is a plain boolean, on the wire both ways: the model's starting
-    // Closed (the poll loop has not looked yet) is `false`.
+    // Closed (the poll loop has not looked yet) is `false`. An unknown account
+    // is absent from the JSON, not `null` (the live state's `selfPuuid`).
     let starting = LiveState {
         stage: Stage::Closed,
         map_id: None,
         players: Vec::new(),
+        self_puuid: None,
         settled: false,
     };
     assert_eq!(
@@ -1198,7 +1201,10 @@ fn wire_keys_are_the_ones_spec_7_1_spells() {
     // LiveState itself (the `live_state.json` golden's top level).
     let live: Value =
         serde_json::from_str(&std::fs::read_to_string(golden_path("live_state")).unwrap()).unwrap();
-    assert_eq!(keys(&live), spec(&["stage", "mapId", "players", "settled"]));
+    assert_eq!(
+        keys(&live),
+        spec(&["stage", "mapId", "players", "selfPuuid", "settled"])
+    );
     // A fully populated card has exactly the spec's PlayerCard keys.
     assert_eq!(
         keys(&cards[0]),

@@ -19,7 +19,7 @@
   import { byAcs, kdaText, nameView, nextTierText, recapModel, rrColor, SESSION_CHIPS, sessionChip } from "../../lib/livev2";
   import { mapName } from "../../lib/meta";
   import { openMatch, router } from "../../lib/router.svelte";
-  import { matchEvents, meta, mystats } from "../../lib/stores";
+  import { matchEvents, meta, myStatsForSelf } from "../../lib/stores";
   import { tierColor, tierName } from "../../lib/theme";
   import { tip } from "../../lib/tooltip.svelte";
   import type { LiveState, MatchDetailsView } from "../../lib/types";
@@ -64,7 +64,7 @@
 
   /** Deathmatch: one block of every player, no sides (as the scoreboard shows it). */
   const noTeams = $derived(view !== null && view.teams.length < 2);
-  const ms = $derived($mystats ?? null);
+  const ms = $derived($myStatsForSelf ?? null);
   const model = $derived(view ? recapModel(view, ms) : null);
   const rank = $derived(ms && typeof ms.rank.tier === "number" ? ms.rank : null);
   const session = $derived(ms?.session ?? null);

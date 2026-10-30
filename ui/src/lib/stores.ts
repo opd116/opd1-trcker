@@ -1,8 +1,9 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { get, readable, writable } from "svelte/store";
+import { derived, get, readable, writable } from "svelte/store";
 import { myStats, tauriBridge } from "./api";
 import { loadMeta, openDetails, openMatch, startLive, startMyStats } from "./boot";
-import { onStage, setLiveCardLookup, startPage } from "./router.svelte";
+import { backFromMatch, closeProfile, onStage, setLiveCardLookup, startPage } from "./router.svelte";
+import { hideTip } from "./tooltip.svelte";
 import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails, Stage } from "./types";
 import { reportError } from "./uilog";
 
@@ -20,15 +21,78 @@ setLiveCardLookup((puuid) => get(live)?.players.find((c) => c.puuid === puuid));
 export const mystats = writable<MyStats | null | undefined>(undefined);
 
 /**
- * Called when the My Stats page opens: while it has no data (nothing answered yet, or Rust answered null because the
- * user or the act was not known at startup) the snapshot is asked for again, a local DB read. An event, or an answer
- * that landed meanwhile, is never overwritten. A failure keeps what is there.
+ * The account a live state names: its own card's puuid, or the session's `selfPuuid` that Rust carries — which also
+ * names it in a `closed` state and for an account the DB has never seen (no self card at all). null when it names none
+ * (before the first connection, or a live state from a Rust that has no `selfPuuid` yet).
+ */
+const liveSelf = derived(
+  live,
+  ($live) => $live?.players.find((p) => p.isSelf)?.puuid ?? $live?.selfPuuid ?? null,
+);
+
+/** The last account a live state named: a self-less live state must not move the account back through `mystats`. */
+let lastLiveSelf: string | null = null;
+liveSelf.subscribe((id) => {
+  if (id !== null) lastLiveSelf = id;
+});
+
+/**
+ * The Riot account the app is showing: the live self card's puuid, else the live state's `selfPuuid` (Rust knows it
+ * from the session, so a switch to an account with no self card and no computable My Stats is signalled at once), else
+ * the last account a live state named, else the My Stats snapshot's puuid — which is only a fallback before any live
+ * state has named one, so a stale My Stats snapshot can never move it back. null while none is known.
+ */
+export const selfId = derived(
+  [liveSelf, mystats],
+  ([$liveSelf, $mystats]) => $liveSelf ?? lastLiveSelf ?? $mystats?.puuid ?? null,
+);
+
+/**
+ * My Stats only while the snapshot belongs to the account the app is showing (`mystats.puuid === selfId`). On an account
+ * switch Rust re-pushes My Stats for the new account, but until that push lands the previous account's snapshot must not
+ * be drawn by any user-relative surface: this keeps the tri-state each of them relies on — `undefined` = nothing answered
+ * yet *for this account* (skeletons), `null` = Rust answered "unknown" (the `—` frames; a null answer carries no account
+ * and is never another account's numbers), a snapshot = this account's. While no account is known yet (`selfId` null)
+ * the snapshot passes through: that is the startup ordering (`my_stats` answering before the first `live` state) and
+ * there is nothing to compare it with.
+ */
+export const myStatsForSelf = derived([mystats, selfId], ([$mystats, $selfId]) =>
+  $mystats && $selfId !== null && $mystats.puuid !== $selfId ? undefined : $mystats,
+);
+
+/**
+ * Runs `fn` when the Riot account changes while the app is open: two different PUUIDs were the known account in turn.
+ * A change to or from "unknown" (nothing known at startup, a dropped connection) is not a switch, so the first account
+ * learned never fires it and Closed↔Menus never does. One case can fire it at boot: the first live snapshot carries the
+ * account stored in the DB and the connection then reports a different one (Riot was switched while the app was closed)
+ * — that is a real account change, and the screens must not keep the stored account's data. Returns the unsubscribe
+ * function.
+ */
+export function onAccountChange(fn: (from: string, to: string) => void): () => void {
+  let last: string | null = null;
+  return selfId.subscribe((id) => {
+    if (id === null) return;
+    if (last !== null && last !== id) fn(last, id);
+    last = id;
+  });
+}
+
+/**
+ * Called when the My Stats page opens (or right after an account switch): while it has no data (nothing answered yet,
+ * or Rust answered null because the user or the act was not known at startup) the snapshot is asked for again, a local
+ * DB read. An event, or an answer that landed meanwhile, is never overwritten. A failure keeps what is there. An answer
+ * for an account that is no longer the one on screen (a rapid A→B→C switch: the read was issued for B) is dropped
+ * instead of occupying the store — a non-null answer may only fill an empty store when it is the current account's;
+ * a null answer carries no account and is always the neutral "unknown" state.
  */
 export async function refreshMyStats(): Promise<void> {
   if (get(mystats)) return;
   try {
     const s = await myStats();
-    if (!get(mystats)) mystats.set(s);
+    if (get(mystats)) return;
+    const self = get(selfId);
+    if (s !== null && self !== null && s.puuid !== self) return;
+    mystats.set(s);
   } catch (err) {
     reportError("mystats", err);
   }
@@ -79,6 +143,34 @@ export function applyLive(s: LiveState | null): void {
   }
   live.set(s);
 }
+
+/**
+ * A Riot account switch: the open profile drawer and scoreboard show values relative to the user (encounters
+ * with/against, "your result", the user's own row) and were built for the previous account. They cannot be corrected in
+ * place, so both close (and the open tooltip, which may describe the old account's card) instead of staying up with the
+ * old account's numbers; the screen a scoreboard returns to is refreshed for the new account by the screen itself
+ * (Saved / History / Skins). A drawer a scoreboard came from is not reopened: the switch did not ask for it, and the
+ * screen under it is the new account's.
+ *
+ * The My Stats snapshot is the previous account's too. Normally Rust's switch already asks for a push
+ * (`on_connected` → `my_stats::notify_now`), which emits the new account's stats and replaces it; but when the new
+ * account is not computable (no current act/content tables, or no self puuid) that push emits nothing, and no later
+ * event may ever come: the page would sit on its skeleton for good. So, as a cheap fallback for exactly that case (one
+ * DB-only read per real switch), the store resets to `undefined` ("nothing known yet for this account": the page draws
+ * its skeleton briefly) and the DB-only `my_stats` command is asked once for the account on screen; its `null` answer
+ * settles the page on its `—` frames, its data shows immediately, and Rust's push updates as today. When the snapshot
+ * already belongs to the new account (the switch was signalled by a `mystats` event itself: the normal case is `selfId`
+ * from the live state, but the fallback exists), it is kept and nothing is asked.
+ */
+onAccountChange((_from, to) => {
+  hideTip();
+  closeProfile();
+  backFromMatch({ reopenProfile: false });
+  if (get(mystats)?.puuid !== to) {
+    mystats.set(undefined);
+    void refreshMyStats();
+  }
+});
 
 let started = false;
 

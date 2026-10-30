@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
-import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails } from "./types";
+import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerCard, PlayerDetails } from "./types";
 
 const state = (stage: LiveState["stage"], settled = true): LiveState => ({ stage, mapId: null, players: [], settled });
 
@@ -8,8 +8,45 @@ const state = (stage: LiveState["stage"], settled = true): LiveState => ({ stage
 async function load() {
   vi.resetModules();
   const stores = await import("./stores");
-  const { go, openProfile, router } = await import("./router.svelte");
-  return { ...stores, go, openProfile, router };
+  const { go, openMatch, openProfile, router } = await import("./router.svelte");
+  // `openMatchPage` is the router's open (the stores' `openMatch` is the payload slot).
+  return { ...stores, go, openMatchPage: openMatch, openProfile, router };
+}
+
+/**
+ * Mocks the Tauri API graph for the tests that let the account-change handler ask `my_stats` (a full replacement, since
+ * router.svelte imports the same module): `myStats` answers `answer`, the page commands answer minimal settled payloads
+ * (no timer, no rejection, no DEV demo resolver). Returns the ask spy.
+ */
+function mockTauriApi(answer: () => Promise<MyStats | null>) {
+  const ask = vi.fn(answer);
+  vi.doMock("./api", () => ({
+    tauriBridge: { invoke: async () => null, listen: async () => () => {} },
+    myStats: ask,
+    closeDetails: async () => {},
+    closeMatch: async () => {},
+    getMatchDetails: async (matchId: string) => ({
+      matchId,
+      mapId: "",
+      queueId: "competitive",
+      startMs: 0,
+      durationMs: null,
+      perspective: "self",
+      teams: [],
+    }),
+    getPlayerDetails: async (puuid: string) => ({
+      card: { puuid },
+      recent: [],
+      topTeammates: [],
+      loadout: {},
+      encounters: [],
+      heroKd: null,
+      heroHs: null,
+      heroMatches: 0,
+    }),
+    setGlance: async () => {},
+  }));
+  return ask;
 }
 
 describe("stores", () => {
@@ -82,6 +119,234 @@ describe("stores", () => {
     const { applyLive, router } = await load();
     applyLive(state("closed"));
     expect(router.screen).toBe("live");
+  });
+
+  describe("Riot account switch", () => {
+    const liveWith = (puuid: string, stage: LiveState["stage"] = "menus"): LiveState => ({
+      stage,
+      mapId: null,
+      players: [{ puuid, isSelf: true } as PlayerCard],
+      settled: true,
+    });
+
+    // The module account-change handler asks `my_stats` for the new account: mock it for the whole describe, so a
+    // switch in any of these tests is deterministic (no rejecting real invoke, no DEV demo resolver side effect).
+    beforeEach(() => {
+      mockTauriApi(async () => null);
+    });
+    afterEach(() => {
+      vi.doUnmock("./api");
+    });
+
+    it("selfId prefers the live self card, keeps the last one a live state named, and uses My Stats only before that", async () => {
+      const { applyLive, mystats, selfId } = await load();
+      expect(get(selfId)).toBeNull();
+      mystats.set({ puuid: "snapshot-account" } as MyStats);
+      expect(get(selfId)).toBe("snapshot-account"); // nothing live yet: the snapshot is the only account known
+      applyLive(liveWith("live-account"));
+      expect(get(selfId)).toBe("live-account");
+      // A self-less live state (the Closed state for an account with no stored player row) must not move the account
+      // back through a stale My Stats snapshot.
+      mystats.set({ puuid: "stale-snapshot" } as MyStats);
+      applyLive({ ...liveWith("live-account"), players: [] });
+      expect(get(selfId)).toBe("live-account");
+    });
+
+    it("selfId uses the live state's selfPuuid when it has no self card, and a switch to another one fires once", async () => {
+      const { applyLive, mystats, onAccountChange, selfId } = await load();
+      const closedWith = (puuid: string): LiveState => ({ stage: "closed", mapId: null, players: [], selfPuuid: puuid, settled: true });
+      mystats.set({ puuid: "stale-snapshot" } as MyStats);
+      // Rust carries the session's own account, so a closed state for a never-seen account (no self card, no My Stats)
+      // still names it; the snapshot is only a fallback and never wins over it.
+      applyLive(closedWith("a"));
+      expect(get(selfId)).toBe("a");
+      const seen: [string, string][] = [];
+      const off = onAccountChange((from, to) => seen.push([from, to]));
+      applyLive(closedWith("b"));
+      expect(get(selfId)).toBe("b");
+      expect(seen).toEqual([["a", "b"]]);
+      off();
+    });
+
+    it("fires once for a real account switch, never on startup, a dropped connection or the same account", async () => {
+      const { applyLive, onAccountChange } = await load();
+      const seen: [string, string][] = [];
+      const off = onAccountChange((from, to) => seen.push([from, to]));
+      applyLive(liveWith("a")); // the first account: not a switch
+      applyLive(liveWith("a", "pregame"));
+      applyLive(null); // a dropped connection is "unknown", not another account
+      applyLive({ ...liveWith("a"), players: [] }); // an empty live state keeps the last known account
+      expect(seen).toEqual([]);
+      applyLive(liveWith("b"));
+      expect(seen).toEqual([["a", "b"]]);
+      applyLive(liveWith("b", "ingame"));
+      applyLive(liveWith("b", "menus"));
+      expect(seen).toEqual([["a", "b"]]);
+      applyLive(liveWith("c"));
+      expect(seen).toEqual([
+        ["a", "b"],
+        ["b", "c"],
+      ]);
+      off();
+      applyLive(liveWith("d"));
+      expect(seen).toHaveLength(2);
+    });
+
+    it("a stale My Stats snapshot cannot move a known live account back (no switch fires)", async () => {
+      const { applyLive, mystats, onAccountChange, selfId } = await load();
+      applyLive(liveWith("a"));
+      const seen: [string, string][] = [];
+      const off = onAccountChange((from, to) => seen.push([from, to]));
+      mystats.set({ puuid: "stale-b" } as MyStats); // My Stats from another account, the live state still names A
+      expect(get(selfId)).toBe("a");
+      applyLive({ ...liveWith("a"), players: [] }); // and a live state that names nobody
+      expect(get(selfId)).toBe("a");
+      expect(seen).toEqual([]);
+      off();
+    });
+
+    it("live B self and My Stats B arriving in either order fire exactly once", async () => {
+      // Live first, then the My Stats push.
+      const first = await load();
+      first.applyLive(liveWith("a"));
+      const seen1: [string, string][] = [];
+      const off1 = first.onAccountChange((from, to) => seen1.push([from, to]));
+      first.applyLive(liveWith("b"));
+      first.mystats.set({ puuid: "b" } as MyStats);
+      expect(seen1).toEqual([["a", "b"]]);
+      off1();
+
+      // My Stats first (it does not move the account while the live self card still names A), then the live state.
+      const second = await load();
+      second.applyLive(liveWith("a"));
+      const seen2: [string, string][] = [];
+      const off2 = second.onAccountChange((from, to) => seen2.push([from, to]));
+      second.mystats.set({ puuid: "b" } as MyStats);
+      expect(seen2).toEqual([]);
+      second.applyLive(liveWith("b"));
+      expect(seen2).toEqual([["a", "b"]]);
+      off2();
+    });
+
+    it("a My Stats-only change signals a switch while the live state has no self card (the documented fallback)", async () => {
+      const { applyLive, mystats, onAccountChange, selfId } = await load();
+      // The fallback case: Rust's Closed live state for an account with no stored player row names nobody.
+      applyLive({ stage: "closed", mapId: null, players: [], settled: true });
+      const seen: [string, string][] = [];
+      const off = onAccountChange((from, to) => seen.push([from, to]));
+      mystats.set({ puuid: "a" } as MyStats); // the first account learned: not a switch
+      expect(get(selfId)).toBe("a");
+      expect(seen).toEqual([]);
+      mystats.set({ puuid: "b" } as MyStats); // the switch is only visible through My Stats
+      expect(get(selfId)).toBe("b");
+      expect(seen).toEqual([["a", "b"]]);
+      // The live state naming B afterwards is the same account: no second switch.
+      applyLive(liveWith("b"));
+      expect(seen).toEqual([["a", "b"]]);
+      off();
+    });
+
+    it("a switch closes the open drawer, and a scoreboard back to its source screen, instead of the old account's numbers", async () => {
+      const { applyLive, openMatchPage, openProfile, router } = await load();
+      applyLive(liveWith("a"));
+      openProfile("some-player");
+      expect(router.profile).toBe("some-player");
+      applyLive(liveWith("b"));
+      expect(router.profile).toBeNull();
+
+      openMatchPage("some-match", { from: "history", focusPuuid: "b" });
+      expect(router.matchId).toBe("some-match");
+      applyLive(liveWith("c"));
+      expect(router.matchId).toBeNull();
+      expect(router.screen).toBe("history");
+    });
+  });
+
+  describe("myStatsForSelf", () => {
+    const statsOf = (puuid: string) => ({ puuid }) as MyStats;
+    const closedWith = (puuid: string): LiveState => ({ stage: "closed", mapId: null, players: [], selfPuuid: puuid, settled: true });
+
+    // The account-change handler asks `my_stats`; keep that path deterministic (and out of the DEV demo resolver).
+    beforeEach(() => {
+      mockTauriApi(async () => null);
+    });
+    afterEach(() => {
+      vi.doUnmock("./api");
+    });
+
+    it("passes a snapshot only for the account on screen, keeping the tri-state each consumer relies on", async () => {
+      const { applyLive, myStatsForSelf, mystats, selfId } = await load();
+      expect(get(myStatsForSelf)).toBeUndefined(); // nothing answered yet
+      mystats.set(null);
+      expect(get(myStatsForSelf)).toBeNull(); // Rust answered "unknown": — frames, no numbers
+      // Answered before any live state: the startup ordering — the snapshot is the only account known so far.
+      mystats.set(statsOf("a"));
+      expect(get(selfId)).toBe("a");
+      expect(get(myStatsForSelf)).toEqual(statsOf("a"));
+      applyLive(closedWith("a"));
+      expect(get(myStatsForSelf)).toEqual(statsOf("a")); // the same account: kept
+      applyLive(closedWith("b"));
+      // The switch, while Rust's push for B is in flight: A's numbers are never passed through.
+      expect(get(myStatsForSelf)).toBeUndefined();
+      mystats.set(statsOf("b"));
+      expect(get(myStatsForSelf)).toEqual(statsOf("b"));
+    });
+
+    it("a null answer stays null after a switch (— frames, never another account's numbers)", async () => {
+      const { applyLive, myStatsForSelf, mystats } = await load();
+      applyLive(closedWith("a"));
+      mystats.set(statsOf("a"));
+      applyLive(closedWith("b"));
+      mystats.set(null);
+      expect(get(myStatsForSelf)).toBeNull();
+    });
+  });
+
+  describe("myStatsForSelf on an account change", () => {
+    afterEach(() => {
+      vi.doUnmock("./api");
+    });
+
+    it("the switch resets My Stats and asks the DB once; startup, a reconnect and the same account do not", async () => {
+      const ask = mockTauriApi(async () => null);
+      const { applyLive, mystats } = await load();
+      const statsOf = (puuid: string) => ({ puuid }) as MyStats;
+      const closed = (puuid: string): LiveState => ({ stage: "closed", mapId: null, players: [], selfPuuid: puuid, settled: true });
+      mystats.set(statsOf("a"));
+      applyLive(closed("a")); // the first account: not a switch
+      applyLive(null); // the client drops…
+      applyLive(closed("a")); // …and reconnects as the same account
+      await Promise.resolve();
+      expect(ask).not.toHaveBeenCalled();
+      expect(get(mystats)).toEqual(statsOf("a"));
+
+      applyLive(closed("b")); // the switch
+      // A's snapshot is dropped at once ("nothing known for B": a brief skeleton, never A's numbers), and the DB-only
+      // command is asked once for the account on screen — its null answer settles the page on the `—` frames.
+      expect(get(mystats)).toBeUndefined();
+      expect(ask).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(get(mystats)).toBeNull());
+      expect(ask).toHaveBeenCalledTimes(1);
+    });
+
+    it("a late answer for the previous account is dropped; the current account's answer is stored", async () => {
+      const pending: Array<(v: MyStats | null) => void> = [];
+      mockTauriApi(() => new Promise<MyStats | null>((resolve) => pending.push(resolve)));
+      const { applyLive, mystats, refreshMyStats } = await load();
+      const statsOf = (puuid: string) => ({ puuid }) as MyStats;
+      const closed = (puuid: string): LiveState => ({ stage: "closed", mapId: null, players: [], selfPuuid: puuid, settled: true });
+      applyLive(closed("a"));
+      // The page asks while A is on screen; before it answers, the account rapidly switches to C (the handler asks
+      // again for C), so that read's answer is for an account that is no longer on screen.
+      const first = refreshMyStats();
+      applyLive(closed("c"));
+      expect(pending).toHaveLength(2);
+      pending[0]!(statsOf("a")); // the late old-account answer
+      await first;
+      expect(get(mystats)).toBeUndefined(); // dropped: it may not occupy the store (the page keeps its skeleton)
+      pending[1]!(statsOf("c")); // the answer for the account on screen
+      await vi.waitFor(() => expect(get(mystats)).toEqual(statsOf("c")));
+    });
   });
 
   describe("startFeeds under Tauri", () => {

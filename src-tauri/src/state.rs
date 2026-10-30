@@ -586,7 +586,7 @@ impl LiveModel {
             loadouts: HashMap::new(),
             self_loadout: None,
             coregame_match_id: None,
-            self_puuid,
+            self_puuid: self_puuid.clone(),
             self_name: None,
             self_name_attempted: false,
             self_roster: None,
@@ -616,6 +616,7 @@ impl LiveModel {
                 stage: Stage::Closed,
                 map_id: None,
                 players: Vec::new(),
+                self_puuid: self_puuid.clone(),
                 settled: false,
             },
             last_bytes: Vec::new(),
@@ -657,6 +658,9 @@ impl LiveModel {
         LiveState {
             stage: self.stage,
             map_id: self.map_id.clone(),
+            // The wire carries the session's account, so the UI learns a switch even when the state has no self card
+            // (a Closed state for an account the DB has never seen: nothing on the live screen names them).
+            self_puuid: self.self_puuid.clone(),
             settled: self.settled,
             players: self
                 .slots

@@ -18,7 +18,7 @@
   import { boardTeams, countdown, loadingProgress, matchup, rowView, type RowCtx } from "../lib/livev2";
   import { mapName } from "../lib/meta";
   import { openProfile, router, setGlance } from "../lib/router.svelte";
-  import { meta, mystats } from "../lib/stores";
+  import { meta, selfId } from "../lib/stores";
   import type { LiveState } from "../lib/types";
 
   let { live }: { live: LiveState | null } = $props();
@@ -28,7 +28,7 @@
   const view = $derived(
     status?.conn === "error" ? "error" : onBoard ? "board" : status?.recapMatchId ? "recap" : "waiting",
   );
-  const selfPuuid = $derived(live?.players.find((p) => p.isSelf)?.puuid ?? $mystats?.puuid ?? null);
+  const selfPuuid = $derived($selfId);
 
   // ── board ──
   const ctx: RowCtx = $derived({

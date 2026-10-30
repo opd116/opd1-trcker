@@ -3,9 +3,9 @@
   total store value in VP and ≈ SAR; BY WEAPON on the left (filters the grid); the edition card (stacked bar + toggle
   chips) above the skin grid, sorted by value then name. A filter pair with no skins says so. `null` (the owned list
   was never fetched): the dashed empty state in the design's empty-list style. While the answer is pending the frames
-  draw skeletons; a failed answer (the skin catalog could not be built) leaves them empty. Either of those two is asked
-  again every minute and when the live stage changes. The page fills <main>; the weapon list and the grid scroll
-  inside their cards.
+  draw skeletons; a failed answer (the owned list could not be fetched, or the skin catalog could not be built)
+  leaves them empty. Either of those two is asked again every minute and when the live stage changes. The page fills
+  <main>; the weapon list and the grid scroll inside their cards.
 -->
 <script lang="ts">
   import { untrack } from "svelte";

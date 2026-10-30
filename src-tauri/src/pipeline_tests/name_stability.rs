@@ -125,12 +125,15 @@ async fn puts(h: &Harness) -> usize {
 #[tokio::test]
 async fn a_dodge_back_to_the_lobby_keeps_a_name_the_db_already_stores() {
     let h = harness().await;
-    // The rank phase of OTHER stays in flight for a while: its bundle cannot
-    // be refreshed by a rank/matches publish before the dodge, so the slot
-    // provably holds the `players` row read before the name was stored.
+    // The rank phase of OTHER must not finish before the assertions below:
+    // the dodge happens once the name is on screen, so the slot still holds
+    // the bundle read before the name was stored. A 60 s answer is
+    // effectively non-completing (the worker is aborted at the dodge and this
+    // test never awaits it), which keeps the window open regardless of the
+    // machine's load; a short delay could lose the race on a slow runner.
     Mock::given(method("GET"))
         .and(path(format!("/mmr/v1/players/{OTHER}/competitiveupdates")))
-        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(2)))
+        .respond_with(ResponseTemplate::new(500).set_delay(Duration::from_secs(60)))
         .with_priority(1)
         .mount(&h.server)
         .await;

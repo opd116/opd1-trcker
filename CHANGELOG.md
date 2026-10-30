@@ -4,7 +4,7 @@ All notable changes to OPD1 TRCKER are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] - 2026-10-31
 
 ### Added
 
@@ -16,9 +16,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Changed
 
+- The application version is now **0.4.0**, so this installer is distinguishable from the 0.3.1 builds.
+- Names learned locally are shared across Riot accounts on the machine (players and matches are keyed by PUUID), while match history, Competitive stats, encounters and each account's skins collection follow the current Riot account. Saved-player notes and the shared name memory stay by PUUID.
+
+
 - The window is resizable now (1280×800 by default, at least 1180×760), with its own title bar.
 
 ### Fixed
+
+- Skins: a transient store failure no longer hides the collection for ten minutes; the screen keeps its retry state and the collection appears on the next one-minute retry, and a stored copy is still shown when a refresh fails.
+- Names: a dodge or a match end keeps a stored name instead of falling back to the loading skeleton; a hidden player's remembered name refreshes after a reset and as soon as a stored match names them; and no live-incognito player's name is ever requested.
+- Riot account switch: open History, Skins and Saved pages, the profile drawer, the scoreboard and the My Stats-driven surfaces no longer keep the previous account's data; My Stats settles on `—` for an account that is not computable yet, and locally learned names stay visible while each account's statistics and encounters remain its own.
+- The queue-timer test no longer depends on millisecond timing (test-only; the CI flake is fixed).
+
 
 - Fast single clicks on Back, navigation, profile Close and scoreboard controls now work immediately after opening a page; keyboard activation also works. The 400 ms guard only suppresses repeated mouse clicks or a second click at the opening position, so double-clicking a player still cannot click through the new drawer.
 

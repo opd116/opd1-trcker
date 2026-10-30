@@ -2694,7 +2694,7 @@ dependencies = [
 
 [[package]]
 name = "opd1-trcker"
-version = "0.3.1"
+version = "0.4.0"
 dependencies = [
  "auto-launch",
  "base64 0.22.1",

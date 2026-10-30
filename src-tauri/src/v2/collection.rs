@@ -129,6 +129,15 @@ async fn collection_for(st: &Arc<AppState>) -> Result<Option<Collection>, String
     };
     let no_stored_answer = refresh_if_due(st, &me).await;
 
+    // The Riot client can switch account while Riot answers: this call was
+    // made for the account on screen when it started, and its stored copy (or
+    // its failure) belongs to that account, not to the one on screen now.
+    // `None` sends the Skins screen to ask again for the current account (it
+    // is the only caller of this command, and drops a stale answer).
+    if lock(&st.live).self_puuid.as_deref() != Some(me.as_str()) {
+        return Ok(None);
+    }
+
     let owner = me.clone();
     let stored = st
         .db(move |repo| Ok(load_stored(repo, &owner)))
@@ -259,6 +268,8 @@ mod tests {
 
     const ME: &str = "aaaaaaaa-0000-0000-0000-000000000001";
     const L1: &str = "578e9077-4f88-260c-e54c-b988425c60e4";
+    /// The other account a Riot client can switch to mid-call.
+    const OTHER_ACCOUNT: &str = "bbbbbbbb-0000-0000-0000-000000000002";
 
     #[test]
     fn riot_is_asked_again_only_after_ten_minutes_or_for_another_account() {
@@ -479,6 +490,72 @@ mod tests {
         assert_eq!(got.items.len(), 1);
         assert_eq!(got.items[0].level_id, L1);
         assert_eq!(store_requests(&h, &store_key_path()).await, 1);
+    }
+
+    /// A call in flight across a Riot account switch belongs to the account
+    /// that started it: it must not return the previous account's stored copy
+    /// for the account on screen now.
+    #[tokio::test]
+    async fn a_call_across_an_account_switch_does_not_return_the_old_accounts_copy() {
+        let _serial = COMMANDS.lock().await;
+        let h = crate::pipeline_tests::harness().await;
+        h.st.set_session(Some(h.session.clone()));
+        lock(&h.st.live).stage = Stage::Menus;
+        *lock(&LAST_ASK) = None;
+        // Both accounts have a stored copy: A's one skin, B's nothing.
+        let a = serde_json::to_string(&StoredOwned {
+            puuid: ME.into(),
+            fetched_ms: 5,
+            levels: vec![L1.into()],
+        })
+        .unwrap();
+        h.st.db(move |repo| repo.set_state(&store_key(ME), &a))
+            .await
+            .expect("A's copy is written");
+        let b = serde_json::to_string(&StoredOwned {
+            puuid: OTHER_ACCOUNT.into(),
+            fetched_ms: 7,
+            levels: vec![],
+        })
+        .unwrap();
+        h.st.db(move |repo| repo.set_state(&store_key(OTHER_ACCOUNT), &b))
+            .await
+            .expect("B's copy is written");
+        // So both copies can be joined with the catalog.
+        crate::pipeline_tests::mount_asset_tables(&h.assets_server).await;
+        mount_weapons(&h.assets_server).await;
+        // Riot's answer is slow enough to switch account while it is in flight.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("GET"))
+            .and(path(store_key_path()))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(one_level())
+                    .set_delay(Duration::from_secs(1)),
+            )
+            .with_priority(1)
+            .mount(&h.server)
+            .await;
+
+        // A starts the call; B takes over while Riot is still answering.
+        let st = h.st.clone();
+        let in_flight = tokio::spawn(async move { collection_for(&st).await });
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        lock(&h.st.live).self_puuid = Some(OTHER_ACCOUNT.into());
+        assert_eq!(
+            in_flight.await.unwrap(),
+            Ok(None),
+            "the old account's copy must not be served for the new one"
+        );
+
+        // The screen's next call for the account on screen now gets its copy.
+        let got = collection_for(&h.st)
+            .await
+            .expect("B's call")
+            .expect("B's stored copy still shows");
+        assert_eq!(got.fetched_ms, 7);
+        assert!(got.items.is_empty(), "B owns no skins");
     }
 
     #[test]

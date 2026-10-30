@@ -1,4 +1,4 @@
-# Current architecture orientation — 2026-10-29
+# Current architecture orientation — 2026-10-30
 
 The implementation has three Rust packages and one Svelte 5 SPA:
 
@@ -125,7 +125,7 @@ Implemented one file per area in `src-tauri/src/v2/`; the wire types are in `cra
 | `get_settings` / `set_settings` | `Settings`, stored as JSON in `app_state` under `ui_settings` (survives updates, R177); saving applies keep-on-top, autostart and close-to-tray and emits `"settings"` |
 | `ascii_list` / `ascii_save` / `ascii_delete` | The ASCII studio's gallery (`ascii_art`, migration 4) |
 | `app_info` | `AppInfo`: version, git commit and build time (`build.rs`), client and game versions, stored matches and DB size |
-| `collection` | `Option<Collection>`: the user's owned skins (Riot store entitlements for skin levels, asked at most every 10 minutes while the game runs, ids kept in `app_state.self_collection`) joined with valorant-api's skin catalog, cached on disk per version (R192) |
+| `collection` | `Option<Collection>`: the user's owned skins (Riot store entitlements for skin levels, ids kept in `app_state` per account) joined with valorant-api's skin catalog, cached on disk per version (R192). Riot is asked while the game runs: a stored answer holds the ten-minute refresh, a failed or held ask is retried by the screen's normal one-minute retry instead (R195). `None` = no ask was attempted yet (no session, the game closed, no self puuid); `Err` = an attempt ended with nothing stored; a stored copy is served even when a refresh fails |
 | `profile_extras` | `ProfileExtras` for one puuid: current-act record per map (top 5) and, for each recent match, which players of the current live match were in it |
 | `set_glance` | Nothing; resizes the window to the 420 px Glance column and back (R190) |
 

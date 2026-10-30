@@ -1366,6 +1366,13 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** A non-default install folder can keep stray files from an older version. The hook change reaches the user's machine only from the next installed version (an update runs the old uninstaller). `windows-registry` becomes a direct dependency (already in the tree via `auto-launch`).
 - **Status:** active
 
+### R195 — Bug-hunt round 1: collection retry and stage-reset names
+
+- **What:** Claude's calls, 2026-10-30. (1) An owned-skins ask counts as the ten-minute `REFRESH_EVERY` refresh only when its answer was parsed and stored for the current account; a failed or held (`RiotError::Held`) ask that left no stored copy returns `Err("skins unavailable")` so the Skins screen keeps its retry state and its normal one-minute retry reaches Riot, while `Ok(None)` stays for the no-ask states (no session, the game closed/stale session, no self puuid). A failed refresh with a stored copy still serves that copy; an account switch during the ask is not stored and not counted. (2) A reset stage transition (`plan_transition(..).reset_synced`, i.e. into the Lobby or Closed) marks the next roster install to re-read every carried player's stored `players` row; a carried slot's row is replaced only when the fresh row has a name or the slot's row has none, so a concurrent fresher write is never blanked. The stage's in-memory name answers are still cleared, so the renamed-player re-ask happens as before.
+- **Why:** (1) One transient Riot 5xx/timeout on the store-entitlements call used to set the ten-minute gate and return `Ok(None)`, so the screen claimed the collection had never been fetched ("Open this page while VALORANT is running") while the game was running. (2) A dodge back to the Lobby (or a match end) used to replace a stored, on-screen name with the loading skeleton until name-service answered again, because a carried slot's cached-first bundle could predate the name write.
+- **Cost:** While Riot keeps failing, the screen's normal retry can cost one owned-skins request per minute (instead of one per ten minutes). A reset transition costs one keyed `players` read per roster player (≤10, local SQLite, no network). Both fixes were verified with regression tests against mocks/fixtures, including the Lead's independent baseline reproductions; real Windows/VALORANT behavior is still to confirm (PRs #5 and #6, not merged as of this entry).
+- **Status:** active (amends R192's throttle cost)
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

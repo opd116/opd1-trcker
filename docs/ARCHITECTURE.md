@@ -12,7 +12,7 @@ The implementation has three Rust packages and one Svelte 5 SPA:
 | `ui/src/lib/router.svelte.ts` | Navigation, profile drawer, scoreboard return paths and scroll/focus state |
 | `ui/tests/` | Browser interaction, fit and visual regression coverage |
 
-All Riot/asset HTTP and caching stay in Rust; the UI consumes Tauri events and commands. The default window is 1280×800, minimum 1180×760, resizable; Glance is 420px wide. The profile drawer and History scoreboard replace the old standalone Details/Match pages. Close-to-tray, autostart and notification behavior are configurable. The UI derives the Riot account it is showing from the live self card (`selfId` in `ui/src/lib/stores.ts`, R196); a switch clears and reloads the account-scoped screens and closes the user-relative overlays.
+All Riot/asset HTTP and caching stay in Rust; the UI consumes Tauri events and commands. The default window is 1280×800, minimum 1180×760, resizable; Glance is 420px wide. The profile drawer and History scoreboard replace the old standalone Details/Match pages. Close-to-tray, autostart and notification behavior are configurable. The UI derives the Riot account it is showing from the live state's self card, else its `selfPuuid` field (the session's account, absent while unknown; `selfId` in `ui/src/lib/stores.ts`, R196); a switch clears and reloads the account-scoped screens and closes the user-relative overlays.
 
 Read `CLAUDE.md` for behavioral contracts and `docs/handoff.md` for verification status. No agent integration is part of the runtime architecture.
 

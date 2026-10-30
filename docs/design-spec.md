@@ -835,6 +835,7 @@ type DisplayName =
 
 interface LiveState {
   stage: Stage; mapId: string | null; players: PlayerCard[];
+  selfPuuid?: string;  // the session's own account; absent while unknown, never null (R196 follow-up; an account switch carries it)
   settled: boolean;   // Rust has made its first verdict on whether VALORANT is running; once true, true for the app's life
 }
 

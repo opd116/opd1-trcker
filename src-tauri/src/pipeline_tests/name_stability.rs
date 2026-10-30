@@ -677,3 +677,111 @@ async fn a_remembered_name_newer_than_the_reread_is_not_downgraded_by_a_reset() 
     assert_lobby_shows_remembered_for_hidden(&h, events_before, &want);
     poller.stop_worker();
 }
+
+/// A match `m-late` the user and HIDDEN played, where match-details carries
+/// HIDDEN's name (post-match answers can show it, R142/R143/R145).
+fn late_match_body(start_ms: i64) -> Value {
+    json!({
+        "matchInfo": {
+            "matchId": "m-late", "mapId": SPLIT_PATH,
+            "gameStartMillis": start_ms, "queueId": "unrated",
+            "isRanked": false, "completionState": "Completed"
+        },
+        "players": [
+            {"subject": ME, "gameName": "Me", "tagLine": "TAG", "teamId": "Blue",
+             "partyId": "p", "characterId": "agent",
+             "stats": {"score": 1, "roundsPlayed": 20, "kills": 20, "deaths": 10, "assists": 3}},
+            {"subject": HIDDEN, "gameName": "LateName", "tagLine": "LATE", "teamId": "Blue",
+             "partyId": "p", "characterId": "agent",
+             "stats": {"score": 1, "roundsPlayed": 20, "kills": 5, "deaths": 15, "assists": 1}}
+        ],
+        "teams": [
+            {"teamId": "Blue", "won": true, "roundsWon": 13},
+            {"teamId": "Red", "won": false, "roundsWon": 7}
+        ],
+        "roundResults": []
+    })
+}
+
+#[tokio::test]
+async fn a_match_stored_while_a_hidden_player_is_carried_refreshes_their_remembered_name() {
+    // R145 ordering gap: the worker syncs roster players in display order
+    // (`order_players`), so a hidden party member's own publish can already be
+    // done when a later player's matches phase stores a match that names them
+    // (e.g. the party is synced before the enemies, and an enemy's old match
+    // names the hidden ally). No slot refresh used to follow that store, so
+    // the card kept its older name/`HiddenPlayer` until the next reset, fill
+    // or own sync. This stores the match through the real `sync::store_details`
+    // path while the hidden player is on screen and already synced.
+    let h = harness().await;
+    mount_party_of(&h, HIDDEN, true).await;
+    mount_pregame_of(&h, HIDDEN, true).await;
+    presence(&h, blob("PREGAME", "competitive")).await;
+    let mut poller = Poller::new(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    poller.presence_tick(&h.session).await.unwrap();
+    assert_eq!(h.st.live_state().stage, Stage::Pregame);
+    // HIDDEN's own sync pass is done: its rank and matches phases published
+    // its bundle, so nothing else will refresh it for this stage.
+    wait_until("HIDDEN synced", || lock(&h.st.live).synced.contains(HIDDEN)).await;
+    let before =
+        h.st.live_state()
+            .players
+            .iter()
+            .find(|c| c.puuid == HIDDEN)
+            .map(|c| c.name.clone())
+            .unwrap();
+    // The DB's best known name before the store is the harness match's
+    // (SecretName#HID, from ME's matches phase), and the card shows it.
+    let pre =
+        h.st.db(|repo| repo.known_name(ME, HIDDEN))
+            .await
+            .flatten()
+            .expect("the earlier harness store named HIDDEN");
+    assert_eq!((pre.name.as_str(), pre.tag.as_str()), ("SecretName", "HID"));
+
+    // A newer match naming HIDDEN is stored while the hidden card is carried,
+    // through the same `store_details` the worker and Match Details use.
+    let start_ms = now_ms() - 60_000;
+    get(
+        &h.server,
+        "/match-details/v1/matches/m-late",
+        late_match_body(start_ms),
+    )
+    .await;
+    let details = h.session.match_details("m-late").await.unwrap();
+    crate::sync::store_details(&h.st, details, |_, _, _| {}).await;
+
+    // The store refreshes the carried hidden slot from the DB: the card shows
+    // the newer name/source/start at once (no wait for the next publish).
+    let want = Field::Value(DisplayName::Remembered {
+        name: "LateName".into(),
+        tag: "LATE".into(),
+        source: RememberedSource::OwnMatch,
+        from_map_id: None, // the asset tables are not loaded here
+        from_start_ms: Some(start_ms),
+    });
+    let after =
+        h.st.live_state()
+            .players
+            .iter()
+            .find(|c| c.puuid == HIDDEN)
+            .map(|c| c.name.clone())
+            .unwrap();
+    assert_eq!(
+        after, want,
+        "the stored match's name reaches the carried hidden card at once (before: {before:?})"
+    );
+
+    // Privacy: no name-service request carries the hidden puuid.
+    for r in h.server.received_requests().await.unwrap() {
+        if r.method.as_str() == "PUT" && r.url.path() == "/name-service/v2/players" {
+            let body = String::from_utf8_lossy(&r.body);
+            assert!(
+                !body.contains(HIDDEN),
+                "a hidden player was sent to name-service: {body}"
+            );
+        }
+    }
+    poller.stop_worker();
+}

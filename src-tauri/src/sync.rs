@@ -434,11 +434,39 @@ pub async fn store_details(
         let me = lock(&st.live).self_puuid.clone().unwrap_or_default();
         unnamed_others(&players, &me).collect()
     };
+    // R145: a hidden player's card reads the remembered name from its slot's
+    // DB bundle, which usually only that player's own sync publish refreshes.
+    // A match stored now can name a hidden player who is already on screen
+    // (another roster player's matches phase runs after theirs: display order
+    // puts a hidden ally before the enemies, and the party in roster order),
+    // so those slots are rebuilt from the DB once the rows are stored.
+    let named_hidden_on_screen: Vec<String> = {
+        let live = lock(&st.live);
+        let me = live.self_puuid.as_deref().unwrap_or("");
+        let full = |s: &Option<String>| s.as_deref().is_some_and(|v| !v.is_empty());
+        players
+            .iter()
+            .filter(|p| p.puuid != me && full(&p.game_name) && full(&p.tag_line))
+            .filter(|p| {
+                live.slots
+                    .iter()
+                    .any(|s| s.roster.puuid == p.puuid && s.roster.incognito)
+            })
+            .map(|p| p.puuid.clone())
+            .collect()
+    };
     let st = st.clone();
     tauri::async_runtime::spawn(async move {
         st.db(move |repo| repo.upsert_match(&m, &teams, &players))
             .await?;
         st.queue_name_fill(asks);
+        // The stored match can be a newer source for a hidden player on
+        // screen: refresh their bundles through the same DB→live path the
+        // names fill uses (one publish for the whole store). DB only: no
+        // request is made, and incognito cards keep their style/source.
+        if !named_hidden_on_screen.is_empty() {
+            st.reload_slots(&named_hidden_on_screen).await;
+        }
         after(&st, start_ms, others);
         Some(())
     })

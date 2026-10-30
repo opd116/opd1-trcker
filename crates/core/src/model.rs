@@ -311,7 +311,8 @@ pub struct LiveState {
     /// account has no self card, and My Stats may not be computable).
     /// Absent while no account is known; a switch replaces it before the
     /// state is built, so the previous account's puuid never survives one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// (`LiveState` is serialize-only, so there is no `default` counterpart.)
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub self_puuid: Option<String>,
     /// The poll loop has reached its first verdict on whether VALORANT is
     /// running: `false` while `Closed` is only the model's starting value (the

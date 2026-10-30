@@ -133,8 +133,9 @@ export const shapes = {
     stage: { kinds: ["string"], enum: "stage" },
     mapId: strOrNull,
     players: { kinds: ["array"], shape: "PlayerCard" },
-    // Rust omits it while the account is unknown (serialized only when known).
-    selfPuuid: { kinds: ["string", "null"], optional: true },
+    // Rust omits it while the account is unknown (serialized only when known; never null: Option + skip_serializing_if,
+    // serialize-only type).
+    selfPuuid: { kinds: ["string"], optional: true },
     settled: bool,
   } satisfies ShapeOf<LiveState>,
 

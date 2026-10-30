@@ -104,11 +104,25 @@ async fn a_switch_to_a_never_seen_account_is_on_the_live_state_without_a_self_ca
             serde_json::to_string(e).unwrap()
         );
     }
-    // The event was emitted although nothing on screen changed: only the account did.
+    // The switch had to produce a live state although the stage did not change. The account is what makes it a
+    // different state (`json["selfPuuid"]` is pinned above); the roster went from ME's card to empty at the same time,
+    // so the byte diff is not account-only. Stripping those two keys, the two states are otherwise identical.
     assert_eq!(before.stage, switched.stage);
+    let before_json = serde_json::to_value(&before).unwrap();
+    let strip = |v: &Value| {
+        let mut v = v.clone();
+        let o = v.as_object_mut().unwrap();
+        o.remove("selfPuuid");
+        o.remove("players");
+        v
+    };
+    assert_eq!(
+        strip(&before_json),
+        strip(&json),
+        "only the account and the roster changed"
+    );
     assert_ne!(
-        serde_json::to_value(before).unwrap(),
-        json,
+        before_json, json,
         "the serialized state must change for the switch to be published"
     );
 }

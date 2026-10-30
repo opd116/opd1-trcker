@@ -10,7 +10,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
-import { detailsFor, historyMatchId, matchFor, MAPS, PUUID } from "../src/lib/demo/cdv8";
+import { detailsFor, emptyDetails, historyMatchId, matchFor, MAPS, PUUID } from "../src/lib/demo/cdv8";
 import { SCENES } from "../src/lib/demo/scenes";
 import { demoStatus } from "../src/lib/demo/v2/status";
 import { DEFAULT_SETTINGS } from "../src/lib/demo/v2/store";
@@ -25,6 +25,7 @@ import type {
 import { APP_READY, gotoApp, NOW, routeMedia, UI_DIR } from "./harness";
 
 /** Account A is the demo scene's user (Fahad); account B is the account the Riot client switches to. */
+const A_PUUID = PUUID.fahad!;
 const B_PUUID = "bbbbbbbb-0000-4000-8000-00000000000b";
 const MARA = PUUID.mara!;
 
@@ -34,11 +35,20 @@ const LIVE_B: LiveState = (() => {
   const self = next.players.find((p) => p.isSelf)!;
   self.puuid = B_PUUID;
   self.name = { kind: "visible", name: "Alt", tag: "B0B0" };
+  next.selfPuuid = B_PUUID;
   return next;
 })();
 // The switch keeps the live stage on purpose: History and Skins already refresh on a stage change (a pre-existing path),
 // and that must not be what makes these cases pass — only the account change may.
 expect(LIVE_A.stage).toBe(LIVE_B.stage);
+
+/**
+ * The real-client edge: Riot switched accounts while VALORANT is closed. The live state names nobody on screen, and a
+ * never-seen account has no self card and no computable My Stats — only the live state's `selfPuuid` names the account.
+ */
+const CLOSED_A: LiveState = { stage: "closed", mapId: null, players: [], selfPuuid: A_PUUID, settled: true };
+const CLOSED_B: LiveState = { stage: "closed", mapId: null, players: [], selfPuuid: B_PUUID, settled: true };
+expect(CLOSED_A.stage).toBe(CLOSED_B.stage);
 
 /** The two accounts' own newest matches: different match ids, so a stale row is visible by id. */
 const ROW_A = historyMatchId(0);
@@ -113,7 +123,11 @@ const savedRow = (withGames: number, withWins: number, againstGames: number): Sa
 });
 
 const LIVE = { a: LIVE_A, b: LIVE_B };
-const STATUS = { a: demoStatus(LIVE_A, new URLSearchParams()), b: demoStatus(LIVE_B, new URLSearchParams()) };
+const CLOSED = { a: CLOSED_A, b: CLOSED_B };
+const STATUS = {
+  ingame: { a: demoStatus(LIVE_A, new URLSearchParams()), b: demoStatus(LIVE_B, new URLSearchParams()) },
+  closed: { a: demoStatus(CLOSED_A, new URLSearchParams()), b: demoStatus(CLOSED_B, new URLSearchParams()) },
+};
 const HISTORY = { a: historyPage(ROW_A, START), b: historyPage(ROW_B, START - HOUR) };
 const COLLECTION = { a: collectionA, b: collectionB };
 const SAVED = { a: [savedRow(3, 2, 2)], b: [savedRow(9, 8, 5)] };
@@ -121,21 +135,37 @@ const SAVED = { a: [savedRow(3, 2, 2)], b: [savedRow(9, 8, 5)] };
 /** Mara's drawer: its encounter rows open scoreboards (the drawer → scoreboard → switch case). */
 const MARA_DETAILS = detailsFor("mara", LIVE_A.players.find((c) => c.puuid === MARA), LIVE_A.players);
 
+/** The Saved row's drawer: a settled, minimal profile (the closed-game case only needs it open and then closed). */
+const SAVED_DETAILS = emptyDetails({
+  puuid: SAVED_PUUID,
+  name: { kind: "visible", name: "Nova", tag: "0001" },
+  cardId: "",
+  agentId: null,
+  party: null,
+  encounters: null,
+  team: "ally",
+  isSelfParty: false,
+  isSelf: false,
+});
+
 const data = {
   meta: JSON.parse(readFileSync(join(UI_DIR, "src", "lib", "demo", "meta.json"), "utf8")) as unknown,
-  live: LIVE,
+  live: { ingame: LIVE, closed: CLOSED },
   status: STATUS,
   settings: DEFAULT_SETTINGS,
   history: HISTORY,
   collection: COLLECTION,
   saved: SAVED,
-  details: { [MARA]: MARA_DETAILS },
+  details: { [MARA]: MARA_DETAILS, [SAVED_PUUID]: SAVED_DETAILS },
   matches: {
     [ROW_A]: matchFor(ROW_A, LIVE_A.players),
     [ROW_B]: matchFor(ROW_B, LIVE_A.players),
     ...Object.fromEntries(MARA_DETAILS.encounters.map((e) => [e.matchId, matchFor(e.matchId, LIVE_A.players)])),
   },
 };
+
+/** How the fake starts: mid-match (A has a self card) or with VALORANT closed (only the session's `selfPuuid`). */
+type Start = "ingame" | "closed";
 
 type Account = "a" | "b";
 
@@ -159,7 +189,7 @@ async function guardDone(page: Page): Promise<void> {
 }
 
 /** Boot the app as if inside Tauri, with account-aware answers for every command the screens ask. */
-async function bootInTauri(page: Page): Promise<void> {
+async function bootInTauri(page: Page, start: Start = "ingame"): Promise<void> {
   await page.addInitScript((d) => {
     const w = window as unknown as Record<string, unknown> & Fake;
     w.isTauri = true;
@@ -188,13 +218,15 @@ async function bootInTauri(page: Page): Promise<void> {
         if (cmd.startsWith("plugin:")) return null;
         w.__calls.push(cmd);
         const account = w.__account;
+        const liveAt = (d.live as Record<Start, typeof d.live.ingame>)[d.start];
+        const statusAt = (d.status as Record<Start, typeof d.status.ingame>)[d.start];
         switch (cmd) {
           case "meta":
             return structuredClone(d.meta);
           case "live_state":
-            return structuredClone(d.live[account]);
+            return structuredClone(liveAt[account]);
           case "app_status":
-            return structuredClone(d.status[account]);
+            return structuredClone(statusAt[account]);
           case "get_settings":
             return structuredClone(d.settings);
           case "player_marks":
@@ -227,26 +259,26 @@ async function bootInTauri(page: Page): Promise<void> {
         }
       },
     };
-  }, data);
+  }, { ...data, start });
   await routeMedia(page);
   await page.clock.setFixedTime(NOW);
   await gotoApp(page, "/", APP_READY);
-  await page.locator("main [data-row]").first().waitFor();
+  if (start === "ingame") await page.locator("main [data-row]").first().waitFor();
+  else await page.locator("nav.rail button").first().waitFor();
   // Nothing went wrong on the way in (the app reports its own errors through `ui_log`).
   expect((await calls(page)).filter((c) => c === "ui_log")).toEqual([]);
 }
 
 /**
- * The Riot client switched accounts while the app is open: the new account's live state (the same stage, the self card
- * now account B), and from here on every command answers for B. Set the account first, so an ask the switch triggers
- * already gets B's data.
+ * The Riot client switched accounts while the app is open: the new account's live state (same stage) and, from here on,
+ * every command answers for B. Set the account first, so an ask the switch triggers already gets B's data.
  */
-async function switchAccount(page: Page): Promise<void> {
-  await page.evaluate((live) => {
+async function switchAccount(page: Page, live: LiveState = LIVE_B): Promise<void> {
+  await page.evaluate((payload) => {
     const w = window as unknown as Fake;
     w.__account = "b";
-    w.__emit("live", live);
-  }, LIVE_B);
+    w.__emit("live", payload);
+  }, live);
 }
 
 test.describe("Riot account switch", () => {
@@ -348,5 +380,47 @@ test.describe("Riot account switch", () => {
     await expect(board).toHaveCount(0);
     // The switch closes the scoreboard for the new account, not back through the old account's drawer.
     await expect(dialog).toHaveCount(0);
+  });
+
+  // The real-client edge: Riot switched accounts while VALORANT is closed. The live state names nobody on screen, and a
+  // never-seen account has no self card and no computable My Stats, so only the live state's `selfPuuid` identifies the
+  // new account. Without it the UI has no signal at all and every case below keeps account A's data.
+  test.describe("while VALORANT is closed: only the live state's selfPuuid names the account", () => {
+    test("History replaces account A's rows", async ({ page }) => {
+      await bootInTauri(page, "closed");
+      await nav(page, "History").click();
+      await expect(page.locator(`main [data-match-id="${ROW_A}"]`)).toHaveCount(1);
+
+      await switchAccount(page, CLOSED_B);
+
+      await expect(page.locator(`main [data-match-id="${ROW_B}"]`)).toHaveCount(1);
+      await expect(page.locator(`main [data-match-id="${ROW_A}"]`)).toHaveCount(0);
+    });
+
+    test("Skins clears account A's collection and draws account B's", async ({ page }) => {
+      await bootInTauri(page, "closed");
+      await nav(page, "Skins").click();
+      await expect(page.locator("main .value .num")).toHaveText("875");
+
+      await switchAccount(page, CLOSED_B);
+
+      await expect(page.locator("main .value .num")).toHaveText("2,550");
+    });
+
+    test("Saved reloads the records and the open drawer closes", async ({ page }) => {
+      await bootInTauri(page, "closed");
+      await nav(page, "Saved").click();
+      const row = page.locator("main [data-row]").filter({ hasText: "Nova" });
+      await expect(row.locator(".rec").first().locator(".games")).toHaveText("3 games");
+      await row.click();
+      const dialog = page.getByRole("dialog");
+      await expect(dialog).toHaveCount(1);
+      await guardDone(page);
+
+      await switchAccount(page, CLOSED_B);
+
+      await expect(dialog).toHaveCount(0);
+      await expect(row.locator(".rec").first().locator(".games")).toHaveText("9 games");
+    });
   });
 });

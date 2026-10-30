@@ -305,6 +305,14 @@ pub struct LiveState {
     /// UI looks assets up by uuid.
     pub map_id: Option<String>,
     pub players: Vec<PlayerCard>,
+    /// The Riot account whose session the app has (the session's own puuid),
+    /// when known: the UI's account signal on an account switch, also in a
+    /// `closed` state and for an account the DB has never seen (such an
+    /// account has no self card, and My Stats may not be computable).
+    /// Absent while no account is known; a switch replaces it before the
+    /// state is built, so the previous account's puuid never survives one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub self_puuid: Option<String>,
     /// The poll loop has reached its first verdict on whether VALORANT is
     /// running: `false` while `Closed` is only the model's starting value (the
     /// app has not looked yet), `true` from the first verdict on, for the rest

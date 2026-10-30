@@ -21,10 +21,14 @@ setLiveCardLookup((puuid) => get(live)?.players.find((c) => c.puuid === puuid));
 export const mystats = writable<MyStats | null | undefined>(undefined);
 
 /**
- * The puuid a live state names as the user, if it names one. A live state without a self card (a Closed state for an
- * account the DB has no player row for yet) says nothing about the account.
+ * The account a live state names: its own card's puuid, or the session's `selfPuuid` that Rust carries — which also
+ * names it in a `closed` state and for an account the DB has never seen (no self card at all). null when it names none
+ * (before the first connection, or a live state from a Rust that has no `selfPuuid` yet).
  */
-const liveSelf = derived(live, ($live) => $live?.players.find((p) => p.isSelf)?.puuid ?? null);
+const liveSelf = derived(
+  live,
+  ($live) => $live?.players.find((p) => p.isSelf)?.puuid ?? $live?.selfPuuid ?? null,
+);
 
 /** The last account a live state named: a self-less live state must not move the account back through `mystats`. */
 let lastLiveSelf: string | null = null;
@@ -33,10 +37,10 @@ liveSelf.subscribe((id) => {
 });
 
 /**
- * The Riot account the app is showing: the live self card's puuid (Rust replaces the whole live state for the new
- * session on an account switch, so its self card is the new account at once), else the last account a live state named,
- * else the My Stats snapshot's puuid — which is only a fallback before any live state has named one, so a stale My
- * Stats snapshot can never move it back. null while none is known.
+ * The Riot account the app is showing: the live self card's puuid, else the live state's `selfPuuid` (Rust knows it
+ * from the session, so a switch to an account with no self card and no computable My Stats is signalled at once), else
+ * the last account a live state named, else the My Stats snapshot's puuid — which is only a fallback before any live
+ * state has named one, so a stale My Stats snapshot can never move it back. null while none is known.
  */
 export const selfId = derived(
   [liveSelf, mystats],

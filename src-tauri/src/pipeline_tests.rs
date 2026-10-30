@@ -1403,6 +1403,11 @@ pub(crate) async fn wait_until(what: &str, mut cond: impl FnMut() -> bool) {
 #[cfg(test)]
 mod status;
 
+/// The live state's account signal (`selfPuuid`): a switch to an account
+/// with no self card is still announced (own file; same harness).
+#[cfg(test)]
+mod account;
+
 /// R163's keyed close and late-open tests (their own file; same harness).
 #[cfg(test)]
 mod ui_open;

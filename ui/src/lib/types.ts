@@ -107,6 +107,12 @@ export interface LiveState {
   mapId: string | null;
   players: PlayerCard[];
   /**
+   * The Riot account whose session the app has (`crates/core/src/model.rs` `self_puuid`), when known — also in a
+   * `closed` state and for an account the DB has never seen (no self card, and My Stats may not be computable yet).
+   * The UI's own account-change signal. Absent while no account is known.
+   */
+  selfPuuid?: string | null;
+  /**
    * Rust has reached its first verdict on whether VALORANT is running: false while the very first presence check is
    * still pending (the `closed` state published before it is the model's starting value, not a verdict). Once true it
    * stays true for the app's lifetime. The start page decides on the first state with `settled: true`.

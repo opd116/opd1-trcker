@@ -107,6 +107,22 @@ describe("stores", () => {
       expect(get(selfId)).toBe("live-account");
     });
 
+    it("selfId uses the live state's selfPuuid when it has no self card, and a switch to another one fires once", async () => {
+      const { applyLive, mystats, onAccountChange, selfId } = await load();
+      const closedWith = (puuid: string): LiveState => ({ stage: "closed", mapId: null, players: [], selfPuuid: puuid, settled: true });
+      mystats.set({ puuid: "stale-snapshot" } as MyStats);
+      // Rust carries the session's own account, so a closed state for a never-seen account (no self card, no My Stats)
+      // still names it; the snapshot is only a fallback and never wins over it.
+      applyLive(closedWith("a"));
+      expect(get(selfId)).toBe("a");
+      const seen: [string, string][] = [];
+      const off = onAccountChange((from, to) => seen.push([from, to]));
+      applyLive(closedWith("b"));
+      expect(get(selfId)).toBe("b");
+      expect(seen).toEqual([["a", "b"]]);
+      off();
+    });
+
     it("fires once for a real account switch, never on startup, a dropped connection or the same account", async () => {
       const { applyLive, onAccountChange } = await load();
       const seen: [string, string][] = [];

@@ -14,7 +14,7 @@
   import SkinCard from "../components/skins/SkinCard.svelte";
   import WeaponFilter from "../components/skins/WeaponFilter.svelte";
   import { scrollHost } from "../lib/router.svelte";
-  import { live } from "../lib/stores";
+  import { live, onAccountChange } from "../lib/stores";
   import { ALL, editionRows, fmtInt, sar, skinNames, totalVp, VALUE_TIP, visibleSkins, weaponRows } from "../lib/skins";
   import { tip } from "../lib/tooltip.svelte";
   import type { Collection, Edition } from "../lib/types";
@@ -31,24 +31,38 @@
   let edition = $state<Edition | typeof ALL>(ALL);
   /** Bumped to ask again. */
   let ask = $state(0);
+  /** Bumped by every ask: an answer for an older ask (another account, another stage) is dropped. */
+  let gen = 0;
 
   $effect(() => {
     void ask;
     let alive = true;
+    const g = ++gen;
     collection()
       .then((c) => {
-        if (!alive) return;
+        if (!alive || g !== gen) return;
         coll = c;
         failed = false;
       })
       .catch((err) => {
         reportError("collection", err);
-        if (alive) failed = true;
+        if (alive && g === gen) failed = true;
       });
     return () => {
       alive = false;
     };
   });
+
+  // A Riot account switch: the collection on screen is the previous account's. It leaves at once (the neutral skeleton
+  // shows while the new account's answer travels) and the new account's collection is asked for; Rust's stored copy is
+  // per puuid, so the ask is cheap when the new account has one.
+  $effect(() =>
+    onAccountChange(() => {
+      coll = undefined;
+      failed = false;
+      ask++;
+    }),
+  );
 
   /** No collection to show yet (never fetched, or the answer failed): asked again. */
   const missing = $derived(failed || coll === null);

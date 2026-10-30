@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { get } from "svelte/store";
-import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails } from "./types";
+import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerCard, PlayerDetails } from "./types";
 
 const state = (stage: LiveState["stage"], settled = true): LiveState => ({ stage, mapId: null, players: [], settled });
 
@@ -8,8 +8,9 @@ const state = (stage: LiveState["stage"], settled = true): LiveState => ({ stage
 async function load() {
   vi.resetModules();
   const stores = await import("./stores");
-  const { go, openProfile, router } = await import("./router.svelte");
-  return { ...stores, go, openProfile, router };
+  const { go, openMatch, openProfile, router } = await import("./router.svelte");
+  // `openMatchPage` is the router's open (the stores' `openMatch` is the payload slot).
+  return { ...stores, go, openMatchPage: openMatch, openProfile, router };
 }
 
 describe("stores", () => {
@@ -82,6 +83,65 @@ describe("stores", () => {
     const { applyLive, router } = await load();
     applyLive(state("closed"));
     expect(router.screen).toBe("live");
+  });
+
+  describe("Riot account switch", () => {
+    const liveWith = (puuid: string, stage: LiveState["stage"] = "menus"): LiveState => ({
+      stage,
+      mapId: null,
+      players: [{ puuid, isSelf: true } as PlayerCard],
+      settled: true,
+    });
+
+    it("selfId is the live self card, else the My Stats puuid while no live state names one", async () => {
+      const { applyLive, mystats, selfId } = await load();
+      expect(get(selfId)).toBeNull();
+      mystats.set({ puuid: "snapshot-account" } as MyStats);
+      expect(get(selfId)).toBe("snapshot-account");
+      applyLive(liveWith("live-account"));
+      expect(get(selfId)).toBe("live-account");
+      applyLive({ ...liveWith("live-account"), players: [] }); // a live state with no self card: the snapshot stands in
+      expect(get(selfId)).toBe("snapshot-account");
+    });
+
+    it("fires once for a real account switch, never on startup, a dropped connection or the same account", async () => {
+      const { applyLive, onAccountChange } = await load();
+      const seen: [string, string][] = [];
+      const off = onAccountChange((from, to) => seen.push([from, to]));
+      applyLive(liveWith("a")); // the first account: not a switch
+      applyLive(liveWith("a", "pregame"));
+      applyLive(null); // a dropped connection is "unknown", not another account
+      applyLive({ ...liveWith("a"), players: [] }); // an empty live state keeps the last known account
+      expect(seen).toEqual([]);
+      applyLive(liveWith("b"));
+      expect(seen).toEqual([["a", "b"]]);
+      applyLive(liveWith("b", "ingame"));
+      applyLive(liveWith("b", "menus"));
+      expect(seen).toEqual([["a", "b"]]);
+      applyLive(liveWith("c"));
+      expect(seen).toEqual([
+        ["a", "b"],
+        ["b", "c"],
+      ]);
+      off();
+      applyLive(liveWith("d"));
+      expect(seen).toHaveLength(2);
+    });
+
+    it("a switch closes the open drawer, and a scoreboard back to its source screen, instead of the old account's numbers", async () => {
+      const { applyLive, openMatchPage, openProfile, router } = await load();
+      applyLive(liveWith("a"));
+      openProfile("some-player");
+      expect(router.profile).toBe("some-player");
+      applyLive(liveWith("b"));
+      expect(router.profile).toBeNull();
+
+      openMatchPage("some-match", { from: "history", focusPuuid: "b" });
+      expect(router.matchId).toBe("some-match");
+      applyLive(liveWith("c"));
+      expect(router.matchId).toBeNull();
+      expect(router.screen).toBe("history");
+    });
   });
 
   describe("startFeeds under Tauri", () => {

@@ -1,8 +1,8 @@
 import { isTauri } from "@tauri-apps/api/core";
-import { get, readable, writable } from "svelte/store";
+import { derived, get, readable, writable } from "svelte/store";
 import { myStats, tauriBridge } from "./api";
 import { loadMeta, openDetails, openMatch, startLive, startMyStats } from "./boot";
-import { onStage, setLiveCardLookup, startPage } from "./router.svelte";
+import { backFromMatch, closeProfile, onStage, setLiveCardLookup, startPage } from "./router.svelte";
 import type { LiveState, MatchDetailsView, Meta, MyStats, PlayerDetails, Stage } from "./types";
 import { reportError } from "./uilog";
 
@@ -18,6 +18,31 @@ setLiveCardLookup((puuid) => get(live)?.players.find((c) => c.puuid === puuid));
  * `null` = Rust answered "unknown" (the user's puuid or the current act is not known yet: the frames show `—`).
  */
 export const mystats = writable<MyStats | null | undefined>(undefined);
+
+/**
+ * The Riot account the app is showing: the live self card's puuid (Rust replaces the whole live state for the new
+ * session on an account switch, so its self card is the new account at once), else the My Stats snapshot's puuid (while
+ * no live state has arrived). null while neither is known.
+ */
+export const selfId = derived(
+  [live, mystats],
+  ([$live, $mystats]) => $live?.players.find((p) => p.isSelf)?.puuid ?? $mystats?.puuid ?? null,
+);
+
+/**
+ * Runs `fn` when the Riot account changes while the app is open: two different PUUIDs were the current account in turn.
+ * A change to or from "unknown" (startup, a dropped connection, the live state still being rebuilt) is not a switch, so
+ * startup and Closed↔Menus never fire it; the previous known account is kept until another one is known. Returns the
+ * unsubscribe function.
+ */
+export function onAccountChange(fn: (from: string, to: string) => void): () => void {
+  let last: string | null = null;
+  return selfId.subscribe((id) => {
+    if (id === null) return;
+    if (last !== null && last !== id) fn(last, id);
+    last = id;
+  });
+}
 
 /**
  * Called when the My Stats page opens: while it has no data (nothing answered yet, or Rust answered null because the
@@ -79,6 +104,18 @@ export function applyLive(s: LiveState | null): void {
   }
   live.set(s);
 }
+
+/**
+ * A Riot account switch: the open profile drawer and scoreboard show values relative to the user (encounters
+ * with/against, "your result", the user's own row) and were built for the previous account. They cannot be corrected in
+ * place, so both close instead of staying up with the old account's numbers; the screen a scoreboard returns to is
+ * refreshed for the new account by the screen itself (Saved / History / Skins). A drawer a scoreboard came from is not
+ * reopened: the switch did not ask for it, and the screen under it is the new account's.
+ */
+onAccountChange(() => {
+  closeProfile();
+  backFromMatch({ reopenProfile: false });
+});
 
 let started = false;
 

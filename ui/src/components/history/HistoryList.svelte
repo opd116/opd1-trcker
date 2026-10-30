@@ -28,7 +28,7 @@
   import { followMatchEnds } from "../../lib/matchEnd";
   import { agentName, isRankedTier, mapName } from "../../lib/meta";
   import { openMatch, scrollHost } from "../../lib/router.svelte";
-  import { live, meta, mystats, now } from "../../lib/stores";
+  import { live, meta, now, onAccountChange, selfId } from "../../lib/stores";
   import { tierName } from "../../lib/theme";
   import { tip } from "../../lib/tooltip.svelte";
   import type { HistoryPage, HistoryQueue, HistoryRow } from "../../lib/types";
@@ -147,6 +147,16 @@
     lastStage = st;
   });
 
+  // A Riot account switch: the rows on screen are the previous account's. They leave at once (the card's skeleton shows)
+  // and the new account's first page is asked for; a page still in flight for the old account is dropped by `refresh`'s
+  // `gen` (and the module cache is cleared by cache.ts, so a remount cannot draw the old rows either).
+  onMount(() =>
+    onAccountChange(() => {
+      data = null;
+      void refresh(queue, PAGE);
+    }),
+  );
+
   let scroller = $state<HTMLElement | null>(null);
   let sentinel = $state<HTMLElement | null>(null);
   // Load the next page when the end of the list comes within 400px.
@@ -161,8 +171,8 @@
   const allTotal = $derived(data?.allTotal ?? null);
   const count = (q: HistoryQueue) => (data ? String(q === "competitive" ? data.competitiveTotal : data.allTotal) : "");
 
-  /** The user's own puuid: the scoreboard takes their side. */
-  const selfPuuid = $derived($mystats?.puuid ?? $live?.players.find((p) => p.isSelf)?.puuid ?? "");
+  /** The user's own puuid (stores `selfId`): the scoreboard takes their side. */
+  const selfPuuid = $derived($selfId ?? "");
 
   function open(r: HistoryRow) {
     openMatch(r.matchId, { from: "history", focusPuuid: selfPuuid });

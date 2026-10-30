@@ -2,8 +2,9 @@
   Saved players (design v2 450–522, logic 1680–1740): the title with the count, a search over name, tag and note, the
   All / Teammates / Opponents pills with counts, and a sortable table (default: last seen, most recent first; the
   header's columns sort, NOTE does not). Rows are `saved_players`, asked again whenever the saved set changes and after a
-  match ends; a note shows the live `marks` copy, so typing in a row never waits on a round trip. Empty: the design's "No saved players
-  yet" with Go to live match.
+  match ends; a Riot account switch clears the rows and reloads them for the new account (the records are relative to
+  the user). A note shows the live `marks` copy, so typing in a row never waits on a round trip. Empty: the design's "No
+  saved players yet" with Go to live match.
 -->
 <script lang="ts">
   import { onMount } from "svelte";
@@ -29,7 +30,7 @@
     type SavedView,
     type SortKey,
   } from "../lib/savedv2";
-  import { live, meta, now } from "../lib/stores";
+  import { live, meta, now, onAccountChange } from "../lib/stores";
   import { tip } from "../lib/tooltip.svelte";
   import type { SavedPlayer } from "../lib/types";
   import { reportError } from "../lib/uilog";
@@ -66,6 +67,16 @@
     followMatchEnds(live, () => async () => {
       load();
       return false;
+    }),
+  );
+
+  // A Riot account switch: the records with/against and the last-seen dates are relative to the previous user. The rows
+  // leave at once (the card's skeleton shows) and the reload asks for the new account's; `load`'s `gen` drops an answer
+  // asked for the old one.
+  onMount(() =>
+    onAccountChange(() => {
+      list = null;
+      load();
     }),
   );
 

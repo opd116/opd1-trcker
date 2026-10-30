@@ -434,11 +434,58 @@ pub async fn store_details(
         let me = lock(&st.live).self_puuid.clone().unwrap_or_default();
         unnamed_others(&players, &me).collect()
     };
+    // R145: a hidden player's card reads the remembered name from its slot's
+    // DB bundle, which usually only that player's own sync publish refreshes.
+    // A match stored now can name a hidden player who is already on screen
+    // (another roster player's matches phase runs after theirs: display order
+    // puts a hidden ally before the enemies, and the party in roster order),
+    // so those slots are rebuilt from the DB once the rows are stored.
+    //
+    // Only when the stored match could be a newer source: `known_name` orders
+    // the sources by time (a match's start / a seen name's confirmation), so a
+    // match that starts at or after the slot's remembered name may improve it
+    // (a tie reloads: the DB read is authoritative), while an older one cannot.
+    // Without this, an own-history backfill (hundreds of old matches) would
+    // reload a carried hidden party member for every match it names them in.
+    let named_hidden_on_screen: Vec<String> = {
+        let live = lock(&st.live);
+        let me = live.self_puuid.as_deref().unwrap_or("");
+        let full = |s: &Option<String>| s.as_deref().is_some_and(|v| !v.is_empty());
+        players
+            .iter()
+            .filter(|p| p.puuid != me && full(&p.game_name) && full(&p.tag_line))
+            .filter(|p| {
+                live.slots.iter().any(|s| {
+                    s.roster.puuid == p.puuid
+                        && s.roster.incognito
+                        && s.db.remembered.as_ref().is_none_or(|known| {
+                            // An unknown slot time counts as older than any
+                            // stored match, so the reload happens.
+                            start_ms >= known.start_ms.unwrap_or(i64::MIN)
+                        })
+                })
+            })
+            .map(|p| p.puuid.clone())
+            .collect()
+    };
     let st = st.clone();
     tauri::async_runtime::spawn(async move {
         st.db(move |repo| repo.upsert_match(&m, &teams, &players))
             .await?;
         st.queue_name_fill(asks);
+        // The stored match can be a newer source for a hidden player on
+        // screen: refresh their bundles through the same DB→live path the
+        // names fill uses (one publish for the whole store). DB only: no
+        // request is made, and incognito cards keep their style/source.
+        //
+        // Sequential-read caveat: the reload installs the newest DB read at
+        // its own read time; a concurrent older read could still overwrite it
+        // until the next refresh. That window is pre-existing (it is the same
+        // for a fill's `reload_slots`) and the reset reread guards its side of
+        // it with `remembered_is_newer`.
+        if !named_hidden_on_screen.is_empty() {
+            st.reload_slots(&named_hidden_on_screen).await;
+        }
         after(&st, start_ms, others);
         Some(())
     })

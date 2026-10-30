@@ -47,6 +47,7 @@ use tokio::time::{sleep, Instant};
 
 use opd1_core::db::repo::Repo;
 use opd1_core::model::{DisplayName, Field};
+use opd1_core::names::KnownName;
 use opd1_core::presence::{decode_presence, Stage};
 use opd1_core::wire::{ConnState, QueueInfo};
 use opd1_riot::session::VersionSource;
@@ -62,8 +63,8 @@ use crate::roster::{
 };
 use crate::state::{closed_self_slot, lock, now_ms, AppState, Slot};
 use crate::store::{
-    forget_level, load_player_db, match_landed, save_player, PlayerDb, SELF_LOADOUT_KEY,
-    SELF_PUUID_KEY,
+    forget_level, load_player, load_player_db, match_landed, save_player, PlayerDb, StoredPlayer,
+    SELF_LOADOUT_KEY, SELF_PUUID_KEY,
 };
 
 /// Own-party lookups an Agent Select makes while the party is unknown: at
@@ -354,6 +355,15 @@ pub(crate) struct Poller {
     queue_seen_ms: Option<i64>,
     /// R189: the saved-player alert of the current match.
     alerts: SavedAlerts,
+    /// The next roster install must read each carried player's `players` row
+    /// again (not just the new players'): a reset transition forgot the names
+    /// resolved this stage, and a slot installed before its name was stored
+    /// would otherwise show no name although the DB has it. Set by
+    /// `change_stage`, taken by `apply_roster`; cleared wherever every slot is
+    /// replaced anyway (`enter_closed`, `drop_session`), and kept on a failed
+    /// read so the next install asks again. A fresh `Poller` (the supervisor's
+    /// restart) starts with it clear.
+    reload_roster_rows: bool,
 }
 
 /// R189: the saved-player alert's memory for one match: who is saved (read
@@ -375,6 +385,25 @@ impl Drop for Poller {
             handle.abort();
         }
     }
+}
+
+/// Whether a remembered name read from the DB replaces the slot's own (the
+/// reset reread, R145). Symmetric with the `players` row rule: the DB's answer
+/// is taken when the slot has none, or when it is at least as recent.
+/// `start_ms` is the time [`Repo::known_name`] itself orders the name sources
+/// by — a source match's start, or when a `seen` name was last confirmed — so
+/// comparing it applies the same recency rule inside one slot. An unknown time
+/// (`None`) counts as older than every known time; on a tie (same time, or two
+/// unknown times) the DB's answer wins, being the newest read of the sources.
+///
+/// The reset reread can race an on-demand `reload_slot`/`reload_slots` (a fill
+/// or an open Details), which installs a newer DB bundle; this older read must
+/// never downgrade what that newer bundle already shows.
+fn remembered_is_newer(slot: Option<&KnownName>, known: &KnownName) -> bool {
+    let Some(slot) = slot else {
+        return true;
+    };
+    known.start_ms.unwrap_or(i64::MIN) >= slot.start_ms.unwrap_or(i64::MIN)
 }
 
 impl Poller {
@@ -418,6 +447,7 @@ impl Poller {
             presence_drops: 0,
             queue_seen_ms: None,
             alerts: SavedAlerts::default(),
+            reload_roster_rows: false,
         }
     }
 
@@ -658,6 +688,9 @@ impl Poller {
         self.session = None;
         self.st.set_session(None);
         self.stage = Stage::Closed;
+        // The reconnect replaces every slot (a new session installs a fresh
+        // roster): no roster-row reread is owed.
+        self.reload_roster_rows = false;
         self.pregame_match_id = None;
         self.next_pregame = None;
         self.roster_retry = None;
@@ -1080,6 +1113,15 @@ impl Poller {
             }
             ended
         };
+        // The reset forgot the names resolved this stage (a renamed player is
+        // asked again). The `players` rows keep them, but a slot installed
+        // before its name was stored still holds the older bundle: the next
+        // roster install reads the stored rows again, so the card shows the
+        // name it already had instead of a loading skeleton until the fresh
+        // lookup answers.
+        if t.reset_synced {
+            self.reload_roster_rows = true;
+        }
         // R189: the user's own match just ended (In Game to the Lobby, or the
         // game closed): the recap points at it.
         let recap = match (self.stage, next) {
@@ -1137,6 +1179,8 @@ impl Poller {
 
         match t.fetch {
             RosterFetch::None => {
+                // `enter_closed` replaces every slot (and clears the reread
+                // flag): there is no roster install to read rows for.
                 self.enter_closed().await;
                 Ok(())
             }
@@ -1429,7 +1473,11 @@ impl Poller {
     /// Installs a roster: cached-first slots (DB) → publish → worker.
     /// Players already on screen keep their DB bundle; only new ones are
     /// read (and get a `players` row upsert), plus the user's own row when
-    /// their level is new or changed (R100).
+    /// their level is new or changed (R100). After a reset transition a
+    /// carried player's `players` row and remembered name (R145, for a hidden
+    /// player's card) are read again — two keyed reads; see
+    /// [`Poller::reload_roster_rows`] — because the DB may have learned them
+    /// after the bundle was installed.
     pub(crate) async fn apply_roster(
         &mut self,
         session: &Arc<RiotSession>,
@@ -1440,6 +1488,7 @@ impl Poller {
         let me = session.self_puuid().to_string();
         let roster = order_players(roster, &me);
 
+        let reread_rows = std::mem::take(&mut self.reload_roster_rows);
         let new_players: Vec<RosterPlayer> = {
             let live = lock(&self.st.live);
             roster
@@ -1459,25 +1508,59 @@ impl Poller {
                 .cloned()
                 .collect()
         };
+        // After a reset transition the carried players' rows are read again:
+        // everyone on the roster that is not already loaded as a new player.
+        let reread_puuids: Vec<String> = if reread_rows {
+            let new_ids: HashSet<&str> = new_players.iter().map(|p| p.puuid.as_str()).collect();
+            roster
+                .iter()
+                .filter(|p| !new_ids.contains(p.puuid.as_str()))
+                .map(|p| p.puuid.clone())
+                .collect()
+        } else {
+            Vec::new()
+        };
         let mut loaded: HashMap<String, PlayerDb> = HashMap::new();
-        if !new_players.is_empty() {
+        let mut reread: HashMap<String, (Option<StoredPlayer>, Option<KnownName>)> = HashMap::new();
+        if !new_players.is_empty() || !reread_puuids.is_empty() {
             let now = now_ms();
             let me = me.clone();
-            loaded = self
+            let read = self
                 .st
                 .db(move |repo| {
-                    let mut out = HashMap::new();
+                    let mut bundles = HashMap::new();
                     for p in &new_players {
                         save_player(repo.conn(), &p.player_update(&me), now)?;
                         if p.hides_level_from(&me) {
                             forget_level(repo.conn(), &p.puuid)?;
                         }
-                        out.insert(p.puuid.clone(), load_player_db(repo, Some(&me), &p.puuid)?);
+                        bundles.insert(p.puuid.clone(), load_player_db(repo, Some(&me), &p.puuid)?);
                     }
-                    Ok(out)
+                    // Keyed reads per carried player, not the whole bundle:
+                    // the `players` row (a name stored after the slot was
+                    // installed) and the remembered name a hidden player's
+                    // card shows (R145; a match row naming them may have been
+                    // stored since).
+                    let mut rows = HashMap::new();
+                    for p in &reread_puuids {
+                        let remembered = if p.as_str() == me.as_str() {
+                            None
+                        } else {
+                            repo.known_name(&me, p)?
+                        };
+                        rows.insert(p.clone(), (load_player(repo.conn(), p)?, remembered));
+                    }
+                    Ok((bundles, rows))
                 })
-                .await
-                .unwrap_or_default();
+                .await;
+            if let Some((bundles, rows)) = read {
+                loaded = bundles;
+                reread = rows;
+            } else if reread_rows {
+                // A failed read must not leave the stale rows on screen until
+                // the next reset: the next roster install reads again.
+                self.reload_roster_rows = true;
+            }
         }
 
         {
@@ -1490,11 +1573,37 @@ impl Poller {
                     let db = match live.slots.iter().find(|s| s.roster.puuid == r.puuid) {
                         Some(s) => {
                             let mut db = s.db.clone();
-                            // The user's freshly saved `players` row (own
-                            // level, R100) replaces the stale one; the rest
-                            // of the bundle stays the worker's.
                             if let Some(fresh) = loaded.remove(&r.puuid) {
+                                // A newly saved row (a new player, the user's
+                                // own level, R100) replaces the slot's; the
+                                // rest of the bundle stays the worker's.
                                 db.row = fresh.row;
+                            } else if let Some((row, remembered)) = reread.remove(&r.puuid) {
+                                // A reset reread only restores a name the slot
+                                // is missing. A slot that already has one is
+                                // left alone: another task (a fill's
+                                // `reload_slot`) may have written a newer row
+                                // meanwhile, and the re-asked lookup is what
+                                // refreshes a renamed player. A row that is not
+                                // there at all leaves the slot's own row.
+                                if let Some(row) = row {
+                                    if db.row.as_ref().and_then(|x| x.name()).is_none() {
+                                        db.row = Some(row);
+                                    }
+                                }
+                                // R145: a hidden player's card reads
+                                // `db.remembered`, which a match row stored
+                                // while the slot was carried can have made
+                                // stale. Take the DB's best known name when it
+                                // is at least as recent as the slot's (never
+                                // blanking it and never letting this older
+                                // read downgrade a newer bundle a racing
+                                // reload installed).
+                                if let Some(known) = remembered {
+                                    if remembered_is_newer(db.remembered.as_ref(), &known) {
+                                        db.remembered = Some(known);
+                                    }
+                                }
                             }
                             db
                         }
@@ -1593,6 +1702,10 @@ impl Poller {
     pub(crate) async fn enter_closed(&mut self) {
         self.stop_worker();
         self.stage = Stage::Closed;
+        // The Closed view replaces every slot (and every later stage installs
+        // a fresh roster): a pending roster-row reread would be for a roster
+        // nobody shows.
+        self.reload_roster_rows = false;
         show_closed(&self.st).await;
     }
 
@@ -2000,6 +2113,54 @@ mod tests {
     };
     use crate::pipeline_tests::{card_json, harness, roster, session_with_other_wait, Harness, ME};
     use crate::store::{save_player, PlayerUpdate};
+
+    // -- the remembered-name recency rule (R145) ----------------------
+
+    /// A known name at `start_ms` (the time `Repo::known_name` orders by).
+    fn known(name: &str, start_ms: Option<i64>) -> KnownName {
+        KnownName {
+            name: name.into(),
+            tag: "TAG".into(),
+            map_id: None,
+            start_ms,
+            source: opd1_core::model::RememberedSource::Seen,
+        }
+    }
+
+    #[test]
+    fn the_remembered_recency_rule_only_ever_moves_forward() {
+        // No remembered name in the slot: the DB's is taken.
+        assert!(remembered_is_newer(None, &known("db", Some(200))));
+        // The DB's is newer — or the same time: the newest read is
+        // authoritative, so it is taken too.
+        assert!(remembered_is_newer(
+            Some(&known("slot", Some(100))),
+            &known("db", Some(200))
+        ));
+        assert!(remembered_is_newer(
+            Some(&known("slot", Some(200))),
+            &known("db", Some(200))
+        ));
+        // The slot's is newer (a racing reload installed it): never downgraded.
+        assert!(!remembered_is_newer(
+            Some(&known("slot", Some(200))),
+            &known("db", Some(100))
+        ));
+        // An unknown time counts as older than every known time...
+        assert!(!remembered_is_newer(
+            Some(&known("slot", Some(100))),
+            &known("db", None)
+        ));
+        assert!(remembered_is_newer(
+            Some(&known("slot", None)),
+            &known("db", Some(100))
+        ));
+        // ...and two unknown times take the DB's answer.
+        assert!(remembered_is_newer(
+            Some(&known("slot", None)),
+            &known("db", None)
+        ));
+    }
 
     // -- the supervisor (A1) -----------------------------------------
 

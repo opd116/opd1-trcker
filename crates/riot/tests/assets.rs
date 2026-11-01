@@ -45,6 +45,26 @@ fn png_dimensions(bytes: &[u8]) -> (u32, u32) {
         .dimensions()
 }
 
+fn jpeg_bytes(width: u32, height: u32) -> Vec<u8> {
+    let img = image::RgbImage::from_pixel(width, height, image::Rgb([50, 120, 200]));
+    let mut out = Vec::new();
+    image::DynamicImage::ImageRgb8(img)
+        .write_to(&mut std::io::Cursor::new(&mut out), ImageFormat::Jpeg)
+        .expect("encode jpeg");
+    out
+}
+
+/// How many times `path` was requested from `server`.
+async fn image_gets(server: &MockServer, path: &str) -> usize {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.method.as_str() == "GET" && r.url.path() == path)
+        .count()
+}
+
 async fn mount_version(server: &MockServer, version: &str) {
     Mock::given(method("GET"))
         .and(path("/v1/version"))
@@ -499,6 +519,166 @@ async fn a_damaged_cached_image_is_downloaded_again() {
             .unwrap();
         assert_eq!(png_dimensions(&std::fs::read(&file).unwrap()), (64, 64));
     }
+}
+
+#[tokio::test]
+async fn a_signature_only_cached_png_is_downloaded_again_once() {
+    // R200/F03: a truncated PNG keeps a valid signature but has no pixels.
+    // The header alone must not be a permanent cache hit.
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    Mock::given(method("GET"))
+        .and(path("/img/agent.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(png_bytes(64, 64)))
+        .mount(&server)
+        .await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    cache.refresh_tables().await.unwrap();
+    let file = cache
+        .ensure_image(AssetKind::Agent, AGENT_UUID)
+        .await
+        .unwrap();
+    let whole = png_bytes(64, 64);
+
+    for prefix in [8usize, 16] {
+        std::fs::write(&file, &whole[..prefix]).unwrap();
+        let before = image_gets(&server, "/img/agent.png").await;
+        cache
+            .ensure_image(AssetKind::Agent, AGENT_UUID)
+            .await
+            .unwrap();
+        assert_eq!(
+            image_gets(&server, "/img/agent.png").await,
+            before + 1,
+            "a {prefix}-byte PNG signature must be one cache miss"
+        );
+        assert_eq!(png_dimensions(&std::fs::read(&file).unwrap()), (64, 64));
+
+        // The replacement is a valid hit: no second request.
+        let after = image_gets(&server, "/img/agent.png").await;
+        cache
+            .ensure_image(AssetKind::Agent, AGENT_UUID)
+            .await
+            .unwrap();
+        assert_eq!(image_gets(&server, "/img/agent.png").await, after);
+    }
+}
+
+#[tokio::test]
+async fn a_signature_only_cached_jpeg_is_downloaded_again_once() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    let jpeg = jpeg_bytes(200, 200);
+    Mock::given(method("GET"))
+        .and(path("/img/map-list.png"))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(jpeg.clone()))
+        .mount(&server)
+        .await;
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    cache.refresh_tables().await.unwrap();
+    let file = cache
+        .ensure_image(AssetKind::MapList, MAP_UUID)
+        .await
+        .unwrap();
+    assert_eq!(png_dimensions(&std::fs::read(&file).unwrap()), (200, 200));
+
+    std::fs::write(&file, &jpeg[..8]).unwrap();
+    let before = image_gets(&server, "/img/map-list.png").await;
+    cache
+        .ensure_image(AssetKind::MapList, MAP_UUID)
+        .await
+        .unwrap();
+    assert_eq!(image_gets(&server, "/img/map-list.png").await, before + 1);
+    assert_eq!(png_dimensions(&std::fs::read(&file).unwrap()), (200, 200));
+}
+
+#[tokio::test]
+async fn an_invalid_200_image_body_is_an_error_and_the_next_valid_body_heals() {
+    // CardSmall/CardWide have no downscale target: they used to accept any
+    // 200 body. R200 validates them too.
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    mount_playercard(&server, Value::Null).await;
+    for (p, bytes) in [
+        ("/img/card-small.png", png_bytes(80, 80)),
+        ("/img/card-wide.png", png_bytes(120, 60)),
+    ] {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(b"not an image".to_vec()))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(bytes))
+            .with_priority(2)
+            .mount(&server)
+            .await;
+    }
+    let cache = AssetCache::with_base(dir.path().to_path_buf(), server.uri());
+    cache.refresh_tables().await.unwrap();
+
+    for (kind, want) in [
+        (AssetKind::CardSmall, (80, 80)),
+        (AssetKind::CardWide, (120, 60)),
+    ] {
+        let err = cache.ensure_image(kind, CARD_UUID).await.unwrap_err();
+        assert!(
+            matches!(err, AssetError::Decode(_)),
+            "{kind:?}: a non-image 200 body must not become a cached hit: {err:?}"
+        );
+        let path = cache.ensure_image(kind, CARD_UUID).await.unwrap();
+        assert_eq!(png_dimensions(&std::fs::read(path).unwrap()), want);
+    }
+}
+
+#[tokio::test]
+async fn a_corrupt_cached_image_is_replaced_once_for_eight_concurrent_callers() {
+    let dir = tempdir();
+    let server = MockServer::start().await;
+    mount_all_tables(&server, "v1").await;
+    Mock::given(method("GET"))
+        .and(path("/img/agent.png"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_bytes(png_bytes(64, 64))
+                .set_delay(std::time::Duration::from_millis(50)),
+        )
+        .mount(&server)
+        .await;
+    let cache = std::sync::Arc::new(AssetCache::with_base(
+        dir.path().to_path_buf(),
+        server.uri(),
+    ));
+    cache.refresh_tables().await.unwrap();
+    let file = cache
+        .ensure_image(AssetKind::Agent, AGENT_UUID)
+        .await
+        .unwrap();
+    std::fs::write(&file, &png_bytes(64, 64)[..8]).unwrap();
+    let before = image_gets(&server, "/img/agent.png").await;
+
+    let mut handles = Vec::new();
+    for _ in 0..8 {
+        let cache = cache.clone();
+        handles.push(tokio::spawn(async move {
+            cache.ensure_image(AssetKind::Agent, AGENT_UUID).await
+        }));
+    }
+    for handle in handles {
+        let path = handle.await.unwrap().unwrap();
+        assert_eq!(png_dimensions(&std::fs::read(path).unwrap()), (64, 64));
+    }
+    assert_eq!(
+        image_gets(&server, "/img/agent.png").await,
+        before + 1,
+        "eight callers must coalesce into one replacement download"
+    );
 }
 
 #[tokio::test]

@@ -1394,6 +1394,48 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** Nothing new is stored; the account-scoped screens must always key off the current `self_puuid` (the round-2/4/5 account-switch fixes enforce this), and the shared name memory grows with the installation (intended, R145). Real Windows/VALORANT validation remains for the account-switch flows.
 - **Status:** active
 
+### R199 - DB bundles and open-view refreshes belong to an account generation and an opening
+
+- **What:** Claude's calls, 2026-11-01, from the reviewed backend audit (F01/F02) and the user's implementation authorization. (1) `LiveModel` carries an internal `account_epoch` bumped only on a real owner change (`set_account`, called by `Poller::on_connected` inside the same `live` section that clears the old account); `OwnerStamp { epoch, puuid }` is captured before an asynchronous DB read and both fields are checked before any live-slot install, worker mark, retry schedule or open-view commit. `reload_slot`/`reload_slots`, `sync::publish_player`, `apply_roster`, `show_self_only` and `show_closed` serialize their read -> install through one `bundle_reload` async gate; a failed read keeps the old bundle. (2) Player Details and Match Details each have a `details_build`/`match_build` gate plus an opening ticket (`DetailsToken`/`MatchToken`: seq + OwnerStamp + key/focus). Refreshes capture the token only while the page is open, build under the gate, and commit only if the epoch, sequence and key/focus still match. A real account switch closes both backend open pages. (3) `collection_for` captures an OwnerStamp once and checks it after `refresh_if_due`, after the stored-copy read and after the catalog build; any mismatch is `Err("skins unavailable")`, never A's collection for B (including A->B->A).
+- **Why:** an older/previous-account read could install after a switch or after a newer read, and a refresh from an old opening/account could replace a newly opened page while checking only the player/match key. The wire shape, keyed-close behavior, shared PUUID names and account-scoped data rules are unchanged.
+- **Cost:** one short local-DB gate per view/bundle install; a slow DB read can delay the next install, never an HTTP call. No schema, UI, dependency or wire change. Regression evidence and the pre-fix failures are in the implementation ledger.
+- **Status:** active
+
+### R200 - A cached image must decode, not merely carry a valid signature
+
+- **What:** Claude's call, 2026-11-01 (F03/R03). `AssetCache::ensure_image` validates a cached file by decoding it to a non-empty image in blocking work, not by `image::guess_format` on its first bytes. A truncated PNG/JPEG with a valid signature is a cache miss; the next request downloads once and atomically replaces it. Downloaded bytes are decoded for every kind (including CardSmall/CardWide with no downscale target), and the same decoded image is reused for the resize. Failed replacement returns an error and leaves the file eligible for a later retry; no corrupt bytes are served as a valid hit.
+- **Why:** a header-only/truncated cached image was returned unchanged and served with a one-year cache header, so the broken image survived retries and restarts.
+- **Cost:** every cache hit reads and decodes the file (V04 measured ~22 ms -> ~72 ms for 800 one-pixel hits; absolute cost ~90 us/hit). A real-size measurement and any validated-file cache optimization need separate review. No dependency or cache format change.
+- **Status:** active
+
+### R201 - Each diagnostic dump is an exact owned-file snapshot
+
+- **What:** Claude's call, 2026-11-01 (F04/R04). `dump_raw` is serialized by an `AppState::dump` async gate from the capture snapshot through the blocking write. A dump owns only `log.txt`, the known endpoint payload names (and error forms) and safe basenames listed in the previous valid `manifest.json`; every owned file absent from the current set is removed (a removal failure is an error, never a mixed-folder success), unrelated files/directories are untouched, payload writes are atomic via per-invocation temp files, and `manifest.json` is written last with app version, optional build commit, time and this dump's payload names. `DumpResult::files` keeps its payload-count meaning; the manifest is excluded.
+- **Why:** successful endpoint files from an earlier Riot session survived a later dump, so a reader could attribute old bodies to the current session.
+- **Cost:** one folder enumeration and a small manifest per dump; one dump at a time. No uploader, timestamped history, log UI, schema or dependency change.
+- **Status:** active
+
+### R202 - A retired Riot session must not send a queued request; account-relative loadout writes use the epoch
+
+- **What:** Claude's calls, 2026-11-01 (V02/L01). (1) `RiotSession::remote` rechecks `check_alive` immediately after the global rate token and before sending, so a call that waited out a throttle cannot go on the wire after the lockfile/account was retired. A response already in flight when the client retires is still accepted: match/name data is installation-global and the backfill intentionally stores what it fetched before the drop; account-relative installation is guarded at the application layer (R199). (2) `sync::fetch_self_loadout_after_holds` captures an `OwnerStamp` at the start and checks both the session account and `owner_matches` before writing memory or the shared `self_loadout` key, so an A->B->A round trip cannot let an older A answer overwrite the newer A session's value. Same-account reconnect keeps the generation; no separate session generation was invented.
+- **Why:** a retired session could send a request after a long throttle wait, and a stale own-loadout answer could overwrite the shared key after A->B->A.
+- **Cost:** one extra lockfile read per remote call (already a small local file), and no new requests. The request, retry and family-hold bounds are unchanged.
+- **Status:** active
+
+### R203 - An unsupported SQLite schema version is refused, never sliced or silently opened
+
+- **What:** Claude's call, 2026-11-01 (V03/L03). `open_db` returns a clear `unsupported schema version N; this build supports 0..=4` error for a negative or newer `user_version` before any migration slice. Valid versions 0-4 still migrate transactionally and idempotently; a failed later migration rolls back every earlier statement. No migration SQL was edited.
+- **Why:** a negative version indexed a slice and panicked, and a future version (a newer build's DB) was silently accepted, risking writes against an unknown schema.
+- **Cost:** a database written by a newer build is refused by this build instead of opened (a downgrade limitation). This is the audit's chosen safe policy; no automatic downgrade was invented.
+- **Status:** active
+
+### R204 - Recognizable authorization forms in diagnostics are redacted
+
+- **What:** Claude's call, 2026-11-01 (V05/L05). Plain-text and JSON-string diagnostics redact JWTs plus `Bearer <token>`, `Basic <base64>`, and `password=<value>`/`password: <value>` forms (case-insensitive, optional quotes, conservative length thresholds), while keeping the surrounding error context. Ordinary prose such as "bearer of good news", "basic error handling" and "password: required" is not redacted. Arbitrary prose secrets, non-JSON opaque blobs outside those shapes and full account names/ids in raw capture payloads remain outside this guarantee.
+- **Why:** JSON secret-named keys and JWTs were covered, but a plain-text `Authorization: Bearer ...` or `password=...` in an error body/log excerpt survived.
+- **Cost:** one linear scan per diagnostic string; no dependency, no new capture, no real credentials or logs used in tests.
+- **Status:** active
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.

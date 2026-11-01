@@ -1,8 +1,18 @@
-# Current handoff — 2026-10-29
+# Current handoff — 2026-11-01
 
 ## Read first
 
 Read `AGENTS.md`, `CLAUDE.md`, then the relevant user requirements and decisions. No agent plugin, external design folder or special handoff command is required. This note supersedes the 2026-10-04 task brief.
+
+## Backend correctness audit - 2026-11-01 (local branch, unreleased)
+
+A user-authorized follow-up to the reviewed backend audit (plan v2 / F01-F04, V01-V06) ran on local branch `codex/backend-correctness`, based on the v0.4.0 release commit `9dc93759d89d17ae611e7a4f4d15dae910939503`. Nothing was pushed, opened as a PR, merged, tagged, released or installed; `main` is unchanged.
+
+- **Fixes committed locally:** FIX-1/2 owner-generation and opening-token safety for live DB bundles and open views; FIX-3 decode-validated cached/downloaded images; FIX-4 exact owned-file diagnostic dumps with a last-written manifest; V01 final owner-stamp check around the Skins catalog; V02 pre-send retirement check and own-loadout A->B->A guard; V03 explicit refusal of negative/newer `user_version`; V05 redaction of recognizable `Bearer`/`Basic`/`password` forms.
+- **Evidence:** every fix has a deterministic pre-fix failure in a disposable worktree and a post-fix pass; the implementation ledger with exact commands, failures, SHAs and limits is outside the repo at `C:\Users\Administrator\Documents\Codex\2026-11-01\new-chat-4\outputs\implementation-ledger.md`. Rulings R199-R204 are in `docs/DECISIONS.md`.
+- **G01 local results (exact tree before this docs update):** `cargo fmt --check` and full workspace `cargo clippy --workspace --all-targets -- -D warnings` clean; `cargo test -p opd1-core -p opd1-riot -p opd1-trcker` = **1216 passed, 0 failed** (core 278, riot 308, trcker 630); UI build clean; Vitest **633 passed, 1 skipped**; svelte-check **0 errors, 0 warnings**; full Playwright serial **288 passed, 14 skipped, 0 failed** (the 14 skips are the Linux-pinned visual baselines; they were not regenerated). No dependency, lockfile, version, migration SQL, screenshot baseline or UI file changed.
+- **Verification limits:** V04 process RSS/unbounded-duration stability was not measured (the bounded cohorts and a 32 MiB body passed; timings are debug-build samples). DST-boundary stats could not be asserted on this no-DST host. V07 real Windows + VALORANT and D01 installer/delivery were not authorized and were not run; the mock results are not live-client validation. V02 accepts a response already in flight at retirement and relies on application-layer owner stamps; the request is not sent if retirement happened before the pre-send recheck.
+- **Next:** review the local branch/commits, then decide whether to push/PR. Do not treat local green checks as a release; exact-commit CI and the manual V07 checklist remain required.
 
 ## Code and release state
 

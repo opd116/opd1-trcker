@@ -2014,6 +2014,10 @@ pub struct AppState {
     /// R199 test hook ([`BundleProbe`]): parks one reload after its DB read.
     #[cfg(test)]
     bundle_probe: Mutex<Option<Arc<BundleProbe>>>,
+    /// R201: serializes `dump_raw` from session capture snapshot to the end
+    /// of its blocking write, so two dumps cannot interleave their file
+    /// inventories or manifests. Never held with `live` or the repo.
+    dump: tokio::sync::Mutex<()>,
     /// B2: the `"mystats"` push's state (`my_stats::notify`): the last emitted
     /// bytes and the one-task-at-a-time flags.
     pub(crate) my_stats_push: Mutex<MyStatsPush>,
@@ -2110,6 +2114,7 @@ impl AppState {
             bundle_reload: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             bundle_probe: Mutex::new(None),
+            dump: tokio::sync::Mutex::new(()),
             my_stats_push: Mutex::new(MyStatsPush::default()),
             carried_holds: Mutex::new(CarriedHolds::default()),
             worker_kick: AtomicBool::new(false),
@@ -2551,6 +2556,19 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn bundle_reload_is_free(&self) -> bool {
         self.bundle_reload.try_lock().is_ok()
+    }
+
+    /// R201: one diagnostic dump at a time, from taking the session capture
+    /// snapshot through the blocking write. `dump_raw` holds it; no `live`
+    /// or repo lock is taken while it is held.
+    pub(crate) async fn dump_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.dump.lock().await
+    }
+
+    /// R201 test guard: the dump gate is free.
+    #[cfg(test)]
+    pub(crate) fn dump_is_free(&self) -> bool {
+        self.dump.try_lock().is_ok()
     }
 
     /// R199 test hook: the next bundle reload parks here after its DB read and

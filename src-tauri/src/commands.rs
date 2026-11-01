@@ -25,6 +25,9 @@
 //! - `dump_raw()` — redacted raw responses (the last 2xx and the last error
 //!   of each endpoint) and the log to `app_data/debug/`.
 
+use std::collections::HashSet;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -520,6 +523,8 @@ pub fn ui_log(level: String, message: String) {
 #[serde(rename_all = "camelCase")]
 pub struct DumpResult {
     pub dir: String,
+    /// Payload files this call wrote (log and capture files); the metadata
+    /// `manifest.json` is written too but is not counted (R201).
     pub files: u32,
 }
 
@@ -568,33 +573,172 @@ fn dump_files(
     files
 }
 
-/// Whether `name` is an error file of an earlier dump (`<key>.error.json` /
-/// `<key>.error.txt`).
-fn is_error_dump_name(name: &str) -> bool {
-    name.ends_with(".error.json") || name.ends_with(".error.txt")
+/// R201: the dump's manifest (metadata about this call's payload files).
+/// Written last and **not** counted by [`DumpResult::files`].
+const DUMP_MANIFEST: &str = "manifest.json";
+/// The log file every dump writes.
+const DUMP_LOG: &str = "log.txt";
+
+/// R201: endpoint `file_stem`s the app writes (`raw_capture`'s keys). Only
+/// these, the log, and names listed in the previous valid manifest are ever
+/// removed as stale; an unrelated JSON/TXT file in the folder is never
+/// app-owned.
+const DUMP_ENDPOINTS: &[&str] = &[
+    "pregame_player",
+    "pregame_match",
+    "pregame_loadouts",
+    "coregame_player",
+    "coregame_match",
+    "coregame_loadouts",
+    "match_history",
+    "match_details",
+    "party_of",
+    "party",
+    "mmr",
+    "comp_updates",
+    "player_loadout",
+    "presences",
+    "names",
+    "chat_v1_session",
+    "store_v1_entitlements_id_id",
+    "content-service_v3_content",
+];
+
+/// A single safe file name for the flat dump directory: no separators, no
+/// `.`/`..`, no path traversal and no control characters.
+fn safe_dump_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 200
+        && name != "."
+        && name != ".."
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
-/// Writes `files` into `dir` (created if needed); how many were written. The
-/// error files of an earlier dump are removed first (only those, only in
-/// `dir`): an error file carries no time, so one from an earlier run left
-/// beside a fresh dump would blame an endpoint that works now.
-fn write_dump(dir: &std::path::Path, files: &[(String, String)]) -> std::io::Result<u32> {
-    std::fs::create_dir_all(dir)?;
-    for entry in std::fs::read_dir(dir)?.flatten() {
-        let is_stale_error = entry.file_type().is_ok_and(|t| t.is_file())
-            && entry.file_name().to_str().is_some_and(is_error_dump_name);
-        if is_stale_error {
-            // Best effort: a file that cannot be removed is overwritten below
-            // when its endpoint failed again, and otherwise stays.
-            let _ = std::fs::remove_file(entry.path());
+/// The endpoint stem of an app-owned payload name (`<stem>.json`,
+/// `<stem>.error.json`, `<stem>.error.txt`), if it is one of the known
+/// endpoints.
+fn owned_endpoint_stem(name: &str) -> Option<&str> {
+    if !safe_dump_name(name) {
+        return None;
+    }
+    for suffix in [".error.json", ".error.txt", ".json"] {
+        if let Some(stem) = name.strip_suffix(suffix) {
+            return DUMP_ENDPOINTS.contains(&stem).then_some(stem);
         }
     }
-    let mut n = 0;
-    for (name, contents) in files {
-        std::fs::write(dir.join(name), contents)?;
-        n += 1;
+    None
+}
+
+/// Whether `name` is a file a dump may have produced (the log or a known
+/// endpoint payload), as opposed to an unrelated file the user or another
+/// program put in the debug directory.
+fn owned_dump_name(name: &str) -> bool {
+    name == DUMP_LOG || owned_endpoint_stem(name).is_some()
+}
+
+/// R201: payload names a previous valid manifest claims. Only a single safe
+/// basename with a dump payload suffix is accepted; a malformed or hostile
+/// manifest cannot make an arbitrary file (or a subdirectory) owned.
+fn prior_manifest_names(dir: &Path) -> HashSet<String> {
+    let Ok(text) = std::fs::read_to_string(dir.join(DUMP_MANIFEST)) else {
+        return HashSet::new();
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return HashSet::new();
+    };
+    value
+        .get("files")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .filter(|name| safe_dump_name(name) && (name.ends_with(".json") || name.ends_with(".txt")))
+        .map(str::to_string)
+        .collect()
+}
+
+/// R201: the manifest written last by a dump. Metadata only — never tokens,
+/// full account ids or response bodies.
+fn dump_manifest(files: &[(String, String)]) -> Vec<u8> {
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    let value = serde_json::json!({
+        "app": "OPD1 TRCKER",
+        "version": env!("CARGO_PKG_VERSION"),
+        "commit": option_env!("OPD1_GIT_COMMIT"),
+        "created_ms": crate::state::now_ms(),
+        "files": names,
+    });
+    serde_json::to_vec_pretty(&value).unwrap_or_default()
+}
+
+/// Writes `files` into `dir` (created if needed) and returns the payload
+/// count. Every app-owned file from an earlier dump that is absent from this
+/// snapshot is removed first — a successful `<endpoint>.json` from an older
+/// session must not sit next to this session's manifest. A removal failure
+/// is an error: a mixed folder is never reported as a fresh dump. Unknown
+/// files and subdirectories are left untouched, and the manifest is written
+/// last (atomically, like every payload).
+fn write_dump(dir: &Path, files: &[(String, String)]) -> std::io::Result<u32> {
+    std::fs::create_dir_all(dir)?;
+    let desired: HashSet<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    if let Some(bad) = desired.iter().find(|name| !safe_dump_name(name)) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("unsafe dump file name: {bad}"),
+        ));
     }
-    Ok(n)
+    let prior = prior_manifest_names(dir);
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if name == DUMP_MANIFEST || desired.contains(name.as_str()) {
+            continue;
+        }
+        let Ok(kind) = entry.file_type() else {
+            continue;
+        };
+        // Only regular files: never recurse, never follow a symlink/reparse
+        // point out of the dump directory.
+        if !kind.is_file() || !(owned_dump_name(&name) || prior.contains(&name)) {
+            continue;
+        }
+        match std::fs::remove_file(entry.path()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
+    }
+    for (name, contents) in files {
+        write_atomic_dump(dir, name, contents.as_bytes())?;
+    }
+    write_atomic_dump(dir, DUMP_MANIFEST, &dump_manifest(files))?;
+    Ok(files.len() as u32)
+}
+
+/// [`write_dump`]'s atomic single-file write: a unique temp file in `dir`,
+/// then a rename. A failed write/rename removes only this invocation's temp
+/// file (drop guard), never an unrelated one.
+fn write_atomic_dump(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<()> {
+    static TMP: AtomicU64 = AtomicU64::new(0);
+    debug_assert!(safe_dump_name(name));
+    let n = TMP.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".{name}.tmp-{}-{n}", std::process::id()));
+    struct Cleanup(Option<std::path::PathBuf>);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            if let Some(path) = self.0.take() {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let mut cleanup = Cleanup(Some(tmp.clone()));
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, dir.join(name))?;
+    cleanup.0 = None;
+    Ok(())
 }
 
 #[tauri::command]
@@ -610,8 +754,10 @@ pub(crate) async fn dump_raw_for(st: &Arc<AppState>) -> Result<DumpResult, Strin
 }
 
 /// [`dump_raw_for`] with the log text given (what `copy_log` returns:
-/// [`log_text`]).
+/// [`log_text`]). One dump runs at a time, from the capture snapshot to the
+/// end of the write (R201), so two calls cannot mix inventories.
 pub(crate) async fn dump_raw_with(st: &Arc<AppState>, log: String) -> Result<DumpResult, String> {
+    let _gate = st.dump_guard().await;
     // Already redacted by opd1-riot (tokens/JWTs/passwords).
     let (captures, errors) = match st.session() {
         Some(session) => (session.raw_captures(), session.raw_error_captures()),
@@ -892,7 +1038,11 @@ mod tests {
             "HTTP 502\nbad gateway",
             "the fresh error file is written"
         );
-        for kept in ["notes.txt", "errors.json", "match_details.json"] {
+        assert!(
+            !debug.join("match_details.json").exists(),
+            "an owned success absent from this dump is stale"
+        );
+        for kept in ["notes.txt", "errors.json"] {
             assert!(debug.join(kept).exists(), "{kept}");
         }
         assert!(
@@ -1138,5 +1288,98 @@ mod tests {
         assert_eq!(file_stem("comp_updates"), "comp_updates");
         assert_eq!(file_stem("a/../b"), "a____b");
         assert_eq!(file_stem(""), "unnamed");
+    }
+
+    #[test]
+    fn dump_ownership_is_known_endpoints_the_log_and_safe_names_only() {
+        assert!(owned_dump_name("mmr.json"));
+        assert!(owned_dump_name("mmr.error.json"));
+        assert!(owned_dump_name("mmr.error.txt"));
+        assert!(owned_dump_name("content-service_v3_content.json"));
+        assert!(owned_dump_name("log.txt"));
+        assert!(!owned_dump_name("keep.json"));
+        assert!(!owned_dump_name("keep.txt"));
+        assert!(!owned_dump_name("mmr.json.bak"));
+        assert!(!owned_dump_name("../mmr.json"));
+        assert!(!owned_dump_name("a/mmr.json"));
+        assert!(!safe_dump_name("a/b"));
+        assert!(!safe_dump_name(".."));
+    }
+
+    #[test]
+    fn a_dump_removes_only_its_own_stale_files_and_keeps_unrelated_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            write_dump(dir.path(), &[("log.txt".into(), "one".into())]).unwrap(),
+            1
+        );
+        std::fs::write(dir.path().join("mmr.json"), "an old success").unwrap();
+        std::fs::write(dir.path().join("keep.json"), "mine").unwrap();
+        std::fs::write(dir.path().join("keep.txt"), "mine").unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("keep.json"), "mine").unwrap();
+
+        let n = write_dump(dir.path(), &[("log.txt".into(), "two".into())]).unwrap();
+        assert_eq!(n, 1, "only the payload count, not the manifest");
+        assert!(
+            !dir.path().join("mmr.json").exists(),
+            "stale success removed"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("keep.json")).unwrap(),
+            "mine"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("keep.txt")).unwrap(),
+            "mine"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("sub").join("keep.json")).unwrap(),
+            "mine"
+        );
+        let manifest: Value =
+            serde_json::from_slice(&std::fs::read(dir.path().join("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["files"], serde_json::json!(["log.txt"]));
+    }
+
+    #[test]
+    fn a_dump_write_failure_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, "a file").unwrap();
+        let err = write_dump(&not_a_dir, &[("log.txt".into(), "new".into())]).unwrap_err();
+        assert!(!err.to_string().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(&not_a_dir).unwrap(),
+            "a file",
+            "the failed dump touched nothing"
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_stale_owned_file_that_cannot_be_removed_fails_the_dump_and_the_next_one_heals() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mmr.json");
+        std::fs::write(&path, "old").unwrap();
+        // No sharing at all: DeleteFile on this handle fails, which is the
+        // "stale file that cannot be removed" case (a read-only attribute no
+        // longer blocks Rust's POSIX delete on Windows).
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+
+        let err = write_dump(dir.path(), &[("log.txt".into(), "new".into())]).unwrap_err();
+        assert!(!err.to_string().is_empty(), "a mixed folder is not success");
+        assert!(path.exists(), "the undeletable file is still there");
+
+        drop(held);
+        let n = write_dump(dir.path(), &[("log.txt".into(), "new".into())]).unwrap();
+        assert_eq!(n, 1);
+        assert!(!path.exists(), "the next dump healed the inventory");
     }
 }

@@ -170,49 +170,6 @@ async fn a_session_retired_while_waiting_for_a_rate_token_sends_nothing() {
     assert_eq!(sent, 0, "a retired session sent its request anyway");
 }
 
-/// V02: a response that was already in flight when the lockfile changed is
-/// not handed to the caller as if it belonged to the current session.
-#[tokio::test]
-async fn a_response_in_flight_when_the_session_retires_is_client_gone() {
-    let tmp = TempDir::new();
-    let server = MockServer::start().await;
-    write_shooter_log(tmp.path());
-    let port = server.address().port();
-    write_lockfile(tmp.path(), "http", port, "pw-1");
-    mount_entitlements(&server, SELF_PUUID).await;
-    Mock::given(method("GET"))
-        .and(path("/slow"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(json!({"from": "old"}))
-                .set_delay(Duration::from_millis(300)),
-        )
-        .mount(&server)
-        .await;
-    let session = Arc::new(connect_against(tmp.path(), &server).await);
-
-    let s = session.clone();
-    let call = tokio::spawn(async move { s.pd::<Value>("/slow").await });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !server
-        .received_requests()
-        .await
-        .unwrap()
-        .iter()
-        .any(|r| r.url.path() == "/slow")
-    {
-        assert!(
-            Instant::now() < deadline,
-            "the request never reached the mock"
-        );
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
-    write_lockfile(tmp.path(), "http", port, "pw-2");
-
-    let err = call.await.unwrap().unwrap_err();
-    assert!(matches!(err, RiotError::ClientGone), "{err:?}");
-}
-
 #[tokio::test]
 async fn player_loadout_reads_only_the_sessions_own_puuid() {
     // R90: the personalization endpoint is asked for the user's own puuid

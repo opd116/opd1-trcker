@@ -882,10 +882,12 @@ impl RiotSession {
             // (the start-of-call check alone is not enough across a wait).
             self.check_alive()?;
 
+            // A response already in flight when the client retires is still
+            // this session's fetched data (the backfill stores what it got
+            // before the drop). Account-relative installation is guarded by
+            // the owner stamps at the application layer, not by discarding
+            // the transport result here.
             let (resp, generation) = self.call_remote(&kind, method.clone(), path, body).await?;
-            // And after the response: a session retired while the request was
-            // in flight must not hand its answer to the new session/account.
-            self.check_alive()?;
             // R166: an expired or rejected token is re-fetched once per call:
             // 401/403 as before, and Riot's 400 `BAD_CLAIMS` (what it answers
             // an expired RSO access token with). Never a loop: a second

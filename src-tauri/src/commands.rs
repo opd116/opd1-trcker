@@ -578,6 +578,8 @@ fn dump_files(
 const DUMP_MANIFEST: &str = "manifest.json";
 /// The log file every dump writes.
 const DUMP_LOG: &str = "log.txt";
+/// R201: the only app marker a prior manifest may carry.
+const DUMP_APP: &str = "OPD1 TRCKER";
 
 /// R201: endpoint `file_stem`s the app writes (`raw_capture`'s keys). Only
 /// these, the log, and names listed in the previous valid manifest are ever
@@ -638,9 +640,19 @@ fn owned_dump_name(name: &str) -> bool {
     name == DUMP_LOG || owned_endpoint_stem(name).is_some()
 }
 
-/// R201: payload names a previous valid manifest claims. Only a single safe
-/// basename with a dump payload suffix is accepted; a malformed or hostile
-/// manifest cannot make an arbitrary file (or a subdirectory) owned.
+/// R201: whether `name` is a payload shape a dump may have written: the log,
+/// a capture, or an error file. A bare `.txt` (other than `log.txt`) is not a
+/// payload, so a stale/edited manifest cannot make a user's `notes.txt` ours.
+fn prior_dump_name(name: &str) -> bool {
+    safe_dump_name(name)
+        && name != DUMP_MANIFEST
+        && (name == DUMP_LOG || name.ends_with(".json") || name.ends_with(".error.txt"))
+}
+
+/// R201: payload names a previous valid manifest claims. The manifest must
+/// carry this app's marker and a version before its names are trusted; a
+/// random or malformed `manifest.json` cannot make an arbitrary file (or a
+/// subdirectory) owned.
 fn prior_manifest_names(dir: &Path) -> HashSet<String> {
     let Ok(text) = std::fs::read_to_string(dir.join(DUMP_MANIFEST)) else {
         return HashSet::new();
@@ -648,13 +660,21 @@ fn prior_manifest_names(dir: &Path) -> HashSet<String> {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
         return HashSet::new();
     };
+    if value.get("app").and_then(serde_json::Value::as_str) != Some(DUMP_APP)
+        || !value
+            .get("version")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|version| !version.is_empty())
+    {
+        return HashSet::new();
+    }
     value
         .get("files")
         .and_then(serde_json::Value::as_array)
         .into_iter()
         .flatten()
         .filter_map(serde_json::Value::as_str)
-        .filter(|name| safe_dump_name(name) && (name.ends_with(".json") || name.ends_with(".txt")))
+        .filter(|name| prior_dump_name(name))
         .map(str::to_string)
         .collect()
 }
@@ -664,7 +684,7 @@ fn prior_manifest_names(dir: &Path) -> HashSet<String> {
 fn dump_manifest(files: &[(String, String)]) -> Vec<u8> {
     let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
     let value = serde_json::json!({
-        "app": "OPD1 TRCKER",
+        "app": DUMP_APP,
         "version": env!("CARGO_PKG_VERSION"),
         "commit": option_env!("OPD1_GIT_COMMIT"),
         "created_ms": crate::state::now_ms(),
@@ -1304,6 +1324,92 @@ mod tests {
         assert!(!owned_dump_name("a/mmr.json"));
         assert!(!safe_dump_name("a/b"));
         assert!(!safe_dump_name(".."));
+    }
+
+    #[test]
+    fn a_manifest_without_the_app_marker_cannot_claim_files() {
+        // R201 follow-up: a user file named manifest.json (or a truncated one)
+        // must not turn an unrelated .json/.txt file into a dump-owned file.
+        let dir = tempfile::tempdir().unwrap();
+        let debug = dir.path().join("debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        for name in ["notes.txt", "old_endpoint.json"] {
+            std::fs::write(debug.join(name), "user data").unwrap();
+        }
+        std::fs::write(
+            debug.join(DUMP_MANIFEST),
+            serde_json::json!({
+                "files": ["notes.txt", "old_endpoint.json"],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let files = dump_files(Vec::new(), Vec::new(), "log".into());
+        assert_eq!(write_dump(&debug, &files).unwrap(), 1);
+        for name in ["notes.txt", "old_endpoint.json"] {
+            assert!(
+                debug.join(name).exists(),
+                "a manifest without our marker claimed {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_app_manifest_claims_payloads_but_not_arbitrary_text_files() {
+        // R201 follow-up: the app marker lets a previous dump clean up an old
+        // endpoint payload, but a bare .txt name is not a dump payload.
+        let dir = tempfile::tempdir().unwrap();
+        let debug = dir.path().join("debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        for name in ["notes.txt", "old_endpoint.json"] {
+            std::fs::write(debug.join(name), "content").unwrap();
+        }
+        std::fs::write(
+            debug.join(DUMP_MANIFEST),
+            serde_json::json!({
+                "app": "OPD1 TRCKER",
+                "version": "0.4.0",
+                "files": ["notes.txt", "old_endpoint.json"],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let files = dump_files(Vec::new(), Vec::new(), "log".into());
+        assert_eq!(write_dump(&debug, &files).unwrap(), 1);
+        assert!(
+            !debug.join("old_endpoint.json").exists(),
+            "a listed payload was stale"
+        );
+        assert!(
+            debug.join("notes.txt").exists(),
+            "a bare .txt name was treated as a payload"
+        );
+    }
+
+    #[test]
+    fn an_app_manifest_without_a_version_cannot_claim_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let debug = dir.path().join("debug");
+        std::fs::create_dir_all(&debug).unwrap();
+        std::fs::write(debug.join("old_endpoint.json"), "user data").unwrap();
+        std::fs::write(
+            debug.join(DUMP_MANIFEST),
+            serde_json::json!({
+                "app": "OPD1 TRCKER",
+                "files": ["old_endpoint.json"],
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let files = dump_files(Vec::new(), Vec::new(), "log".into());
+        assert_eq!(write_dump(&debug, &files).unwrap(), 1);
+        assert!(
+            debug.join("old_endpoint.json").exists(),
+            "a manifest without a version claimed a file"
+        );
     }
 
     #[test]

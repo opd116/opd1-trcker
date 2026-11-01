@@ -194,10 +194,11 @@ fn redact_value(value: &mut Value) {
         Value::String(s) if looks_like_jwt(s) => {
             *value = Value::String(REDACTED.to_string());
         }
-        // A token quoted inside a longer string ("invalid bearer eyJ... for
-        // player"): the same scan the plain-text path runs.
-        Value::String(s) if s.contains("eyJ") => {
-            *s = redact_jwts_in_plain_text(s);
+        // A token/auth form quoted inside a longer string ("invalid bearer
+        // eyJ... for player", "Authorization: Basic …", "password=…"): the
+        // same scan the plain-text path runs.
+        Value::String(s) => {
+            *s = redact_plain_text(s);
         }
         _ => {}
     }
@@ -243,9 +244,129 @@ fn redact_jwts_in_plain_text(s: &str) -> String {
     out
 }
 
+/// JWT scan plus the recognizable authorization forms a plain-text error
+/// can carry: `Bearer <token>`, `Basic <base64>`, and `password=<value>` /
+/// `password: <value>` (with optional quotes). Conservative by construction:
+/// a form needs its keyword, its `=`/`:` where applicable, and a long enough
+/// token; ordinary prose ("bearer of good news", "basic error handling",
+/// "password: required") is left alone. This cannot recognize arbitrary prose
+/// secrets — only those shapes.
+fn redact_plain_text(s: &str) -> String {
+    redact_auth_forms(&redact_jwts_in_plain_text(s))
+}
+
+/// The minimum value length for `password` forms (real secrets are longer;
+/// this avoids eating ordinary words such as "required").
+const PASSWORD_MIN_CHARS: usize = 12;
+/// The minimum token length after `Bearer`/`Basic`.
+const AUTH_TOKEN_MIN_CHARS: usize = 8;
+
+/// The token characters of a `Bearer`/`Basic` value or a password value.
+fn is_auth_value_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '+' | '/' | '=' | ':' | '@')
+}
+
+/// Finds `keyword` case-insensitively at byte `i` and returns the byte after
+/// it, when `i` is a char boundary.
+fn ascii_keyword_at(s: &str, i: usize, keyword: &str) -> Option<usize> {
+    let end = i.checked_add(keyword.len())?;
+    (end <= s.len() && s.is_char_boundary(i) && s.get(i..end)?.eq_ignore_ascii_case(keyword))
+        .then_some(end)
+}
+
+/// The end of an auth value starting at `start`: stops at whitespace or a
+/// structural delimiter, after an optional opening quote.
+fn auth_value_end(s: &str, start: usize) -> usize {
+    let mut chars = s[start..].char_indices();
+    let mut end = start;
+    for (off, c) in chars.by_ref() {
+        if matches!(c, '"' | '\'' | ',' | ';' | ')' | ']' | '}' | '<' | '>') || c.is_whitespace() {
+            return start + off;
+        }
+        if !is_auth_value_char(c) {
+            return start + off;
+        }
+        end = start + off + c.len_utf8();
+    }
+    end
+}
+
+/// Redacts `Bearer`/`Basic`/`password` forms in one pass, keeping the
+/// surrounding text and the scheme/keyword.
+fn redact_auth_forms(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let mut matched = None;
+        for keyword in ["Bearer", "Basic"] {
+            if let Some(after) = ascii_keyword_at(s, i, keyword) {
+                let mut token_start = after;
+                while s[token_start..]
+                    .chars()
+                    .next()
+                    .is_some_and(char::is_whitespace)
+                {
+                    token_start += s[token_start..].chars().next().unwrap().len_utf8();
+                }
+                let quoted = s[token_start..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| matches!(c, '"' | '\''));
+                if quoted {
+                    token_start += 1;
+                }
+                let token_end = auth_value_end(s, token_start);
+                if s[token_start..token_end].chars().count() >= AUTH_TOKEN_MIN_CHARS
+                    && &s[token_start..token_end] != REDACTED
+                {
+                    matched = Some((token_start, token_end));
+                }
+            }
+        }
+        if matched.is_none() {
+            if let Some(after) = ascii_keyword_at(s, i, "password") {
+                let mut j = after;
+                while s[j..].chars().next().is_some_and(char::is_whitespace) {
+                    j += s[j..].chars().next().unwrap().len_utf8();
+                }
+                if s[j..].starts_with('=') || s[j..].starts_with(':') {
+                    j += 1;
+                    while s[j..].chars().next().is_some_and(char::is_whitespace) {
+                        j += s[j..].chars().next().unwrap().len_utf8();
+                    }
+                    let quoted = s[j..]
+                        .chars()
+                        .next()
+                        .is_some_and(|c| matches!(c, '"' | '\''));
+                    let token_start = if quoted { j + 1 } else { j };
+                    let token_end = auth_value_end(s, token_start);
+                    if s[token_start..token_end].chars().count() >= PASSWORD_MIN_CHARS
+                        && &s[token_start..token_end] != REDACTED
+                    {
+                        matched = Some((token_start, token_end));
+                    }
+                }
+            }
+        }
+        match matched {
+            Some((start, end)) => {
+                out.push_str(&s[i..start]);
+                out.push_str(REDACTED);
+                i = end;
+            }
+            None => {
+                let c = s[i..].chars().next().unwrap();
+                out.push(c);
+                i += c.len_utf8();
+            }
+        }
+    }
+    out
+}
+
 /// Redacts a captured response body: parsed-and-walked as JSON when
 /// possible (the expected case — every endpoint here returns JSON),
-/// falling back to a plain-text JWT scan otherwise. Always valid UTF-8 out
+/// falling back to a plain-text scan otherwise. Always valid UTF-8 out
 /// (non-UTF8 bytes in a non-JSON body are lossily replaced) since this is
 /// only ever used to produce a human-readable debug file.
 pub(crate) fn redact_bytes(body: &[u8]) -> String {
@@ -254,7 +375,7 @@ pub(crate) fn redact_bytes(body: &[u8]) -> String {
             redact_value(&mut value);
             serde_json::to_string_pretty(&value).unwrap_or_else(|_| REDACTED.to_string())
         }
-        Err(_) => redact_jwts_in_plain_text(&String::from_utf8_lossy(body)),
+        Err(_) => redact_plain_text(&String::from_utf8_lossy(body)),
     }
 }
 
@@ -329,7 +450,7 @@ fn excerpt_with(body: &[u8], max_chars: usize, left_boundary: bool) -> String {
             redact_value(&mut value);
             serde_json::to_string(&value).unwrap_or_else(|_| REDACTED.to_string())
         }
-        Err(_) => redact_jwts_in_plain_text(&String::from_utf8_lossy(body)),
+        Err(_) => redact_plain_text(&String::from_utf8_lossy(body)),
     };
     let shortened = shorten_uuids_with(&redacted, left_boundary);
     let one_line = shortened.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -707,6 +828,52 @@ mod tests {
         let invalid_utf8 = [0xFF, 0xFE, 0xFD];
         // Must not panic; exact content isn't asserted (lossy replacement).
         let _ = redact_bytes(&invalid_utf8);
+    }
+
+    #[test]
+    fn plain_text_authorization_forms_are_redacted_without_losing_context() {
+        let text = "gateway said: Authorization: Bearer SYNTHETIC_OPAQUE_SECRET9, \
+                    Basic U1lOVEhFVElDX0JBU0U2NA==; password=SYNTHETIC_PASSWORD1 \
+                    for player aaaaaaaa-0000-0000-0000-000000000001";
+        let out = excerpt(text.as_bytes(), 500);
+        for leaked in [
+            "SYNTHETIC_OPAQUE_SECRET9",
+            "U1lOVEhFVElDX0JBU0U2NA==",
+            "SYNTHETIC_PASSWORD1",
+            "aaaaaaaa-0000-0000-0000-000000000001",
+        ] {
+            assert!(!out.contains(leaked), "{leaked} leaked: {out}");
+        }
+        assert!(out.contains("Authorization: Bearer REDACTED"), "{out}");
+        assert!(out.contains("Basic REDACTED"), "{out}");
+        assert!(out.contains("password=REDACTED"), "{out}");
+        assert!(
+            out.contains("gateway said") && out.contains("for player"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn ordinary_prose_is_not_mistaken_for_a_secret() {
+        let text = "the bearer of good news; basic error handling; password: required; retry later";
+        let out = excerpt(text.as_bytes(), 500);
+        assert_eq!(out, text, "ordinary words were redacted");
+    }
+
+    #[test]
+    fn authorization_forms_inside_json_values_and_nested_arrays_are_redacted() {
+        let body = json!({
+            "errorCode": "E",
+            "message": "invalid Bearer SYNTHETIC_OPAQUE_SECRET9 for this caller",
+            "nested": [{"note": "password=SYNTHETIC_PASSWORD1"}, {"ok": "ordinary text"}],
+        });
+        let redacted = redact_bytes(body.to_string().as_bytes());
+        assert!(!redacted.contains("SYNTHETIC_OPAQUE_SECRET9"), "{redacted}");
+        assert!(!redacted.contains("SYNTHETIC_PASSWORD1"), "{redacted}");
+        assert!(redacted.contains("\"errorCode\": \"E\""), "{redacted}");
+        assert!(redacted.contains("ordinary text"), "{redacted}");
+        let parsed: Value = serde_json::from_str(&redacted).unwrap();
+        assert_eq!(parsed["errorCode"], "E");
     }
 
     #[test]

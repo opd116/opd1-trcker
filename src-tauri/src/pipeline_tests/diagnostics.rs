@@ -258,6 +258,58 @@ async fn a_dump_keeps_unrelated_files_and_subdirectories() {
     );
 }
 
+/// V05/R201: 20 sequential fresh dumps stay at the same two files (log and
+/// manifest), then four concurrent dumps leave one consistent inventory.
+#[tokio::test]
+async fn twenty_sequential_and_four_concurrent_dumps_stay_bounded() {
+    let h = harness().await;
+    let mut dir = None;
+    for i in 0..20 {
+        let result = dump_raw_with(&h.st, format!("fresh log {i}"))
+            .await
+            .unwrap();
+        assert_eq!(result.files, 1);
+        let d = std::path::PathBuf::from(&result.dir);
+        let mut names: Vec<String> = std::fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["log.txt", "manifest.json"], "dump {i}: {names:?}");
+        dir = Some(d);
+    }
+    let dir = dir.unwrap();
+
+    let (a, b, c, d) = tokio::join!(
+        dump_raw_with(&h.st, "A".into()),
+        dump_raw_with(&h.st, "B".into()),
+        dump_raw_with(&h.st, "C".into()),
+        dump_raw_with(&h.st, "D".into())
+    );
+    for result in [a, b, c, d] {
+        assert_eq!(result.unwrap().files, 1);
+    }
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    let listed: Vec<&str> = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(listed, ["log.txt"]);
+    assert!(dir.join("log.txt").is_file());
+    let payloads = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .count();
+    assert_eq!(payloads, 2, "log + manifest only");
+    assert!(h.st.dump_is_free());
+}
+
 /// R201: two dumps do not interleave; the final manifest lists exactly the
 /// payload files left in the folder.
 #[tokio::test]

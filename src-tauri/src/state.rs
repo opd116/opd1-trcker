@@ -5,9 +5,12 @@
 //! synchronous work (never across an `.await`); SQLite work always goes
 //! through [`AppState::db`] (`spawn_blocking`). Order: a DB closure may
 //! take the `live` lock (`sync::fetch_self_loadout`'s account check), so
-//! nothing takes the repo while holding `live`. The My Stats push checks the
-//! account and emits as one step (R186): it takes `my_stats_push`, then `live`,
-//! so nothing may call `my_stats::notify` / `notify_now` (which take
+//! nothing takes the repo while holding `live`. A DB-bundle read/install
+//! (`AppState::bundle_reload`) is taken before the read, never while holding
+//! `live` or the repo, and is released before publishing or any callback that
+//! can reload a bundle; a DB closure never takes it. The My Stats push checks
+//! the account and emits as one step (R186): it takes `my_stats_push`, then
+//! `live`, so nothing may call `my_stats::notify` / `notify_now` (which take
 //! `my_stats_push`) while holding `live`. `set_session` takes the session
 //! lock, then `carried_holds` (R185); the riot crate's throttle locks are leaves.
 
@@ -90,6 +93,34 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct Slot {
     pub roster: RosterPlayer,
     pub db: PlayerDb,
+}
+
+/// The account a DB-bundle read belongs to, captured under the `live` lock
+/// (R199). The epoch is internal: a real owner change (A->B, and A->B->A)
+/// gives a new generation even when the PUUID string comes back, so an older
+/// read can never be installed over a newer one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerStamp {
+    pub(crate) epoch: u64,
+    pub(crate) puuid: Option<String>,
+}
+
+/// Test-only hook: parks a bundle reload after its DB read and before its
+/// install, so a test can build the other side of a race deterministically.
+#[cfg(test)]
+pub(crate) struct BundleProbe {
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl BundleProbe {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
 }
 
 /// R150: the most asks the names-fill queue holds. A match end adds at most
@@ -453,6 +484,11 @@ pub struct LiveModel {
     pub self_loadout: Option<RawLoadout>,
     pub coregame_match_id: Option<String>,
     pub self_puuid: Option<String>,
+    /// Internal account generation (R199): bumped on every real owner change
+    /// (`Self::set_account`). A bundle read captures the owner and this epoch
+    /// and installs only when both still match, so an A->B->A sequence is not
+    /// mistaken for the original A. Never serialized or stored.
+    account_epoch: u64,
     /// The user's own Riot ID from the local chat session
     /// (`/chat/v1/session`, R43) — the only source of the user's name; the
     /// user is never sent to name-service.
@@ -587,6 +623,7 @@ impl LiveModel {
             self_loadout: None,
             coregame_match_id: None,
             self_puuid: self_puuid.clone(),
+            account_epoch: 0,
             self_name: None,
             self_name_attempted: false,
             self_roster: None,
@@ -622,6 +659,37 @@ impl LiveModel {
             last_bytes: Vec::new(),
             built_act_id: None,
         }
+    }
+
+    /// The current owner generation, for a DB-bundle read to be checked
+    /// against after its await (R199).
+    pub(crate) fn owner_stamp(&self) -> OwnerStamp {
+        OwnerStamp {
+            epoch: self.account_epoch,
+            puuid: self.self_puuid.clone(),
+        }
+    }
+
+    /// Whether the owner is still the one `stamp` was taken for. Both the
+    /// epoch and the PUUID matter: the epoch makes A->B->A a new generation,
+    /// and the PUUID makes a first assignment (epoch 0, no owner) different
+    /// from a later owner even if the epoch were not bumped.
+    pub(crate) fn owner_matches(&self, stamp: &OwnerStamp) -> bool {
+        self.account_epoch == stamp.epoch && self.self_puuid == stamp.puuid
+    }
+
+    /// Takes `puuid` as the owner, bumping [`Self::account_epoch`] when it is
+    /// a real change. The poll loop calls this inside the same `live` critical
+    /// section that clears the previous account's state, before assigning the
+    /// new one. A same-account reconnect keeps the generation.
+    pub(crate) fn set_account(&mut self, puuid: Option<String>) {
+        if self.self_puuid != puuid {
+            self.account_epoch = self
+                .account_epoch
+                .checked_add(1)
+                .expect("account epoch overflow");
+        }
+        self.self_puuid = puuid;
     }
 
     /// The poll loop's first verdict is in (VALORANT running in some stage,
@@ -1887,6 +1955,15 @@ pub struct AppState {
     /// ([`OpenGate`]). Lock order: a gate, then its open slot.
     details_gate: Mutex<OpenGate>,
     match_gate: Mutex<OpenGate>,
+    /// R199: serializes the DB-bundle read -> install critical section across
+    /// reloads, roster installs and worker publishes. Never spans HTTP, never
+    /// held while taking `live` for anything but the short install, and never
+    /// taken inside a DB closure. Public bundle readers take it themselves;
+    /// a caller that already holds it installs inline and never calls one.
+    bundle_reload: tokio::sync::Mutex<()>,
+    /// R199 test hook ([`BundleProbe`]): parks one reload after its DB read.
+    #[cfg(test)]
+    bundle_probe: Mutex<Option<Arc<BundleProbe>>>,
     /// B2: the `"mystats"` push's state (`my_stats::notify`): the last emitted
     /// bytes and the one-task-at-a-time flags.
     pub(crate) my_stats_push: Mutex<MyStatsPush>,
@@ -1974,6 +2051,9 @@ impl AppState {
             open_match: Mutex::new(None),
             details_gate: Mutex::new(OpenGate::default()),
             match_gate: Mutex::new(OpenGate::default()),
+            bundle_reload: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            bundle_probe: Mutex::new(None),
             my_stats_push: Mutex::new(MyStatsPush::default()),
             carried_holds: Mutex::new(CarriedHolds::default()),
             worker_kick: AtomicBool::new(false),
@@ -2403,6 +2483,36 @@ impl AppState {
         crate::roster::map_uuid(path, |p| self.assets.map_uuid_for_path(p).ok().flatten())
     }
 
+    /// R199: the gate for a DB-bundle read -> install critical section. Drop
+    /// it before publishing, refreshing a view, or any callback that can read
+    /// a bundle again; never take it while holding `live` or the repo.
+    pub(crate) async fn bundle_reload_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.bundle_reload.lock().await
+    }
+
+    /// R199 test guard: the gate is free (a completed installer has released
+    /// it; a re-entrant path would leave it held).
+    #[cfg(test)]
+    pub(crate) fn bundle_reload_is_free(&self) -> bool {
+        self.bundle_reload.try_lock().is_ok()
+    }
+
+    /// R199 test hook: the next bundle reload parks here after its DB read and
+    /// before its install; the test releases it with `release`.
+    #[cfg(test)]
+    pub(crate) fn set_bundle_probe(&self, probe: Arc<BundleProbe>) {
+        *lock(&self.bundle_probe) = Some(probe);
+    }
+
+    #[cfg(test)]
+    async fn wait_bundle_probe(&self) {
+        let probe = lock(&self.bundle_probe).take();
+        if let Some(probe) = probe {
+            probe.reached.notify_one();
+            probe.release.notified().await;
+        }
+    }
+
     /// Runs `f` against the repo on the blocking pool. `None` (logged) on
     /// a SQLite error — callers treat that as "the DB doesn't know".
     pub async fn db<T, F>(&self, f: F) -> Option<T>
@@ -2780,30 +2890,43 @@ impl AppState {
     }
 
     /// Replaces the DB bundle of `puuid`'s live slot (if it's on screen)
-    /// with a fresh read, then republishes.
+    /// with a fresh read, then republishes. R199: the read and install are
+    /// serialized by `bundle_reload`, and the result is dropped when the
+    /// account changed or moved on (A->B->A included) while it was reading.
     pub async fn reload_slot(&self, puuid: &str) {
+        let _gate = self.bundle_reload_guard().await;
+        let stamp = lock(&self.live).owner_stamp();
         let p = puuid.to_string();
-        let me = lock(&self.live).self_puuid.clone();
+        let me = stamp.puuid.clone();
         let Some(db) = self
             .db(move |repo| crate::store::load_player_db(repo, me.as_deref(), &p))
             .await
         else {
             return;
         };
+        #[cfg(test)]
+        self.wait_bundle_probe().await;
         {
             let mut live = lock(&self.live);
+            if !live.owner_matches(&stamp) {
+                return;
+            }
             if let Some(slot) = live.slots.iter_mut().find(|s| s.roster.puuid == puuid) {
                 slot.db = db;
             }
         }
+        drop(_gate);
         self.publish();
     }
 
     /// R167: [`Self::reload_slot`] for several players at once: the DB bundle
     /// of each of `puuids` that is on screen is read afresh (one DB call),
     /// and the cards are published **once**. Nothing is read or published
-    /// when none of them is on screen.
+    /// when none of them is on screen. R199: the same owner/generation check
+    /// as [`Self::reload_slot`].
     pub async fn reload_slots(&self, puuids: &[String]) {
+        let _gate = self.bundle_reload_guard().await;
+        let stamp = lock(&self.live).owner_stamp();
         let (on_screen, me) = {
             let live = lock(&self.live);
             let on_screen: Vec<String> = puuids
@@ -2832,14 +2955,20 @@ impl AppState {
         else {
             return;
         };
+        #[cfg(test)]
+        self.wait_bundle_probe().await;
         {
             let mut live = lock(&self.live);
+            if !live.owner_matches(&stamp) {
+                return;
+            }
             for (puuid, db) in bundles {
                 if let Some(slot) = live.slots.iter_mut().find(|s| s.roster.puuid == puuid) {
                     slot.db = db;
                 }
             }
         }
+        drop(_gate);
         self.publish();
     }
 

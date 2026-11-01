@@ -3,7 +3,12 @@
 //! the DB has no `players` row for (the chat session gives no Riot ID yet, so not even the name row exists, and My
 //! Stats may not be computable either). The poller is the real one; only Riot is mocked.
 
+use std::pin::Pin;
+use std::task::Poll;
+
 use opd1_core::wire::HistoryQueue;
+
+use crate::state::BundleProbe;
 
 use super::*;
 
@@ -137,7 +142,7 @@ async fn a_switch_to_a_never_seen_account_is_on_the_live_state_without_a_self_ca
     );
 }
 
-fn mplayer(puuid: &str, team_id: &str, name: &str, tag: &str) -> MatchPlayer {
+pub(super) fn mplayer(puuid: &str, team_id: &str, name: &str, tag: &str) -> MatchPlayer {
     MatchPlayer {
         puuid: puuid.into(),
         team_id: team_id.into(),
@@ -158,7 +163,7 @@ fn mplayer(puuid: &str, team_id: &str, name: &str, tag: &str) -> MatchPlayer {
     }
 }
 
-fn match_row(match_id: &str, start_ms: i64) -> Match {
+pub(super) fn match_row(match_id: &str, start_ms: i64) -> Match {
     Match {
         match_id: match_id.into(),
         map_id: "/Game/Maps/Ascent/Ascent".into(),
@@ -172,7 +177,7 @@ fn match_row(match_id: &str, start_ms: i64) -> Match {
 }
 
 /// Stores one immutable match and the user's own history-list row (a real details store writes both tables).
-async fn store_played(st: &AppState, m: &Match, players: &[MatchPlayer], owner: &str) {
+pub(super) async fn store_played(st: &AppState, m: &Match, players: &[MatchPlayer], owner: &str) {
     let (m, players, owner) = (m.clone(), players.to_vec(), owner.to_string());
     let entry = HistoryEntry {
         match_id: m.match_id.clone(),
@@ -206,6 +211,78 @@ async fn last5_ids(st: &Arc<AppState>) -> (String, Vec<String>) {
         s.puuid.clone(),
         s.last5.into_iter().map(|m| m.match_id).collect(),
     )
+}
+
+/// Polls `fut` once without consuming it (the bundle-reload tests use it to
+/// prove a reload is parked or waiting on the R199 gate).
+async fn poll_once<F: std::future::Future>(mut fut: Pin<&mut F>) -> Poll<F::Output> {
+    std::future::poll_fn(|cx| Poll::Ready(fut.as_mut().poll(cx))).await
+}
+
+/// `puuid`'s DB bundle as `owner` sees it (encounters/remembered relative to
+/// that account).
+async fn bundle_for(st: &AppState, owner: &str, puuid: &str) -> PlayerDb {
+    let (owner, puuid) = (owner.to_string(), puuid.to_string());
+    st.db(move |repo| load_player_db(repo, Some(&owner), &puuid))
+        .await
+        .expect("the bundle read")
+}
+
+/// One incognito slot for `puuid`, in Agent Select.
+fn install_only_slot(h: &Harness, puuid: &str, db: PlayerDb) {
+    let mut live = lock(&h.st.live);
+    live.stage = Stage::Pregame;
+    live.slots = vec![Slot {
+        roster: roster(puuid, true),
+        db,
+    }];
+}
+
+/// The card fields a bundle from account A would wrongly carry on B's screen.
+fn assert_b_owner_bundle(h: &Harness, puuid: &str, from_start_ms: i64, seen: usize) {
+    let state = h.st.live_state();
+    let card = state
+        .players
+        .iter()
+        .find(|p| p.puuid == puuid)
+        .expect("the player's card");
+    assert_eq!(
+        card.encounters, None,
+        "the previous owner's encounter count leaked"
+    );
+    assert_eq!(
+        card.name,
+        Field::Value(DisplayName::Remembered {
+            name: "SharedName".into(),
+            tag: "SHRD".into(),
+            source: RememberedSource::OtherMatch,
+            from_map_id: None,
+            from_start_ms: Some(from_start_ms),
+        }),
+        "the shared name must keep B's source, never A's own-match source"
+    );
+    for event in h.live_events().iter().skip(seen) {
+        if event.self_puuid.as_deref() != Some(B) {
+            continue;
+        }
+        let card = event
+            .players
+            .iter()
+            .find(|p| p.puuid == puuid)
+            .expect("the player's card in every B event");
+        assert_eq!(card.encounters, None);
+        assert!(
+            matches!(
+                &card.name,
+                Field::Value(DisplayName::Remembered {
+                    source: RememberedSource::OtherMatch,
+                    ..
+                })
+            ),
+            "a B event carried A's remembered source: {:?}",
+            card.name
+        );
+    }
 }
 
 /// The user's cross-account rule: names learned locally are shared across Riot accounts on the installation (keyed by
@@ -347,7 +424,7 @@ async fn names_learned_on_one_account_are_shared_but_account_data_follows_the_se
     );
 
     // 6. B's history / My Stats / encounters use only B's match; A's use only A's.
-    lock(&h.st.live).self_puuid = Some(B.into());
+    lock(&h.st.live).set_account(Some(B.into()));
     assert_eq!(
         history_ids(&h.st).await,
         vec![B_MATCH.to_string()],
@@ -364,7 +441,7 @@ async fn names_learned_on_one_account_are_shared_but_account_data_follows_the_se
         "B never shared a match with X"
     );
 
-    lock(&h.st.live).self_puuid = Some(ME.into());
+    lock(&h.st.live).set_account(Some(ME.into()));
     assert_eq!(
         history_ids(&h.st).await,
         vec![A_MATCH.to_string()],
@@ -378,4 +455,333 @@ async fn names_learned_on_one_account_are_shared_but_account_data_follows_the_se
     assert_eq!(x_from_a.encounters.len(), 1, "A shared that match with X");
     assert_eq!(x_from_a.encounters[0].match_id, A_MATCH);
     assert!(!x_from_a.encounters[0].with);
+}
+
+/// R199 (F01): a reload that started under account A must not install A's
+/// account-relative bundle after the live owner switched to B. A met X once,
+/// B never did; the name stays shared (OtherMatch for B), the encounter count
+/// and the remembered source do not follow the previous account.
+#[tokio::test]
+async fn reload_bundle_drops_previous_owner() {
+    let h = harness().await;
+    let a_start = now_ms() - 7_200_000;
+    store_played(
+        &h.st,
+        &match_row(A_MATCH, a_start),
+        &[
+            mplayer(ME, "Blue", "Me", "TAG"),
+            mplayer(X, "Red", "SharedName", "SHRD"),
+        ],
+        ME,
+    )
+    .await;
+    let a_db = bundle_for(&h.st, ME, X).await;
+    let b_db = bundle_for(&h.st, B, X).await;
+    assert!(a_db.encounters.is_some(), "A met X");
+    assert!(b_db.encounters.is_none(), "B never met X");
+    install_only_slot(&h, X, a_db);
+    h.st.publish();
+    let seen = h.live_events().len();
+
+    let hold = super::ui_open::hold_db(&h.st);
+    let st = h.st.clone();
+    let mut reload = Box::pin(st.reload_slot(X));
+    assert!(
+        poll_once(reload.as_mut()).await.is_pending(),
+        "the reload must park on the held DB"
+    );
+    {
+        let mut live = lock(&h.st.live);
+        live.set_account(Some(B.into()));
+        live.slots = vec![Slot {
+            roster: roster(X, true),
+            db: b_db,
+        }];
+    }
+    h.st.publish();
+    drop(hold);
+    reload.await;
+
+    assert_b_owner_bundle(&h, X, a_start, seen);
+    assert!(h.st.bundle_reload_is_free(), "the gate must be released");
+}
+
+/// R199: [`reload_slots`] has the same owner rule as `reload_slot`.
+#[tokio::test]
+async fn reload_slots_bundle_drops_previous_owner() {
+    let h = harness().await;
+    let a_start = now_ms() - 7_200_000;
+    store_played(
+        &h.st,
+        &match_row(A_MATCH, a_start),
+        &[
+            mplayer(ME, "Blue", "Me", "TAG"),
+            mplayer(X, "Red", "SharedName", "SHRD"),
+        ],
+        ME,
+    )
+    .await;
+    let a_db = bundle_for(&h.st, ME, X).await;
+    let b_db = bundle_for(&h.st, B, X).await;
+    install_only_slot(&h, X, a_db);
+    h.st.publish();
+    let seen = h.live_events().len();
+
+    let hold = super::ui_open::hold_db(&h.st);
+    let st = h.st.clone();
+    let ids = vec![X.to_string()];
+    let mut reload = Box::pin(st.reload_slots(&ids));
+    assert!(
+        poll_once(reload.as_mut()).await.is_pending(),
+        "the reload must park on the held DB"
+    );
+    {
+        let mut live = lock(&h.st.live);
+        live.set_account(Some(B.into()));
+        live.slots = vec![Slot {
+            roster: roster(X, true),
+            db: b_db,
+        }];
+    }
+    h.st.publish();
+    drop(hold);
+    reload.await;
+
+    assert_b_owner_bundle(&h, X, a_start, seen);
+    assert!(h.st.bundle_reload_is_free(), "the gate must be released");
+}
+
+/// R199 (F01): A->B->A is a new generation. An old A read that already has
+/// its bundle must not overwrite the newer A bundle installed after the
+/// round-trip; a bare owner-string check would accept it.
+#[tokio::test]
+async fn reload_bundle_rejects_aba() {
+    let h = harness().await;
+    let old_start = now_ms() - 7_200_000;
+    store_played(
+        &h.st,
+        &match_row(A_MATCH, old_start),
+        &[
+            mplayer(ME, "Blue", "Me", "TAG"),
+            mplayer(X, "Red", "OldName", "OLD"),
+        ],
+        ME,
+    )
+    .await;
+    let old_db = bundle_for(&h.st, ME, X).await;
+    install_only_slot(&h, X, old_db);
+    h.st.publish();
+
+    let probe = BundleProbe::new();
+    h.st.set_bundle_probe(probe.clone());
+    let st = h.st.clone();
+    let reload = tokio::spawn(async move { st.reload_slot(X).await });
+    tokio::time::timeout(Duration::from_secs(5), probe.reached.notified())
+        .await
+        .expect("the old read reached its post-read barrier");
+
+    {
+        let mut live = lock(&h.st.live);
+        live.set_account(Some(B.into()));
+        live.set_account(Some(ME.into()));
+    }
+    let new_start = now_ms() - 3_600_000;
+    store_played(
+        &h.st,
+        &match_row(A_MATCH, new_start),
+        &[
+            mplayer(ME, "Blue", "Me", "TAG"),
+            mplayer(X, "Red", "NewName", "NEW"),
+        ],
+        ME,
+    )
+    .await;
+    let new_db = bundle_for(&h.st, ME, X).await;
+    {
+        let mut live = lock(&h.st.live);
+        live.slots = vec![Slot {
+            roster: roster(X, true),
+            db: new_db,
+        }];
+    }
+    h.st.publish();
+    let seen = h.live_events().len();
+
+    probe.release.notify_one();
+    reload.await.expect("the old reload task");
+
+    {
+        let live = lock(&h.st.live);
+        let slot = live
+            .slots
+            .iter()
+            .find(|s| s.roster.puuid == X)
+            .expect("X still on screen");
+        let remembered = slot.db.remembered.as_ref().expect("a remembered name");
+        assert_eq!(
+            remembered.name, "NewName",
+            "the original A read overwrote the post-round-trip bundle"
+        );
+        assert_eq!(remembered.start_ms, Some(new_start));
+    }
+    let last = h.live_events().last().expect("the newer event").clone();
+    let card = last
+        .players
+        .iter()
+        .find(|p| p.puuid == X)
+        .expect("X in the last event");
+    match &card.name {
+        Field::Value(DisplayName::Remembered { name, .. }) => {
+            assert_eq!(name, "NewName", "a stale A event was published last")
+        }
+        other => panic!("expected the remembered name, got {other:?}"),
+    }
+    assert_eq!(
+        h.live_events().len(),
+        seen,
+        "the superseded read published an event"
+    );
+    assert!(h.st.bundle_reload_is_free(), "the gate must be released");
+}
+
+/// R199: a worker publish for a session that is no longer the live account
+/// must neither install its bundle nor mark the new account synced/ranked.
+#[tokio::test]
+async fn publish_player_with_a_stale_owner_marks_and_installs_nothing() {
+    let h = harness().await;
+    let a_start = now_ms() - 7_200_000;
+    store_played(
+        &h.st,
+        &match_row(A_MATCH, a_start),
+        &[
+            mplayer(ME, "Blue", "Me", "TAG"),
+            mplayer(X, "Red", "SharedName", "SHRD"),
+        ],
+        ME,
+    )
+    .await;
+    let b_db = bundle_for(&h.st, B, X).await;
+    {
+        let mut live = lock(&h.st.live);
+        live.set_account(Some(B.into()));
+        live.stage = Stage::Pregame;
+        live.slots = vec![Slot {
+            roster: roster(X, true),
+            db: b_db,
+        }];
+    }
+    h.st.publish();
+
+    crate::sync::publish_player(&h.st, &h.session, X, |live, _| {
+        live.synced.insert(X.to_string());
+        live.synced.mark_ranked(X);
+    })
+    .await;
+
+    let live = lock(&h.st.live);
+    assert!(
+        !live.synced.contains(X) && !live.synced.rank_done(X),
+        "the old session marked the new account synced/ranked"
+    );
+    let slot = live
+        .slots
+        .iter()
+        .find(|s| s.roster.puuid == X)
+        .expect("X still on screen");
+    assert!(
+        slot.db.encounters.is_none(),
+        "the old account's encounters were installed"
+    );
+    assert_eq!(
+        slot.db.remembered.as_ref().map(|k| k.source),
+        Some(RememberedSource::OtherMatch),
+        "the old account's own-match source was installed"
+    );
+}
+
+/// R199: a completed `apply_roster` releases the bundle gate (an accidental
+/// public reload while holding it would deadlock the poll loop).
+#[tokio::test]
+async fn apply_roster_leaves_the_bundle_gate_free() {
+    let h = harness().await;
+    let mut poller = crate::poll::Poller::new(h.st.clone());
+    poller.on_connected(h.session.clone()).await;
+    let players = vec![roster(ME, false), roster(OTHER, false)];
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        poller.apply_roster(&h.session, Stage::Pregame, None, players),
+    )
+    .await;
+    assert!(result.is_ok(), "apply_roster deadlocked on the bundle gate");
+    assert!(h.st.bundle_reload_is_free());
+    poller.stop_worker();
+}
+
+/// R199: a Closed install that started for the previous owner must not put
+/// that owner's card on the new account's screen.
+#[tokio::test]
+async fn a_closed_install_started_for_a_previous_owner_never_lands() {
+    let h = harness().await;
+    h.st.db(|repo| {
+        save_player(
+            repo.conn(),
+            &PlayerUpdate {
+                puuid: ME.into(),
+                name: Some(("Me".into(), "TAG".into())),
+                account_level: 50,
+                card_id: "card".into(),
+            },
+            now_ms(),
+        )
+    })
+    .await
+    .unwrap();
+
+    let hold = super::ui_open::hold_db(&h.st);
+    let mut poller = crate::poll::Poller::new(h.st.clone());
+    let mut closed = Box::pin(poller.enter_closed());
+    assert!(poll_once(closed.as_mut()).await.is_pending());
+    {
+        let mut live = lock(&h.st.live);
+        live.set_account(Some(B.into()));
+        live.slots.clear();
+    }
+    h.st.publish();
+    drop(hold);
+    closed.await;
+
+    let state = h.st.live_state();
+    assert_eq!(state.self_puuid.as_deref(), Some(B));
+    assert!(
+        state.players.iter().all(|p| p.puuid != ME),
+        "the previous account's Closed card landed on B"
+    );
+}
+
+/// R199: only a real owner change bumps the generation; a same-account
+/// reconnect keeps it. A->B->A is two generations.
+#[tokio::test]
+async fn a_real_account_switch_bumps_the_epoch_and_a_reconnect_does_not() {
+    let h = harness().await;
+    let epoch = |h: &Harness| lock(&h.st.live).owner_stamp().epoch;
+    let mut poller = crate::poll::Poller::new(h.st.clone());
+    assert_eq!(epoch(&h), 0);
+
+    poller.on_connected(h.session.clone()).await;
+    assert_eq!(
+        epoch(&h),
+        0,
+        "a same-account reconnect keeps the generation"
+    );
+
+    let b_server = mock_client_of(B, None).await;
+    let (_b_dir, b_session) = session_of(&b_server, B).await;
+    poller.drop_session().await;
+    poller.on_connected(b_session).await;
+    assert_eq!(epoch(&h), 1, "A->B is a new generation");
+
+    poller.drop_session().await;
+    poller.on_connected(h.session.clone()).await;
+    assert_eq!(epoch(&h), 2, "A->B->A is two generations");
+    poller.stop_worker();
 }

@@ -307,22 +307,29 @@ pub async fn refresh_open(st: &Arc<AppState>) {
     }
 }
 
-/// Rebuilds `puuid`'s details and emits them (`"details"`) when they are
-/// the open Player Details and changed since the UI was last given them
-/// (`AppState::emit_details_if_changed`). A no-op for anyone else, so the
-/// worker can call it after every player it syncs.
+/// Rebuilds `puuid`'s details and emits them (`"details"`) when they still
+/// belong to the open Player Details — same opening, account and key — and
+/// changed since the UI was last given them (R199, `AppState::emit_details`).
+/// The build gate serializes rebuilds of this view, so a slower older build
+/// can never commit after a newer one; a no-op for anyone else, so the worker
+/// can call it after every player it syncs.
 pub async fn refresh(st: &Arc<AppState>, puuid: &str) {
-    if !st.details_open_for(puuid) {
+    let gate = st.details_build_guard().await;
+    let Some(token) = st.details_open_token(puuid) else {
         return;
-    }
-    match build(st, puuid).await {
+    };
+    let built = build(st, puuid).await;
+    #[cfg(test)]
+    st.wait_details_probe().await;
+    match built {
         Ok(fresh) => {
-            if st.emit_details_if_changed(fresh) {
+            if st.emit_details(&token, fresh) {
                 log::debug!("details for {} updated", short(puuid));
             }
         }
         Err(e) => log::warn!("details rebuild failed: {e}"),
     }
+    drop(gate);
 }
 
 /// Everything cached for `puuid`'s details view.

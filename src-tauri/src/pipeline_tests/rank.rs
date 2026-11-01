@@ -581,7 +581,7 @@ pub(super) async fn open_details_of_me(h: &Harness) {
     h.st.publish();
     let ticket = h.st.begin_open_details(ME);
     let page = crate::details::build(&h.st, ME).await.unwrap();
-    h.st.set_open_details(ticket, &page);
+    assert!(h.st.set_open_details(&ticket, &page));
 }
 
 /// A 429 on ME's competitive updates (the first request only), with this

@@ -123,6 +123,45 @@ impl BundleProbe {
     }
 }
 
+/// Test-only hook for an open-view rebuild: parks it after its build and
+/// before its commit, so a close/reopen or a second refresh can be requested
+/// deterministically while the older payload is still pending (R199).
+#[cfg(test)]
+pub(crate) struct ViewProbe {
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl ViewProbe {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+/// The opening a view rebuild belongs to (R199): the open ticket, the account
+/// generation and the page key, captured under `live` -> gate -> payload. A
+/// commit is accepted only while all three still match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DetailsToken {
+    pub(crate) seq: u64,
+    pub(crate) owner: OwnerStamp,
+    pub(crate) puuid: String,
+}
+
+/// [`DetailsToken`] for the Match Details page: the same opening/account
+/// identity plus the match and its focused player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MatchToken {
+    pub(crate) seq: u64,
+    pub(crate) owner: OwnerStamp,
+    pub(crate) match_id: String,
+    pub(crate) focus_puuid: String,
+}
+
 /// R150: the most asks the names-fill queue holds. A match end adds at most
 /// the match's players, the own-history backfill at most
 /// `sync::BACKFILL_FILL_MAX` per run, and Details a handful: a full queue is
@@ -1952,9 +1991,20 @@ pub struct AppState {
     /// and it emits only on a change.
     open_match: Mutex<Option<OpenMatch>>,
     /// R163: which `player_details` / `match_details` call may open its page
-    /// ([`OpenGate`]). Lock order: a gate, then its open slot.
+    /// ([`OpenGate`]). Lock order: `live`, then a gate, then its open slot.
     details_gate: Mutex<OpenGate>,
     match_gate: Mutex<OpenGate>,
+    /// R199: serializes each view's DB build -> commit. An initial open holds
+    /// it across its build and install too, so a refresh cannot overtake the
+    /// page the UI is being given. Never spans HTTP: `match_details::load`
+    /// drops it around a missing-details fetch and reacquires it.
+    details_build: tokio::sync::Mutex<()>,
+    match_build: tokio::sync::Mutex<()>,
+    /// R199 test hooks ([`ViewProbe`]): park one rebuild after its build.
+    #[cfg(test)]
+    details_probe: Mutex<Option<Arc<ViewProbe>>>,
+    #[cfg(test)]
+    match_probe: Mutex<Option<Arc<ViewProbe>>>,
     /// R199: serializes the DB-bundle read -> install critical section across
     /// reloads, roster installs and worker publishes. Never spans HTTP, never
     /// held while taking `live` for anything but the short install, and never
@@ -2051,6 +2101,12 @@ impl AppState {
             open_match: Mutex::new(None),
             details_gate: Mutex::new(OpenGate::default()),
             match_gate: Mutex::new(OpenGate::default()),
+            details_build: tokio::sync::Mutex::new(()),
+            match_build: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            details_probe: Mutex::new(None),
+            #[cfg(test)]
+            match_probe: Mutex::new(None),
             bundle_reload: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             bundle_probe: Mutex::new(None),
@@ -2650,13 +2706,75 @@ impl AppState {
         live.current = state;
     }
 
+    /// R199: the Player Details build gate. Held from before the DB build to
+    /// the commit of the page it builds; never taken from a DB closure, and
+    /// dropped before name/skin/sync follow-ups.
+    pub(crate) async fn details_build_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.details_build.lock().await
+    }
+
+    /// R199: the Match Details build gate (see [`Self::details_build_guard`]).
+    pub(crate) async fn match_build_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.match_build.lock().await
+    }
+
+    /// R199 test hook: the next Details rebuild parks after its build.
+    #[cfg(test)]
+    pub(crate) fn set_details_probe(&self, probe: Arc<ViewProbe>) {
+        *lock(&self.details_probe) = Some(probe);
+    }
+
+    /// R199 test hook: the next Match Details rebuild parks after its build.
+    #[cfg(test)]
+    pub(crate) fn set_match_probe(&self, probe: Arc<ViewProbe>) {
+        *lock(&self.match_probe) = Some(probe);
+    }
+
+    /// R199 test guard: no view build holds its gate.
+    #[cfg(test)]
+    pub(crate) fn view_builds_are_free(&self) -> bool {
+        self.details_build.try_lock().is_ok() && self.match_build.try_lock().is_ok()
+    }
+
+    /// R199 test accessor: the open Match Details payload.
+    #[cfg(test)]
+    pub(crate) fn open_match_view_for_test(&self) -> Option<MatchDetailsView> {
+        lock(&self.open_match).as_ref().map(|o| o.view.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_details_probe(&self) {
+        let probe = lock(&self.details_probe).take();
+        if let Some(probe) = probe {
+            probe.reached.notify_one();
+            probe.release.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_match_probe(&self) {
+        let probe = lock(&self.match_probe).take();
+        if let Some(probe) = probe {
+            probe.reached.notify_one();
+            probe.release.notified().await;
+        }
+    }
+
     /// A `player_details` call starts opening `puuid`'s page: the ticket it
     /// must hand to [`Self::set_open_details`] once its build is done. Any
-    /// earlier ticket is void from now on (R163).
-    pub fn begin_open_details(&self, puuid: &str) -> u64 {
+    /// earlier ticket is void from now on (R163). The ticket also carries the
+    /// account generation (R199), so a switch while the build runs loses it.
+    pub fn begin_open_details(&self, puuid: &str) -> DetailsToken {
         // R97: a new open asks again for every skin name still unknown.
         *lock(&self.skins_tried) = Some((puuid.to_string(), HashSet::new()));
-        lock(&self.details_gate).begin(puuid)
+        let live = lock(&self.live);
+        let owner = live.owner_stamp();
+        let seq = lock(&self.details_gate).begin(puuid);
+        DetailsToken {
+            seq,
+            owner,
+            puuid: puuid.to_string(),
+        }
     }
 
     /// R97: records that the names of `ids` were asked for `puuid`'s open page.
@@ -2677,14 +2795,21 @@ impl AppState {
 
     /// Records `details` as the open Player Details, as the UI was just
     /// given them (the `player_details` answer), when `ticket` is still the
-    /// latest open and its page was not left meanwhile (R163: a build that
-    /// finishes after Back, or after a newer open, must not set the open
-    /// page); `false` when it lost. Opening a Player Details also closes any
-    /// Match Details: the UI only gets here from the match page by going
-    /// Back.
-    pub fn set_open_details(&self, ticket: u64, details: &PlayerDetails) -> bool {
+    /// latest open, its page was not left meanwhile (R163), and the account
+    /// is still the one that asked (R199: a build that finishes after Back, a
+    /// newer open or a switch must not set the open page); `false` when it
+    /// lost. Opening a Player Details also closes any Match Details: the UI
+    /// only gets here from the match page by going Back.
+    pub fn set_open_details(&self, ticket: &DetailsToken, details: &PlayerDetails) -> bool {
+        let live = lock(&self.live);
+        if !live.owner_matches(&ticket.owner) {
+            return false;
+        }
         let gate = lock(&self.details_gate);
-        if gate.seq != ticket {
+        if gate.seq != ticket.seq
+            || gate.key.as_deref() != Some(ticket.puuid.as_str())
+            || details.card.puuid != ticket.puuid
+        {
             return false;
         }
         *lock(&self.open_details) = Some(details.clone());
@@ -2693,27 +2818,39 @@ impl AppState {
     }
 
     /// A `match_details` call starts opening `match_id`'s page (like
-    /// [`Self::begin_open_details`]).
-    pub fn begin_open_match(&self, match_id: &str) -> u64 {
-        lock(&self.match_gate).begin(match_id)
+    /// [`Self::begin_open_details`]); the ticket carries the account
+    /// generation too (R199).
+    pub fn begin_open_match(&self, match_id: &str) -> MatchToken {
+        let live = lock(&self.live);
+        let owner = live.owner_stamp();
+        let seq = lock(&self.match_gate).begin(match_id);
+        MatchToken {
+            seq,
+            owner,
+            match_id: match_id.to_string(),
+            focus_puuid: String::new(),
+        }
     }
 
     /// Records `view` as the open Match Details, as the UI was just given it
     /// (the `match_details` answer), when `ticket` is still the latest open
-    /// of its page; `false` when it lost (R163).
+    /// of its page and its account (R163/R199); `false` when it lost.
     pub fn set_open_match(
         &self,
-        ticket: u64,
-        match_id: &str,
+        ticket: &MatchToken,
         focus_puuid: &str,
         view: &MatchDetailsView,
     ) -> bool {
+        let live = lock(&self.live);
+        if !live.owner_matches(&ticket.owner) {
+            return false;
+        }
         let gate = lock(&self.match_gate);
-        if gate.seq != ticket {
+        if gate.seq != ticket.seq || gate.key.as_deref() != Some(ticket.match_id.as_str()) {
             return false;
         }
         *lock(&self.open_match) = Some(OpenMatch {
-            match_id: match_id.to_string(),
+            match_id: ticket.match_id.clone(),
             focus_puuid: focus_puuid.to_string(),
             view: view.clone(),
         });
@@ -2735,26 +2872,53 @@ impl AppState {
     }
 
     /// `(match id, focus puuid)` of the open Match Details, if any.
-    pub fn open_match_args(&self) -> Option<(String, String)> {
+    #[cfg(test)]
+    pub(crate) fn open_match_args(&self) -> Option<(String, String)> {
         lock(&self.open_match)
             .as_ref()
             .map(|o| (o.match_id.clone(), o.focus_puuid.clone()))
     }
 
-    /// Emits `fresh` as a `"match"` event when it is the open Match Details
-    /// (same match and focus) and differs from what the UI was last given;
-    /// `true` when it was emitted. Compare, emit and record happen under one
-    /// lock, like [`Self::emit_details_if_changed`].
-    pub fn emit_match_if_changed(
-        &self,
-        match_id: &str,
-        focus_puuid: &str,
-        fresh: MatchDetailsView,
-    ) -> bool {
+    /// R199: the opening a Match Details rebuild belongs to — sequence,
+    /// account generation, match and focus — only while that page is still
+    /// open. Lock order: `live`, gate, payload.
+    pub(crate) fn match_open_token(&self) -> Option<MatchToken> {
+        let live = lock(&self.live);
+        let owner = live.owner_stamp();
+        let gate = lock(&self.match_gate);
+        let key = gate.key.clone()?;
+        let open = lock(&self.open_match);
+        let open = open.as_ref()?;
+        if open.match_id != key {
+            return None;
+        }
+        Some(MatchToken {
+            seq: gate.seq,
+            owner,
+            match_id: open.match_id.clone(),
+            focus_puuid: open.focus_puuid.clone(),
+        })
+    }
+
+    /// Emits `fresh` as a `"match"` event when it still belongs to the open
+    /// Match Details (same opening, account, match and focus, R199) and
+    /// differs from what the UI was last given; `true` when it was emitted.
+    /// Compare, emit and record happen under one lock.
+    pub fn emit_match(&self, token: &MatchToken, fresh: MatchDetailsView) -> bool {
+        let live = lock(&self.live);
+        if !live.owner_matches(&token.owner) {
+            return false;
+        }
+        let gate = lock(&self.match_gate);
+        if gate.seq != token.seq || gate.key.as_deref() != Some(token.match_id.as_str()) {
+            return false;
+        }
         let mut open = lock(&self.open_match);
         match open.as_mut() {
             Some(o)
-                if o.match_id == match_id && o.focus_puuid == focus_puuid && o.view != fresh =>
+                if o.match_id == token.match_id
+                    && o.focus_puuid == token.focus_puuid
+                    && o.view != fresh =>
             {
                 self.sink.match_view(&fresh);
                 o.view = fresh;
@@ -2869,14 +3033,44 @@ impl AppState {
         *lock(&self.open_details) = None;
     }
 
-    /// Emits `fresh` as a `"details"` event when it is the open Player
-    /// Details and differs from what the UI was last given; `true` when it
-    /// was emitted. Compare, emit and record happen under one lock, so two
-    /// rebuilds can't both emit the same change.
-    pub fn emit_details_if_changed(&self, fresh: PlayerDetails) -> bool {
+    /// R199: the opening a Player Details rebuild belongs to — sequence,
+    /// account generation and key — only while that page is still open.
+    /// Lock order: `live`, gate, payload.
+    pub(crate) fn details_open_token(&self, puuid: &str) -> Option<DetailsToken> {
+        let live = lock(&self.live);
+        let owner = live.owner_stamp();
+        let gate = lock(&self.details_gate);
+        if gate.key.as_deref() != Some(puuid) {
+            return None;
+        }
+        let open = lock(&self.open_details);
+        if !open.as_ref().is_some_and(|d| d.card.puuid == puuid) {
+            return None;
+        }
+        Some(DetailsToken {
+            seq: gate.seq,
+            owner,
+            puuid: puuid.to_string(),
+        })
+    }
+
+    /// Emits `fresh` as a `"details"` event when it still belongs to the open
+    /// Player Details (same opening, account and key, R199) and differs from
+    /// what the UI was last given; `true` when it was emitted. Compare, emit
+    /// and record happen under one lock, so two rebuilds can't both emit the
+    /// same change.
+    pub fn emit_details(&self, token: &DetailsToken, fresh: PlayerDetails) -> bool {
+        let live = lock(&self.live);
+        if !live.owner_matches(&token.owner) {
+            return false;
+        }
+        let gate = lock(&self.details_gate);
+        if gate.seq != token.seq || gate.key.as_deref() != Some(token.puuid.as_str()) {
+            return false;
+        }
         let mut open = lock(&self.open_details);
         match open.as_ref() {
-            Some(last) if last.card.puuid == fresh.card.puuid && *last != fresh => {
+            Some(last) if last.card.puuid == token.puuid && *last != fresh => {
                 self.sink.details(&fresh);
                 *open = Some(fresh);
                 true

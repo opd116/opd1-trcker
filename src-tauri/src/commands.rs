@@ -115,12 +115,20 @@ pub(crate) async fn player_details_for(
     let resolving =
         crate::details::skins_pending(&st, &puuid).then(|| st.begin_skin_resolve(&puuid));
     // R163: the ticket is taken before the build, so a Back (or a newer open)
-    // that happens while it runs voids this open.
+    // that happens while it runs voids this open. R199: the ticket carries
+    // the account; the build and the install hold the view's build gate, so
+    // a refresh cannot overtake the page the UI is being given.
     let ticket = st.begin_open_details(&puuid);
-    let details = crate::details::build(&st, &puuid).await?;
+    let gate = st.details_build_guard().await;
+    let built = crate::details::build(&st, &puuid).await;
+    let installed = built
+        .as_ref()
+        .is_ok_and(|details| st.set_open_details(&ticket, details));
+    drop(gate);
+    let details = built?;
     // The open view: every later rebuild of it (the jobs below, and the
     // worker's sync of this player, R23) is emitted only when it changed.
-    if !st.set_open_details(ticket, &details) {
+    if !installed {
         // The page was left (or a newer open took over) while this build ran:
         // nobody sees this answer, so no name asks, skin fetch or sync for it
         // (R163). The caller still gets its answer; the UI drops it.

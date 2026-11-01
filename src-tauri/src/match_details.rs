@@ -35,13 +35,19 @@ pub async fn load(
     // R163: the ticket is taken before the build, so a Back (or a newer open)
     // that happens while it runs voids this open.
     let ticket = st.begin_open_match(match_id);
+    // R199: the DB read and the install of this opening are one build-gate
+    // section. A missing match drops the gate around its HTTP fetch and takes
+    // it back for the final read/install; the ticket is never reissued.
+    let mut gate = st.match_build_guard().await;
     let found = match read(st, match_id, focus_puuid).await? {
         Some(found) => Some(found),
         None => match st.session() {
             Some(session) => {
+                drop(gate);
                 // A client that went away mid-fetch is just a miss here: the
                 // poll loop notices it on its own next tick.
                 let _ = fetch_missing_details(st, &session, vec![match_id.to_string()]).await;
+                gate = st.match_build_guard().await;
                 read(st, match_id, focus_puuid).await?
             }
             None => None,
@@ -50,27 +56,36 @@ pub async fn load(
     let Some((view, asks)) = found else {
         return Err("unknown match".into());
     };
-    // R163: an open that lost (the page was left, or a newer open took over)
-    // asks for no names: nobody sees this answer.
-    if st.set_open_match(ticket, match_id, focus_puuid, &view) {
+    // R163/R199: an open that lost (the page was left, a newer open took
+    // over, or the account switched) asks for no names: nobody sees it.
+    let installed = st.set_open_match(&ticket, focus_puuid, &view);
+    drop(gate);
+    if installed {
         st.queue_name_fill(asks);
     }
     Ok(view)
 }
 
 /// Rebuilds the open Match Details, if any, from the DB and emits it
-/// (`"match"`) when it changed (R150: names arrived from the names fill).
+/// (`"match"`) when it still belongs to that opening and account and changed
+/// (R150/R199: names arrived from the names fill; a close/reopen or a switch
+/// meanwhile drops the older build).
 pub async fn refresh_open(st: &Arc<AppState>) {
-    let Some((match_id, focus_puuid)) = st.open_match_args() else {
+    let gate = st.match_build_guard().await;
+    let Some(token) = st.match_open_token() else {
         return;
     };
-    match read(st, &match_id, &focus_puuid).await {
+    let read = read(st, &token.match_id, &token.focus_puuid).await;
+    #[cfg(test)]
+    st.wait_match_probe().await;
+    match read {
         Ok(Some((view, _))) => {
-            st.emit_match_if_changed(&match_id, &focus_puuid, view);
+            st.emit_match(&token, view);
         }
         Ok(None) => {}
         Err(e) => log::warn!("match rebuild failed: {e}"),
     }
+    drop(gate);
 }
 
 /// The view from what is stored — with the names fill's asks for its rows

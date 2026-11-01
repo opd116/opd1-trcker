@@ -14,7 +14,7 @@ use super::*;
 
 /// The second Riot account in this installation, and the two players the accounts met: X in account A's match (hidden
 /// on B's screen later), Y in account B's own match.
-const B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
+pub(super) const B: &str = "bbbbbbbb-1111-2222-3333-444444444444";
 const X: &str = HIDDEN;
 const Y: &str = STRANGER;
 const A_MATCH: &str = "am1";
@@ -756,6 +756,31 @@ async fn a_closed_install_started_for_a_previous_owner_never_lands() {
         state.players.iter().all(|p| p.puuid != ME),
         "the previous account's Closed card landed on B"
     );
+}
+
+/// R199 (F02): a real account switch closes both backend open pages at once;
+/// an old refresh can neither install nor emit for the new account.
+#[tokio::test]
+async fn an_account_switch_closes_the_backend_open_pages() {
+    let h = harness().await;
+    crate::commands::player_details_for(&h.st, STRANGER)
+        .await
+        .unwrap();
+    assert!(h.st.details_open_for(STRANGER), "Details is open");
+    h.st.set_session(Some(h.session.clone()));
+    crate::match_details::load(&h.st, "m1", HIDDEN)
+        .await
+        .unwrap();
+    assert!(h.st.open_match_args().is_some(), "Match Details is open");
+
+    let mut poller = crate::poll::Poller::new(h.st.clone());
+    let b_server = mock_client_of(B, None).await;
+    let (_b_dir, b_session) = session_of(&b_server, B).await;
+    poller.on_connected(b_session).await;
+    poller.stop_worker();
+
+    assert!(!h.st.details_open_for(STRANGER), "Details stayed open");
+    assert_eq!(h.st.open_match_args(), None, "Match Details stayed open");
 }
 
 /// R199: only a real owner change bumps the generation; a same-account

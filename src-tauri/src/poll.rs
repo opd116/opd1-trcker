@@ -590,6 +590,12 @@ impl Poller {
                 live.rank_retries.clear();
                 // R161: nor are the tiers of its last Agent Select.
                 live.match_tiers.clear();
+                // R199/R02: an open page and every open still being built
+                // belong to the old account. Invalidate them here, under the
+                // same live section that changed the owner, so a build that
+                // returns later can neither install nor emit.
+                self.st.close_details(None);
+                self.st.close_match(None);
             } else {
                 live.self_puuid = Some(me.clone());
             }

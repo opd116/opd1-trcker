@@ -199,6 +199,10 @@ async fn refresh_if_due(st: &Arc<AppState>, me: &str) -> bool {
     if !due(lock(&LAST_ASK).as_ref(), me, Instant::now()) {
         return false;
     }
+    // R199/V01: the store belongs to the account generation that asked. An
+    // A->B->A round trip while Riot answers must not let the old A answer
+    // overwrite the newer A session's collection.
+    let stamp = lock(&st.live).owner_stamp();
     let answer = session.owned_skin_levels().await;
     if let Err(RiotError::Held(left)) = &answer {
         // R160: a hold is "not now", not an answer, and nothing was sent. No
@@ -228,10 +232,13 @@ async fn refresh_if_due(st: &Arc<AppState>, me: &str) -> bool {
     let stored_for = me.clone();
     let saved = st
         .db(move |repo| {
-            // An account switch while Riot answered: not this account's list.
-            if lock(&owner.live).self_puuid.as_deref() != Some(stored_for.as_str()) {
+            // An account switch while Riot answered: not this account's list,
+            // in the same generation that asked (A->B->A included).
+            let live = lock(&owner.live);
+            if stamp.puuid.as_deref() != Some(stored_for.as_str()) || !live.owner_matches(&stamp) {
                 return Ok(false);
             }
+            drop(live);
             repo.set_state(&store_key(&stored_for), &json)?;
             Ok(true)
         })

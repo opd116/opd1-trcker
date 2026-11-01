@@ -6,6 +6,7 @@
 
 mod support;
 
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -119,6 +120,97 @@ async fn session_detects_password_change_even_if_port_is_unchanged() {
         .await
         .unwrap_err();
     assert!(matches!(err, RiotError::ClientGone));
+}
+
+/// V02: a session retired while a call waits for its rate token must not put
+/// the request on the wire. Before the re-check, the start-of-call check had
+/// already passed, so the old request went out after the lockfile changed.
+#[tokio::test]
+async fn a_session_retired_while_waiting_for_a_rate_token_sends_nothing() {
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    write_shooter_log(tmp.path());
+    let port = server.address().port();
+    write_lockfile(tmp.path(), "http", port, "pw-1");
+    mount_entitlements(&server, SELF_PUUID).await;
+    for p in ["/warm", "/second"] {
+        Mock::given(method("GET"))
+            .and(path(p))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({})))
+            .mount(&server)
+            .await;
+    }
+    let session = Arc::new(connect_against(tmp.path(), &server).await);
+    // Spend the production bucket's burst (10) so the next call waits for a
+    // refill token (10 rps: ~100 ms).
+    for _ in 0..10 {
+        session.pd::<Value>("/warm").await.unwrap();
+    }
+
+    let s = session.clone();
+    let mut second = tokio::spawn(async move { s.pd::<Value>("/second").await });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), &mut second)
+            .await
+            .is_err(),
+        "the second call must still be waiting for its token"
+    );
+    // The Riot client restarted/retired while the call waited.
+    write_lockfile(tmp.path(), "http", port, "pw-2");
+
+    let err = second.await.unwrap().unwrap_err();
+    assert!(matches!(err, RiotError::ClientGone), "{err:?}");
+    let sent = server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path() == "/second")
+        .count();
+    assert_eq!(sent, 0, "a retired session sent its request anyway");
+}
+
+/// V02: a response that was already in flight when the lockfile changed is
+/// not handed to the caller as if it belonged to the current session.
+#[tokio::test]
+async fn a_response_in_flight_when_the_session_retires_is_client_gone() {
+    let tmp = TempDir::new();
+    let server = MockServer::start().await;
+    write_shooter_log(tmp.path());
+    let port = server.address().port();
+    write_lockfile(tmp.path(), "http", port, "pw-1");
+    mount_entitlements(&server, SELF_PUUID).await;
+    Mock::given(method("GET"))
+        .and(path("/slow"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(json!({"from": "old"}))
+                .set_delay(Duration::from_millis(300)),
+        )
+        .mount(&server)
+        .await;
+    let session = Arc::new(connect_against(tmp.path(), &server).await);
+
+    let s = session.clone();
+    let call = tokio::spawn(async move { s.pd::<Value>("/slow").await });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.url.path() == "/slow")
+    {
+        assert!(
+            Instant::now() < deadline,
+            "the request never reached the mock"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    write_lockfile(tmp.path(), "http", port, "pw-2");
+
+    let err = call.await.unwrap().unwrap_err();
+    assert!(matches!(err, RiotError::ClientGone), "{err:?}");
 }
 
 #[tokio::test]

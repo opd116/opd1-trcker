@@ -2350,6 +2350,10 @@ pub(crate) async fn fetch_self_loadout_after_holds(
     slack: Duration,
 ) -> Result<(), Gone> {
     let me = session.self_puuid().to_string();
+    // R202/V02: the read belongs to the account generation that started it.
+    // A->B->A is a new generation, so an older A answer cannot overwrite the
+    // newer A session's loadout (a bare PUUID check would accept it).
+    let stamp = lock(&st.live).owner_stamp();
     let mut held_retries = 0;
     let resp = loop {
         match session.player_loadout().await {
@@ -2366,9 +2370,10 @@ pub(crate) async fn fetch_self_loadout_after_holds(
     let stored = serde_json::to_string(&loadout).unwrap_or_default();
     {
         // The answer can land after an account switch (a slow read, a 429
-        // hold): it is only this session's account's loadout.
+        // hold): it is only this session's account's loadout, in the same
+        // generation that asked (A->B->A included).
         let mut live = lock(&st.live);
-        if live.self_puuid.as_deref() != Some(me.as_str()) {
+        if stamp.puuid.as_deref() != Some(me.as_str()) || !live.owner_matches(&stamp) {
             log::debug!("own loadout of a previous account dropped");
             return Ok(());
         }
@@ -2381,9 +2386,11 @@ pub(crate) async fn fetch_self_loadout_after_holds(
         // lock, so a write for the previous account lands before that
         // delete or not at all. (Lock order: the repo, then the live model;
         // nothing takes the repo while holding the live model.)
-        if lock(&owner.live).self_puuid.as_deref() != Some(me.as_str()) {
+        let live = lock(&owner.live);
+        if stamp.puuid.as_deref() != Some(me.as_str()) || !live.owner_matches(&stamp) {
             return Ok(());
         }
+        drop(live);
         if repo.get_state(SELF_LOADOUT_KEY)?.as_deref() != Some(stored.as_str()) {
             repo.set_state(SELF_LOADOUT_KEY, &stored)?;
         }

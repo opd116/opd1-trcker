@@ -1812,6 +1812,68 @@ async fn a_late_own_loadout_answer_never_lands_on_another_account() {
     assert!(kept.is_some());
 }
 
+/// V02: A->B->A is a new generation. An old A loadout answer must not
+/// overwrite the newer A session's memory/stored value (a bare PUUID check
+/// would accept it once A is back).
+#[tokio::test]
+async fn an_old_own_loadout_answer_cannot_overwrite_the_newer_a_session_after_aba() {
+    let h = harness().await;
+    let (_raw, body) = fixture_loadout();
+    Mock::given(method("GET"))
+        .and(path(format!(
+            "/personalization/v3/players/{ME}/playerloadout"
+        )))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_json(body)
+                .set_delay(Duration::from_millis(300)),
+        )
+        .mount(&h.server)
+        .await;
+
+    let st = h.st.clone();
+    let session = h.session.clone();
+    let call = tokio::spawn(async move { crate::sync::fetch_self_loadout(&st, &session).await });
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !h
+        .server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .any(|r| r.url.path().ends_with("/playerloadout"))
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the loadout request never reached the mock"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    lock(&h.st.live).set_account(Some("another-account".into()));
+    lock(&h.st.live).set_account(Some(ME.into()));
+    lock(&h.st.live).self_loadout = None;
+    h.st.db(|repo| repo.set_state("self_loadout", "newer-a"))
+        .await
+        .unwrap();
+
+    call.await.unwrap().unwrap();
+    assert_eq!(
+        lock(&h.st.live).self_loadout,
+        None,
+        "the older A answer was installed"
+    );
+    let kept =
+        h.st.db(|repo| repo.get_state("self_loadout"))
+            .await
+            .unwrap();
+    assert_eq!(
+        kept.as_deref(),
+        Some("newer-a"),
+        "the older A answer overwrote the stored value"
+    );
+}
+
 // ---------------------------------------------------------------------
 // R164: the In Game roster is on screen before the loadouts answer
 // ---------------------------------------------------------------------

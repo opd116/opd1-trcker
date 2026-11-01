@@ -2388,6 +2388,41 @@ fn an_unsupported_user_version_is_refused_without_migrating_or_losing_rows() {
     }
 }
 
+/// V03 follow-up: the refusal must happen before the WAL pragma, so it does
+/// not rewrite the database header. The row/version assertions above are not
+/// enough to prove "never writes": `journal_mode=WAL` changes the file.
+#[test]
+fn a_refused_user_version_does_not_rewrite_the_database_header() {
+    for version in [-1i64, 5] {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+            conn.execute_batch(include_str!("fixtures/schema_v1.sql"))
+                .unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+        }
+        let before = std::fs::read(tmp.path()).unwrap();
+        let err = open_db(tmp.path()).expect_err("the version must be refused");
+        assert!(
+            err.to_string().contains("unsupported schema version"),
+            "{version}: {err}"
+        );
+        let after = std::fs::read(tmp.path()).unwrap();
+        if before != after {
+            let first = before
+                .iter()
+                .zip(&after)
+                .position(|(a, b)| a != b)
+                .unwrap_or(before.len().min(after.len()));
+            panic!(
+                "{version}: the refusal rewrote the file ({} -> {} bytes, first difference at byte {first})",
+                before.len(),
+                after.len()
+            );
+        }
+    }
+}
+
 /// V03: a migration that fails after earlier statements were applied rolls
 /// the whole transaction back: no half-applied columns, no version bump.
 #[test]

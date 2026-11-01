@@ -23,27 +23,21 @@ const MIGRATIONS: &[&str] = &[
     include_str!("migration4.sql"),
 ];
 
-/// Opens (creating if needed) the SQLite database at `path`, sets its
-/// pragmas, and applies any migrations from [`MIGRATIONS`] not yet
-/// applied — idempotent on reopen, since a connection whose
-/// `user_version` already matches `MIGRATIONS.len()` runs no SQL at all.
+/// Opens (creating if needed) the SQLite database at `path`, checks its
+/// schema version, sets its pragmas, and applies any migrations from
+/// [`MIGRATIONS`] not yet applied — idempotent on reopen, since a connection
+/// whose `user_version` already matches `MIGRATIONS.len()` runs no SQL at all.
 pub fn open_db(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
-
-    // WAL + NORMAL: the standard "don't fsync on every write, but don't
-    // corrupt on a crash either" pair for a single-writer desktop app.
-    // (SQLite silently keeps `:memory:` databases on its own in-memory
-    // journal regardless of what we ask for here — harmless for tests.)
-    conn.pragma_update(None, "journal_mode", "WAL")?;
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
 
     let current_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let target_version = MIGRATIONS.len() as i64;
 
     // R203/V03: a negative version (corrupt/hostile header) or one from a
     // newer build is refused explicitly. The old slice `[current..]` panicked
-    // on a negative value, and a newer schema was silently accepted. Refusing
-    // never writes the file and never runs a migration/downgrade.
+    // on a negative value, and a newer schema was silently accepted. The check
+    // runs before the WAL pragma, so a refusal does not rewrite the header and
+    // never runs a migration/downgrade.
     if current_version < 0 || current_version > target_version {
         return Err(rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
@@ -52,6 +46,13 @@ pub fn open_db(path: &Path) -> Result<Connection> {
             )),
         ));
     }
+
+    // WAL + NORMAL: the standard "don't fsync on every write, but don't
+    // corrupt on a crash either" pair for a single-writer desktop app.
+    // (SQLite silently keeps `:memory:` databases on its own in-memory
+    // journal regardless of what we ask for here — harmless for tests.)
+    conn.pragma_update(None, "journal_mode", "WAL")?;
+    conn.pragma_update(None, "synchronous", "NORMAL")?;
 
     if current_version < target_version {
         let tx = conn.unchecked_transaction()?;

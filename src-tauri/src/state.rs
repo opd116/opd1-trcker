@@ -3073,11 +3073,16 @@ impl AppState {
     }
 
     /// Emits `fresh` as a `"details"` event when it still belongs to the open
-    /// Player Details (same opening, account and key, R199) and differs from
-    /// what the UI was last given; `true` when it was emitted. Compare, emit
-    /// and record happen under one lock, so two rebuilds can't both emit the
-    /// same change.
+    /// Player Details (same opening, account, key and player, R199) and
+    /// differs from what the UI was last given; `true` when it was emitted.
+    /// Compare, emit and record happen under one lock, so two rebuilds can't
+    /// both emit the same change.
     pub fn emit_details(&self, token: &DetailsToken, fresh: PlayerDetails) -> bool {
+        // R199 follow-up: the install path (`set_open_details`) rejects a
+        // card whose puuid is not the ticket's; the emit path must too.
+        if fresh.card.puuid != token.puuid {
+            return false;
+        }
         let live = lock(&self.live);
         if !live.owner_matches(&token.owner) {
             return false;

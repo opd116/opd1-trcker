@@ -188,6 +188,28 @@ async fn a_late_details_open_never_overwrites_a_newer_one() {
 }
 
 #[tokio::test]
+async fn emit_details_rejects_a_card_for_another_puuid() {
+    // R199 follow-up: set_open_details already rejects a mismatched card;
+    // the emit path must be just as strict. A refresh is built for the
+    // token's puuid, so this is defence in depth, not a reachable UI path.
+    let h = harness().await;
+    known(&h, &[ME, OTHER]).await;
+    let other = built(&h, OTHER).await;
+    let mine = built(&h, ME).await;
+    let ticket = h.st.begin_open_details(OTHER);
+    assert!(h.st.set_open_details(&ticket, &other));
+    let token = h.st.details_open_token(OTHER).expect("OTHER is open");
+    let before = details_events(&h).len();
+
+    assert!(
+        !h.st.emit_details(&token, mine),
+        "a card for ME was emitted under OTHER's token"
+    );
+    assert_eq!(h.st.open_details_puuid().as_deref(), Some(OTHER));
+    assert_eq!(details_events(&h).len(), before, "nothing was emitted");
+}
+
+#[tokio::test]
 async fn a_close_for_another_match_leaves_the_open_match_alone() {
     let h = harness().await;
     h.st.set_session(Some(h.session.clone()));

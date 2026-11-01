@@ -1677,19 +1677,24 @@ impl Poller {
         // R199: the self-only placeholder's DB read/install is serialized and
         // owner-checked like a full roster install.
         let _gate = self.st.bundle_reload_guard().await;
-        let (me, own, old_db) = {
+        // R199 follow-up: one live snapshot binds the owner stamp to the self
+        // slot and the old bundle. Reading the stamp in a second acquisition
+        // could install the previous account's slot under a new owner if the
+        // owner changed between the two reads.
+        let (stamp, own, old_db) = {
             let live = lock(&self.st.live);
-            let me = live.self_puuid.clone();
-            let old_db = me.as_ref().and_then(|me| {
+            let stamp = live.owner_stamp();
+            let old_db = stamp.puuid.as_ref().and_then(|me| {
                 live.slots
                     .iter()
                     .find(|s| &s.roster.puuid == me)
                     .map(|s| s.db.clone())
             });
-            (me, live.self_roster.clone(), old_db)
+            (stamp, live.self_roster.clone(), old_db)
         };
-        let Some(me) = me else { return };
-        let stamp = lock(&self.st.live).owner_stamp();
+        let Some(me) = stamp.puuid.clone() else {
+            return;
+        };
         let p = me.clone();
         // A failed read keeps the bundle already on screen, never a default.
         let db = self

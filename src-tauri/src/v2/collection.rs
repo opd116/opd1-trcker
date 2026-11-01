@@ -128,18 +128,17 @@ pub async fn collection(state: AppStateRef<'_>) -> Result<Option<Collection>, St
 /// [`collection`]'s body, over `st` so the tests can drive it without Tauri's
 /// `State`.
 async fn collection_for(st: &Arc<AppState>) -> Result<Option<Collection>, String> {
-    let Some(me) = lock(&st.live).self_puuid.clone() else {
+    // R199/V01: the whole call belongs to the account generation on screen
+    // when it started. A switch anywhere in it — while Riot answers, while
+    // the DB/catalog is read, or an A->B->A round trip — is not this
+    // account's answer, so the screen keeps its retry state.
+    let stamp = lock(&st.live).owner_stamp();
+    let Some(me) = stamp.puuid.clone() else {
         return Ok(None);
     };
     let no_stored_answer = refresh_if_due(st, &me).await;
 
-    // The Riot client can switch account while Riot answers: this call was
-    // made for the account on screen when it started, and its stored copy (or
-    // its failure) belongs to that account, not to the one on screen now. An
-    // `Err` is not an answer for the new account either, so the screen keeps
-    // its retry state (never the "no collection yet" empty state) and the
-    // account handler re-asks for the account that is on screen now.
-    if lock(&st.live).self_puuid.as_deref() != Some(me.as_str()) {
+    if !lock(&st.live).owner_matches(&stamp) {
         return Err("skins unavailable".into());
     }
 
@@ -161,11 +160,16 @@ async fn collection_for(st: &Arc<AppState>) -> Result<Option<Collection>, String
     };
     // The catalog needs the tables' version; offline the disk copies serve.
     let _ = st.ensure_tables(false).await;
-    match st
+    let built = st
         .assets
         .collection(&stored.levels, stored.fetched_ms)
-        .await
-    {
+        .await;
+    // A switch while the catalog was read makes this A's collection, not the
+    // page's: never hand it to the account on screen now (V01).
+    if !lock(&st.live).owner_matches(&stamp) {
+        return Err("skins unavailable".into());
+    }
+    match built {
         Ok(collection) => Ok(Some(collection)),
         Err(e) => {
             log::warn!("skins collection unavailable: {e}");
@@ -311,6 +315,41 @@ mod tests {
         format!("/store/v1/entitlements/{ME}/{SKIN_LEVEL_ITEM_TYPE}")
     }
 
+    async fn weapon_requests(h: &crate::pipeline_tests::Harness) -> usize {
+        h.assets_server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|r| r.url.path() == "/v1/weapons")
+            .count()
+    }
+
+    /// A's stored copy (one Reaver level) and B's (none), both valid for the
+    /// catalog. A's `LAST_ASK` is made recent so the delayed catalog, not a
+    /// Riot ask, is what the test holds open.
+    async fn two_copies(h: &crate::pipeline_tests::Harness) {
+        let a = serde_json::to_string(&StoredOwned {
+            puuid: ME.into(),
+            fetched_ms: 5,
+            levels: vec![L1.into()],
+        })
+        .unwrap();
+        h.st.db(move |repo| repo.set_state(&store_key(ME), &a))
+            .await
+            .expect("A's copy");
+        let b = serde_json::to_string(&StoredOwned {
+            puuid: OTHER_ACCOUNT.into(),
+            fetched_ms: 7,
+            levels: vec![],
+        })
+        .unwrap();
+        h.st.db(move |repo| repo.set_state(&store_key(OTHER_ACCOUNT), &b))
+            .await
+            .expect("B's copy");
+        *lock(&LAST_ASK) = Some((ME.into(), Instant::now()));
+    }
+
     /// Mounts the mock store endpoint: `status`, at most `times`, then
     /// `body` as JSON when given. `priority` decides between the overlapping
     /// mocks of a test explicitly (wiremock: 1 beats 2).
@@ -340,34 +379,38 @@ mod tests {
 
     /// Mounts the one weapon the collection tests own a skin of: its default
     /// skin (dropped by the catalog) and the Reaver Vandal on `L1` (Premium).
-    async fn mount_weapons(server: &wiremock::MockServer) {
+    async fn mount_weapons(server: &wiremock::MockServer, delay: Option<Duration>) {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, ResponseTemplate};
 
+        let mut response = ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "status": 200,
+            "data": [{
+                "uuid": "9c82e19d-4575-0200-1a81-3eacf00cf872",
+                "displayName": "Vandal",
+                "category": "EEquippableCategory::Rifle",
+                "defaultSkinUuid": "27f21d97-4c4b-bd1c-1f08-31830ab0be84",
+                "displayIcon": null,
+                "skins": [{
+                    "uuid": "30388628-42f0-606c-82c0-73ad43de997f",
+                    "displayName": "Reaver Vandal",
+                    "contentTierUuid": "60bca009-4182-7998-dee7-b8a2558dc369",
+                    "levels": [{"uuid": L1, "displayIcon": null}]
+                }, {
+                    "uuid": "27f21d97-4c4b-bd1c-1f08-31830ab0be84",
+                    "displayName": "Standard Vandal",
+                    "contentTierUuid": null,
+                    "levels": [{"uuid": "bbbb0000-0000-0000-0000-000000000001",
+                                "displayIcon": null}]
+                }]
+            }]
+        }));
+        if let Some(delay) = delay {
+            response = response.set_delay(delay);
+        }
         Mock::given(method("GET"))
             .and(path("/v1/weapons"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "status": 200,
-                "data": [{
-                    "uuid": "9c82e19d-4575-0200-1a81-3eacf00cf872",
-                    "displayName": "Vandal",
-                    "category": "EEquippableCategory::Rifle",
-                    "defaultSkinUuid": "27f21d97-4c4b-bd1c-1f08-31830ab0be84",
-                    "displayIcon": null,
-                    "skins": [{
-                        "uuid": "30388628-42f0-606c-82c0-73ad43de997f",
-                        "displayName": "Reaver Vandal",
-                        "contentTierUuid": "60bca009-4182-7998-dee7-b8a2558dc369",
-                        "levels": [{"uuid": L1, "displayIcon": null}]
-                    }, {
-                        "uuid": "27f21d97-4c4b-bd1c-1f08-31830ab0be84",
-                        "displayName": "Standard Vandal",
-                        "contentTierUuid": null,
-                        "levels": [{"uuid": "bbbb0000-0000-0000-0000-000000000001",
-                                    "displayIcon": null}]
-                    }]
-                }]
-            })))
+            .respond_with(response)
             .mount(server)
             .await;
     }
@@ -483,7 +526,7 @@ mod tests {
             .expect("the stored copy is written");
         // The tables and the skin catalog, from the mocked valorant-api.
         crate::pipeline_tests::mount_asset_tables(&h.assets_server).await;
-        mount_weapons(&h.assets_server).await;
+        mount_weapons(&h.assets_server, None).await;
         // Riot's store endpoint fails now.
         mount_store(&h, 500, None, None, 1).await;
 
@@ -528,7 +571,7 @@ mod tests {
             .expect("B's copy is written");
         // So both copies can be joined with the catalog.
         crate::pipeline_tests::mount_asset_tables(&h.assets_server).await;
-        mount_weapons(&h.assets_server).await;
+        mount_weapons(&h.assets_server, None).await;
         // Riot's answer is slow enough to switch account while it is in flight.
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, ResponseTemplate};
@@ -571,6 +614,76 @@ mod tests {
             .expect("B's stored copy still shows");
         assert_eq!(got.fetched_ms, 7);
         assert!(got.items.is_empty(), "B owns no skins");
+    }
+
+    /// V01: a switch after the Riot answer but while the catalog is still
+    /// being read must not hand A's collection to B. The final owner stamp is
+    /// checked after `assets.collection`, before the result is returned.
+    #[tokio::test]
+    async fn a_call_across_a_switch_during_the_catalog_is_an_error() {
+        let _serial = COMMANDS.lock().await;
+        let h = crate::pipeline_tests::harness().await;
+        h.st.set_session(Some(h.session.clone()));
+        lock(&h.st.live).stage = Stage::Menus;
+        two_copies(&h).await;
+        crate::pipeline_tests::mount_asset_tables(&h.assets_server).await;
+        mount_weapons(&h.assets_server, Some(Duration::from_secs(1))).await;
+
+        let st = h.st.clone();
+        let in_flight = tokio::spawn(async move { collection_for(&st).await });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while weapon_requests(&h).await == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the catalog request never reached the mock"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        lock(&h.st.live).set_account(Some(OTHER_ACCOUNT.into()));
+        assert_eq!(
+            in_flight.await.unwrap(),
+            Err("skins unavailable".to_string()),
+            "A's collection must not become B's page"
+        );
+
+        // B's own next call still serves B's stored copy.
+        let got = collection_for(&h.st)
+            .await
+            .expect("B's call")
+            .expect("B has a stored copy");
+        assert_eq!(got.fetched_ms, 7);
+        assert!(got.items.is_empty(), "B owns no skins");
+    }
+
+    /// V01: A->B->A is a new generation. An A call that started before the
+    /// round trip must not install its catalog result after A returns.
+    #[tokio::test]
+    async fn a_call_across_an_aba_round_trip_during_the_catalog_is_an_error() {
+        let _serial = COMMANDS.lock().await;
+        let h = crate::pipeline_tests::harness().await;
+        h.st.set_session(Some(h.session.clone()));
+        lock(&h.st.live).stage = Stage::Menus;
+        two_copies(&h).await;
+        crate::pipeline_tests::mount_asset_tables(&h.assets_server).await;
+        mount_weapons(&h.assets_server, Some(Duration::from_secs(1))).await;
+
+        let st = h.st.clone();
+        let in_flight = tokio::spawn(async move { collection_for(&st).await });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while weapon_requests(&h).await == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the catalog request never reached the mock"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        lock(&h.st.live).set_account(Some(OTHER_ACCOUNT.into()));
+        lock(&h.st.live).set_account(Some(ME.into()));
+        assert_eq!(
+            in_flight.await.unwrap(),
+            Err("skins unavailable".to_string()),
+            "an older A call passed the round trip"
+        );
     }
 
     #[test]

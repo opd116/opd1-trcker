@@ -261,6 +261,17 @@ const PASSWORD_MIN_CHARS: usize = 12;
 /// The minimum token length after `Bearer`/`Basic`.
 const AUTH_TOKEN_MIN_CHARS: usize = 8;
 
+/// Whether `value` looks like an authorization token rather than an ordinary
+/// lowercase word. The length alone is not enough: `Basic authentication
+/// failed` is a realistic diagnostic. A short all-lowercase word is prose; a
+/// mixed-case/digit/symbol value, or a long opaque value, is treated as a
+/// token. This stays conservative (an all-lowercase short secret is missed)
+/// because a false positive corrupts the diagnostic context.
+fn looks_like_auth_value(value: &str) -> bool {
+    let len = value.chars().count();
+    len >= AUTH_TOKEN_MIN_CHARS && (len >= 20 || value.chars().any(|c| !c.is_ascii_lowercase()))
+}
+
 /// The token characters of a `Bearer`/`Basic` value or a password value.
 fn is_auth_value_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '~' | '+' | '/' | '=' | ':' | '@')
@@ -291,6 +302,45 @@ fn auth_value_end(s: &str, start: usize) -> usize {
     end
 }
 
+/// The byte index of the closing `quote` for a value starting at `start`
+/// (just after an opening quote), or `None` when it is unterminated. A
+/// backslash escapes the next scalar, so `password="a\"b"` keeps its value
+/// together.
+fn quoted_value_end(s: &str, start: usize, quote: char) -> Option<usize> {
+    let mut escaped = false;
+    for (off, c) in s[start..].char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if c == '\\' {
+            escaped = true;
+            continue;
+        }
+        if c == quote {
+            return Some(start + off);
+        }
+    }
+    None
+}
+
+/// `ascii_keyword_at` for a scheme word: a match only when the keyword is not
+/// glued to a preceding word and is followed by whitespace or a quote. This
+/// keeps `Basic authentication failed` / `BasicInstinct` as prose while
+/// `Authorization: Basic <token>` still matches.
+fn scheme_keyword_at(s: &str, i: usize, keyword: &str) -> Option<usize> {
+    let after = ascii_keyword_at(s, i, keyword)?;
+    let left_ok = s[..i]
+        .chars()
+        .next_back()
+        .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+    let right_ok = s[after..]
+        .chars()
+        .next()
+        .is_none_or(|c| c.is_whitespace() || matches!(c, '"' | '\''));
+    (left_ok && right_ok).then_some(after)
+}
+
 /// Redacts `Bearer`/`Basic`/`password` forms in one pass, keeping the
 /// surrounding text and the scheme/keyword.
 fn redact_auth_forms(s: &str) -> String {
@@ -299,7 +349,7 @@ fn redact_auth_forms(s: &str) -> String {
     while i < s.len() {
         let mut matched = None;
         for keyword in ["Bearer", "Basic"] {
-            if let Some(after) = ascii_keyword_at(s, i, keyword) {
+            if let Some(after) = scheme_keyword_at(s, i, keyword) {
                 let mut token_start = after;
                 while s[token_start..]
                     .chars()
@@ -316,9 +366,8 @@ fn redact_auth_forms(s: &str) -> String {
                     token_start += 1;
                 }
                 let token_end = auth_value_end(s, token_start);
-                if s[token_start..token_end].chars().count() >= AUTH_TOKEN_MIN_CHARS
-                    && &s[token_start..token_end] != REDACTED
-                {
+                let value = &s[token_start..token_end];
+                if looks_like_auth_value(value) && value != REDACTED {
                     matched = Some((token_start, token_end));
                 }
             }
@@ -334,14 +383,23 @@ fn redact_auth_forms(s: &str) -> String {
                     while s[j..].chars().next().is_some_and(char::is_whitespace) {
                         j += s[j..].chars().next().unwrap().len_utf8();
                     }
-                    let quoted = s[j..]
-                        .chars()
-                        .next()
-                        .is_some_and(|c| matches!(c, '"' | '\''));
-                    let token_start = if quoted { j + 1 } else { j };
-                    let token_end = auth_value_end(s, token_start);
-                    if s[token_start..token_end].chars().count() >= PASSWORD_MIN_CHARS
-                        && &s[token_start..token_end] != REDACTED
+                    let quote = s[j..].chars().next().filter(|c| matches!(c, '"' | '\''));
+                    let (token_start, token_end, quoted) = if let Some(quote) = quote {
+                        let start = j + 1;
+                        match quoted_value_end(s, start, quote) {
+                            Some(end) => (start, end, true),
+                            // An unterminated quote is not a licence to scan
+                            // the rest of the document: fall back to the
+                            // conservative unquoted-token rule.
+                            None => (start, auth_value_end(s, start), false),
+                        }
+                    } else {
+                        (j, auth_value_end(s, j), false)
+                    };
+                    let value = &s[token_start..token_end];
+                    if ((quoted && !value.is_empty())
+                        || (!quoted && value.chars().count() >= PASSWORD_MIN_CHARS))
+                        && value != REDACTED
                     {
                         matched = Some((token_start, token_end));
                     }
@@ -858,6 +916,43 @@ mod tests {
         let text = "the bearer of good news; basic error handling; password: required; retry later";
         let out = excerpt(text.as_bytes(), 500);
         assert_eq!(out, text, "ordinary words were redacted");
+    }
+
+    #[test]
+    fn auth_scheme_words_inside_ordinary_sentences_are_not_redacted() {
+        // R204 follow-up: a scheme keyword is not a token when it is glued to
+        // a word or followed by a normal word. These are diagnostics, not
+        // credentials, and must survive unchanged.
+        let text = "Basic authentication failed; BasicInstinct; Bearer authentication failed; \
+                    the bearer of good news";
+        let out = excerpt(text.as_bytes(), 500);
+        assert_eq!(out, text, "ordinary prose was redacted");
+    }
+
+    #[test]
+    fn quoted_password_values_with_spaces_are_redacted_in_full() {
+        // R204 follow-up: a quoted value ends at its closing quote, not at
+        // the first space. The old scan saw only `hunter2` (below the length
+        // threshold), so the whole password leaked into the diagnostic.
+        let text = "login failed: password=\"hunter2 with a space\" for player \
+                    aaaaaaaa-0000-0000-0000-000000000001";
+        let out = excerpt(text.as_bytes(), 500);
+        assert!(!out.contains("hunter2"), "{out}");
+        assert!(!out.contains("with a space"), "{out}");
+        assert!(out.contains("password=\"REDACTED\""), "{out}");
+        assert!(
+            out.contains("login failed") && out.contains("for player"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn short_quoted_password_values_are_still_redacted_in_full() {
+        // The length threshold is a guard for unquoted prose (`password:
+        // required`), not a reason to keep an explicitly quoted value.
+        let text = "password=\"abc def\"";
+        let out = excerpt(text.as_bytes(), 500);
+        assert_eq!(out, "password=\"REDACTED\"");
     }
 
     #[test]

@@ -40,6 +40,19 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     let current_version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     let target_version = MIGRATIONS.len() as i64;
 
+    // R203/V03: a negative version (corrupt/hostile header) or one from a
+    // newer build is refused explicitly. The old slice `[current..]` panicked
+    // on a negative value, and a newer schema was silently accepted. Refusing
+    // never writes the file and never runs a migration/downgrade.
+    if current_version < 0 || current_version > target_version {
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+            Some(format!(
+                "unsupported schema version {current_version}; this build supports 0..={target_version}"
+            )),
+        ));
+    }
+
     if current_version < target_version {
         let tx = conn.unchecked_transaction()?;
         for migration in &MIGRATIONS[current_version as usize..] {

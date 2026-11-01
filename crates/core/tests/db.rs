@@ -2345,3 +2345,238 @@ fn v3_db_upgrades_to_user_version_4_and_keeps_its_data() {
         .unwrap();
     assert_eq!(history.all_total, 1, "a pre-v4 match shows in the history");
 }
+
+/// V03: an unknown/negative `user_version` is refused, not sliced (negative
+/// used to panic) and not silently accepted (a newer build's schema used to
+/// open). The file's version and rows are unchanged.
+#[test]
+fn an_unsupported_user_version_is_refused_without_migrating_or_losing_rows() {
+    for version in [-1i64, 5] {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        {
+            let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+            conn.execute_batch(include_str!("fixtures/schema_v1.sql"))
+                .unwrap();
+            conn.execute_batch(
+                "INSERT INTO matches VALUES ('old', 'Ascent', 'competitive', 1000, 'Blue', 1, 24);",
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| open_db(tmp.path())));
+        match result {
+            Ok(Ok(_)) => panic!("user_version {version} was accepted"),
+            Ok(Err(e)) => assert!(
+                e.to_string().contains("unsupported schema version"),
+                "{version}: {e}"
+            ),
+            Err(_) => panic!("user_version {version} panicked instead of returning an error"),
+        }
+
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        assert_eq!(user_version(&conn), version, "the version changed");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM matches", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1, "{version}: the row survived");
+        assert!(
+            !column_names(&conn, "matches")
+                .iter()
+                .any(|c| c == "game_length_ms"),
+            "{version}: a migration ran"
+        );
+    }
+}
+
+/// V03: a migration that fails after earlier statements were applied rolls
+/// the whole transaction back: no half-applied columns, no version bump.
+#[test]
+fn a_failed_later_migration_leaves_the_previous_schema_and_rows_intact() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    {
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        conn.execute_batch(include_str!("fixtures/schema_v1.sql"))
+            .unwrap();
+        // The later migration's last ALTER conflicts with this column; the
+        // three ALTERs before it succeed inside the same transaction.
+        conn.execute_batch(
+            "ALTER TABLE match_players ADD COLUMN damage INTEGER;
+             PRAGMA user_version = 1;
+             INSERT INTO matches VALUES ('old', 'Ascent', 'competitive', 1000, 'Blue', 1, 24);
+             INSERT INTO match_players
+                (match_id, puuid, team_id, party_id, agent_id, kills, deaths, assists,
+                 score, rounds, hs, bs, ls, game_name, tag_line)
+             VALUES ('old', 'self', 'Blue', NULL, 'jett', 20, 15, 5, 4000, 24, 10, 20, 5, 'Self', '111');",
+        )
+        .unwrap();
+    }
+    let err = open_db(tmp.path()).expect_err("the duplicate column must fail the migration");
+    assert!(err.to_string().contains("duplicate column"), "{err}");
+
+    let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+    assert_eq!(user_version(&conn), 1, "a failed migration did not bump");
+    for column in ["game_length_ms", "rounds_won_h1", "competitive_tier"] {
+        let table = if column == "rounds_won_h1" {
+            "match_teams"
+        } else if column == "competitive_tier" {
+            "match_players"
+        } else {
+            "matches"
+        };
+        assert!(
+            !column_names(&conn, table).iter().any(|c| c == column),
+            "{table}.{column} survived the rollback"
+        );
+    }
+    assert!(
+        column_names(&conn, "match_players")
+            .iter()
+            .any(|c| c == "damage"),
+        "the fixture's own column is unchanged"
+    );
+    let rows: i64 = conn
+        .query_row("SELECT COUNT(*) FROM matches", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 1);
+}
+
+/// V03: a failed `upsert_match` (a player insert aborts) leaves no header,
+/// team or player rows behind.
+#[test]
+fn a_failed_match_upsert_commits_nothing() {
+    let conn = open_db(Path::new(":memory:")).unwrap();
+    let repo = Repo::new(conn);
+    repo.upsert_match(
+        &sample_match("keep", 1_000, Some("Blue")),
+        &[team("Blue", true, Some(13))],
+        &[sample_player("self", "Blue", "Self", "111")],
+    )
+    .unwrap();
+    repo.conn()
+        .execute_batch(
+            "CREATE TRIGGER no_player BEFORE INSERT ON match_players
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+
+    let err = repo
+        .upsert_match(
+            &sample_match("new", 2_000, Some("Blue")),
+            &[team("Blue", true, Some(13))],
+            &[sample_player("self", "Blue", "Self", "111")],
+        )
+        .unwrap_err();
+    assert!(err.to_string().contains("disk full"), "{err}");
+    assert!(repo.match_rows("new").unwrap().is_none());
+    let (matches, teams, players): (i64, i64, i64) = repo
+        .conn()
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM matches),
+                    (SELECT COUNT(*) FROM match_teams),
+                    (SELECT COUNT(*) FROM match_players)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .unwrap();
+    assert_eq!((matches, teams, players), (1, 1, 1), "only 'keep' remains");
+}
+
+/// V03: the configured busy behavior is fail-fast (no busy_timeout). A
+/// second writer fails while the first holds a write transaction, then the
+/// same explicit retry succeeds once it is released; the DB stays integral.
+#[test]
+fn a_contended_write_fails_fast_and_a_retry_after_release_succeeds() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let writer = open_db(tmp.path()).unwrap();
+    let other = open_db(tmp.path()).unwrap();
+    writer
+        .execute(
+            "INSERT INTO app_state (key, value) VALUES ('held', '1')",
+            [],
+        )
+        .unwrap();
+    writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+    writer
+        .execute(
+            "INSERT INTO app_state (key, value) VALUES ('while-held', '1')",
+            [],
+        )
+        .unwrap();
+
+    let err = other
+        .execute(
+            "INSERT INTO app_state (key, value) VALUES ('other', '1')",
+            [],
+        )
+        .unwrap_err();
+    assert_eq!(
+        err.sqlite_error_code(),
+        Some(rusqlite::ErrorCode::DatabaseBusy),
+        "{err:?}"
+    );
+
+    writer.execute_batch("ROLLBACK").unwrap();
+    other
+        .execute(
+            "INSERT INTO app_state (key, value) VALUES ('other', '1')",
+            [],
+        )
+        .unwrap();
+    let integrity: String = other
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(integrity, "ok");
+    let rows: i64 = other
+        .query_row("SELECT COUNT(*) FROM app_state", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 2, "the held row rolled back, the retry landed");
+}
+
+/// V03: a corrupt file fails with an error and is not deleted or rewritten.
+#[test]
+fn a_corrupt_database_file_is_not_self_healed_or_deleted() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let bytes = b"this is not a SQLite database".to_vec();
+    std::fs::write(tmp.path(), &bytes).unwrap();
+    let err = open_db(tmp.path()).expect_err("a corrupt file must fail");
+    assert!(!err.to_string().is_empty());
+    assert!(tmp.path().exists(), "the file was deleted");
+    assert_eq!(
+        std::fs::read(tmp.path()).unwrap(),
+        bytes,
+        "the file was rewritten"
+    );
+}
+
+/// V03: version 0 (no migrations yet) and version 4 (current) both end at 4
+/// and keep unrelated/current data.
+#[test]
+fn the_endpoint_versions_open_at_version_4() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    {
+        let conn = rusqlite::Connection::open(tmp.path()).unwrap();
+        conn.execute_batch("CREATE TABLE unrelated (x INTEGER); INSERT INTO unrelated VALUES (7);")
+            .unwrap();
+    }
+    let conn = open_db(tmp.path()).expect("version 0 runs all migrations");
+    assert_eq!(user_version(&conn), 4);
+    let x: i64 = conn
+        .query_row("SELECT x FROM unrelated", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(x, 7);
+    conn.execute(
+        "INSERT INTO app_state (key, value) VALUES ('kept', '1')",
+        [],
+    )
+    .unwrap();
+    drop(conn);
+
+    let conn = open_db(tmp.path()).expect("version 4 is a no-op");
+    assert_eq!(user_version(&conn), 4);
+    let value: String = conn
+        .query_row("SELECT value FROM app_state WHERE key = 'kept'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(value, "1");
+}

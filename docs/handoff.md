@@ -6,7 +6,7 @@ Read `AGENTS.md`, `CLAUDE.md`, then the relevant user requirements and decisions
 
 ## Backend correctness audit - 2026-11-01 (local branch, unreleased)
 
-A user-authorized follow-up to the reviewed backend audit (plan v2 / F01-F04, V01-V06) ran on local branch `codex/backend-correctness`, based on the v0.4.0 release commit `9dc93759d89d17ae611e7a4f4d15dae910939503`. Nothing was pushed, opened as a PR, merged, tagged, released or installed; `main` is unchanged.
+A user-authorized follow-up to the reviewed backend audit (plan v2 / F01-F04, V01-V06) ran on local branch `codex/backend-correctness`, based on the v0.4.0 release commit `9dc93759d89d17ae611e7a4f4d15dae910939503`. The exact code HEAD for the final checks below is `56d63ce`; the docs commit that records this note follows it. Nothing was pushed, opened as a PR, merged, tagged, released or installed; `main` is unchanged.
 
 - **Fixes committed locally:** FIX-1/2 owner-generation and opening-token safety for live DB bundles and open views; FIX-3 decode-validated cached/downloaded images; FIX-4 exact owned-file diagnostic dumps with a last-written manifest; V01 final owner-stamp check around the Skins catalog; V02 pre-send retirement check and own-loadout A->B->A guard; V03 explicit refusal of negative/newer `user_version`; V05 redaction of recognizable `Bearer`/`Basic`/`password` forms.
 - **Evidence:** every fix has a deterministic pre-fix failure in a disposable worktree and a post-fix pass; the implementation ledger with exact commands, failures, SHAs and limits is outside the repo at `C:\Users\Administrator\Documents\Codex\2026-11-01\new-chat-4\outputs\implementation-ledger.md`. Rulings R199-R204 are in `docs/DECISIONS.md`.

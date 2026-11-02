@@ -1123,6 +1123,26 @@ impl Poller {
             let ended = live.coregame_match_id.take();
             live.loadouts.clear();
             if t.reset_synced {
+                // R150/R145: preserve any in-memory names on the currently carried
+                // slots into their DB rows before `forget_synced` clears `known_names`,
+                // so that an in-flight publish from an aborted worker before the new
+                // roster or placeholder installs cannot revert a card to a blank skeleton.
+                let known = live.known_names.clone();
+                for s in &mut live.slots {
+                    if let Some((n, t)) = known.get(&s.roster.puuid) {
+                        if s.db.row.as_ref().and_then(|r| r.name()).is_none() {
+                            let mut row = s.db.row.clone().unwrap_or(StoredPlayer {
+                                game_name: String::new(),
+                                tag_line: String::new(),
+                                account_level: 0,
+                                card_id: String::new(),
+                            });
+                            row.game_name = n.clone();
+                            row.tag_line = t.clone();
+                            s.db.row = Some(row);
+                        }
+                    }
+                }
                 live.forget_synced();
                 // R161: a match is over or VALORANT closed.
                 live.match_tiers.clear();

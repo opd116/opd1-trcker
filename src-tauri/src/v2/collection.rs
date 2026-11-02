@@ -726,4 +726,68 @@ mod tests {
             format!(r#"{{"puuid":"{ME}","fetchedMs":7,"levels":[]}}"#)
         );
     }
+
+    /// Scale: a real account owns many skins. The entitlements answer lists
+    /// 50 owned levels; the catalog maps every one of them to a skin with an
+    /// edition and a standard price, and none is dropped by a size limit or an
+    /// index bound.
+    #[tokio::test]
+    async fn a_full_collection_maps_many_owned_skins() {
+        let _serial = COMMANDS.lock().await;
+        let h = crate::pipeline_tests::harness().await;
+        h.st.set_session(Some(h.session.clone()));
+        lock(&h.st.live).stage = Stage::Menus;
+        *lock(&LAST_ASK) = None;
+
+        // 50 skins on one weapon, each with its own first level.
+        let mut skins = Vec::new();
+        let mut levels = Vec::new();
+        for i in 0..50usize {
+            let level = format!("11111111-2222-3333-4444-{:012}", i);
+            levels.push(level.clone());
+            skins.push(serde_json::json!({
+                "uuid": format!("aaaaaaaa-bbbb-cccc-dddd-{:012}", i),
+                "displayName": format!("Skin {} Vandal", i),
+                "contentTierUuid": "60bca009-4182-7998-dee7-b8a2558dc369",
+                "levels": [{"uuid": level, "displayIcon": "icon.png"}]
+            }));
+        }
+        let weapons = serde_json::json!({
+            "status": 200,
+            "data": [{
+                "uuid": "9c82e19d-4575-0200-1a81-3eacf00cf872",
+                "displayName": "Vandal",
+                "category": "EEquippableCategory::Rifle",
+                "defaultSkinUuid": "27f21d97-4c4b-bd1c-1f08-31830ab0be84",
+                "displayIcon": null,
+                "skins": skins
+            }]
+        });
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, ResponseTemplate};
+        Mock::given(method("GET"))
+            .and(path("/v1/weapons"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(weapons))
+            .mount(&h.assets_server)
+            .await;
+
+        // Entitlements: all 50 levels owned.
+        let entitlements = serde_json::json!({
+            "ItemTypeID": SKIN_LEVEL_ITEM_TYPE,
+            "Entitlements": levels.iter().map(|l| serde_json::json!({"ItemID": l})).collect::<Vec<_>>()
+        });
+        mount_store(&h, 200, None, Some(entitlements), 1).await;
+
+        crate::pipeline_tests::mount_asset_tables(&h.assets_server).await;
+
+        let got = collection_for(&h.st).await.expect("collection");
+        let col = got.expect("stored copy shows");
+        assert_eq!(col.items.len(), 50, "every owned skin maps");
+        assert!(
+            col.items.iter().all(|s| s.edition.is_some()),
+            "edition resolved"
+        );
+        assert!(col.items.iter().all(|s| s.vp.is_some()), "price resolved");
+        assert_eq!(store_requests(&h, &store_key_path()).await, 1);
+    }
 }

@@ -48,6 +48,15 @@ All tests use in-memory SQLite (`:memory:`) or temp dirs, wiremock servers,
 and `RiotSession::connect_with_overrides`. No test contacts Riot production.
 Missing mock endpoints fail the test rather than falling back.
 
+## Opt-in capture procedure (read-only, user-controlled)
+
+To capture real Riot responses for future fixtures, run the app with the
+existing redacted dump (Ctrl+Shift+D) during a user-controlled live session.
+The dump writes `log.txt` plus redacted JSON per endpoint under the app data
+dir. Review the output for secrets before sharing; never commit tokens,
+passwords, or raw personal match data. Convert sanitized bodies into
+schema-faithful fixtures under `crates/riot/tests/fixtures/`.
+
 ## What remains unverified without VALORANT
 
 - Real Riot entitlements response shape beyond captured fixtures.

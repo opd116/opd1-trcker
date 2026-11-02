@@ -726,4 +726,82 @@ mod tests {
             format!(r#"{{"puuid":"{ME}","fetchedMs":7,"levels":[]}}"#)
         );
     }
+
+    #[tokio::test]
+    async fn realistic_riot_entitlements_payload_with_real_type_id_populates_full_collection() {
+        let _g = COMMANDS.lock().await;
+        *lock(&LAST_ASK) = None;
+        let h = crate::pipeline_tests::harness().await;
+        h.st.set_session(Some(h.session.clone()));
+        lock(&h.st.live).stage = Stage::Menus;
+        crate::pipeline_tests::mount_asset_tables(&h.assets_server).await;
+        mount_weapons(&h.assets_server, None).await;
+
+        // Real Riot response: ItemTypeID is SKIN_LEVEL_ITEM_TYPE, but TypeID
+        // inside Entitlements is the entitlement service UUID (4e60e748...).
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(store_key_path()))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "ItemTypeID": SKIN_LEVEL_ITEM_TYPE,
+                    "Entitlements": [
+                        {
+                            "TypeID": "4e60e748-bce6-4faa-9327-ebbe6089d5fe",
+                            "ItemID": L1,
+                            "InstanceID": "a95b9f3b-4e7b-4b24-8fba-d9fad9d4da34",
+                            "Version": 1
+                        }
+                    ]
+                })),
+            )
+            .mount(&h.server)
+            .await;
+
+        let got = collection_for(&h.st)
+            .await
+            .expect("collection")
+            .expect("items present");
+        assert_eq!(
+            got.items.len(),
+            1,
+            "Real Riot response must populate owned skins"
+        );
+        assert_eq!(got.items[0].level_id, L1);
+
+        // Verify SQLite persisted the owned levels
+        let in_db = stored(&h).await.expect("stored in SQLite");
+        assert_eq!(in_db.levels, vec![L1]);
+    }
+
+    #[tokio::test]
+    async fn restart_recovery_serves_stored_cached_collection_when_game_is_closed() {
+        let _g = COMMANDS.lock().await;
+        *lock(&LAST_ASK) = None;
+        let h = crate::pipeline_tests::harness().await;
+        h.st.set_session(Some(h.session.clone()));
+        // Game is closed (e.g. app reopened without VALORANT running)
+        lock(&h.st.live).stage = Stage::Closed;
+        crate::pipeline_tests::mount_asset_tables(&h.assets_server).await;
+        mount_weapons(&h.assets_server, None).await;
+
+        // Populate stored copy in DB (from a previous session)
+        let previous = StoredOwned {
+            puuid: ME.into(),
+            fetched_ms: 1_000,
+            levels: vec![L1.into()],
+        };
+        let json = serde_json::to_string(&previous).unwrap();
+        h.st.db(move |repo| repo.set_state(&store_key(ME), &json))
+            .await
+            .unwrap();
+
+        let got = collection_for(&h.st)
+            .await
+            .expect("collection")
+            .expect("cached copy");
+        assert_eq!(got.items.len(), 1);
+        assert_eq!(got.items[0].level_id, L1);
+        // Closed game: zero remote store requests sent
+        assert_eq!(store_requests(&h, &store_key_path()).await, 0);
+    }
 }

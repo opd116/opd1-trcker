@@ -876,7 +876,17 @@ impl RiotSession {
                     .map_err(RiotError::Held)?;
             }
             self.global_throttle.take().await;
+            // R202/V02: the lockfile/account may have been retired while this
+            // call waited for its rate token. Re-check immediately before the
+            // send, so a retired session never puts a request on the wire
+            // (the start-of-call check alone is not enough across a wait).
+            self.check_alive()?;
 
+            // A response already in flight when the client retires is still
+            // this session's fetched data (the backfill stores what it got
+            // before the drop). Account-relative installation is guarded by
+            // the owner stamps at the application layer, not by discarding
+            // the transport result here.
             let (resp, generation) = self.call_remote(&kind, method.clone(), path, body).await?;
             // R166: an expired or rejected token is re-fetched once per call:
             // 401/403 as before, and Riot's 400 `BAD_CLAIMS` (what it answers

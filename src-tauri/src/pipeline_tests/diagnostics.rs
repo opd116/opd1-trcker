@@ -84,11 +84,25 @@ async fn dump_raw_writes_the_last_error_of_each_endpoint_and_the_log() {
         !names.contains(&"mmr.json".to_string()),
         "mmr never answered 2xx: {names:?}"
     );
+    assert!(
+        names.contains(&"manifest.json".to_string()),
+        "the dump wrote its manifest: {names:?}"
+    );
     assert_eq!(
         result.files as usize,
-        names.len(),
-        "the count includes the log"
+        names.len() - 1,
+        "the count includes the log but not the manifest"
     );
+    let manifest: Value = serde_json::from_str(&read("manifest.json")).unwrap();
+    let listed: Vec<&str> = manifest["files"]
+        .as_array()
+        .expect("the manifest lists its files")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(listed.contains(&"comp_updates.json"), "{manifest}");
+    assert!(listed.contains(&"log.txt"), "{manifest}");
+    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
 
     let error: Value = serde_json::from_str(&read("mmr.error.json")).unwrap();
     assert_eq!(error["status"], 500);
@@ -167,4 +181,181 @@ async fn the_dump_and_copy_log_start_with_the_same_header_line() {
     );
     // After the header come the log's own lines, and no secret anywhere.
     assert!(!written.contains(JWT) && !written.contains("opaque-secret"));
+}
+
+/// R201/F04: a dump is an exact snapshot of this session, not a folder that
+/// accumulates successful endpoint files from earlier sessions.
+#[tokio::test]
+async fn a_second_dump_without_the_old_session_removes_its_successes_and_errors() {
+    crate::logbuf::init();
+    let h = harness().await;
+    mmr_fails_with(&h, ME, "ERR_CODE_STALE_DUMP").await;
+    h.st.set_session(Some(h.session.clone()));
+    sync_player(&h.st, &h.session, ME).await.unwrap();
+
+    let first = dump_raw_for(&h.st).await.unwrap();
+    let dir = std::path::PathBuf::from(&first.dir);
+    assert!(dir.join("comp_updates.json").exists(), "A's success");
+    assert!(dir.join("mmr.error.json").exists(), "A's error");
+
+    // The client went away: the next dump has no captures at all.
+    h.st.set_session(None);
+    let second = dump_raw_with(&h.st, "B, no session".into()).await.unwrap();
+    assert_eq!(second.files, 1, "only the log is a payload");
+    assert!(
+        !dir.join("comp_updates.json").exists(),
+        "an earlier session's success survived"
+    );
+    assert!(
+        !dir.join("mmr.error.json").exists(),
+        "an earlier session's error survived"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("log.txt")).unwrap(),
+        "B, no session"
+    );
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    assert_eq!(manifest["files"], json!(["log.txt"]));
+    assert_eq!(manifest["version"], env!("CARGO_PKG_VERSION"));
+    assert!(h.st.dump_is_free(), "the dump gate leaked");
+}
+
+/// R201: unrelated files and subdirectories survive a dump, while a legacy
+/// known-endpoint file from before manifests is still cleaned.
+#[tokio::test]
+async fn a_dump_keeps_unrelated_files_and_subdirectories() {
+    let h = harness().await;
+    let first = dump_raw_with(&h.st, "first".into()).await.unwrap();
+    let dir = std::path::PathBuf::from(&first.dir);
+    std::fs::write(dir.join("keep.txt"), "mine").unwrap();
+    std::fs::create_dir(dir.join("sub")).unwrap();
+    std::fs::write(dir.join("sub").join("keep.json"), "mine").unwrap();
+    // A legacy success from before the manifest existed: known endpoint.
+    std::fs::write(dir.join("names.json"), "old").unwrap();
+
+    let second = dump_raw_with(&h.st, "second".into()).await.unwrap();
+    assert_eq!(second.files, 1);
+    assert!(
+        !dir.join("names.json").exists(),
+        "the legacy success is stale"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("keep.txt")).unwrap(),
+        "mine"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("sub").join("keep.json")).unwrap(),
+        "mine"
+    );
+    let names: Vec<String> = std::fs::read_dir(&dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(
+        !names.iter().any(|n| n.contains(".tmp-")),
+        "a temp file leaked: {names:?}"
+    );
+}
+
+/// V05/R201: 20 sequential fresh dumps stay at the same two files (log and
+/// manifest), then four concurrent dumps leave one consistent inventory.
+#[tokio::test]
+async fn twenty_sequential_and_four_concurrent_dumps_stay_bounded() {
+    let h = harness().await;
+    let mut dir = None;
+    for i in 0..20 {
+        let result = dump_raw_with(&h.st, format!("fresh log {i}"))
+            .await
+            .unwrap();
+        assert_eq!(result.files, 1);
+        let d = std::path::PathBuf::from(&result.dir);
+        let mut names: Vec<String> = std::fs::read_dir(&d)
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["log.txt", "manifest.json"], "dump {i}: {names:?}");
+        dir = Some(d);
+    }
+    let dir = dir.unwrap();
+
+    let (a, b, c, d) = tokio::join!(
+        dump_raw_with(&h.st, "A".into()),
+        dump_raw_with(&h.st, "B".into()),
+        dump_raw_with(&h.st, "C".into()),
+        dump_raw_with(&h.st, "D".into())
+    );
+    for result in [a, b, c, d] {
+        assert_eq!(result.unwrap().files, 1);
+    }
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    let listed: Vec<&str> = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert_eq!(listed, ["log.txt"]);
+    assert!(dir.join("log.txt").is_file());
+    let payloads = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .count();
+    assert_eq!(payloads, 2, "log + manifest only");
+    assert!(h.st.dump_is_free());
+}
+
+/// R201: two dumps do not interleave; the final manifest lists exactly the
+/// payload files left in the folder.
+#[tokio::test]
+async fn two_concurrent_dumps_leave_one_complete_inventory() {
+    crate::logbuf::init();
+    let h = harness().await;
+    mmr_fails_with(&h, ME, "ERR_CODE_CONCURRENT_DUMP").await;
+    h.st.set_session(Some(h.session.clone()));
+    sync_player(&h.st, &h.session, ME).await.unwrap();
+
+    let (a, b) = tokio::join!(
+        dump_raw_with(&h.st, "A".into()),
+        dump_raw_with(&h.st, "B".into())
+    );
+    let a = a.unwrap();
+    let b = b.unwrap();
+    assert!(a.files > 1 && a.files == b.files);
+    let dir = std::path::PathBuf::from(&a.dir);
+    let manifest: Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("manifest.json")).unwrap()).unwrap();
+    let listed: Vec<&str> = manifest["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for name in &listed {
+        assert!(
+            dir.join(name).is_file(),
+            "the manifest lists {name} but it is missing"
+        );
+    }
+    let payloads = std::fs::read_dir(&dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n != "manifest.json")
+        .count();
+    assert_eq!(payloads, listed.len(), "the folder and manifest disagree");
+    assert!(
+        !std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().contains(".tmp-")),
+        "a temp file leaked"
+    );
+    assert!(h.st.dump_is_free(), "the dump gate leaked");
 }

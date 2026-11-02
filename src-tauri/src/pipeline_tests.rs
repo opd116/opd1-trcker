@@ -1426,3 +1426,8 @@ mod db_scale;
 /// not blanked by a reset transition (their own file; same harness).
 #[cfg(test)]
 mod name_stability;
+
+/// V04's bounded local cohorts: roster/view cycles, same-key coalescing and
+/// image cache/large-body limits (their own file; same harness).
+#[cfg(test)]
+mod resource_soak;

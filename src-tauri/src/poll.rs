@@ -558,6 +558,10 @@ impl Poller {
             let mut live = lock(&self.st.live);
             let switched = live.self_puuid.as_deref() != Some(me.as_str());
             if switched {
+                // R199: bump the generation before clearing or replacing
+                // anything account-scoped. A->B->A is two generations, so an
+                // old A read cannot pass the stamp check after the second A.
+                live.set_account(Some(me.clone()));
                 // A different account: nothing learned about the previous
                 // one's session applies.
                 live.synced.clear();
@@ -586,12 +590,19 @@ impl Poller {
                 live.rank_retries.clear();
                 // R161: nor are the tiers of its last Agent Select.
                 live.match_tiers.clear();
+                // R199/R02: an open page and every open still being built
+                // belong to the old account. Invalidate them here, under the
+                // same live section that changed the owner, so a build that
+                // returns later can neither install nor emit.
+                self.st.close_details(None);
+                self.st.close_match(None);
+            } else {
+                live.self_puuid = Some(me.clone());
             }
             // R160: the names deferral belongs to the old session's hold; a
             // held name call defers itself again. The request holds
             // themselves are carried to this session by `set_session` (R185).
             live.reset_names_hold();
-            live.self_puuid = Some(me.clone());
             live.self_name_attempted = false;
             switched
         };
@@ -1493,6 +1504,15 @@ impl Poller {
         let me = session.self_puuid().to_string();
         let roster = order_players(roster, &me);
 
+        // R199: the DB-bundle read and the install of this roster are one
+        // owner-checked critical section. A roster for a session that is no
+        // longer the live account must not install under the new one.
+        let _gate = self.st.bundle_reload_guard().await;
+        let stamp = lock(&self.st.live).owner_stamp();
+        if stamp.puuid.as_deref() != Some(me.as_str()) {
+            return;
+        }
+
         let reread_rows = std::mem::take(&mut self.reload_roster_rows);
         let new_players: Vec<RosterPlayer> = {
             let live = lock(&self.st.live);
@@ -1570,6 +1590,9 @@ impl Poller {
 
         {
             let mut live = lock(&self.st.live);
+            if !live.owner_matches(&stamp) {
+                return;
+            }
             // Built under the lock from the *current* slots: the worker may
             // have stored a fresh DB bundle while the reads above ran.
             let slots: Vec<Slot> = roster
@@ -1630,6 +1653,7 @@ impl Poller {
             // R155: a player the new roster no longer shows is not retried.
             live.prune_rank_retries();
         }
+        drop(_gate);
         self.st.publish();
         // An open Details of someone on this roster follows it (a lock-in,
         // a team change): it is a snapshot otherwise. Before the worker
@@ -1650,46 +1674,67 @@ impl Poller {
     /// follows (`apply_roster` prunes then; `due_rank_retry` skips anyone not
     /// on screen meanwhile).
     pub(crate) async fn show_self_only(&mut self, session: &Arc<RiotSession>) {
-        let (me, own) = {
+        // R199: the self-only placeholder's DB read/install is serialized and
+        // owner-checked like a full roster install.
+        let _gate = self.st.bundle_reload_guard().await;
+        // R199 follow-up: one live snapshot binds the owner stamp to the self
+        // slot and the old bundle. Reading the stamp in a second acquisition
+        // could install the previous account's slot under a new owner if the
+        // owner changed between the two reads.
+        let (stamp, own, old_db) = {
             let live = lock(&self.st.live);
-            (live.self_puuid.clone(), live.self_roster.clone())
+            let stamp = live.owner_stamp();
+            let old_db = stamp.puuid.as_ref().and_then(|me| {
+                live.slots
+                    .iter()
+                    .find(|s| &s.roster.puuid == me)
+                    .map(|s| s.db.clone())
+            });
+            (stamp, live.self_roster.clone(), old_db)
         };
-        let Some(me) = me else { return };
+        let Some(me) = stamp.puuid.clone() else {
+            return;
+        };
         let p = me.clone();
+        // A failed read keeps the bundle already on screen, never a default.
         let db = self
             .st
             .db(move |repo| load_player_db(repo, Some(&p), &p))
             .await
-            .unwrap_or_default();
-        // Agent Select to In Game is the same match: its lock-in, team and
-        // tier still hold. Any other way, they were the last match's (R99:
-        // no agent before this stage's lock-in).
-        let same_match = self.stage == Stage::Ingame && lock(&self.st.live).stage == Stage::Pregame;
-        let slot = match own {
-            Some(roster) if same_match => Some(Slot { roster, db }),
-            Some(roster) => {
-                let roster = RosterPlayer {
-                    team_id: String::new(),
-                    character_id: String::new(),
-                    selection_state: String::new(),
-                    live_tier: None,
-                    ..roster
-                };
-                // Kept cleared: a later placeholder of this match (Agent
-                // Select failed too, then In Game) never brings back the
-                // older match's agent.
-                lock(&self.st.live).self_roster = Some(roster.clone());
-                Some(Slot { roster, db })
-            }
-            None => closed_self_slot(&me, db),
-        };
+            .unwrap_or_else(|| old_db.unwrap_or_default());
         {
             let mut live = lock(&self.st.live);
+            if !live.owner_matches(&stamp) {
+                return;
+            }
+            // Agent Select to In Game is the same match: its lock-in, team and
+            // tier still hold. Any other way, they were the last match's (R99:
+            // no agent before this stage's lock-in).
+            let same_match = self.stage == Stage::Ingame && live.stage == Stage::Pregame;
+            let slot = match own {
+                Some(roster) if same_match => Some(Slot { roster, db }),
+                Some(roster) => {
+                    let roster = RosterPlayer {
+                        team_id: String::new(),
+                        character_id: String::new(),
+                        selection_state: String::new(),
+                        live_tier: None,
+                        ..roster
+                    };
+                    // Kept cleared: a later placeholder of this match (Agent
+                    // Select failed too, then In Game) never brings back the
+                    // older match's agent.
+                    live.self_roster = Some(roster.clone());
+                    Some(Slot { roster, db })
+                }
+                None => closed_self_slot(&me, db),
+            };
             live.stage = self.stage;
             live.map_path = None;
             live.map_id = None;
             live.slots = slot.into_iter().collect();
         }
+        drop(_gate);
         self.st.publish();
         self.ensure_worker(session);
     }
@@ -2058,20 +2103,37 @@ pub(crate) fn note_of(repo: &Repo, puuid: &str) -> rusqlite::Result<String> {
 /// The shared model in the Closed stage, published: the user's own card from
 /// the DB (when it knows them), nothing else.
 async fn show_closed(st: &Arc<AppState>) {
-    let me = lock(&st.live).self_puuid.clone();
+    // R199: the Closed card's DB read/install is serialized and owner-checked:
+    // a read started for the previous account never lands under the new one.
+    let _gate = st.bundle_reload_guard().await;
+    let stamp = lock(&st.live).owner_stamp();
+    let me = stamp.puuid.clone();
+    let old_db = {
+        let live = lock(&st.live);
+        me.as_ref().and_then(|me| {
+            live.slots
+                .iter()
+                .find(|s| &s.roster.puuid == me)
+                .map(|s| s.db.clone())
+        })
+    };
     let slot = match me {
         Some(me) => {
             let p = me.clone();
+            // A failed read keeps the bundle already on screen, never a default.
             let db = st
                 .db(move |repo| load_player_db(repo, Some(&p), &p))
                 .await
-                .unwrap_or_default();
+                .unwrap_or_else(|| old_db.unwrap_or_default());
             closed_self_slot(&me, db)
         }
         None => None,
     };
     {
         let mut live = lock(&st.live);
+        if !live.owner_matches(&stamp) {
+            return;
+        }
         live.stage = Stage::Closed;
         live.in_match = false;
         live.map_path = None;
@@ -2083,6 +2145,7 @@ async fn show_closed(st: &Arc<AppState>) {
         // R155: nothing is retried while VALORANT is closed.
         live.prune_rank_retries();
     }
+    drop(_gate);
     st.publish();
     // R189: no Agent Select and no queue while closed.
     st.set_status(|s| {

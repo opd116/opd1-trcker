@@ -5,9 +5,12 @@
 //! synchronous work (never across an `.await`); SQLite work always goes
 //! through [`AppState::db`] (`spawn_blocking`). Order: a DB closure may
 //! take the `live` lock (`sync::fetch_self_loadout`'s account check), so
-//! nothing takes the repo while holding `live`. The My Stats push checks the
-//! account and emits as one step (R186): it takes `my_stats_push`, then `live`,
-//! so nothing may call `my_stats::notify` / `notify_now` (which take
+//! nothing takes the repo while holding `live`. A DB-bundle read/install
+//! (`AppState::bundle_reload`) is taken before the read, never while holding
+//! `live` or the repo, and is released before publishing or any callback that
+//! can reload a bundle; a DB closure never takes it. The My Stats push checks
+//! the account and emits as one step (R186): it takes `my_stats_push`, then
+//! `live`, so nothing may call `my_stats::notify` / `notify_now` (which take
 //! `my_stats_push`) while holding `live`. `set_session` takes the session
 //! lock, then `carried_holds` (R185); the riot crate's throttle locks are leaves.
 
@@ -90,6 +93,73 @@ pub fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct Slot {
     pub roster: RosterPlayer,
     pub db: PlayerDb,
+}
+
+/// The account a DB-bundle read belongs to, captured under the `live` lock
+/// (R199). The epoch is internal: a real owner change (A->B, and A->B->A)
+/// gives a new generation even when the PUUID string comes back, so an older
+/// read can never be installed over a newer one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OwnerStamp {
+    pub(crate) epoch: u64,
+    pub(crate) puuid: Option<String>,
+}
+
+/// Test-only hook: parks a bundle reload after its DB read and before its
+/// install, so a test can build the other side of a race deterministically.
+#[cfg(test)]
+pub(crate) struct BundleProbe {
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl BundleProbe {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+/// Test-only hook for an open-view rebuild: parks it after its build and
+/// before its commit, so a close/reopen or a second refresh can be requested
+/// deterministically while the older payload is still pending (R199).
+#[cfg(test)]
+pub(crate) struct ViewProbe {
+    pub(crate) reached: tokio::sync::Notify,
+    pub(crate) release: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl ViewProbe {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            reached: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        })
+    }
+}
+
+/// The opening a view rebuild belongs to (R199): the open ticket, the account
+/// generation and the page key, captured under `live` -> gate -> payload. A
+/// commit is accepted only while all three still match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DetailsToken {
+    pub(crate) seq: u64,
+    pub(crate) owner: OwnerStamp,
+    pub(crate) puuid: String,
+}
+
+/// [`DetailsToken`] for the Match Details page: the same opening/account
+/// identity plus the match and its focused player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MatchToken {
+    pub(crate) seq: u64,
+    pub(crate) owner: OwnerStamp,
+    pub(crate) match_id: String,
+    pub(crate) focus_puuid: String,
 }
 
 /// R150: the most asks the names-fill queue holds. A match end adds at most
@@ -453,6 +523,11 @@ pub struct LiveModel {
     pub self_loadout: Option<RawLoadout>,
     pub coregame_match_id: Option<String>,
     pub self_puuid: Option<String>,
+    /// Internal account generation (R199): bumped on every real owner change
+    /// (`Self::set_account`). A bundle read captures the owner and this epoch
+    /// and installs only when both still match, so an A->B->A sequence is not
+    /// mistaken for the original A. Never serialized or stored.
+    account_epoch: u64,
     /// The user's own Riot ID from the local chat session
     /// (`/chat/v1/session`, R43) — the only source of the user's name; the
     /// user is never sent to name-service.
@@ -587,6 +662,7 @@ impl LiveModel {
             self_loadout: None,
             coregame_match_id: None,
             self_puuid: self_puuid.clone(),
+            account_epoch: 0,
             self_name: None,
             self_name_attempted: false,
             self_roster: None,
@@ -622,6 +698,37 @@ impl LiveModel {
             last_bytes: Vec::new(),
             built_act_id: None,
         }
+    }
+
+    /// The current owner generation, for a DB-bundle read to be checked
+    /// against after its await (R199).
+    pub(crate) fn owner_stamp(&self) -> OwnerStamp {
+        OwnerStamp {
+            epoch: self.account_epoch,
+            puuid: self.self_puuid.clone(),
+        }
+    }
+
+    /// Whether the owner is still the one `stamp` was taken for. Both the
+    /// epoch and the PUUID matter: the epoch makes A->B->A a new generation,
+    /// and the PUUID makes a first assignment (epoch 0, no owner) different
+    /// from a later owner even if the epoch were not bumped.
+    pub(crate) fn owner_matches(&self, stamp: &OwnerStamp) -> bool {
+        self.account_epoch == stamp.epoch && self.self_puuid == stamp.puuid
+    }
+
+    /// Takes `puuid` as the owner, bumping [`Self::account_epoch`] when it is
+    /// a real change. The poll loop calls this inside the same `live` critical
+    /// section that clears the previous account's state, before assigning the
+    /// new one. A same-account reconnect keeps the generation.
+    pub(crate) fn set_account(&mut self, puuid: Option<String>) {
+        if self.self_puuid != puuid {
+            self.account_epoch = self
+                .account_epoch
+                .checked_add(1)
+                .expect("account epoch overflow");
+        }
+        self.self_puuid = puuid;
     }
 
     /// The poll loop's first verdict is in (VALORANT running in some stage,
@@ -1884,9 +1991,33 @@ pub struct AppState {
     /// and it emits only on a change.
     open_match: Mutex<Option<OpenMatch>>,
     /// R163: which `player_details` / `match_details` call may open its page
-    /// ([`OpenGate`]). Lock order: a gate, then its open slot.
+    /// ([`OpenGate`]). Lock order: `live`, then a gate, then its open slot.
     details_gate: Mutex<OpenGate>,
     match_gate: Mutex<OpenGate>,
+    /// R199: serializes each view's DB build -> commit. An initial open holds
+    /// it across its build and install too, so a refresh cannot overtake the
+    /// page the UI is being given. Never spans HTTP: `match_details::load`
+    /// drops it around a missing-details fetch and reacquires it.
+    details_build: tokio::sync::Mutex<()>,
+    match_build: tokio::sync::Mutex<()>,
+    /// R199 test hooks ([`ViewProbe`]): park one rebuild after its build.
+    #[cfg(test)]
+    details_probe: Mutex<Option<Arc<ViewProbe>>>,
+    #[cfg(test)]
+    match_probe: Mutex<Option<Arc<ViewProbe>>>,
+    /// R199: serializes the DB-bundle read -> install critical section across
+    /// reloads, roster installs and worker publishes. Never spans HTTP, never
+    /// held while taking `live` for anything but the short install, and never
+    /// taken inside a DB closure. Public bundle readers take it themselves;
+    /// a caller that already holds it installs inline and never calls one.
+    bundle_reload: tokio::sync::Mutex<()>,
+    /// R199 test hook ([`BundleProbe`]): parks one reload after its DB read.
+    #[cfg(test)]
+    bundle_probe: Mutex<Option<Arc<BundleProbe>>>,
+    /// R201: serializes `dump_raw` from session capture snapshot to the end
+    /// of its blocking write, so two dumps cannot interleave their file
+    /// inventories or manifests. Never held with `live` or the repo.
+    dump: tokio::sync::Mutex<()>,
     /// B2: the `"mystats"` push's state (`my_stats::notify`): the last emitted
     /// bytes and the one-task-at-a-time flags.
     pub(crate) my_stats_push: Mutex<MyStatsPush>,
@@ -1974,6 +2105,16 @@ impl AppState {
             open_match: Mutex::new(None),
             details_gate: Mutex::new(OpenGate::default()),
             match_gate: Mutex::new(OpenGate::default()),
+            details_build: tokio::sync::Mutex::new(()),
+            match_build: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            details_probe: Mutex::new(None),
+            #[cfg(test)]
+            match_probe: Mutex::new(None),
+            bundle_reload: tokio::sync::Mutex::new(()),
+            #[cfg(test)]
+            bundle_probe: Mutex::new(None),
+            dump: tokio::sync::Mutex::new(()),
             my_stats_push: Mutex::new(MyStatsPush::default()),
             carried_holds: Mutex::new(CarriedHolds::default()),
             worker_kick: AtomicBool::new(false),
@@ -2403,6 +2544,49 @@ impl AppState {
         crate::roster::map_uuid(path, |p| self.assets.map_uuid_for_path(p).ok().flatten())
     }
 
+    /// R199: the gate for a DB-bundle read -> install critical section. Drop
+    /// it before publishing, refreshing a view, or any callback that can read
+    /// a bundle again; never take it while holding `live` or the repo.
+    pub(crate) async fn bundle_reload_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.bundle_reload.lock().await
+    }
+
+    /// R199 test guard: the gate is free (a completed installer has released
+    /// it; a re-entrant path would leave it held).
+    #[cfg(test)]
+    pub(crate) fn bundle_reload_is_free(&self) -> bool {
+        self.bundle_reload.try_lock().is_ok()
+    }
+
+    /// R201: one diagnostic dump at a time, from taking the session capture
+    /// snapshot through the blocking write. `dump_raw` holds it; no `live`
+    /// or repo lock is taken while it is held.
+    pub(crate) async fn dump_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.dump.lock().await
+    }
+
+    /// R201 test guard: the dump gate is free.
+    #[cfg(test)]
+    pub(crate) fn dump_is_free(&self) -> bool {
+        self.dump.try_lock().is_ok()
+    }
+
+    /// R199 test hook: the next bundle reload parks here after its DB read and
+    /// before its install; the test releases it with `release`.
+    #[cfg(test)]
+    pub(crate) fn set_bundle_probe(&self, probe: Arc<BundleProbe>) {
+        *lock(&self.bundle_probe) = Some(probe);
+    }
+
+    #[cfg(test)]
+    async fn wait_bundle_probe(&self) {
+        let probe = lock(&self.bundle_probe).take();
+        if let Some(probe) = probe {
+            probe.reached.notify_one();
+            probe.release.notified().await;
+        }
+    }
+
     /// Runs `f` against the repo on the blocking pool. `None` (logged) on
     /// a SQLite error — callers treat that as "the DB doesn't know".
     pub async fn db<T, F>(&self, f: F) -> Option<T>
@@ -2540,13 +2724,75 @@ impl AppState {
         live.current = state;
     }
 
+    /// R199: the Player Details build gate. Held from before the DB build to
+    /// the commit of the page it builds; never taken from a DB closure, and
+    /// dropped before name/skin/sync follow-ups.
+    pub(crate) async fn details_build_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.details_build.lock().await
+    }
+
+    /// R199: the Match Details build gate (see [`Self::details_build_guard`]).
+    pub(crate) async fn match_build_guard(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.match_build.lock().await
+    }
+
+    /// R199 test hook: the next Details rebuild parks after its build.
+    #[cfg(test)]
+    pub(crate) fn set_details_probe(&self, probe: Arc<ViewProbe>) {
+        *lock(&self.details_probe) = Some(probe);
+    }
+
+    /// R199 test hook: the next Match Details rebuild parks after its build.
+    #[cfg(test)]
+    pub(crate) fn set_match_probe(&self, probe: Arc<ViewProbe>) {
+        *lock(&self.match_probe) = Some(probe);
+    }
+
+    /// R199 test guard: no view build holds its gate.
+    #[cfg(test)]
+    pub(crate) fn view_builds_are_free(&self) -> bool {
+        self.details_build.try_lock().is_ok() && self.match_build.try_lock().is_ok()
+    }
+
+    /// R199 test accessor: the open Match Details payload.
+    #[cfg(test)]
+    pub(crate) fn open_match_view_for_test(&self) -> Option<MatchDetailsView> {
+        lock(&self.open_match).as_ref().map(|o| o.view.clone())
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_details_probe(&self) {
+        let probe = lock(&self.details_probe).take();
+        if let Some(probe) = probe {
+            probe.reached.notify_one();
+            probe.release.notified().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_match_probe(&self) {
+        let probe = lock(&self.match_probe).take();
+        if let Some(probe) = probe {
+            probe.reached.notify_one();
+            probe.release.notified().await;
+        }
+    }
+
     /// A `player_details` call starts opening `puuid`'s page: the ticket it
     /// must hand to [`Self::set_open_details`] once its build is done. Any
-    /// earlier ticket is void from now on (R163).
-    pub fn begin_open_details(&self, puuid: &str) -> u64 {
+    /// earlier ticket is void from now on (R163). The ticket also carries the
+    /// account generation (R199), so a switch while the build runs loses it.
+    pub fn begin_open_details(&self, puuid: &str) -> DetailsToken {
         // R97: a new open asks again for every skin name still unknown.
         *lock(&self.skins_tried) = Some((puuid.to_string(), HashSet::new()));
-        lock(&self.details_gate).begin(puuid)
+        let live = lock(&self.live);
+        let owner = live.owner_stamp();
+        let seq = lock(&self.details_gate).begin(puuid);
+        DetailsToken {
+            seq,
+            owner,
+            puuid: puuid.to_string(),
+        }
     }
 
     /// R97: records that the names of `ids` were asked for `puuid`'s open page.
@@ -2567,14 +2813,21 @@ impl AppState {
 
     /// Records `details` as the open Player Details, as the UI was just
     /// given them (the `player_details` answer), when `ticket` is still the
-    /// latest open and its page was not left meanwhile (R163: a build that
-    /// finishes after Back, or after a newer open, must not set the open
-    /// page); `false` when it lost. Opening a Player Details also closes any
-    /// Match Details: the UI only gets here from the match page by going
-    /// Back.
-    pub fn set_open_details(&self, ticket: u64, details: &PlayerDetails) -> bool {
+    /// latest open, its page was not left meanwhile (R163), and the account
+    /// is still the one that asked (R199: a build that finishes after Back, a
+    /// newer open or a switch must not set the open page); `false` when it
+    /// lost. Opening a Player Details also closes any Match Details: the UI
+    /// only gets here from the match page by going Back.
+    pub fn set_open_details(&self, ticket: &DetailsToken, details: &PlayerDetails) -> bool {
+        let live = lock(&self.live);
+        if !live.owner_matches(&ticket.owner) {
+            return false;
+        }
         let gate = lock(&self.details_gate);
-        if gate.seq != ticket {
+        if gate.seq != ticket.seq
+            || gate.key.as_deref() != Some(ticket.puuid.as_str())
+            || details.card.puuid != ticket.puuid
+        {
             return false;
         }
         *lock(&self.open_details) = Some(details.clone());
@@ -2583,27 +2836,39 @@ impl AppState {
     }
 
     /// A `match_details` call starts opening `match_id`'s page (like
-    /// [`Self::begin_open_details`]).
-    pub fn begin_open_match(&self, match_id: &str) -> u64 {
-        lock(&self.match_gate).begin(match_id)
+    /// [`Self::begin_open_details`]); the ticket carries the account
+    /// generation too (R199).
+    pub fn begin_open_match(&self, match_id: &str) -> MatchToken {
+        let live = lock(&self.live);
+        let owner = live.owner_stamp();
+        let seq = lock(&self.match_gate).begin(match_id);
+        MatchToken {
+            seq,
+            owner,
+            match_id: match_id.to_string(),
+            focus_puuid: String::new(),
+        }
     }
 
     /// Records `view` as the open Match Details, as the UI was just given it
     /// (the `match_details` answer), when `ticket` is still the latest open
-    /// of its page; `false` when it lost (R163).
+    /// of its page and its account (R163/R199); `false` when it lost.
     pub fn set_open_match(
         &self,
-        ticket: u64,
-        match_id: &str,
+        ticket: &MatchToken,
         focus_puuid: &str,
         view: &MatchDetailsView,
     ) -> bool {
+        let live = lock(&self.live);
+        if !live.owner_matches(&ticket.owner) {
+            return false;
+        }
         let gate = lock(&self.match_gate);
-        if gate.seq != ticket {
+        if gate.seq != ticket.seq || gate.key.as_deref() != Some(ticket.match_id.as_str()) {
             return false;
         }
         *lock(&self.open_match) = Some(OpenMatch {
-            match_id: match_id.to_string(),
+            match_id: ticket.match_id.clone(),
             focus_puuid: focus_puuid.to_string(),
             view: view.clone(),
         });
@@ -2625,26 +2890,53 @@ impl AppState {
     }
 
     /// `(match id, focus puuid)` of the open Match Details, if any.
-    pub fn open_match_args(&self) -> Option<(String, String)> {
+    #[cfg(test)]
+    pub(crate) fn open_match_args(&self) -> Option<(String, String)> {
         lock(&self.open_match)
             .as_ref()
             .map(|o| (o.match_id.clone(), o.focus_puuid.clone()))
     }
 
-    /// Emits `fresh` as a `"match"` event when it is the open Match Details
-    /// (same match and focus) and differs from what the UI was last given;
-    /// `true` when it was emitted. Compare, emit and record happen under one
-    /// lock, like [`Self::emit_details_if_changed`].
-    pub fn emit_match_if_changed(
-        &self,
-        match_id: &str,
-        focus_puuid: &str,
-        fresh: MatchDetailsView,
-    ) -> bool {
+    /// R199: the opening a Match Details rebuild belongs to — sequence,
+    /// account generation, match and focus — only while that page is still
+    /// open. Lock order: `live`, gate, payload.
+    pub(crate) fn match_open_token(&self) -> Option<MatchToken> {
+        let live = lock(&self.live);
+        let owner = live.owner_stamp();
+        let gate = lock(&self.match_gate);
+        let key = gate.key.clone()?;
+        let open = lock(&self.open_match);
+        let open = open.as_ref()?;
+        if open.match_id != key {
+            return None;
+        }
+        Some(MatchToken {
+            seq: gate.seq,
+            owner,
+            match_id: open.match_id.clone(),
+            focus_puuid: open.focus_puuid.clone(),
+        })
+    }
+
+    /// Emits `fresh` as a `"match"` event when it still belongs to the open
+    /// Match Details (same opening, account, match and focus, R199) and
+    /// differs from what the UI was last given; `true` when it was emitted.
+    /// Compare, emit and record happen under one lock.
+    pub fn emit_match(&self, token: &MatchToken, fresh: MatchDetailsView) -> bool {
+        let live = lock(&self.live);
+        if !live.owner_matches(&token.owner) {
+            return false;
+        }
+        let gate = lock(&self.match_gate);
+        if gate.seq != token.seq || gate.key.as_deref() != Some(token.match_id.as_str()) {
+            return false;
+        }
         let mut open = lock(&self.open_match);
         match open.as_mut() {
             Some(o)
-                if o.match_id == match_id && o.focus_puuid == focus_puuid && o.view != fresh =>
+                if o.match_id == token.match_id
+                    && o.focus_puuid == token.focus_puuid
+                    && o.view != fresh =>
             {
                 self.sink.match_view(&fresh);
                 o.view = fresh;
@@ -2759,14 +3051,49 @@ impl AppState {
         *lock(&self.open_details) = None;
     }
 
-    /// Emits `fresh` as a `"details"` event when it is the open Player
-    /// Details and differs from what the UI was last given; `true` when it
-    /// was emitted. Compare, emit and record happen under one lock, so two
-    /// rebuilds can't both emit the same change.
-    pub fn emit_details_if_changed(&self, fresh: PlayerDetails) -> bool {
+    /// R199: the opening a Player Details rebuild belongs to — sequence,
+    /// account generation and key — only while that page is still open.
+    /// Lock order: `live`, gate, payload.
+    pub(crate) fn details_open_token(&self, puuid: &str) -> Option<DetailsToken> {
+        let live = lock(&self.live);
+        let owner = live.owner_stamp();
+        let gate = lock(&self.details_gate);
+        if gate.key.as_deref() != Some(puuid) {
+            return None;
+        }
+        let open = lock(&self.open_details);
+        if !open.as_ref().is_some_and(|d| d.card.puuid == puuid) {
+            return None;
+        }
+        Some(DetailsToken {
+            seq: gate.seq,
+            owner,
+            puuid: puuid.to_string(),
+        })
+    }
+
+    /// Emits `fresh` as a `"details"` event when it still belongs to the open
+    /// Player Details (same opening, account, key and player, R199) and
+    /// differs from what the UI was last given; `true` when it was emitted.
+    /// Compare, emit and record happen under one lock, so two rebuilds can't
+    /// both emit the same change.
+    pub fn emit_details(&self, token: &DetailsToken, fresh: PlayerDetails) -> bool {
+        // R199 follow-up: the install path (`set_open_details`) rejects a
+        // card whose puuid is not the ticket's; the emit path must too.
+        if fresh.card.puuid != token.puuid {
+            return false;
+        }
+        let live = lock(&self.live);
+        if !live.owner_matches(&token.owner) {
+            return false;
+        }
+        let gate = lock(&self.details_gate);
+        if gate.seq != token.seq || gate.key.as_deref() != Some(token.puuid.as_str()) {
+            return false;
+        }
         let mut open = lock(&self.open_details);
         match open.as_ref() {
-            Some(last) if last.card.puuid == fresh.card.puuid && *last != fresh => {
+            Some(last) if last.card.puuid == token.puuid && *last != fresh => {
                 self.sink.details(&fresh);
                 *open = Some(fresh);
                 true
@@ -2780,30 +3107,43 @@ impl AppState {
     }
 
     /// Replaces the DB bundle of `puuid`'s live slot (if it's on screen)
-    /// with a fresh read, then republishes.
+    /// with a fresh read, then republishes. R199: the read and install are
+    /// serialized by `bundle_reload`, and the result is dropped when the
+    /// account changed or moved on (A->B->A included) while it was reading.
     pub async fn reload_slot(&self, puuid: &str) {
+        let _gate = self.bundle_reload_guard().await;
+        let stamp = lock(&self.live).owner_stamp();
         let p = puuid.to_string();
-        let me = lock(&self.live).self_puuid.clone();
+        let me = stamp.puuid.clone();
         let Some(db) = self
             .db(move |repo| crate::store::load_player_db(repo, me.as_deref(), &p))
             .await
         else {
             return;
         };
+        #[cfg(test)]
+        self.wait_bundle_probe().await;
         {
             let mut live = lock(&self.live);
+            if !live.owner_matches(&stamp) {
+                return;
+            }
             if let Some(slot) = live.slots.iter_mut().find(|s| s.roster.puuid == puuid) {
                 slot.db = db;
             }
         }
+        drop(_gate);
         self.publish();
     }
 
     /// R167: [`Self::reload_slot`] for several players at once: the DB bundle
     /// of each of `puuids` that is on screen is read afresh (one DB call),
     /// and the cards are published **once**. Nothing is read or published
-    /// when none of them is on screen.
+    /// when none of them is on screen. R199: the same owner/generation check
+    /// as [`Self::reload_slot`].
     pub async fn reload_slots(&self, puuids: &[String]) {
+        let _gate = self.bundle_reload_guard().await;
+        let stamp = lock(&self.live).owner_stamp();
         let (on_screen, me) = {
             let live = lock(&self.live);
             let on_screen: Vec<String> = puuids
@@ -2832,14 +3172,20 @@ impl AppState {
         else {
             return;
         };
+        #[cfg(test)]
+        self.wait_bundle_probe().await;
         {
             let mut live = lock(&self.live);
+            if !live.owner_matches(&stamp) {
+                return;
+            }
             for (puuid, db) in bundles {
                 if let Some(slot) = live.slots.iter_mut().find(|s| s.roster.puuid == puuid) {
                     slot.db = db;
                 }
             }
         }
+        drop(_gate);
         self.publish();
     }
 

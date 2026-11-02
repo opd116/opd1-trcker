@@ -6,9 +6,49 @@ use std::future::Future;
 use std::pin::Pin;
 use std::task::Poll;
 
+use opd1_core::model::PlayerDetails;
+
+use crate::state::ViewProbe;
 use crate::store::{save_player, PlayerUpdate};
 
+use super::account::{match_row, mplayer, store_played, B};
 use super::*;
+
+/// Polls `fut` once without consuming it.
+async fn poll_once<F: Future>(mut fut: Pin<&mut F>) -> Poll<F::Output> {
+    std::future::poll_fn(|cx| Poll::Ready(fut.as_mut().poll(cx))).await
+}
+
+/// The name a Player Details card shows.
+fn card_name(page: &PlayerDetails) -> &DisplayName {
+    match &page.card.name {
+        Field::Value(name) => name,
+        other => panic!("the card has no name: {other:?}"),
+    }
+}
+
+/// Asserts the page shows `want` as a visible name.
+fn assert_visible(page: &PlayerDetails, want: &str) {
+    match card_name(page) {
+        DisplayName::Visible { name, .. } => assert_eq!(name, want),
+        other => panic!("expected the visible name {want:?}, got {other:?}"),
+    }
+}
+
+fn details_events(h: &Harness) -> Vec<PlayerDetails> {
+    h.rec.details.lock().unwrap().clone()
+}
+
+/// One scoreboard row's name.
+fn board_name(view: &opd1_core::model::MatchDetailsView, puuid: &str) -> DisplayName {
+    view.teams
+        .iter()
+        .flat_map(|t| t.players.iter())
+        .find(|p| p.puuid == puuid)
+        .unwrap_or_else(|| panic!("{puuid} not on the scoreboard"))
+        .name
+        .clone()
+}
 
 /// The DB lock, held by another thread until this guard is dropped: every
 /// `AppState::db` call (the first await of a details or match open) parks
@@ -119,7 +159,7 @@ async fn a_details_open_finishing_after_its_close_never_opens() {
     let d = built(&h, OTHER).await;
     let ticket = h.st.begin_open_details(OTHER);
     crate::commands::close_details_key_for(&h.st, Some(OTHER));
-    assert!(!h.st.set_open_details(ticket, &d), "the open lost");
+    assert!(!h.st.set_open_details(&ticket, &d), "the open lost");
     assert!(!h.st.details_open_for(OTHER), "nothing is open");
     assert_eq!(h.st.open_details_puuid(), None);
 }
@@ -133,8 +173,8 @@ async fn a_late_details_open_never_overwrites_a_newer_one() {
     let first = h.st.begin_open_details(OTHER);
     crate::commands::close_details_key_for(&h.st, Some(OTHER));
     let second = h.st.begin_open_details(ME);
-    assert!(h.st.set_open_details(second, &b));
-    assert!(!h.st.set_open_details(first, &a), "A's late answer lost");
+    assert!(h.st.set_open_details(&second, &b));
+    assert!(!h.st.set_open_details(&first, &a), "A's late answer lost");
     assert_eq!(h.st.open_details_puuid().as_deref(), Some(ME));
 
     // A stale close for A (after B opened) does not close B.
@@ -143,8 +183,30 @@ async fn a_late_details_open_never_overwrites_a_newer_one() {
     // And a newer open for the same player supersedes an older one.
     let older = h.st.begin_open_details(ME);
     let newer = h.st.begin_open_details(ME);
-    assert!(!h.st.set_open_details(older, &b));
-    assert!(h.st.set_open_details(newer, &b));
+    assert!(!h.st.set_open_details(&older, &b));
+    assert!(h.st.set_open_details(&newer, &b));
+}
+
+#[tokio::test]
+async fn emit_details_rejects_a_card_for_another_puuid() {
+    // R199 follow-up: set_open_details already rejects a mismatched card;
+    // the emit path must be just as strict. A refresh is built for the
+    // token's puuid, so this is defence in depth, not a reachable UI path.
+    let h = harness().await;
+    known(&h, &[ME, OTHER]).await;
+    let other = built(&h, OTHER).await;
+    let mine = built(&h, ME).await;
+    let ticket = h.st.begin_open_details(OTHER);
+    assert!(h.st.set_open_details(&ticket, &other));
+    let token = h.st.details_open_token(OTHER).expect("OTHER is open");
+    let before = details_events(&h).len();
+
+    assert!(
+        !h.st.emit_details(&token, mine),
+        "a card for ME was emitted under OTHER's token"
+    );
+    assert_eq!(h.st.open_details_puuid().as_deref(), Some(OTHER));
+    assert_eq!(details_events(&h).len(), before, "nothing was emitted");
 }
 
 #[tokio::test]
@@ -175,15 +237,15 @@ async fn a_match_open_finishing_after_its_close_or_a_newer_open_never_opens() {
     // Late after its close.
     let ticket = h.st.begin_open_match("m1");
     crate::commands::close_match_key_for(&h.st, Some("m1"));
-    assert!(!h.st.set_open_match(ticket, "m1", HIDDEN, &view));
+    assert!(!h.st.set_open_match(&ticket, HIDDEN, &view));
     assert_eq!(h.st.open_match_args(), None);
 
     // Late after a newer open (another focus, so the two are told apart).
     let first = h.st.begin_open_match("m1");
     crate::commands::close_match_key_for(&h.st, Some("m1"));
     let second = h.st.begin_open_match("m1");
-    assert!(h.st.set_open_match(second, "m1", OTHER, &view));
-    assert!(!h.st.set_open_match(first, "m1", HIDDEN, &view));
+    assert!(h.st.set_open_match(&second, OTHER, &view));
+    assert!(!h.st.set_open_match(&first, HIDDEN, &view));
     assert_eq!(
         h.st.open_match_args(),
         Some(("m1".to_string(), OTHER.to_string()))
@@ -274,4 +336,353 @@ async fn a_details_open_that_lost_queues_no_names_and_ends_its_skin_mark() {
     assert!(!h.st.details_open_for(STRANGER), "not open");
     assert!(!h.st.take_worker_kick(), "no name ask for a closed page");
     assert!(!h.st.skins_resolving(STRANGER));
+}
+
+/// R199 (F02): a refresh begun for the old opening must not install after the
+/// same player is closed and opened again. The old build is parked after its
+/// DB read; the reopen installs the newer name; the old commit would replace
+/// it if it checked only the page key.
+#[tokio::test]
+async fn a_details_refresh_cannot_cross_a_same_key_reopen() {
+    let h = harness().await;
+    known(&h, &[OTHER]).await;
+    crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    assert_visible(
+        &h.st.open_details_of(OTHER).expect("OTHER's page"),
+        "Someone",
+    );
+    let seen = details_events(&h).len();
+
+    let probe = ViewProbe::new();
+    h.st.set_details_probe(probe.clone());
+    let st = h.st.clone();
+    let old = tokio::spawn(async move { crate::details::refresh(&st, OTHER).await });
+    tokio::time::timeout(Duration::from_secs(5), probe.reached.notified())
+        .await
+        .expect("the old refresh reached its barrier");
+
+    h.st.db(|repo| {
+        save_player(
+            repo.conn(),
+            &PlayerUpdate {
+                puuid: OTHER.into(),
+                name: Some(("NewName".into(), "NEW".into())),
+                account_level: 50,
+                card_id: "card".into(),
+            },
+            now_ms(),
+        )
+    })
+    .await
+    .unwrap();
+    crate::commands::close_details_key_for(&h.st, Some(OTHER));
+    let st2 = h.st.clone();
+    let mut reopened =
+        Box::pin(async move { crate::commands::player_details_for(&st2, OTHER).await });
+    assert!(
+        poll_once(reopened.as_mut()).await.is_pending(),
+        "the reopen must wait for the older build's gate"
+    );
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let reopened = tokio::spawn(async move {
+        let page = reopened.await;
+        let _ = done_tx.send(());
+        page
+    });
+    // With the build gate the reopen cannot finish while the older one is
+    // parked. Without it, the reopen installs the newer page now, and the
+    // older commit that follows must not replace it.
+    let reopen_waited = tokio::time::timeout(Duration::from_secs(2), done_rx)
+        .await
+        .is_err();
+
+    probe.release.notify_one();
+    old.await.expect("the old refresh task");
+    let page = reopened.await.expect("the reopen task").unwrap();
+    assert_visible(&page, "NewName");
+    assert_visible(&h.st.open_details_of(OTHER).expect("still open"), "NewName");
+    for event in details_events(&h).into_iter().skip(seen) {
+        if event.card.puuid == OTHER {
+            assert_visible(&event, "NewName");
+        }
+    }
+    assert!(reopen_waited, "the reopen passed the older build's gate");
+    assert!(h.st.view_builds_are_free(), "the build gate leaked");
+}
+
+/// R199 (F02): the A->B reopen. A met X; B never did. A refresh begun on A
+/// has A's encounters when the owner switches; reopening X on B builds none.
+/// The old commit must not put A's encounters on B's page.
+#[tokio::test]
+async fn a_details_refresh_cannot_cross_an_account_switch_reopen() {
+    let h = harness().await;
+    let start = now_ms() - 3_600_000;
+    store_played(
+        &h.st,
+        &match_row("ui-a1", start),
+        &[
+            mplayer(ME, "Blue", "Me", "TAG"),
+            mplayer(HIDDEN, "Red", "SharedName", "SHRD"),
+        ],
+        ME,
+    )
+    .await;
+    crate::commands::player_details_for(&h.st, HIDDEN)
+        .await
+        .unwrap();
+    assert_eq!(
+        h.st.open_details_of(HIDDEN)
+            .expect("A's page")
+            .encounters
+            .len(),
+        1,
+        "A met X once"
+    );
+    let seen = details_events(&h).len();
+
+    let probe = ViewProbe::new();
+    h.st.set_details_probe(probe.clone());
+    let st = h.st.clone();
+    let old = tokio::spawn(async move { crate::details::refresh(&st, HIDDEN).await });
+    tokio::time::timeout(Duration::from_secs(5), probe.reached.notified())
+        .await
+        .expect("the old refresh reached its barrier");
+
+    lock(&h.st.live).set_account(Some(B.into()));
+    // What `on_connected` does on a real switch: no old page stays open.
+    h.st.close_details(None);
+    let st2 = h.st.clone();
+    let mut reopened =
+        Box::pin(async move { crate::commands::player_details_for(&st2, HIDDEN).await });
+    assert!(
+        poll_once(reopened.as_mut()).await.is_pending(),
+        "the reopen must wait for the older build's gate"
+    );
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let reopened = tokio::spawn(async move {
+        let page = reopened.await;
+        let _ = done_tx.send(());
+        page
+    });
+    let reopen_waited = tokio::time::timeout(Duration::from_secs(2), done_rx)
+        .await
+        .is_err();
+
+    probe.release.notify_one();
+    old.await.expect("the old refresh task");
+    let page = reopened.await.expect("the reopen task").unwrap();
+    assert!(
+        page.encounters.is_empty(),
+        "B never met X: {:?}",
+        page.encounters
+    );
+    assert!(h
+        .st
+        .open_details_of(HIDDEN)
+        .expect("B's page")
+        .encounters
+        .is_empty());
+    for event in details_events(&h).into_iter().skip(seen) {
+        assert!(
+            event.encounters.is_empty(),
+            "A's encounters crossed the switch: {:?}",
+            event.encounters
+        );
+    }
+    assert!(reopen_waited, "the reopen passed the older build's gate");
+    assert!(h.st.view_builds_are_free(), "the build gate leaked");
+}
+
+/// R199 (F02): two refreshes of one opening build in order. The first is
+/// parked with the old name; the second sees a newer name. Without the build
+/// gate the second emits first, then the older one overwrites it.
+#[tokio::test]
+async fn refreshes_emit_in_build_order() {
+    let h = harness().await;
+    known(&h, &[OTHER]).await;
+    crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+    let seen = details_events(&h).len();
+
+    let probe = ViewProbe::new();
+    h.st.set_details_probe(probe.clone());
+    let st = h.st.clone();
+    let first = tokio::spawn(async move { crate::details::refresh(&st, OTHER).await });
+    tokio::time::timeout(Duration::from_secs(5), probe.reached.notified())
+        .await
+        .expect("the first refresh reached its barrier");
+
+    h.st.db(|repo| {
+        save_player(
+            repo.conn(),
+            &PlayerUpdate {
+                puuid: OTHER.into(),
+                name: Some(("NewName".into(), "NEW".into())),
+                account_level: 50,
+                card_id: "card".into(),
+            },
+            now_ms(),
+        )
+    })
+    .await
+    .unwrap();
+
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let st2 = h.st.clone();
+    let second = tokio::spawn(async move {
+        crate::details::refresh(&st2, OTHER).await;
+        let _ = done_tx.send(());
+    });
+    let second_waited = tokio::time::timeout(Duration::from_secs(2), done_rx)
+        .await
+        .is_err();
+
+    probe.release.notify_one();
+    first.await.expect("the first refresh task");
+    second.await.expect("the second refresh task");
+
+    assert_visible(&h.st.open_details_of(OTHER).expect("still open"), "NewName");
+    let events = details_events(&h);
+    for event in events.iter().skip(seen) {
+        if event.card.puuid == OTHER {
+            assert_visible(event, "NewName");
+        }
+    }
+    assert!(
+        second_waited,
+        "the second refresh passed the first one's gate"
+    );
+    assert!(h.st.view_builds_are_free(), "the build gate leaked");
+}
+
+/// R199 (F02): a Match Details refresh cannot cross a same-match reopen. The
+/// old build has the player visible; by the reopen they are incognito on the
+/// live screen. The old payload must not replace the hidden-style page.
+#[tokio::test]
+async fn a_match_refresh_cannot_cross_a_same_match_reopen() {
+    let h = harness().await;
+    h.st.set_session(Some(h.session.clone()));
+    crate::match_details::load(&h.st, "m1", HIDDEN)
+        .await
+        .unwrap();
+    assert!(matches!(
+        board_name(h.st.open_match_view_for_test().as_ref().unwrap(), HIDDEN),
+        DisplayName::Visible { .. }
+    ));
+    let seen = h.rec.matches.lock().unwrap().len();
+
+    let probe = ViewProbe::new();
+    h.st.set_match_probe(probe.clone());
+    let st = h.st.clone();
+    let old = tokio::spawn(async move { crate::match_details::refresh_open(&st).await });
+    tokio::time::timeout(Duration::from_secs(5), probe.reached.notified())
+        .await
+        .expect("the old refresh reached its barrier");
+
+    lock(&h.st.live).slots.push(Slot {
+        roster: roster(HIDDEN, true),
+        db: PlayerDb::default(),
+    });
+    crate::commands::close_match_key_for(&h.st, Some("m1"));
+    let st2 = h.st.clone();
+    let mut reopened =
+        Box::pin(async move { crate::match_details::load(&st2, "m1", HIDDEN).await });
+    assert!(
+        poll_once(reopened.as_mut()).await.is_pending(),
+        "the reopen must wait for the older build's gate"
+    );
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let reopened = tokio::spawn(async move {
+        let view = reopened.await;
+        let _ = done_tx.send(());
+        view
+    });
+    let reopen_waited = tokio::time::timeout(Duration::from_secs(2), done_rx)
+        .await
+        .is_err();
+
+    probe.release.notify_one();
+    old.await.expect("the old refresh task");
+    let view = reopened.await.expect("the reopen task").unwrap();
+    assert!(
+        matches!(board_name(&view, HIDDEN), DisplayName::Remembered { .. }),
+        "the reopened page is not in the hidden style: {:?}",
+        board_name(&view, HIDDEN)
+    );
+    assert!(matches!(
+        board_name(h.st.open_match_view_for_test().as_ref().unwrap(), HIDDEN),
+        DisplayName::Remembered { .. }
+    ));
+    assert_eq!(
+        h.rec.matches.lock().unwrap().len(),
+        seen,
+        "the superseded refresh emitted a match event"
+    );
+    assert!(reopen_waited, "the reopen passed the older build's gate");
+    assert!(h.st.view_builds_are_free(), "the build gate leaked");
+}
+
+/// R199 (F02): an initial open that loses its ticket while it waits on the
+/// build gate must not install. The gate is held by a parked refresh; the
+/// open takes its ticket, then Back voids it.
+#[tokio::test]
+async fn an_open_that_lost_while_waiting_on_the_build_gate_never_opens() {
+    let h = harness().await;
+    known(&h, &[OTHER]).await;
+    crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+
+    let probe = ViewProbe::new();
+    h.st.set_details_probe(probe.clone());
+    let st = h.st.clone();
+    let parked_refresh = tokio::spawn(async move { crate::details::refresh(&st, OTHER).await });
+    tokio::time::timeout(Duration::from_secs(5), probe.reached.notified())
+        .await
+        .expect("the refresh reached its barrier");
+
+    let mut open = Box::pin(crate::commands::player_details_for(&h.st, OTHER));
+    assert!(
+        poll_once(open.as_mut()).await.is_pending(),
+        "the open must wait on the build gate"
+    );
+    crate::commands::close_details_key_for(&h.st, Some(OTHER));
+
+    probe.release.notify_one();
+    parked_refresh.await.expect("the parked refresh task");
+    let _ = open.await.unwrap();
+    assert!(!h.st.details_open_for(OTHER), "a lost open installed");
+    assert!(h.st.view_builds_are_free(), "the build gate leaked");
+}
+
+/// R199 (F02): aborting a rebuild while it holds the build gate releases it;
+/// a later rebuild still runs.
+#[tokio::test]
+async fn an_aborted_rebuild_releases_the_build_gate() {
+    let h = harness().await;
+    known(&h, &[OTHER]).await;
+    crate::commands::player_details_for(&h.st, OTHER)
+        .await
+        .unwrap();
+
+    let probe = ViewProbe::new();
+    h.st.set_details_probe(probe.clone());
+    let st = h.st.clone();
+    let aborted = tokio::spawn(async move { crate::details::refresh(&st, OTHER).await });
+    tokio::time::timeout(Duration::from_secs(5), probe.reached.notified())
+        .await
+        .expect("the rebuild reached its barrier");
+    aborted.abort();
+    assert!(aborted.await.unwrap_err().is_cancelled());
+
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        crate::details::refresh(&h.st, OTHER),
+    )
+    .await
+    .expect("a later rebuild must not wait on a leaked gate");
+    assert!(h.st.view_builds_are_free(), "the build gate leaked");
 }

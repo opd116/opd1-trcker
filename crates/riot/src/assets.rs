@@ -1414,14 +1414,20 @@ impl AssetCache {
         let _guard = lock.lock().await;
 
         // Re-check after acquiring the lock: another caller may have just
-        // finished downloading this exact asset while we were waiting.
-        if cached_image_ok(&file_path) {
+        // finished downloading this exact asset while we were waiting. The
+        // file must decode, not merely start like an image (R200): a header-
+        // only/truncated file is a cache miss, never a permanent hit.
+        let check_path = file_path.clone();
+        let cached = blocking(move || Ok(cached_image_ok(&check_path))).await?;
+        if cached {
             return Ok(file_path);
         }
 
         let source_url = self.resolve_source_url(kind, id).await?;
         let bytes = self.download(&source_url).await?;
-        let processed = blocking(move || downscale_image(kind, bytes)).await?;
+        // R200: the downloaded bytes are decoded even for a kind with no
+        // downscale target, and the same decode is reused for the resize.
+        let processed = blocking(move || prepare_image(kind, bytes)).await?;
 
         let write_path = file_path.clone();
         blocking(move || write_atomic(&write_path, &processed)).await?;
@@ -1841,37 +1847,48 @@ impl AssetCache {
     }
 }
 
-/// A cached image is there and starts like an image file: an empty or damaged
-/// one (a power cut mid-write, another program) is downloaded again rather
-/// than served forever. Reads only the first bytes.
+/// A cached image is a file that actually decodes to a non-empty image
+/// (R200). A recognizable signature alone is not enough: a truncated file
+/// whose first 8/16 bytes are a valid PNG/JPEG header is a cache miss and is
+/// downloaded again, never served forever.
 fn cached_image_ok(path: &Path) -> bool {
-    use std::io::Read;
-    let mut head = [0u8; 16];
-    let Ok(mut file) = std::fs::File::open(path) else {
+    let Ok(bytes) = std::fs::read(path) else {
         return false;
     };
-    let n = file.read(&mut head).unwrap_or(0);
-    n > 0 && image::guess_format(&head[..n]).is_ok()
+    decodes_to_an_image(&bytes)
 }
 
-/// Downscales `bytes` to `kind`'s target width (see
+/// Whether `bytes` decode as an image with a positive width and height. Used
+/// for both a cached file and a fresh download.
+fn decodes_to_an_image(bytes: &[u8]) -> bool {
+    match image::load_from_memory(bytes) {
+        Ok(img) => img.width() > 0 && img.height() > 0,
+        Err(_) => false,
+    }
+}
+
+/// Decodes `bytes`, rejecting anything that is not a non-empty image, then
+/// downscales it to `kind`'s target width (see
 /// [`AssetKind::downscale_target_width`]), preserving aspect ratio, if the
-/// source is wider than that target. Re-encodes as PNG regardless of the
-/// source format (every valorant-api image asset is PNG or JPEG; PNG is a
-/// safe, lossless, universally-supported cache format for both). Returns
-/// `bytes` unchanged for a kind with no downscale target, or a source
-/// already at/under the target width.
+/// source is wider than that target. Re-encodes a resized image as PNG
+/// regardless of the source format (every valorant-api image asset is PNG or
+/// JPEG; PNG is a safe, lossless, universally-supported cache format for
+/// both). Returns `bytes` unchanged for a valid image of a kind with no
+/// downscale target, or a source already at/under the target width.
 ///
 /// A free function (not a method) so it can be moved into a
 /// [`tokio::task::spawn_blocking`] closure by value, with no `&self`
 /// lifetime to fight (fix-round item 10 / R37 — this is the CPU-bound
-/// decode/resize step).
-fn downscale_image(kind: AssetKind, bytes: Vec<u8>) -> Result<Vec<u8>, AssetError> {
+/// decode/resize step). R200: the decode happens once, for every kind, so a
+/// 200 body that is not an image is an error and is never written as a hit.
+fn prepare_image(kind: AssetKind, bytes: Vec<u8>) -> Result<Vec<u8>, AssetError> {
+    let img = image::load_from_memory(&bytes).map_err(|e| AssetError::Decode(e.to_string()))?;
+    if img.width() == 0 || img.height() == 0 {
+        return Err(AssetError::Decode("image has no pixels".to_string()));
+    }
     let Some(target_width) = kind.downscale_target_width() else {
         return Ok(bytes);
     };
-
-    let img = image::load_from_memory(&bytes).map_err(|e| AssetError::Decode(e.to_string()))?;
     if img.width() <= target_width {
         return Ok(bytes);
     }

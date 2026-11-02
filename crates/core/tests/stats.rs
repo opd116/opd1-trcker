@@ -144,6 +144,17 @@ fn winrate_computes_fraction() {
     assert_eq!(winrate(6, 20), Some(0.3));
 }
 
+/// V06's boundary table: the exact values the plan names, including the
+/// unavailable cases (not zero) and a pooled head/body/leg fraction.
+#[test]
+fn the_stat_boundary_values_are_exact() {
+    assert_eq!(kd(5, 0), 5.0, "zero deaths is kills, not unavailable");
+    assert_eq!(hs_pct(2, 6, 2), Some(0.2), "2 of 10 landed shots");
+    assert_eq!(winrate(2, 4), Some(0.5));
+    assert_eq!(hs_pct(0, 0, 0), None, "no shots is unavailable");
+    assert_eq!(winrate(0, 0), None, "no games is unavailable");
+}
+
 // ---------------------------------------------------------------------
 // peak
 // ---------------------------------------------------------------------

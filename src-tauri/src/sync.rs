@@ -1749,19 +1749,31 @@ pub async fn run_worker(st: Arc<AppState>, session: Arc<RiotSession>, id: u64) {
 /// The player's stored bundle (`None`: the read failed, the bundle already on
 /// screen stays) into the live slot, `mark` applied under the same lock, then
 /// the card is published and an open Details of the player follows (R23).
-async fn publish_player(
+/// R199: the read/install takes the bundle gate, and a call whose session is
+/// no longer the live owner (A->B, or A->B->A) neither installs nor marks:
+/// the new account must not inherit the old account's sync/retry state.
+pub(crate) async fn publish_player(
     st: &Arc<AppState>,
     session: &RiotSession,
     puuid: &str,
     mark: impl FnOnce(&mut crate::state::LiveModel, bool),
 ) {
-    let (p, me) = (puuid.to_string(), session.self_puuid().to_string());
+    let _gate = st.bundle_reload_guard().await;
+    let stamp = lock(&st.live).owner_stamp();
+    let me = session.self_puuid().to_string();
+    if stamp.puuid.as_deref() != Some(me.as_str()) {
+        return;
+    }
+    let p = puuid.to_string();
     // A failed read keeps the bundle already on screen.
     let db = st
         .db(move |repo| crate::store::load_player_db(repo, Some(&me), &p))
         .await;
     {
         let mut live = lock(&st.live);
+        if !live.owner_matches(&stamp) {
+            return;
+        }
         mark(&mut live, db.is_some());
         if let (Some(db), Some(slot)) =
             (db, live.slots.iter_mut().find(|s| s.roster.puuid == puuid))
@@ -1769,6 +1781,7 @@ async fn publish_player(
             slot.db = db;
         }
     }
+    drop(_gate);
     st.publish();
     // R23: an open Details of this player shows the settled card too.
     crate::details::refresh(st, puuid).await;
@@ -1851,6 +1864,7 @@ pub(crate) async fn rank_batch_step(
     session: &Arc<RiotSession>,
     batch: Vec<String>,
 ) -> Result<(), Gone> {
+    let stamp = lock(&st.live).owner_stamp();
     let mut set = JoinSet::new();
     for puuid in &batch {
         let (st, session, puuid) = (st.clone(), session.clone(), puuid.clone());
@@ -1876,6 +1890,10 @@ pub(crate) async fn rank_batch_step(
     // A task that panicked must not be handed out again forever.
     if panicked {
         let mut live = lock(&st.live);
+        // R199: a panic after an account switch must not mark the new account.
+        if !live.owner_matches(&stamp) {
+            return Ok(());
+        }
         for puuid in &batch {
             live.synced.mark_ranked(puuid);
         }
@@ -1902,11 +1920,17 @@ async fn retry_step(
     session: &Arc<RiotSession>,
     puuid: String,
 ) -> Result<(), Gone> {
+    // R199: the retry's final schedule is account state too; an account
+    // switch during the two phases must not record it for the new account.
+    let stamp = lock(&st.live).owner_stamp();
     let rank = rank_step(st, session, &puuid, false).await?;
     let matches = matches_step(st, session, &puuid, false).await?;
     let failed = rank.failed || matches.partial;
     let held = rank.held.into_iter().chain(matches.held).max();
     let mut live = lock(&st.live);
+    if !live.owner_matches(&stamp) {
+        return Ok(());
+    }
     match held.filter(|_| !failed) {
         Some(left) => live.note_rank_held(&puuid, left, true),
         None => live.note_rank_sync(&puuid, failed, true),
@@ -2326,6 +2350,10 @@ pub(crate) async fn fetch_self_loadout_after_holds(
     slack: Duration,
 ) -> Result<(), Gone> {
     let me = session.self_puuid().to_string();
+    // R202/V02: the read belongs to the account generation that started it.
+    // A->B->A is a new generation, so an older A answer cannot overwrite the
+    // newer A session's loadout (a bare PUUID check would accept it).
+    let stamp = lock(&st.live).owner_stamp();
     let mut held_retries = 0;
     let resp = loop {
         match session.player_loadout().await {
@@ -2342,9 +2370,10 @@ pub(crate) async fn fetch_self_loadout_after_holds(
     let stored = serde_json::to_string(&loadout).unwrap_or_default();
     {
         // The answer can land after an account switch (a slow read, a 429
-        // hold): it is only this session's account's loadout.
+        // hold): it is only this session's account's loadout, in the same
+        // generation that asked (A->B->A included).
         let mut live = lock(&st.live);
-        if live.self_puuid.as_deref() != Some(me.as_str()) {
+        if stamp.puuid.as_deref() != Some(me.as_str()) || !live.owner_matches(&stamp) {
             log::debug!("own loadout of a previous account dropped");
             return Ok(());
         }
@@ -2357,9 +2386,11 @@ pub(crate) async fn fetch_self_loadout_after_holds(
         // lock, so a write for the previous account lands before that
         // delete or not at all. (Lock order: the repo, then the live model;
         // nothing takes the repo while holding the live model.)
-        if lock(&owner.live).self_puuid.as_deref() != Some(me.as_str()) {
+        let live = lock(&owner.live);
+        if stamp.puuid.as_deref() != Some(me.as_str()) || !live.owner_matches(&stamp) {
             return Ok(());
         }
+        drop(live);
         if repo.get_state(SELF_LOADOUT_KEY)?.as_deref() != Some(stored.as_str()) {
             repo.set_state(SELF_LOADOUT_KEY, &stored)?;
         }

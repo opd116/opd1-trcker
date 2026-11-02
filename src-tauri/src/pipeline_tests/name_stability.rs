@@ -40,6 +40,9 @@ use std::time::Duration;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
+use super::account::{match_row, mplayer, store_played};
+use crate::state::BundleProbe;
+
 use opd1_core::model::{DisplayName, Field, LiveState, RememberedSource};
 use opd1_core::names::KnownName;
 use opd1_core::presence::Stage;
@@ -982,4 +985,107 @@ async fn a_stored_match_naming_a_visible_player_publishes_nothing() {
         events,
         "a visible-only store publishes nothing"
     );
+}
+
+/// R199 (F01): two bundle reads for the same account must install in read
+/// order. The first read is parked after its DB result; the second one is
+/// requested while the DB already holds a newer name. Without the gate the
+/// second installs first, then the parked older one overwrites it and the
+/// last live event regresses. A bare owner-string check cannot help: both
+/// reads belong to the same owner.
+#[tokio::test]
+async fn bundle_reads_cannot_install_in_reverse_order() {
+    let h = harness().await;
+    let old_start = now_ms() - 7_200_000;
+    store_played(
+        &h.st,
+        &match_row("nm-old", old_start),
+        &[
+            mplayer(ME, "Blue", "Me", "TAG"),
+            mplayer(OTHER, "Red", "OldName", "OLD"),
+        ],
+        ME,
+    )
+    .await;
+    let old_db =
+        h.st.db(|repo| load_player_db(repo, Some(ME), OTHER))
+            .await
+            .expect("the old bundle");
+    {
+        let mut live = lock(&h.st.live);
+        live.stage = Stage::Pregame;
+        live.slots = vec![Slot {
+            roster: roster(OTHER, true),
+            db: old_db,
+        }];
+    }
+    h.st.publish();
+
+    let probe = BundleProbe::new();
+    h.st.set_bundle_probe(probe.clone());
+    let st = h.st.clone();
+    let first = tokio::spawn(async move { st.reload_slot(OTHER).await });
+    tokio::time::timeout(Duration::from_secs(5), probe.reached.notified())
+        .await
+        .expect("the first read reached its post-read barrier");
+
+    let new_start = now_ms() - 3_600_000;
+    store_played(
+        &h.st,
+        &match_row("nm-new", new_start),
+        &[
+            mplayer(ME, "Blue", "Me", "TAG"),
+            mplayer(OTHER, "Red", "NewName", "NEW"),
+        ],
+        ME,
+    )
+    .await;
+
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let st2 = h.st.clone();
+    let second = tokio::spawn(async move {
+        st2.reload_slot(OTHER).await;
+        let _ = done_tx.send(());
+    });
+    // With the gate, the second read cannot finish while the first holds it.
+    // Without the gate it finishes now, so the test can release the parked
+    // older read afterwards and observe the regression.
+    let second_waited = tokio::time::timeout(Duration::from_secs(2), done_rx)
+        .await
+        .is_err();
+
+    probe.release.notify_one();
+    first.await.expect("the first reload task");
+    second.await.expect("the second reload task");
+
+    {
+        let live = lock(&h.st.live);
+        let slot = live
+            .slots
+            .iter()
+            .find(|s| s.roster.puuid == OTHER)
+            .expect("OTHER still on screen");
+        let remembered = slot.db.remembered.as_ref().expect("a remembered name");
+        assert_eq!(
+            remembered.name, "NewName",
+            "the parked older read overwrote the newer bundle"
+        );
+    }
+    let last = h.live_events().last().expect("the newer event").clone();
+    let card = last
+        .players
+        .iter()
+        .find(|p| p.puuid == OTHER)
+        .expect("OTHER in the last event");
+    match &card.name {
+        Field::Value(DisplayName::Remembered { name, .. }) => {
+            assert_eq!(name, "NewName", "the last live event regressed")
+        }
+        other => panic!("expected the remembered name, got {other:?}"),
+    }
+    assert!(
+        second_waited,
+        "the second read passed the first read's gate"
+    );
+    assert!(h.st.bundle_reload_is_free(), "the gate must be released");
 }

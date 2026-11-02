@@ -1431,3 +1431,7 @@ mod name_stability;
 /// image cache/large-body limits (their own file; same harness).
 #[cfg(test)]
 mod resource_soak;
+
+/// Deterministic offline Riot simulation harness covering the full match lifecycle.
+#[cfg(test)]
+pub(crate) mod simulation;

@@ -5,6 +5,13 @@
 //!
 //! Disconnected → Lobby → Agent Select → In Game → Match End → Lobby
 //!
+//! Scope & UI Integration Boundary:
+//! - This harness exercises the real Rust backend pipeline (Poller, AppState, SQLite Repo,
+//!   sync worker, EventSink, and wire HTTP mock interactions) across all match phases.
+//! - Frontend UI integration (WebView / Svelte component tree / Playwright DOM) is tested
+//!   separately in `ui/tests/`; this harness exercises the backend and IPC/EventSink boundary
+//!   rather than driving a web browser.
+//!
 //! Features:
 //! - 10 players across two teams (Blue allies, Red enemies).
 //! - Realistic responses: account levels, hidden names (`Incognito: true`),
@@ -738,17 +745,31 @@ async fn simulation_full_match_lifecycle_ten_players_with_persistence() {
         "roundResults": []
     })).unwrap();
 
-    let details_resp: opd1_riot::endpoints::MatchDetailsResponse =
-        serde_json::from_value(match_json).unwrap();
-    let (match_row, team_rows, player_rows) = opd1_riot::to_core::match_from_details(&details_resp);
+    // Serve match details over the wiremock HTTP endpoint
+    get(
+        &h.server,
+        &format!("/match-details/v1/matches/{MATCH_ID_COREGAME}"),
+        match_json,
+    )
+    .await;
 
-    // Persist match into SQLite
-    h.st.db(move |repo| {
-        repo.upsert_match(&match_row, &team_rows, &player_rows)?;
-        Ok(())
-    })
-    .await
-    .unwrap();
+    // Persist match into SQLite via the real application pipeline
+    // (fetch_missing_details -> HTTP GET -> match_from_details -> store_details -> upsert_match)
+    crate::sync::fetch_missing_details(&h.st, &h.session, vec![MATCH_ID_COREGAME.to_string()])
+        .await
+        .unwrap();
+
+    // Verify exactly one match-details wire request was performed
+    assert_eq!(
+        count(
+            &h.server,
+            "GET",
+            &format!("/match-details/v1/matches/{MATCH_ID_COREGAME}")
+        )
+        .await,
+        1,
+        "Match details must be requested via HTTP through the sync pipeline"
+    );
 
     // Verify match and 10 players are stored in SQLite
     let stored_match =

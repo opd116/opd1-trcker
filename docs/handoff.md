@@ -136,25 +136,31 @@ User-requested merge preparation; no new bug hunt. Nothing merged/tagged/publish
 
 ### 1. Offline Riot simulation runtime — PR [#14](https://github.com/opd116/opd1-trcker/pull/14), branch `feat/riot-simulation-runtime`
 - **Objective:** Build a deterministic offline Riot simulation harness exercising the real Rust backend across Disconnected → Lobby → Agent Select → In Game → Match End → Lobby for 10 players, validating SQLite persistence, MMR caching, and privacy rules.
-- **Implementation:** Added `src-tauri/src/pipeline_tests/simulation.rs`. Covers:
-  - Disconnected: `ConnState::Error` with `LOCKFILE_NOT_FOUND`.
-  - Lobby: `Stage::Menus`, 2 players in party, local player stats and party members synced.
-  - Agent Select: `Stage::Pregame`, 5 allies with locked/hovered agents, incognito ally, R150 privacy verification (hidden player is never sent to Riot's name-service).
-  - In Game: `Stage::Ingame`, 10 players across Blue/Red teams, incognito opponents, cached MMR stats.
-  - Match End: Match details stored in SQLite `matches` and `match_players`, +21 RR competitive update.
-  - Return to Lobby: R145 remembered names for previously hidden players verified in SQLite (`OwnMatch` source).
-- **Verification:** `cargo test -p opd1-trcker -- simulation` passes deterministically in ~0.07s; clippy and fmt clean.
+- **Implementation & Review Improvements:**
+  - Added `src-tauri/src/pipeline_tests/simulation.rs`. Covers:
+    - Disconnected: `ConnState::Error` with `LOCKFILE_NOT_FOUND`.
+    - Lobby: `Stage::Menus`, 2 players in party, local player stats and party members synced.
+    - Agent Select: `Stage::Pregame`, 5 allies with locked/hovered agents, incognito ally, R150 privacy verification (hidden player is never sent to Riot's name-service).
+    - In Game: `Stage::Ingame`, 10 players across Blue/Red teams, incognito opponents, cached MMR stats.
+    - Match End: Match details served via WireMock HTTP endpoint (`/match-details/v1/matches/{match_id}`) and ingested through the real pipeline (`crate::sync::fetch_missing_details` -> `MatchDetailsResponse` -> `store_details` -> SQLite `upsert_match`), validating HTTP wire requests and SQLite match/player rows without pipeline bypasses.
+    - Return to Lobby: R145 remembered names for previously hidden players verified in SQLite (`OwnMatch` source).
+  - Clarified UI boundary: The harness tests the complete Rust backend pipeline and IPC/EventSink boundary; UI rendering is covered separately by Vitest/Playwright in `ui/tests/`.
+- **Verification:** `cargo test -p opd1-trcker -- simulation` passes deterministically in ~0.07s; clippy and fmt clean. Push CI passed (runs 41455940461, 41460170636).
 
 ### 2. Broken skins collection parsing — PR [#15](https://github.com/opd116/opd1-trcker/pull/15), branch `fix/skins-collection-parsing`
-- **Root Cause:** In `crates/riot/src/endpoints.rs`, Riot's store entitlements endpoint `/store/v1/entitlements/{puuid}/{SKIN_LEVEL_ITEM_TYPE}` returns:
-  `{"ItemTypeID": "e7c63390-eda7-46e0-bb7a-a6abdacd2433", "Entitlements": [{"TypeID": "4e60e748-bce6-4faa-9327-ebbe6089d5fe", "ItemID": "..."}]}`.
-  Prior code filtered by `same(&e.type_id)`, dropping every real entitlement because `TypeID` is Riot's internal entitlement service ID rather than `SKIN_LEVEL_ITEM_TYPE`. Synthetic tests had artificially set `TypeID` to the skin level UUID, masking the bug.
+- **Root Cause & Independent API Evidence:**
+  - Independent Riot Client API documentation (techchrism community schema) confirms that Riot's store entitlements endpoint `/store/v1/entitlements/{puuid}/{SKIN_LEVEL_ITEM_TYPE}` returns:
+    `{"ItemTypeID": "e7c63390-eda7-46e0-bb7a-a6abdacd2433", "Entitlements": [{"TypeID": "4e60e748-bce6-4faa-9327-ebbe6089d5fe", "ItemID": "..."}]}`.
+  - `4e60e748-bce6-4faa-9327-ebbe6089d5fe` is the documented `PermanentEntitlementTypeID` (internal entitlement grant type), whereas `ItemTypeID` is the requested category (`SKIN_LEVEL_ITEM_TYPE`).
+  - Prior code checked `same(&e.type_id)`, dropping every real entitlement because `TypeID` is never equal to `SKIN_LEVEL_ITEM_TYPE`. Synthetic tests had set `TypeID` to the skin level UUID, masking the bug.
+- **Evidence Boundary:** Documented API evidence and authentic fixtures verify the parser fix. Per safety guidelines, tests do not contact live production Riot services; verification against the user's live account requires launching VALORANT or providing an opt-in diagnostic dump via `Ctrl+Shift+D` (`dump_raw()`).
+- **Privacy-Safe Diagnostics:** `raw_capture.rs` normalizes `/store/v1/entitlements/` to `owned_skins.json` with all JWTs, bearer tokens, passwords, and sensitive keys strictly redacted.
 - **Fix:**
-  - `OwnedItemsResponse::item_ids` now accepts all entitlements under a container whose parent `ItemTypeID` matches `item_type`, without filtering by `e.type_id`.
-  - Added `owned_skins` endpoint key normalization in `crates/riot/src/raw_capture.rs` for `Ctrl+Shift+D` / `dump_raw` diagnostic dumps.
+  - `OwnedItemsResponse::item_ids` accepts entitlements under a container whose parent `ItemTypeID` matches `item_type`, without filtering child entitlements by `e.type_id`.
+  - Added `owned_skins` endpoint key normalization in `crates/riot/src/raw_capture.rs`.
   - Added regression unit tests with authentic Riot payloads in `crates/riot/tests/tolerant_decoding.rs`.
   - Added full pipeline tests in `src-tauri/src/v2/collection.rs` verifying realistic Riot payloads, SQLite persistence of owned levels, and restart recovery with game closed.
-- **Verification:** Full Rust suite passed (636 `opd1-trcker`, 88+ unit tests in `opd1-riot`, all in `opd1-core`); Clippy and `fmt` clean; UI `test`, `check`, and `build` clean.
+- **Verification:** Full Rust suite passed (636 `opd1-trcker`, 88+ unit tests in `opd1-riot`, all in `opd1-core`); Clippy and `fmt` clean; UI `test`, `check`, and `build` clean. CI checks passed (run 41457808631).
 
 ## References and history
 

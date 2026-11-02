@@ -435,17 +435,26 @@ impl OwnedItemsResponse {
     /// answer omits it).
     pub fn item_ids(&self, item_type: &str) -> Vec<String> {
         let same = |t: &str| t.is_empty() || t.eq_ignore_ascii_case(item_type);
-        let top = same(&self.item_type_id).then_some(&self.entitlements);
+        let top = same(&self.item_type_id).then_some((&self.item_type_id, &self.entitlements));
         let groups = self
             .by_types
             .iter()
             .filter(|g| same(&g.item_type_id))
-            .map(|g| &g.entitlements);
+            .map(|g| (&g.item_type_id, &g.entitlements));
         let mut seen = std::collections::HashSet::new();
         top.into_iter()
             .chain(groups)
-            .flatten()
-            .filter(|e| same(&e.type_id))
+            .flat_map(|(parent_type, list)| {
+                let parent_matched =
+                    !parent_type.is_empty() && parent_type.eq_ignore_ascii_case(item_type);
+                list.iter().filter(move |e| {
+                    if parent_matched {
+                        true
+                    } else {
+                        same(&e.type_id)
+                    }
+                })
+            })
             .map(|e| e.item_id.trim().to_ascii_lowercase())
             .filter(|id| is_uuid(id) && seen.insert(id.clone()))
             .take(MAX_OWNED_ITEMS)

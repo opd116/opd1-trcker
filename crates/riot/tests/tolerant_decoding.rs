@@ -782,3 +782,43 @@ fn owned_items_tolerate_missing_fields_and_drop_bad_elements() {
         assert!(r.item_ids(SKIN_LEVEL_ITEM_TYPE).is_empty(), "{odd}");
     }
 }
+
+#[test]
+fn owned_items_with_real_riot_type_id_record_is_not_dropped() {
+    const L1: &str = "12831559-44ee-c708-b97c-29a43938e3cd";
+    // Real Riot response: ItemTypeID is SKIN_LEVEL_ITEM_TYPE, but TypeID
+    // inside Entitlements is an internal entitlement service ID (4e60e748...).
+    let real_riot_json = json!({
+        "ItemTypeID": SKIN_LEVEL_ITEM_TYPE,
+        "Entitlements": [
+            {
+                "TypeID": "4e60e748-bce6-4faa-9327-ebbe6089d5fe",
+                "ItemID": L1,
+                "InstanceID": "a95b9f3b-4e7b-4b24-8fba-d9fad9d4da34",
+                "Version": 1
+            }
+        ]
+    });
+    let parsed: OwnedItemsResponse = serde_json::from_value(real_riot_json).unwrap();
+    assert_eq!(parsed.item_ids(SKIN_LEVEL_ITEM_TYPE), [L1]);
+}
+
+#[test]
+fn owned_items_by_types_with_real_riot_type_id_record_is_not_dropped() {
+    const L1: &str = "12831559-44ee-c708-b97c-29a43938e3cd";
+    let real_riot_json = json!({
+        "EntitlementsByTypes": [
+            {
+                "ItemTypeID": SKIN_LEVEL_ITEM_TYPE,
+                "Entitlements": [
+                    {
+                        "TypeID": "4e60e748-bce6-4faa-9327-ebbe6089d5fe",
+                        "ItemID": L1
+                    }
+                ]
+            }
+        ]
+    });
+    let parsed: OwnedItemsResponse = serde_json::from_value(real_riot_json).unwrap();
+    assert_eq!(parsed.item_ids(SKIN_LEVEL_ITEM_TYPE), [L1]);
+}

@@ -118,6 +118,10 @@ pub(crate) fn endpoint_key(path: &str) -> String {
         return "player_loadout".to_string();
     }
 
+    if path_only.starts_with("/store/v1/entitlements/") {
+        return "owned_skins".to_string();
+    }
+
     match path_only {
         "/chat/v4/presences" => return "presences".to_string(),
         "/name-service/v2/players" => return "names".to_string(),

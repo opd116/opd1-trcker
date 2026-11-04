@@ -23,6 +23,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 | R209 | 2026-11-04 | superseded (partial) | Solid party strokes; wider white thresholds; compact profile section order |
 | R210 | 2026-11-04 | active | Exact 6 metric colors & 5 continuous threshold arrays; Profile single vertical scroll (no 340px cap/scroll in RecentTable); measured layout in ProfileDrawer (no grid gaps, exact 12–20px Mates-to-Maps gap, deterministic left/right placement); unified .mlabel headings; review NSIS installer authorized (no auto-install/merge) |
 | R211 | 2026-11-04 | active | User approved the full Compact design; migrate active visual references to baselines/compact at both normal sizes and square Glance, retaining v2 history and unchanged quality gates; Windows remains the app target |
+| R212 | 2026-11-04 | active | Fixed window: exactly 700×860 normal and 420×420 Glance, not resizable or maximizable; Maximize button removed (supersedes R205's 680×760 minimum and resizable/maximizable) |
 
 
 ## Working with the user
@@ -56,7 +57,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 
 ## Window
 
-- (R190; compact geometry R205; pin removal R206, user 2026-11-04) No native frame: the app's own title bar has Minimize, Maximize and Close, with no pin, connection/status pill or own-rank control. **Always-on-top is removed entirely**, including Glance and settings. Default **700×860**, minimum **680×760**, resizable and maximizable. Glance mode shrinks it to a **420×420** square and restores the previous normal geometry on exit without forcing it over other windows.
+- (R190; compact geometry R205; pin removal R206, user 2026-11-04) No native frame: the app's own title bar has Minimize and Close (no Maximize: the window is fixed-size, R212), with no pin, connection/status pill or own-rank control. **Always-on-top is removed entirely**, including Glance and settings. **Fixed 700×860** (R212, user 2026-11-04): not resizable, not maximizable, no fullscreen. Glance mode shrinks it to a **420×420** square and returns to exactly 700×860 at the same position on exit without forcing it over other windows.
 - (R193) Close goes to the tray when Settings' "Close to tray" is on (default), otherwise it quits. "Launch with Windows" (default on) starts minimized in the tray. "Saved player in my match" sends a Windows notification. (R205: Settings' UI is postponed, so those toggles are not shown yet; the stored defaults above still apply.)
 
 ## Screens

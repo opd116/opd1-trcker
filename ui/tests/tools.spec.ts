@@ -170,7 +170,7 @@ test("R206: the title bar has no always-on-top pin; Settings stays empty and the
     .locator("#app > header")
     .getByRole("button")
     .evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
-  expect(labels).toEqual(["Minimize", "Maximize", "Close"]);
+  expect(labels).toEqual(["Minimize", "Close"]);
   await expect(page.locator('#app > header button[aria-label="Keep on top during matches"]')).toHaveCount(0);
   // The postponed Settings page still shows only its title, and the stored defaults are the documented seven.
   const readSettings = () =>

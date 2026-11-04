@@ -1,5 +1,5 @@
 //! Window behaviour (R189, user 2026-10-22): the custom title bar's window
-//! (no decorations, 700×860, at least 680×760), Glance mode, the tray,
+//! (no decorations, a fixed 700×860, R212), Glance mode, the tray,
 //! close to tray, launch with Windows and the saved-player toast.
 //!
 //! - [`setup`] (from `lib.rs`): the tray icon, the
@@ -32,10 +32,9 @@ pub const MINIMIZED_ARG: &str = "--minimized";
 const AUTOSTART_NAME: &str = "OPD1 TRCKER";
 const TRAY_ID: &str = "main";
 
-/// The normal window's minimum (logical px), as `tauri.conf.json` sets it.
-pub const NORMAL_MIN: (f64, f64) = (680.0, 760.0);
-/// Glance mode's minimum and width (logical px).
-pub const GLANCE_MIN: (f64, f64) = (420.0, 420.0);
+/// The normal window's one fixed size (logical px), as `tauri.conf.json` sets it (R212): never resizable or maximizable.
+pub const NORMAL_SIZE: (f64, f64) = (700.0, 860.0);
+/// Glance mode's one fixed size (logical px).
 pub const GLANCE_WIDTH: f64 = 420.0;
 pub const GLANCE_HEIGHT: f64 = 420.0;
 
@@ -67,14 +66,29 @@ pub fn glance_geometry(current: Geometry, scale: f64) -> Geometry {
     }
 }
 
-/// The window to restore after Glance: the saved one, grown to the normal
-/// minimum if it was ever smaller.
+/// The window to restore after Glance (R212): always exactly the fixed normal
+/// size (never a remembered custom one), at the saved top-left.
 pub fn restore_geometry(saved: Geometry, scale: f64) -> Geometry {
     Geometry {
-        width: saved.width.max(to_physical(NORMAL_MIN.0, scale)),
-        height: saved.height.max(to_physical(NORMAL_MIN.1, scale)),
+        width: to_physical(NORMAL_SIZE.0, scale),
+        height: to_physical(NORMAL_SIZE.1, scale),
         ..saved
     }
+}
+
+/// Lifts the size limits, so a new size is never refused by the old maximum.
+fn lift_limits(w: &WebviewWindow) -> tauri::Result<()> {
+    w.set_min_size(None::<LogicalSize<f64>>)?;
+    w.set_max_size(None::<LogicalSize<f64>>)
+}
+
+/// Pins the window to exactly `size` logical px: minimum and maximum equal it,
+/// and it can be neither dragged to another size nor maximized.
+fn pin_limits(w: &WebviewWindow, size: (f64, f64)) -> tauri::Result<()> {
+    w.set_min_size(Some(LogicalSize::new(size.0, size.1)))?;
+    w.set_max_size(Some(LogicalSize::new(size.0, size.1)))?;
+    w.set_resizable(false)?;
+    w.set_maximizable(false)
 }
 
 /// The window's state the settings and Glance mode share (Tauri managed
@@ -150,6 +164,13 @@ pub fn setup(app: &tauri::App, st: &AppState) -> tauri::Result<()> {
 
     let minimized = std::env::args().any(|a| a == MINIMIZED_ARG);
     if let Some(w) = main_window(app.handle()) {
+        // R212: one fixed size, set explicitly rather than trusting the creation size.
+        let fixed = lift_limits(&w)
+            .and_then(|()| w.set_size(LogicalSize::new(NORMAL_SIZE.0, NORMAL_SIZE.1)))
+            .and_then(|()| pin_limits(&w, NORMAL_SIZE));
+        if let Err(e) = fixed {
+            log::warn!("window fixed size failed: {e}");
+        }
         // The config's `center` is not applied to a window created hidden
         // (`visible: false`): on Windows it came up at x = -27 on a
         // 1920×1080 screen. Center it here, before it is first shown.
@@ -355,9 +376,8 @@ impl NoAutostart {
 }
 
 /// Glance mode: a 420×420 window (on) or the normal window (off). On:
-/// the window is remembered (and un-maximized), its minimum drops to
-/// 420×420. Off: the remembered window comes back (maximized again if it
-/// was), with the 680×760 minimum. Asking for the mode it is already in
+/// the window's position is remembered and the window is pinned to exactly
+/// 420×420. Off: it returns to exactly 700×860 at the same place (R212). Asking for the mode it is already in
 /// changes nothing.
 #[tauri::command]
 pub fn set_glance(on: bool, app: AppHandle) -> Result<(), String> {
@@ -371,10 +391,6 @@ pub fn set_glance(on: bool, app: AppHandle) -> Result<(), String> {
         if saved.is_some() {
             return Ok(());
         }
-        let maximized = window.is_maximized().unwrap_or(false);
-        if maximized {
-            window.unmaximize().map_err(err)?;
-        }
         let scale = window.scale_factor().map_err(err)?;
         let pos = window.outer_position().map_err(err)?;
         let size = window.inner_size().map_err(err)?;
@@ -385,33 +401,26 @@ pub fn set_glance(on: bool, app: AppHandle) -> Result<(), String> {
             height: size.height,
         };
         let target = glance_geometry(current, scale);
-        *saved = Some((current, maximized));
-        window.set_maximizable(false).map_err(err)?;
-        window
-            .set_min_size(Some(LogicalSize::new(GLANCE_MIN.0, GLANCE_MIN.1)))
-            .map_err(err)?;
+        *saved = Some((current, false));
+        lift_limits(&window).map_err(err)?;
         window
             .set_size(PhysicalSize::new(target.width, target.height))
             .map_err(err)?;
+        pin_limits(&window, (GLANCE_WIDTH, GLANCE_HEIGHT)).map_err(err)?;
     } else {
-        let Some((before, maximized)) = saved.take() else {
+        let Some((before, _)) = saved.take() else {
             return Ok(());
         };
         let scale = window.scale_factor().map_err(err)?;
         let target = restore_geometry(before, scale);
+        lift_limits(&window).map_err(err)?;
         window
             .set_size(PhysicalSize::new(target.width, target.height))
             .map_err(err)?;
         window
             .set_position(PhysicalPosition::new(target.x, target.y))
             .map_err(err)?;
-        window
-            .set_min_size(Some(LogicalSize::new(NORMAL_MIN.0, NORMAL_MIN.1)))
-            .map_err(err)?;
-        window.set_maximizable(true).map_err(err)?;
-        if maximized {
-            window.maximize().map_err(err)?;
-        }
+        pin_limits(&window, NORMAL_SIZE).map_err(err)?;
     }
     Ok(())
 }
@@ -495,31 +504,31 @@ mod tests {
     }
 
     #[test]
-    fn leaving_glance_restores_the_window_never_below_the_normal_minimum() {
-        assert_eq!(restore_geometry(AT, 1.0), AT);
+    fn leaving_glance_always_restores_the_fixed_normal_size() {
+        let fixed = Geometry {
+            x: 100,
+            y: 50,
+            width: 700,
+            height: 860,
+        };
+        // Whatever the window was, the normal size is exactly 700x860 at the same top-left.
+        assert_eq!(restore_geometry(AT, 1.0), fixed);
         let small = Geometry {
             width: 600,
             height: 700,
             ..AT
         };
-        assert_eq!(
-            restore_geometry(small, 1.0),
-            Geometry {
-                x: 100,
-                y: 50,
-                width: 680,
-                height: 760
-            }
-        );
-        assert_eq!(restore_geometry(small, 2.0).width, 1360);
-        // A round trip gives the window back.
-        let there = glance_geometry(AT, 1.0);
-        assert_ne!(there, AT);
-        assert_eq!(restore_geometry(AT, 1.0), AT);
+        assert_eq!(restore_geometry(small, 1.0), fixed);
+        assert_eq!(restore_geometry(small, 1.5).width, 1050);
+        assert_eq!(restore_geometry(small, 1.5).height, 1290);
+        // Glance never leaks into it.
+        let there = glance_geometry(fixed, 1.0);
+        assert_ne!(there, fixed);
+        assert_eq!(restore_geometry(there, 1.0), fixed);
     }
 
     #[test]
-    fn compact_normal_window_round_trip_keeps_its_size_at_both_scales() {
+    fn compact_normal_window_round_trip_returns_exactly_700x860_at_both_scales() {
         for scale in [1.0, 1.5] {
             let normal = Geometry {
                 width: to_physical(700.0, scale),
@@ -530,6 +539,7 @@ mod tests {
             assert_eq!(glance.width, to_physical(420.0, scale));
             assert_eq!(glance.height, to_physical(420.0, scale));
             assert_eq!((glance.x, glance.y), (normal.x, normal.y));
+            assert_eq!(restore_geometry(glance, scale), normal);
             assert_eq!(restore_geometry(normal, scale), normal);
         }
     }

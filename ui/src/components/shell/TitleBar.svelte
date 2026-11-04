@@ -1,14 +1,11 @@
 <!--
   The custom title bar (window `decorations: false`): 36px, the wordmark and window buttons. Always-on-top and its pin
   were removed by the user's 2026-11-04 decision. The bar is the drag region; Tauri's drag script
-  also turns a double-click there into maximize / restore. The wordmark reads TRCKER: the product name is spelled that
+  has nothing to maximize: the window is one fixed size (R212), so there is no Maximize button. The wordmark reads TRCKER: the product name is spelled that
   way on purpose (the prototype's "TRACKER" is the one thing not copied).
 -->
 <script lang="ts">
-  import { close, minimize, toggleMaximize, watchMaximized } from "./appWindow";
-
-  let maximized = $state(false);
-  $effect(() => watchMaximized((m) => (maximized = m)));
+  import { close, minimize } from "./appWindow";
 </script>
 
 <header class="bar" data-tauri-drag-region>
@@ -20,13 +17,6 @@
   <div class="fill" data-tauri-drag-region></div>
   <button type="button" class="wb" aria-label="Minimize" onclick={minimize}
     ><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><path d="M0 5h10"></path></svg></button
-  >
-  <button type="button" class="wb" aria-label={maximized ? "Restore" : "Maximize"} onclick={toggleMaximize}
-    >{#if maximized}<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1" aria-hidden="true"
-        ><rect x=".5" y="2.5" width="7" height="7"></rect><path d="M2.5 2.5V.5h7v7h-2"></path></svg
-      >{:else}<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.1" aria-hidden="true"
-        ><rect x=".5" y=".5" width="9" height="9"></rect></svg
-      >{/if}</button
   >
   <button type="button" class="wb close" aria-label="Close" onclick={close}
     ><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><path d="M0 0l10 10M10 0L0 10"></path></svg></button

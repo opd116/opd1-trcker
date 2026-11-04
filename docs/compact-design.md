@@ -8,7 +8,7 @@ Status: implementation for review, not a merged release. R205 and the newest blo
 - Local Barlow Semi Condensed 500/600/700 unifies names, captions and tabular metrics. Retained mono/code faces stay local. No new runtime dependencies or font CDN.
 - Canvas `#0C0B0C` lifts the preceding `#020202` slightly. Alternate rows `#191718`, roster/panels `#101010`, brand `#D63743`. Semantic rank/party/W/L colors are not repurposed.
 - Two five-player teams stack in one column. Alternate shading restarts at each team. Portraits 36px; current/peak icons equally 32px. Win/KD/HS share fixed column centers and baselines.
-- Flexible 48–80px rows consume excess bottom space, leaving roughly 16px at supported window heights. Default 700×860, minimum 680×760; large windows remain usable. Lists/profiles may scroll, normal ten-player Live does not need to.
+- Flexible 48–80px rows consume excess bottom space, leaving roughly 16px at supported window heights. Fixed 700×860 (R212: not resizable or maximizable, no Maximize button); the 680×760 viewport stays tested as the tightest case. Lists/profiles may scroll, normal ten-player Live does not need to.
 - Image saturation 1.22 affects artwork, not portrait borders, text or page backgrounds. Self ownership rail stays red; detected parties retain confirmed/likely distinction.
 
 ## Navigation and information

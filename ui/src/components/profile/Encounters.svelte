@@ -1,5 +1,5 @@
 <!--
-  Stored competitive matches with the user (prototype 1030–1048): map, the user's result, `Same team` / `Against you`,
+  Stored competitive matches with the user (R209 compact half-width panel): map, the user's result, `Same team` / `Against you`,
   the date (exact in the tooltip), both players' agent + rank + score, a chevron. A row opens the scoreboard from the
   user's side, focused on this player. None stored: one line across both columns ([C]: the prototype's `noEncText`).
 -->
@@ -59,7 +59,7 @@
         {#if e.mapId}<img {@attach retryImg} class="map" src={assetUrl("mapList", e.mapId)} alt="" />{:else}<span class="map"></span>{/if}
         <div class="mid">
           <div class="l1">
-            <span class="mn">{#if e.map === undefined}<Skel w={60} h={12} />{:else}{e.map ?? "—"}{/if}</span>
+            <span class="mn" data-ellipsis>{#if e.map === undefined}<Skel w={60} h={12} />{:else}{e.map ?? "—"}{/if}</span>
             <span class="res" style:background={e.resStyle.bg} style:color={e.resStyle.fg}>{e.res}</span>
           </div>
           <div class="l2">
@@ -97,7 +97,7 @@
 
   .row {
     display: grid;
-    grid-template-columns: 64px minmax(0, 1fr) auto 8px;
+    grid-template-columns: 96px minmax(0, 1fr) auto 8px;
     column-gap: 12px;
     align-items: center;
     padding: 10px 12px;
@@ -131,8 +131,8 @@
   }
 
   .map {
-    width: 64px;
-    height: 40px;
+    width: 96px;
+    height: 54px;
     object-fit: cover;
     border-radius: 5px;
     display: block;
@@ -255,4 +255,19 @@
     text-align: center;
     margin-top: 9px;
   }
+
+  .card { flex: none; }
+  .row:nth-child(even) { background: var(--surface); }
+  .row:hover { background: var(--row-hover); }
+
+  /* R209: a compact half-width section alongside Top teammates, not a full-width strip. */
+  .row{grid-template-columns:48px minmax(0,1fr) 8px;gap:8px;padding:10px}
+  .map{width:48px;height:42px;grid-column:1;grid-row:1}
+  .mid{grid-column:2;grid-row:1;gap:5px}
+  .mn{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;line-height:18px}
+  .l1{gap:6px}.res{flex:none}
+  .l2{flex-wrap:wrap;gap:5px}
+  .who{grid-column:1 / 3;grid-row:2;justify-content:center;align-items:center}
+  .side{flex-direction:row;align-items:center;gap:5px}.ag{width:24px;height:24px}
+  .join{margin-top:0}.row>svg{grid-column:3;grid-row:1 / 3}
 </style>

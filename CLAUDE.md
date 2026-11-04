@@ -9,9 +9,20 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Asset lookup table: `docs/refs/valorant-api-assets.md`
 - Historical implementation plan (not a current task list): `docs/plan.md`
 - Current session status and known failures: `docs/handoff.md`
-- Available visual references: `docs/design-spec.md`, current `ui/src/` Svelte/CSS and `ui/tests/baselines/`. The original external design handoff is not part of a fresh checkout and is no longer a required dependency (user, 2026-10-29). Preserve the implemented v2 design; ask for a new reference only when the requested visual change actually needs one.
+- Available visual references: current `ui/src/` Svelte/CSS and `ui/tests/baselines/`. The original external design handoff is not part of a fresh checkout and is no longer a required dependency (user, 2026-10-29). The approved compact prototype is the current shell (R205, user 2026-11-03; see `docs/compact-design.md`); the v2 sections of `docs/design-spec.md` and the existing `ui/tests/baselines/` are historical references, not goldens to restore or regenerate. Ask for a new reference only when the requested visual change actually needs one.
 - Precedence: newer dated user decisions in `docs/requirements-raw.md` beat older rules. Read the relevant ruling in `docs/DECISIONS.md`; historical plans do not override current instructions. Keep these rules updated when a decision changes.
-- Build spec: `docs/design-spec.md`; use the latest v2 sections and current regression baselines. Older v8 sections describe history, not instructions to restore the old UI. Preserve Hidden names, Smart data and Hard limits when changing visuals.
+- Build spec: `docs/compact-design.md` (R205) for the current shell; the v2 sections of `docs/design-spec.md` and the existing regression baselines are historical, not approved goldens. Older v8 sections describe history, not instructions to restore the old UI. Preserve Hidden names, Smart data and Hard limits when changing visuals.
+
+### Decision log
+| ID | Date | Status | Core ruling |
+|---|---|---|---|
+| R205 | 2026-11-03 | active | Compact redesign prototype integration, 700×860 default / 680×760 min, Glance 420×420 |
+| R206 | 2026-11-04 | active | Remove pin/always-on-top entirely; label Peak and point current-gap downward |
+| R207 | 2026-11-04 | superseded | Peak act-age subtitle; restored party brackets; initial metric color tables |
+| R208 | 2026-11-04 | active | Correct party reference: rounded vertical spine with small arrows into portraits |
+| R209 | 2026-11-04 | superseded (partial) | Solid party strokes; wider white thresholds; compact profile section order |
+| R210 | 2026-11-04 | active | Exact 6 metric colors & 5 continuous threshold arrays; Profile single vertical scroll (no 340px cap/scroll in RecentTable); remove grid-row gaps below Top teammates; unified .mlabel headings; review NSIS installer authorized (no auto-install/merge) |
+
 
 ## Working with the user
 
@@ -19,7 +30,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - The user tests on their Windows PC with VALORANT. Claude works on a Linux VPS with no game client. Anything touching the real Riot client is verified by the user. Ask for their result or the in-app "copy log" output (Ctrl+Shift+L). Ctrl+Shift+D writes the redacted raw answers to a folder, now with `log.txt` and the error bodies (`<endpoint>.error.json`) of failed calls (R158).
 - Use available tools and skills when helpful; no specific plugin or skill is required to open or maintain this project.
 - Update `docs/handoff.md` directly before context gets long and at session end. Record the commit, work done, verification, known failures and next task. Keep `docs/requirements-raw.md` updated with new user decisions.
-- Resolve routine typography and spacing from the existing v2 tokens and components. Ask the user only about product choices or visual changes that need a decision.
+- Resolve routine typography and spacing from the existing compact tokens and components. Ask the user only about product choices or visual changes that need a decision.
 - Every step is committed with a clear conventional message and pushed to the private GitHub repo right away (2026-09-29). Commit explicit paths only (`git commit -m "…" -- <paths>`); never commit temporary design exports or root `*.zip`.
 - Repo files: README.md, CHANGELOG.md (Keep a Changelog; the release section is filled at release from `git log`), docs/ARCHITECTURE.md, docs/DECISIONS.md, docs/design-spec.md, AGENTS.md, LICENSE (proprietary), THIRD-PARTY-NOTICES.md, .editorconfig, .gitattributes.
 
@@ -44,18 +55,18 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 
 ## Window
 
-- (R190, user 2026-10-22) No native frame: the app's own title bar has Pin (always on top), Minimize, Maximize and Close. Default **1280×800**, minimum **1180×760**, resizable and maximizable. Glance mode shrinks it to a 420px-wide column on top.
-- (R193) Close goes to the tray when Settings' "Close to tray" is on (default), otherwise it quits. "Launch with Windows" (default on) starts minimized in the tray. "Saved player in my match" sends a Windows notification.
+- (R190; compact geometry R205; pin removal R206, user 2026-11-04) No native frame: the app's own title bar has Minimize, Maximize and Close, with no pin, connection/status pill or own-rank control. **Always-on-top is removed entirely**, including Glance and settings. Default **700×860**, minimum **680×760**, resizable and maximizable. Glance mode shrinks it to a **420×420** square and restores the previous normal geometry on exit without forcing it over other windows.
+- (R193) Close goes to the tray when Settings' "Close to tray" is on (default), otherwise it quits. "Launch with Windows" (default on) starts minimized in the tray. "Saved player in my match" sends a Windows notification. (R205: Settings' UI is postponed, so those toggles are not shown yet; the stored defaults above still apply.)
 
 ## Screens
 
-**Nav rail (R189):** Live, Saved, History, Comp, Skins, ASCII, Settings, About. The v2 implementation replaces the old standalone Details/My Stats pages with a profile drawer, a History scoreboard and Competitive stats.
+**Nav rail (R189; compact grouping R205, user 2026-11-03):** Live · Records (History, Saved players, Competitive) · Tools (Skins, ASCII) · Settings · About. Records and Tools are disclosures that open on click and close on Escape, returning focus to their trigger; Settings is intentionally empty (page title only) for now. The profile drawer and History scoreboard replace the old standalone Details/My Stats pages.
 
 - Live includes waiting/last-match state, party/lobby, Agent Select and In Game views, connection/error states and the post-match recap.
 - Agent Select brings the user to Live; the recap remains until the next queue. Do not restore the old rule that immediately returned to Lobby with no recap.
 - The profile drawer opens from player rows; matches open the scoreboard with a return path to their source.
-- Saved players and private notes, History, Competitive stats, Skins, ASCII, Settings and About are implemented already.
-- For precise layouts and stage behavior read the current screen components, tests and latest v2 spec. No scrolling in normal Live views; profile and list pages may scroll.
+- Saved players and private notes, History, Competitive stats, Skins, ASCII, Settings (kept reachable but intentionally empty for now) and About are implemented already.
+- For precise layouts and stage behavior read the current screen components, tests and `docs/compact-design.md`. No scrolling in normal Live views; profile and list pages may scroll.
 
 **Player card fields:**
 - Player Card image
@@ -77,7 +88,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 - Eye-off icon + dotted-underlined name + tag = hidden player's name remembered by the DB, from any source (R145). The tooltip names the source: `Hidden name · known from your match` or `Hidden name · known from a past match`, each + map · date; `Hidden name · seen before` + date only.
 - Eye-off icon + italic agent name = hidden name. Tooltip `Hidden name`.
 
-**Player profile data** (shown in the v2 profile drawer; scrolling allowed; retain these data scopes, not the old standalone page layout):
+**Player profile data** (shown in the profile drawer; scrolling allowed; retain these data scopes, not the old standalone page layout):
 - Close returns to the underlying screen; scoreboard Back returns to its source.
 - **Recent Competitive Matches:** 3 shown, each with map image and result. **Show More** reveals more, up to 8 total, newest first. No count picker.
 - **Top 3 Teammates** for the current act, with full names and shared match count. Computed from the last 20 current-act comp matches plus any older matches already in the DB.
@@ -96,21 +107,23 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 7. Win rate by weekday and by time of day
 8. Auto insights (best/worst map, time of day, weekday vs weekend, RR economy, last 7 days)
 
-Match History, Settings, Saved players with notes, Skins, ASCII and About are built in v2 (R189).
+Match History, Settings (empty for now), Saved players with notes, Skins, ASCII and About are built and being reworked for the compact shell (R189, R205).
 
 ## Design rules
 
-- English UI only. Dark, calm, low-glare palette with one accent. No bright white surfaces, and body text is off-white.
-- Follow the v2 design's type scale exactly (its uppercase Geist Mono micro-labels are 10.5px and its badges 9–10px; body text stays ≥12px; tabular numerals for stats; R189). Never shrink fonts to fit. Sizes follow the design.
+- English UI only. Dark, calm, low-glare palette with one red accent (`#d63743` on a lifted near-black canvas; R205). No bright white surfaces, and body text is off-white.
+- (R207–R210, 2026-11-04) Live/profile K/D, HS and Win rate use the six colors (0: `#D32F2F`, 1: `#FF5252`, 2: `#FF9100`, 3: `#FFFFFF`, 4: `#69E08A`, 5: `#00C853`) and **R210 continuous lower-bound thresholds** in the latest requirements block (5-match Live KD `[0.72, 0.79, 0.87, 1.15, 1.39]` & HS `[0.15, 0.175, 0.205, 0.275, 0.33]`; 20-current-act-match profile KD `[0.81, 0.86, 0.92, 1.10, 1.24]` & HS `[0.16, 0.185, 0.21, 0.27, 0.32]`; full-act WR `[0.36, 0.40, 0.44, 0.56, 0.64]`). Raw values determine band; value 0 maps to color 0 (`#D32F2F`); KD > 1 unbounded; negative/invalid maps to neutral. Peak shows its name and act-age subtitle instead of division cells. Party connectors follow the user's supplied R208 image: rounded spine with small arrows into portraits, independent group colors, no stray boxes. **R209 makes all Live connectors/portrait frames solid**, likely or confirmed; confidence remains in data/tooltips. R208 corrects the assistant's mistaken R207 no-arrow interpretation; do not redesign beyond this reference.
+- (R209, R210) Profile sections after rank/stats prioritize Encounters when present, then Top teammates; with no encounters, Top teammates is first. Encounters and Recent matches are compact half-width panels like Top teammates/Map performance, not full-width strips. **R210 eliminates internal Recent matches scrolling and 340px height cap** in favor of a single profile vertical scroll flow while removing grid spacing gaps below Top teammates, unifying section headings (`.mlabel`), and keeping all six recent matches in normal flow. Preserve scoreboard/privacy rules.
+- Follow the compact design's type scale exactly (Barlow Semi Condensed 500/600/700 unifies names, captions and tabular metrics; Geist Mono stays for code and micro-labels; body text stays ≥12px; tabular numerals for stats; R189, R205). Never shrink fonts to fit. Sizes follow the design.
 - **No text may overlap or crowd numbers.** Every label/value pair gets its own space and a consistent alignment.
-- **No status text or badges** beyond what the v2 design shows (R191: the connection pill, the lost banner, the error and waiting screens, the queue timer). No "BETA", "Saved data", "refresh unavailable".
+- **No status text or badges** beyond what the design shows (R191: the lost banner, the error and waiting screens, the queue timer; a status dot remains only in Glance). The title bar no longer carries the connection pill (R205). No "BETA", "Saved data", "refresh unavailable".
 - Loading uses neutral skeleton shapes with no text. Missing values show `—`.
 - Put extra detail behind hover tooltips instead of adding visible text.
 - Stat scope is not printed on screen (no "Last 5 comp" / "This Act" headings). Each stat's tooltip names its scope: K/D and HS% → "Last 5 competitive"; Win% → "This act · W · L · games"; last 5 → per-match tooltip. The Peak label `This Act` stays.
 - The `docs/refs/` screenshots are the *content* reference only. The user dislikes their fonts and number/label arrangement.
-- **Verify every screen before showing the user.** Render it at 1280×800, 1180×760 and (Live) Glance 420 wide in a headless browser, screenshot it, and check for overlap, clipping, and unwanted scrollbars.
+- **Verify every screen before showing the user.** Render it at 700×860, 680×760 and (Live) Glance 420×420 in a headless browser, screenshot it, and check for overlap, clipping, and unwanted scrollbars.
 - Fonts are bundled locally (latin-subset woff2, only weights used). No runtime requests to Google Fonts or any CDN; images go through the Rust img cache (CSP stays strict).
-- The v2 design has one theme (violet accent `#9d8cff`, Barlow / Saira Condensed / Geist Mono); the v8 options are gone (R189).
+- The compact design has one theme (red accent `#d63743`, Barlow Semi Condensed 500/600/700 with Geist Mono for code); the v2 violet accent and the v8 options are gone (R189, R205).
 
 ## Hidden names (incognito)
 

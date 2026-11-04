@@ -1436,6 +1436,72 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
 - **Cost:** one linear scan per diagnostic string; no dependency, no new capture, no real credentials or logs used in tests.
 - **Status:** active
 
+### R205 — Approved compact prototype replaces the v2 visual shell on a review branch
+
+- **What:** User authorization, 2026-11-03, after reading session `ses_e6488195fffd0EFwUj8p5Jtr8U` («تشغيل الواجهة التجريبية كنافذة تطبيق»). Preserve that prototype's current competition-roster identity rather than restarting the design. Bring it to the real app with no mock release data. Default 700×860, minimum 680×760; keep resizing and existing Glance/native controls. Lift the near-black canvas slightly; retain subdued alternate rows, red ownership/actions and semantic party/rank colors. Replace the own-rank chrome item with no duplicate. Group History/Saved/Competitive under Records and Skins/ASCII under Tools; keep Settings reachable but intentionally without options for now. Rework every retained page and profile/scoreboard to fit. Live notes/game counts and visible smurf decoration stay absent; underlying data/functions remain.
+- **Peak:** Reversible layered transition, icon plus three connected cells replacing the peak division numeral. Fill 1/2/3 for the peak's actual division (Radiant fills all three); this is NOT the current-to-peak gap. The old draft plan's gap interpretation was not adopted because it would mislabel the rank's division. Empty cells are off-white, filled cells use peak-family color, and the full rank/act/dates remain accessible in the tooltip. Current keeps its separate numeric peak-gap marker. Missing/loading peak data stays missing/loading, never a fabricated peak. Respect OS reduced motion.
+- **Why:** Explicit current user request supersedes older visual-only/no-main-integration restrictions and R189/R190 visual geometry. Account/privacy/DB/read-only Riot rules and release guards still apply. Settings persistence/backend defaults are not deleted merely because its UI is postponed.
+- **Cost:** Existing v2 screenshots are historical and are not automatically regenerated to bless a new design. Functional/fit tests must migrate to the new DOM and sizes. This is a review branch, not a release; no merge, tag, installer install, or production-data reset. Immutable prototype restore points remain untouched.
+- **Status:** active, implementation on `feat/compact-redesign`; final review/merge remains the user's decision.
+
+### R206 — Remove always-on-top; label Peak and point its gap toward Current
+
+- **What:** User, 2026-11-04: remove the pin and always-on-top feature entirely, for normal and Glance windows. Remove its settings/runtime/contract surface while ignoring the obsolete key in older saved JSON; preserve other settings, SQLite data, tray/autostart and window geometry. In Peak view show the peak rank's name alongside its icon/connected division cells and a gap badge pointing toward the current rank (↓2 when current is two divisions lower). Current keeps its upward peak-gap badge. Missing/unranked/equal ranks do not invent a numeric comparison.
+- **Why:** Latest explicit user change supersedes the pin/onTop defaults in R193/R205 and the icon-only Peak presentation. The user likes the current colors/coordination; this is a focused modification, not a redesign. Statistics scopes are unchanged by the accompanying question.
+- **Cost:** Remove a setting/wire field compatibly and update contracts/regressions; old saved JSON may contain an ignored `onTop` key, without a database migration. Browser window previews cannot verify native topmost behavior. Previous test totals predate this removal and must be rerun.
+- **Status:** active, implementation on `feat/compact-redesign`; latest preview approval still required before native packaging, no merge authorized.
+
+### R207 — Peak act-age subtitle, frozen restored party brackets, explicit metric colors
+
+- **What:** User, 2026-11-04: replace Peak's three-cell bar with actual episode/act label + age since act end (e.g. `E9 A3 · 1y ago`), retaining the peak name/icon and downward current-gap from R206. Restore the rounded party connectors from before the added arrowheads and freeze that visual; keep likely/confirmed semantics, independent group colors, and enemy duo+duo / trio+duo support. Apply the exact six-band color tables in the latest `requirements-raw.md` block to Live 5-match K/D/HS, profile 20-current-act-match K/D/HS, and full-act WR on both. Unknown/invalid values remain neutral; real zero uses the lowest band; thresholds use raw, not rounded values. Preserve highlight-off behavior and unrelated metrics/pages.
+- **Why:** New explicit review feedback supersedes R205/R206's division-cell bar and R205 arrowhead addition. User approved the rest of the colors/layout, not a broader redesign or calculation change.
+- **Cost:** Migrate obsolete bar/arrowhead tests to assert act-age/restored connectors and exact boundary colors; do not regenerate historical screenshots. Party detection already supports distinct/transitive groups, so do not rewrite its algorithm to meet a visual request.
+- **Status:** active, implementation and preview verification pending; no installer/merge authorized.
+
+### R208 — User-supplied Party reference corrects the no-arrow interpretation
+
+- **What:** User, 2026-11-04, paused changes, supplied the Drake/Nova + Mara/Kilo crop, then explicitly resumed implementation. Match its rounded vertical connector and small right-pointing arrows into each portrait; remove stray dashed boxes, preserve separate group colors and duo/trio support. A trio's middle branch joins the same spine. Keep likely dashed / confirmed solid semantics and legible solid arrowheads.
+- **Why:** R207's wording about removing arrowheads was the assistant's **mistaken reference interpretation**, not the user's approved visual. This ruling supersedes that part only; Peak act-age and exact statistic colors remain unchanged.
+- **Scope:** CompactPlayerRow connector CSS and focused browser regressions; no backend detection, dependencies, geometry, data, installer or merge. User retracted the Full screen concern as browser zoom/maximization; compact geometry stays unchanged.
+- **Status:** implemented; 37 compact browser cases pass, including endpoint alignment, rounded elbows, no phantom border edges, separate groups and middle-member branch. Visual review completed at 700×860 and 680×760; final design approval remains with user.
+
+### R209 — Solid Party strokes, quieter numeric bands, compact profile section order
+
+- **What:** User explicitly approved connected Party strokes for both evidence states (including portrait frames), while retaining real confidence in data/tooltips. They approved the assistant's recommendation to widen white rather than desaturate all metric colors. Authoritative new six-band thresholds are in the latest R209 requirements block: white Live KD `[.85,1.30)`, profile KD `[.90,1.25)`, Live HS `[.17,.30)`, profile HS `[.18,.30)`, shared full-act WR `[.45,.60)`; other bands graded outside these ranges, exact hexes unchanged.
+- **Profile:** After rank/stats, Encounters first when present, then Top teammates; with no encounters, Top teammates comes first. Encounters and Recent matches use compact half-width sections like Top teammates / Map performance, not full-width strips. Preserve match details, all six recent rows (scrollable panel), self-only recent-match navigation and encounter scoreboard navigation.
+- **Supersedes:** R207 threshold tables and R208 dashed likely strokes only. Detection/confidence semantics, group colors, metric calculation scopes, unknown/zero/off rules, geometry and packaging approval gate remain intact.
+- **Status:** implemented; 691 UI units passed / 1 skipped, 42 compact acceptance cases passed before a final CSS headroom correction, latest focused profile/fit 48 passed / 1 pre-existing long-name underline failure at DPR 1.5. UI check/build green. Final full-suite verification delegated via the user's Anti-gravity workflow; no installer/merge approval.
+
+### R210 — Continuous metric thresholds, exact palette, unified profile flow, review installer authorization
+
+- **What:** Authoritative user update (2026-11-04) establishing:
+  - **Exact 6 Metric Colors:**
+    - 0: `#D32F2F` (dark red)
+    - 1: `#FF5252` (red)
+    - 2: `#FF9100` (orange)
+    - 3: `#FFFFFF` (white)
+    - 4: `#69E08A` (light green)
+    - 5: `#00C853` (strong green)
+  - **Five Continuous Lower-Bound Threshold Arrays:**
+    - `LIVE_KD_BANDS [0.72, 0.79, 0.87, 1.15, 1.39]`
+    - `LIVE_HS_BANDS [0.15, 0.175, 0.205, 0.275, 0.33]`
+    - `PROFILE_KD_BANDS [0.81, 0.86, 0.92, 1.10, 1.24]`
+    - `PROFILE_HS_BANDS [0.16, 0.185, 0.21, 0.27, 0.32]`
+    - `WR_BANDS [0.36, 0.40, 0.44, 0.56, 0.64]` (shared for Live and profile contexts).
+  - **Color Selection Rules:** Colors are evaluated strictly from RAW numerical values before rounding or string formatting. Continuous bands with inclusive lower bounds and exclusive upper bounds; value 0 maps to color 0 (`#D32F2F`); negative, null, undefined, NaN, Infinity, and HS/WR > 1 map to context-neutral; KD > 1 values remain valid without an upper cap.
+  - **Profile Layout Refinement:**
+    - Single main vertical scroll area for profile content (`ProfileDrawer.svelte`); eliminate Recent matches' internal scrolling and 340px height cap in `RecentTable.svelte`.
+    - All six recent matches remain displayed and reachable through profile vertical scroll.
+    - Remove artificial grid-row height gaps below Top teammates in normal viewports.
+    - Section ordering: When encounters exist, Encounters displays first followed by Top teammates; when encounters are absent/empty, the Encounters section is omitted and Top teammates becomes first priority.
+    - Standardize section headings across profile components (`Encounters`, `Mates`, `RecentTable`, `Maps`) using unified `.mlabel` placement, typography, and spacing.
+    - Compact half-width sections render side-by-side at normal widths with narrow-container (<600px) single-column fallback.
+    - RecentTable map area retains at least 48px headroom with no clipped descenders.
+  - **Windows NSIS Review Installer Authorization:** User authorizes building a review installer (`OPD1-TRCKER-<version>-compact-review-<shortsha>-setup.exe`) delivered directly to the Desktop (`C:\Users\Administrator\Desktop`) with production packaging limits (<= 10 MiB, no DEV fixtures, no CDN fonts, SHA-256 verified, unsigned, no auto-install/execution) alongside a 10-section English review report and Arabic conclusion.
+- **Supersedes:** R209 metric palette and thresholds, internal Recent matches scrolling/340px cap and grid spacing gaps, and the previous prohibition on building a review installer.
+- **Preserves:** Privacy rules (hidden player name handling, PUUID keys, no live name-service calls), calculation scopes (Live KD/HS last 5 Competitive, Profile KD/HS last 20 current-act Competitive, WR/Record full current-act), Party rules (solid frames, connectors, arrows, distinct group colors), window geometry (700×860 default, 680×760 minimum, Glance 420×420, DPR 1.5 remembered underline repair), and strict merge prohibition (no merge to main, no push to main, no auto-merge; review branch only).
+- **Status:** active, implementation on `feat/compact-redesign`; review installer delivered to Desktop for inspection, no merge authorized.
+
 ## User decisions index
 
 Each row is a dated block of `docs/requirements-raw.md`, in file order. That file is the source of truth for the user's wishes; never reword it, only append supersession markers.
@@ -1454,3 +1520,4 @@ Each row is a dated block of `docs/requirements-raw.md`, in file order. That fil
 | 2026-09-28 | `ملاحظات المستخدم على v8` | Remove the printed scope headings (tooltip only); numbers and last-5 results look off; the palette looks AI-made; the user said the design pleases them (to confirm). |
 | 2026-09-29 | `التصميم المعتمد + قرارات 2026-09-29` | Claude Design v8 is the approved design and outranks older visual rules; build scope is Live (one page), Player Details and Match Details; the six options ship at their defaults; smart party detection unchanged; migration 1 could be amended (R31, later frozen by R89); "Delete app data" in the uninstaller may wipe the DB; last 5 newest on the right; commit and push every step; the standard repo files. Claude's calls (R71, My Stats maths) and the user's answers (`Lv —`, lock-only, own-history backfill, Lobby card size) are on the last lines, and the final line lists the design calls R74 to R86. Later 2026-09-29 line: Player Details hero K/D and HS% from the last 20 act matches (R116). Later 2026-09-30 lines: names Riot returns for matches the user did not play may show off the live screen (R143); a hidden player's name shows in the remembered style from any source the DB knows (R145); name-service may be asked off the live stages (R150); names are captured after each match because the game's own Match History shows them; Encounters count competitive matches only (R156); friends' names come like everyone else's (R157, withdrawn); when the rank request fails the rank shows from the player's matches (R154); build the requests the way Scout does (R159). Later line, 2026-10-01: after testing, "there is still a delay or a bug in the requests"; holds per family, full Retry-After, mmr never blocks (R160). Later line, 2026-10-03: v0.3.0 = fixes plus My Stats (R168). Later line, 2026-10-04: v0.3.0 tested fine; v0.4.0 = the brief plus five picked features (encounter tooltip, Match History, Settings as a fourth tab whose choices survive updates, hide hotkey, notes) (R177). Same day: the rank carries over into a new act (R188); then anything about the new act is postponed for now (R188, parked). |
 | 2026-10-22 | `قرارات تصميم v2` | Implement the new TrackerApp design on the real app (R189); custom title bar, resizable 1280×800 / min 1180×760, Glance (R190); the design's status text wins over "No status text" (R191); full skins collection (R192); tray, autostart and notification plugins approved (R193). |
+| 2026-11-04 | `إعادة توزيع أقسام ملف اللاعب، نطاقات ألوان الإحصائيات، وترخيص حزمة المراجعة (R210)` | Exact six metric colors (0: #D32F2F, 1: #FF5252, 2: #FF9100, 3: #FFFFFF, 4: #69E08A, 5: #00C853) and five continuous threshold arrays (R210); ProfileDrawer single vertical scroll with no RecentTable internal scroll or 340px cap; removed grid-row gap below Top teammates; unified .mlabel headings; review NSIS installer authorized for Desktop delivery (<= 10 MiB, no auto-install); strict merge prohibition preserved. |

@@ -141,11 +141,61 @@ describe("row fields", () => {
     expect(r.statsLoading).toBe(false);
   });
 
-  it("highlight colours follow the setting", () => {
+  it("highlight colours follow the setting: the 5-match bands when on, the row's neutral when off", () => {
     const on = rowView(card(), 0, [card()], ctx());
     const off = rowView(card(), 0, [card()], ctx({ settings: { highlight: false, smurf: "cautious" } }));
-    expect(on.wr && on.wr.color).toBe("#ffffff");
+    expect(on.wr && on.wr.color).toBe("#69E08A"); // 0.61 win rate over the full act in [0.56, 0.64)
+    expect(on.kd && on.kd.color).toBe("#69E08A"); // 1.31 K/D over the last 5 in [1.15, 1.39)
+    expect(on.hs && on.hs.color).toBe("#FFFFFF"); // 27% is in [0.205, 0.275)
     expect(off.wr && off.wr.color).toBe("#d6d7da");
+    expect(off.kd && off.kd.color).toBe("#d6d7da");
+    expect(off.hs && off.hs.color).toBe("#d6d7da");
+  });
+
+  it("row stat colours take the exact 5-match bands from the raw values", () => {
+    const kd = (v: number | null) => rowView(card({ kd: v }), 0, [card()], ctx()).kd?.color;
+    expect(kd(0.719)).toBe("#D32F2F");
+    expect(kd(0.72)).toBe("#FF5252");
+    expect(kd(0.79)).toBe("#FF9100");
+    expect(kd(0.87)).toBe("#FFFFFF");
+    expect(kd(1.15)).toBe("#69E08A");
+    expect(kd(1.39)).toBe("#00C853");
+    expect(kd(2.5)).toBe("#00C853"); // a K/D is unbounded above
+    const hs = (v: number | null) => rowView(card({ hsPct: v }), 0, [card()], ctx()).hs?.color;
+    expect(hs(0.149)).toBe("#D32F2F");
+    expect(hs(0.15)).toBe("#FF5252");
+    expect(hs(0.175)).toBe("#FF9100");
+    expect(hs(0.205)).toBe("#FFFFFF");
+    expect(hs(0.275)).toBe("#69E08A");
+    expect(hs(0.33)).toBe("#00C853");
+  });
+
+  it("row stats never colour an unknown value: pending is the neutral, zero is the lowest red", () => {
+    expect(rowView(card({ kd: null }), 0, [card()], ctx()).kd).toMatchObject({ text: "—", color: "#d6d7da" });
+    expect(rowView(card({ hsPct: null }), 0, [card()], ctx()).hs).toMatchObject({ text: "—", color: "#d6d7da" });
+    expect(rowView(card({ hsPct: 1.2 }), 0, [card()], ctx()).hs?.color).toBe("#d6d7da"); // fraction above 1
+    expect(rowView(card({ kd: 0 }), 0, [card()], ctx()).kd?.color).toBe("#D32F2F");
+    expect(rowView(card({ kd: undefined }), 0, [card()], ctx()).kd).toBeUndefined(); // still loading: no cell
+  });
+
+  it("row stat colours take raw unrounded numerical values at boundaries", () => {
+    // 0.719 rounds to 0.72 for display, but raw color is dark red #D32F2F
+    const r719 = rowView(card({ kd: 0.719 }), 0, [card()], ctx());
+    expect(r719.kd?.text).toBe("0.72");
+    expect(r719.kd?.color).toBe("#D32F2F");
+
+    const r720 = rowView(card({ kd: 0.720 }), 0, [card()], ctx());
+    expect(r720.kd?.text).toBe("0.72");
+    expect(r720.kd?.color).toBe("#FF5252");
+
+    // 0.359 rounds to 36% for display, but raw winrate is dark red #D32F2F
+    const wr359 = rowView(card({ actWinrate: 0.359 }), 0, [card()], ctx());
+    expect(wr359.wr?.text).toBe("36%");
+    expect(wr359.wr?.color).toBe("#D32F2F");
+
+    const wr360 = rowView(card({ actWinrate: 0.360 }), 0, [card()], ctx());
+    expect(wr360.wr?.text).toBe("36%");
+    expect(wr360.wr?.color).toBe("#FF5252");
   });
 
   it("picking: no agent before the lock", () => {

@@ -1,16 +1,16 @@
 <!--
-  RECENT MATCHES (prototype 1087–1126): the newest 6 stored competitive matches. Result + score, map + when (exact in
-  the tooltip), agent, K / D / A, the rank during the match, RR, and IN YOUR MATCH: players of the current live match
-  who were in that game (`profile_extras.liveMates`, drawn from their live cards). The user's own rows open the
+  RECENT MATCHES (R209 compact half-width panel): the newest 6 stored competitive matches. Result + score, map + when (exact in
+  the tooltip), agent, K / D / A, and the rank during the match. The recent-match RR and IN YOUR MATCH columns the
+  owner screenshot removed do not show (their data stays available in `profile_extras`). The user's own rows open the
   scoreboard; another player's are not links.
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
   import { rowKeydown } from "../../lib/details";
   import { retryImg } from "../../lib/imgRetry";
-  import { liveMateChips, RECENT_ROWS, recentRow } from "../../lib/profile";
+  import { RECENT_ROWS, recentRow } from "../../lib/profile";
   import { openMatch } from "../../lib/router.svelte";
-  import { live, meta, now } from "../../lib/stores";
+  import { meta, now } from "../../lib/stores";
   import { tip } from "../../lib/tooltip.svelte";
   import type { MatchSummary, ProfileExtras } from "../../lib/types";
   import Skel from "../Skel.svelte";
@@ -18,19 +18,18 @@
   interface Props {
     /** null while the details load. */
     rows: MatchSummary[] | null;
-    /** undefined while pending, null when it failed. */
+    /**
+     * Accepted from the drawer, but the IN YOUR MATCH column that consumed it is owner-removed, so nothing here
+     * renders it yet.
+     */
     extras: ProfileExtras | null | undefined;
     isSelf: boolean;
     puuid: string;
   }
 
-  let { rows, extras, isSelf, puuid }: Props = $props();
+  let { rows, isSelf, puuid }: Props = $props();
 
-  const views = $derived(
-    rows
-      ? rows.slice(0, RECENT_ROWS).map((m) => ({ ...recentRow(m, $meta, $now), with: liveMateChips(m.matchId, extras ?? null, $live, puuid, $meta) }))
-      : null,
-  );
+  const views = $derived(rows ? rows.slice(0, RECENT_ROWS).map((m) => recentRow(m, $meta, $now)) : null);
   const open = (matchId: string) => openMatch(matchId, { from: "profile", focusPuuid: puuid });
 </script>
 
@@ -41,40 +40,26 @@
   <div class="c-map">
     {#if m.mapId}<img {@attach retryImg} class="map" src={assetUrl("mapList", m.mapId)} alt="" />{:else}<span class="map"></span>{/if}
     <div class="mcol">
-      <span class="mn">{#if m.map === undefined}<Skel w={56} h={12} />{:else}{m.map ?? "—"}{/if}</span>
+      <span class="mn" data-ellipsis>{#if m.map === undefined}<Skel w={56} h={12} />{:else}{m.map ?? "—"}{/if}</span>
       <span class="when" use:tip={m.whenTip}>{m.when}</span>
     </div>
   </div>
-  {#if m.agentId}<img {@attach retryImg} class="ag" src={assetUrl("agent", m.agentId)} alt={m.agent} use:tip={m.agent} />{:else}<span class="ag"></span>{/if}
-  <span class="kda">{m.kda}</span>
+  <div class="performance">
+    {#if m.agentId}<img {@attach retryImg} class="ag" src={assetUrl("agent", m.agentId)} alt={m.agent} use:tip={m.agent} />{:else}<span class="ag"></span>{/if}
+    <span class="kda" use:tip={'K / D / A'}>{m.kda}</span>
+  </div>
   <div class="c-rank" use:tip={m.rankName}>
     {#if m.tier !== null}<img {@attach retryImg} src={assetUrl("tier", m.tier >= 3 ? m.tier : 0)} alt="" />{/if}<span style:color={m.rankColor}>{m.rankShort}</span>
-  </div>
-  <span class="rr" style:color={m.rrColor}>{m.rr}</span>
-  <div class="c-with">
-    {#each m.with as w (w.puuid)}
-      <span class="wchip" use:tip={w.tip}
-        >{#if w.agentId}<img {@attach retryImg} src={assetUrl("agent", w.agentId)} alt="" />{:else}<span class="wx"></span>{/if}<span
-          class={["wn", w.hidden && "hid"]} data-ellipsis>{w.name}</span
-        ></span
-      >
-    {/each}
   </div>
 {/snippet}
 
 <div class="rm">
-  <span class="lbl">RECENT MATCHES</span>
+  <span class="lbl mlabel">RECENT MATCHES</span>
   <div class="card">
-    <div class="row head">
-      <span>RESULT</span><span>MAP</span><span>AGENT</span><span>K / D / A</span><span>RANK</span><span class="r">RR</span><span
-        class="help"
-        use:tip={"Players from your current live match who were in this game"}>IN YOUR MATCH</span
-      ><span></span>
-    </div>
     {#if views === null}
       {#each [0, 1, 2] as i (i)}
         <div class="row" aria-hidden="true">
-          <Skel w={70} h={20} block /><Skel w={140} h={28} r={4} block /><Skel w={28} h={28} r={5} block /><Skel w={70} h={13} block /><Skel w={70} h={20} block /><span></span><span></span><span></span>
+          <Skel w={54} h={20} block /><Skel w={90} h={28} r={4} block /><Skel w={50} h={20} block /><span></span>
         </div>
       {/each}
     {:else if views.length === 0}
@@ -107,7 +92,8 @@
     gap: 10px;
   }
 
-  .lbl {
+  .lbl,
+  .mlabel {
     font: 500 10.5px/1 var(--font-mono);
     letter-spacing: 0.06em;
     color: var(--text-label);
@@ -122,34 +108,17 @@
 
   .row {
     display: grid;
-    grid-template-columns: 82px minmax(0, 1fr) 28px 92px 104px 40px minmax(0, 1.2fr) 10px;
-    column-gap: 12px;
+     grid-template-columns: 62px minmax(0, 1fr) 62px 8px;
+    column-gap: 6px;
     align-items: center;
-    height: 50px;
-    padding: 0 14px;
+    min-height: 58px;
+    padding: 0 10px;
     border-bottom: 1px solid var(--line-soft);
     color: var(--text-disabled);
   }
 
   .row:last-child {
     border-bottom: none;
-  }
-
-  .row.head {
-    height: 32px;
-    background: var(--card-head);
-    border-bottom: 1px solid var(--line);
-    font: 500 10.5px/1 var(--font-mono);
-    letter-spacing: 0.06em;
-    color: var(--text-label);
-  }
-
-  .head .r {
-    text-align: right;
-  }
-
-  .help {
-    cursor: help;
   }
 
   .row.link {
@@ -169,7 +138,7 @@
   .c-res {
     display: flex;
     align-items: center;
-    gap: 9px;
+    gap: 5px;
   }
 
   .res {
@@ -193,13 +162,19 @@
   .c-map {
     display: flex;
     align-items: center;
-    gap: 10px;
+    position: relative;
+    height: 48px;
+    min-height: 48px;
+    overflow: hidden;
+    border-radius: 4px;
     min-width: 0;
   }
 
   .map {
-    width: 56px;
-    height: 28px;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     object-fit: cover;
     border-radius: 4px;
     display: block;
@@ -208,6 +183,12 @@
   }
 
   .mcol {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    justify-content: center;
+    padding: 5px 7px;
+    background: linear-gradient(90deg, rgba(12, 11, 12, .9), rgba(12, 11, 12, .4));
     display: flex;
     flex-direction: column;
     gap: 5px;
@@ -215,13 +196,13 @@
   }
 
   .mn {
-    font: 600 13.5px/1 var(--font);
+    font: 600 13.5px/18px var(--font);
     color: var(--text);
   }
 
   .when {
     font: 500 12px/1 var(--font);
-    color: var(--text-label);
+    color: var(--text-2);
     white-space: nowrap;
   }
 
@@ -243,66 +224,29 @@
   .c-rank {
     display: flex;
     align-items: center;
-    gap: 7px;
+    gap: 3px;
     min-width: 0;
     font: 700 13.5px/1 var(--font);
     white-space: nowrap;
   }
 
   .c-rank img {
-    width: 22px;
-    height: 22px;
+    width: 18px;
+    height: 18px;
     display: block;
     flex: none;
   }
 
-  .rr {
-    font: 700 15px/1 var(--font);
-    text-align: right;
-    font-variant-numeric: tabular-nums;
-  }
-
-  .c-with {
-    display: flex;
-    gap: 5px;
-    min-width: 0;
-    overflow: hidden;
-  }
-
-  .wchip {
-    flex: 0 1 auto;
-    min-width: 0;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 2px 8px 2px 2px;
-    border-radius: 5px;
-    background: var(--button);
-    border: 1px solid var(--line-control);
-    cursor: default;
-  }
-
-  .wchip img,
-  .wx {
-    width: 22px;
-    height: 22px;
-    border-radius: 4px;
-    display: block;
-    flex: none;
-    background: var(--skel);
-  }
-
-  .wn {
-    min-width: 0;
-    font: 600 12.5px/1 var(--font);
-    color: var(--text);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-
-  .wn.hid {
-    font-style: italic;
-    color: var(--text-muted);
-  }
+  .row:nth-child(even) { background-color: var(--surface); }
+  .row.link:hover { background-color: var(--row-hover); }
+  .mn { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .kda { text-align: center; }
+  /* R210: compact panel, natural vertical flow without internal scrolling, map with 48px headroom */
+  .row{row-gap:7px;padding:8px 10px}
+  .c-map{grid-column:1 / -1;grid-row:1;height:48px;min-height:48px}
+  .c-res{grid-column:1;grid-row:2}
+  .performance{grid-column:2;grid-row:2;display:flex;align-items:center;gap:5px;min-width:0}
+  .performance .ag{width:22px;height:22px;flex:none}
+  .c-rank{grid-column:3;grid-row:2}
+  .row>svg,.row>span:last-child{grid-column:4;grid-row:2}
 </style>

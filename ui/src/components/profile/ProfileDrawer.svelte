@@ -10,13 +10,12 @@
 <script lang="ts">
   import { tick } from "svelte";
   import { profileExtras } from "../../lib/api";
-  import { dismissSmurf, isSaved, marks, NOTE_MAX_CHARS, noteOf, setNote, settings, toggleSaved } from "../../lib/appdata.svelte";
+  import { isSaved, marks, NOTE_MAX_CHARS, noteOf, setNote, settings, toggleSaved } from "../../lib/appdata.svelte";
   import { assetUrl } from "../../lib/assets";
   import { retryBg, retryImg } from "../../lib/imgRetry";
   import { agentName } from "../../lib/meta";
   import { nameView, partyChip, statCells } from "../../lib/profile";
   import { closeProfile, go } from "../../lib/router.svelte";
-  import { smurfSignal } from "../../lib/smurf";
   import { live, meta, myStatsForSelf, openDetails } from "../../lib/stores";
   import { tip } from "../../lib/tooltip.svelte";
   import type { PlayerCard, ProfileExtras } from "../../lib/types";
@@ -29,7 +28,6 @@
   import Mates from "./Mates.svelte";
   import RankCard from "./RankCard.svelte";
   import RecentTable from "./RecentTable.svelte";
-  import SmurfPanel from "./SmurfPanel.svelte";
 
   let { puuid }: { puuid: string } = $props();
 
@@ -49,9 +47,6 @@
     return { agent: agent || null, level: lv, remembered: nv?.style === "remembered" };
   });
   const party = $derived(liveCard && inMatch ? partyChip(liveCard, $live, $meta) : null);
-  const smurf = $derived(
-    liveCard && inMatch ? smurfSignal(liveCard, $live?.players ?? [], $settings.smurf, $marks.notSmurf) : null,
-  );
   const saved = $derived(isSaved($marks, puuid));
   const note = $derived(noteOf($marks, puuid));
   const stats = $derived(
@@ -98,8 +93,6 @@
   const encExpected = $derived(
     !isSelf && (details ? details.encounters.length > 0 : (liveCard?.encounters?.with ?? 0) + (liveCard?.encounters?.against ?? 0) > 0),
   );
-  /** No encounters (another player): the loadout spans both columns in four tiles, the maps sit level with the mates. */
-  const wideLoadout = $derived(!isSelf && !encExpected);
 
   // ── save + note popover (prototype 975–985, `onSave` / `unsave`) ──────────────
   let noteOpen = $state(false);
@@ -144,15 +137,9 @@
     queueMicrotask(() => el.focus({ preventScroll: true }));
   };
 
-  function noteKey(e: KeyboardEvent) {
-    if (e.key === "Escape") {
-      e.stopPropagation();
-      closeNote();
-    }
-  }
-
   // ── focus, Escape, scroll shadow ───────────────────────────────────────────────
   let panel = $state<HTMLDivElement | null>(null);
+  let popover = $state<HTMLDivElement | null>(null);
   let body = $state<HTMLDivElement | null>(null);
   let scrolled = $state(false);
 
@@ -177,12 +164,17 @@
     }
     // aria-modal: Tab stays inside the panel.
     if (e.key === "Tab" && panel) {
-      const els = [...panel.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.offsetParent !== null);
+      const scope = noteOpen ? popover : panel;
+      if (!scope) return;
+      const els = [...scope.querySelectorAll<HTMLElement>(FOCUSABLE)].filter((el) => el.offsetParent !== null && !el.closest("[inert]"));
       if (els.length === 0) return;
       const first = els[0]!;
       const last = els[els.length - 1]!;
       const a = document.activeElement;
-      if (e.shiftKey && (a === first || a === panel)) {
+      if (!els.includes(a as HTMLElement)) {
+        e.preventDefault();
+        (e.shiftKey ? last : first).focus();
+      } else if (e.shiftKey && a === first) {
         e.preventDefault();
         last.focus();
       } else if (!e.shiftKey && a === last) {
@@ -265,12 +257,6 @@
                 </span>
               </span>
             {/if}
-            {#if smurf}
-              <span class="smurf"
-                ><svg width="10" height="10" viewBox="0 0 10 10" aria-hidden="true"><path d="M5 .8L9.6 9.2H.4z" fill="currentColor" /></svg
-                >Possible smurf · automated</span
-              >
-            {/if}
           </div>
         </div>
         {#if card && !isSelf}
@@ -304,8 +290,7 @@
 
     {#if noteOpen && !isSelf}
       <button type="button" class="nscrim" tabindex="-1" aria-label="Close note" onclick={() => closeNote()}></button>
-      <!-- svelte-ignore a11y_no_static_element_interactions -->
-      <div class="pop" onkeydown={noteKey}>
+      <div class="pop" bind:this={popover} role="group" aria-label={`Note on ${nv?.ref ?? "this player"}`}>
         <span class="mlabel">NOTE ON {(nv?.ref ?? "this player").toUpperCase()}</span>
         <textarea
           {@attach focusNow}
@@ -331,38 +316,42 @@
     {/if}
 
     <div bind:this={body} class="body" onscroll={onScroll}>
-      <RankCard {card} {stats} />
+      <RankCard {card} {stats} note={isSelf ? "" : note} />
 
-      {#if smurf}
-        <SmurfPanel reasons={smurf.reasons} level={$settings.smurf} ondismiss={() => {
-            void dismissSmurf(puuid);
-            panel?.focus({ preventScroll: true });
-          }}
-        />
+      {#if isSelf}
+        <div class="notes">
+          <div class="nhead"><span class="mlabel">PERSONAL NOTES</span><span class="hint">Reminders for yourself</span></div>
+          <textarea
+            aria-label="Personal notes"
+            placeholder="Goals for this session, warm-up routine, things to work on…"
+            maxlength={NOTE_MAX_CHARS}
+            value={note}
+            oninput={(e) => setNote(puuid, e.currentTarget.value)}
+          ></textarea>
+          <span class="foot">Not shown in live matches or to other players.</span>
+        </div>
       {/if}
 
-      <div class="grid">
-        {#if isSelf}
-          <div class="notes">
-            <div class="nhead"><span class="mlabel">PERSONAL NOTES</span><span class="hint">Reminders for yourself</span></div>
-            <textarea
-              aria-label="Personal notes"
-              placeholder="Goals for this session, warm-up routine, things to work on…"
-              maxlength={NOTE_MAX_CHARS}
-              value={note}
-              oninput={(e) => setNote(puuid, e.currentTarget.value)}
-            ></textarea>
-            <span class="foot">Not shown in live matches or to other players.</span>
-          </div>
-        {:else if card}
-          <Encounters rows={encRows} {puuid} them={nv} expected={encExpected} />
+      <div class="grid" class:has-encounters={!isSelf && encExpected}>
+        {#if !isSelf && encExpected}
+          <section class="map-section encounter-section" aria-label="Encounters">
+            <div class="shead"><span class="mlabel">ENCOUNTERS</span><span class="hint">Your result</span></div>
+            <Encounters rows={encRows} {puuid} them={nv} expected={encExpected} />
+          </section>
         {/if}
-        <Mates mates={details ? details.topTeammates : null} live={$live} {party} {isSelf} />
-        <Loadout loadout={details ? details.loadout : null} wide={wideLoadout} />
-        <Maps rows={extras === undefined ? undefined : (extras?.maps ?? [])} pad={!wideLoadout} />
+        <section class="map-section mates-section" aria-label="Top teammates">
+          <span class="mlabel">TOP TEAMMATES</span>
+          <Mates mates={details ? details.topTeammates : null} live={$live} {party} {isSelf} />
+        </section>
+        <section class="map-section recent-section" aria-label="Recent matches">
+          <RecentTable rows={details ? details.recent : null} {extras} {isSelf} {puuid} />
+        </section>
+        <section class="map-section maps-section" aria-label="Map performance">
+          <span class="mlabel">MAP PERFORMANCE</span>
+          <Maps rows={extras === undefined ? undefined : (extras?.maps ?? [])} pad={false} />
+        </section>
       </div>
-
-      <RecentTable rows={details ? details.recent : null} {extras} {isSelf} {puuid} />
+      <Loadout loadout={details ? details.loadout : null} wide={true} />
     </div>
   </div>
 </div>
@@ -387,8 +376,9 @@
 
   .panel {
     position: relative;
-    width: 820px;
-    max-width: calc(100% - 48px);
+    container: profile / inline-size;
+    width: 700px;
+    max-width: 100%;
     height: 100%;
     background: var(--drawer);
     border-left: 1px solid var(--line-control);
@@ -404,7 +394,7 @@
     position: relative;
     z-index: 2;
     flex: none;
-    height: 100px;
+    min-height: 92px;
     overflow: hidden;
     border-bottom: 1px solid var(--line-control);
     transition: box-shadow 0.15s ease;
@@ -425,21 +415,21 @@
   .fade {
     position: absolute;
     inset: 0;
-    background: linear-gradient(90deg, var(--drawer) 12%, rgba(17, 19, 23, 0.8) 60%, rgba(17, 19, 23, 0.5));
+    background: linear-gradient(90deg, var(--drawer) 12%, rgba(16, 16, 16, 0.8) 60%, rgba(16, 16, 16, 0.5));
   }
 
   .hrow {
     position: relative;
-    height: 100%;
+    min-height: 92px;
     display: flex;
     align-items: center;
-    gap: 16px;
-    padding: 0 16px 0 24px;
+    gap: 10px;
+    padding: 12px 12px 12px 16px;
   }
 
   .agent {
-    width: 60px;
-    height: 60px;
+    width: 44px;
+    height: 44px;
     border-radius: 10px;
     overflow: hidden;
     border: 1px solid var(--line-control);
@@ -529,7 +519,7 @@
   }
 
   .sub {
-    font: 500 13px/1 var(--font);
+    font: 500 13px/1.3 var(--font);
     color: var(--text-2);
   }
 
@@ -565,21 +555,6 @@
     border-radius: 4px;
     display: block;
     background: var(--drawer);
-  }
-
-  .smurf {
-    display: inline-flex;
-    align-items: center;
-    gap: 5px;
-    font: 600 12.5px/1 var(--font);
-    color: var(--warn-text);
-    border: 1px dashed color-mix(in srgb, var(--warn) 65%, transparent);
-    padding: 3px 7px;
-    border-radius: 4px;
-  }
-
-  .smurf svg {
-    color: var(--warn);
   }
 
   .btn {
@@ -714,17 +689,54 @@
     min-height: 0;
     overflow-y: auto;
     overflow-x: hidden;
-    padding: 20px 24px 32px;
+    padding: 12px 16px 24px;
     display: flex;
     flex-direction: column;
-    gap: 22px;
+    gap: 16px;
+    scrollbar-gutter: stable;
+    overscroll-behavior: contain;
   }
 
   .grid {
     display: grid;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 22px 24px;
+    gap: 16px;
     align-items: start;
+  }
+
+  .grid:not(.has-encounters) .mates-section {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .grid:not(.has-encounters) .maps-section {
+    grid-column: 1;
+    grid-row: 2;
+  }
+
+  .grid:not(.has-encounters) .recent-section {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+  }
+
+  .map-section {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  @container profile (width < 600px) {
+    .grid { grid-template-columns: minmax(0, 1fr); }
+    .grid:not(.has-encounters) .mates-section,
+    .grid:not(.has-encounters) .maps-section,
+    .grid:not(.has-encounters) .recent-section {
+      grid-column: auto;
+      grid-row: auto;
+    }
+    .hrow { flex-wrap: wrap; }
+    .who { flex-basis: 200px; }
+    .btn { padding-inline: 9px; }
   }
 
   .mlabel {
@@ -739,6 +751,7 @@
     gap: 10px;
   }
 
+  .shead,
   .nhead {
     display: flex;
     align-items: baseline;

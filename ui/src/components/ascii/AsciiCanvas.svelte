@@ -17,21 +17,20 @@
   let backdrop = $state<HTMLDivElement | null>(null);
   let surface = $state<HTMLPreElement | null>(null);
   let fittedPx = $state<number | null>(null);
+  const MIN_PX = 8;
   const fontPx = $derived(Math.min(canvas.fontPx, fittedPx ?? canvas.fontPx));
 
-  // Measure glyph advances at the model's preferred size, including symbol fallback fonts, not an assumed .61em.
-  // Measuring at a fixed size avoids feedback from repeatedly scaling an already-fitted, pixel-rounded surface.
-  // Preserve the existing 8px art floor: unusually wide saved drawings still scroll instead of being clipped.
+  // Fit the art to the frame by what the browser really lays out, not by a prediction. Measuring glyph advances at one
+  // size and scaling them linearly fails where a browser rounds advances to whole pixels per font size (Chromium on
+  // Linux without subpixel positioning): the real <pre> came out wider than predicted and was clipped (R213). A hidden
+  // twin of the <pre> is laid out at candidate sizes (a bigger font is never narrower) and a bisection keeps the largest
+  // size whose real width fits. Preserve the 8px art floor: unusually wide saved drawings still scroll, not clip.
   $effect(() => {
     const frame = backdrop;
     const pre = surface;
     const preferred = canvas.fontPx;
-    const lines = canvas.out.split("\n");
+    const art = canvas.out;
     if (!frame || !pre) return;
-    const probe = document.createElement("canvas");
-    probe.width = probe.height = 1;
-    const measure = probe.getContext("2d");
-    if (!measure) return;
     let pending = 0;
     let active = true;
     const fit = () => {
@@ -39,12 +38,35 @@
       if (!active) return;
       const style = getComputedStyle(frame);
       const available = frame.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 2;
-      const font = getComputedStyle(pre);
-      measure.font = `${font.fontStyle} ${font.fontWeight} ${preferred}px ${font.fontFamily}`;
-      const natural = Math.max(...lines.map((line) => measure.measureText(line).width));
-      if (available <= 0 || natural <= 0) return;
-      const next = Math.min(preferred, Math.max(8, preferred * available / natural));
-      if (fittedPx === null || Math.abs(next - fittedPx) > .02) fittedPx = next;
+      if (available <= 0) return;
+      const twin = document.createElement("pre");
+      twin.className = pre.className;
+      twin.setAttribute("aria-hidden", "true");
+      twin.textContent = art;
+      twin.style.cssText = "position:fixed;left:-100000px;top:0;visibility:hidden;pointer-events:none;";
+      document.body.append(twin);
+      let next: number;
+      try {
+        const widthAt = (px: number) => {
+          twin.style.fontSize = `${px}px`;
+          return twin.getBoundingClientRect().width;
+        };
+        if (widthAt(preferred) <= available) next = preferred;
+        else if (widthAt(MIN_PX) > available) next = MIN_PX;
+        else {
+          let lo = MIN_PX;
+          let hi = preferred;
+          for (let i = 0; i < 14 && hi - lo > 0.02; i++) {
+            const mid = (lo + hi) / 2;
+            if (widthAt(mid) <= available) lo = mid;
+            else hi = mid;
+          }
+          next = lo;
+        }
+      } finally {
+        twin.remove();
+      }
+      if (next !== fittedPx) fittedPx = next;
     };
     const schedule = () => {
       if (active && !pending) pending = requestAnimationFrame(fit);

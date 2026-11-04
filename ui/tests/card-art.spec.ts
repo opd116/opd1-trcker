@@ -6,6 +6,7 @@ import { expect, test, type Page } from "@playwright/test";
 import { IMG_RETRY_MS } from "../src/lib/imgRetry";
 import { PUUID } from "../src/lib/demo/cdv8";
 import { gotoApp, NOW, openScene, routeMedia } from "./harness";
+test.use({ viewport: { width: 700, height: 860 } });
 
 const MARA = PUUID.mara!;
 const art = (page: Page) => page.getByRole("dialog").locator(".head .art");
@@ -105,7 +106,7 @@ test("a card art that fails is asked again after the first backoff (?r=1) and th
 
 test("an agent icon that fails is asked again with ?r=1 and then loads", async ({ page }) => {
   const { failed } = await openFailingOnce(page, /\/agents\/[^/]+\/displayicon\.png$/, "scene=ingame");
-  const icon = page.locator("main [data-row] .agent img").first();
+  const icon = page.locator("main [data-row] .portrait img").first();
   await expect(icon).toBeAttached();
   await expect.poll(failed).toBeGreaterThan(0);
   await page.clock.runFor(IMG_RETRY_MS[0]! + 100);

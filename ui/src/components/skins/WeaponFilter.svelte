@@ -97,7 +97,7 @@
 
   .row.on {
     background: var(--accent-soft);
-    border-color: rgba(157, 140, 255, 0.4);
+    border-color: var(--accent);
     color: var(--text);
   }
 
@@ -141,5 +141,14 @@
     font: 600 13.5px/1 var(--font);
     text-align: right;
     font-variant-numeric: tabular-nums;
+  }
+
+  @media (max-width: 1000px) {
+    .card { flex: 1; min-height: 0; }
+    .hdr { padding: 10px 12px 8px; }
+    .list { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); grid-auto-rows: 34px; gap: 4px; padding: 0 8px 8px; overflow-x: hidden; overflow-y: auto; }
+    .row { grid-template-columns: 32px minmax(0, 1fr) 24px; gap: 5px; padding-inline: 6px; }
+    .track { display: none; }
+    .art img { max-width: 32px; }
   }
 </style>

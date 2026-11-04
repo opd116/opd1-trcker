@@ -1,7 +1,6 @@
 <!--
-  Settings (design v2, TrackerApp.dc.html 918–948, words in `extraVals4` 2012–2038): four section cards in a 780px
-  column. Every control writes through `updateSettings` (the store changes at once; Rust stores the copy and applies
-  keep-on-top / autostart / tray). The title bar's pin writes the same `onTop`, so the two always agree.
+  Retained settings implementation; the compact shell currently renders a title-only placeholder (R205).
+  Stored options still use updateSettings. Always-on-top and the pin were removed entirely by R206.
 -->
 <script lang="ts">
   import OptionDetail from "../components/settings/OptionDetail.svelte";

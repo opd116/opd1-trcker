@@ -1,7 +1,7 @@
 // The v2 Live screen's view model (design v2 `.superpowers/design/v2/TrackerApp.dc.html`: `rows()` 1289–1350,
 // `team()` 1352–1377, `renderVals` 2044–2151), mapped onto the real wire types. Pure: every function takes what it
 // reads (live cards, meta, settings, marks, the clock) and returns plain data the components draw. Colours are CSS
-// variables or the theme's tier/party hexes, never the prototype's literals.
+// variables, the theme's tier/party hexes, or the authorized metric bands (`statColors`), never stray literals.
 //
 // Tri-state (types.ts): an absent card field is still loading (a skeleton), null is missing ("—").
 import { agentName, isRankedTier, mapName } from "./meta";
@@ -9,7 +9,8 @@ import { actDates, count, DASH, kd2, pct0, rrDelta, span } from "./format";
 import { showEncounters, showParty } from "./live";
 import { nameTip } from "./tips";
 import { smurfSignal } from "./smurf";
-import { hlHs, hlKd, hlWinPct, PARTY_COLORS, rgba, tierColor, tierName, tierShort } from "./theme";
+import { PARTY_COLORS, rgba, tierColor, tierName, tierShort } from "./theme";
+import { liveHsColor, liveKdColor, liveWrColor } from "./statColors";
 import type { TipArg } from "./tooltip.svelte";
 import type {
   AppStatus,
@@ -238,7 +239,7 @@ export function rowView(c: PlayerCard, i: number, list: readonly PlayerCard[], c
         ? null
         : {
             text: pct0(c.actWinrate),
-            color: hlWinPct(c.actWinrate * 100, hlOn),
+            color: liveWrColor(c.actWinrate, hlOn),
             w: typeof w === "number" ? w : 0,
             l: typeof w === "number" && typeof g === "number" ? Math.max(0, g - w) : 0,
           };
@@ -270,8 +271,8 @@ export function rowView(c: PlayerCard, i: number, list: readonly PlayerCard[], c
     wr,
     streak: streakOf(c.last5),
     games: g === undefined ? undefined : g === null ? DASH : count(g, "game"),
-    kd: stat(c.kd, kd2, (v) => hlKd(v, hlOn)),
-    hs: stat(c.hsPct, pct0, (v) => hlHs(v === null ? null : v * 100, hlOn)),
+    kd: stat(c.kd, kd2, (v) => liveKdColor(v, hlOn)),
+    hs: stat(c.hsPct, pct0, (v) => liveHsColor(v, hlOn)),
     selected: ctx.selected === c.puuid,
     aria: `${plainName(c.name, meta)}, ${picking ? "picking" : (agent ?? "agent")}, ${rank.state === "ranked" || rank.state === "unranked" ? rank.name : "rank unknown"}. Open profile`,
     statsLoading: statsLoading(c),

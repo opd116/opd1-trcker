@@ -1,38 +1,56 @@
 <!--
-  The drawer's rank card (prototype 988–1010): current rank (with the RR to the next tier), peak (act + time since
-  that act ended; tooltip: the act's name and dates), last act; then the stats row, each stat's scope in its tooltip.
+  The drawer's rank card (prototype 988–1010): current rank (only the exact RR shows; the next-tier figure is not
+  shown here at all, per the owner screenshot), peak (act + time since that act ended; tooltip: the act's name and
+  dates), last act (its `Final rank` subtitle is removed by the same screenshot); then the stats row, each stat's
+  scope in its tooltip. The Record cell draws the typed W/L counts (`41W – 24L`, win/loss tokens, neutral zeros); six
+  stats wrap to a 3×2 grid below ~720px so a `999W – 999L` record never overflows.
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
+  import { DASH } from "../../lib/format";
   import { retryImg } from "../../lib/imgRetry";
+  import { isRankedTier } from "../../lib/meta";
   import { peakCell, prevCell, rankCell, type StatCell } from "../../lib/profile";
   import { meta } from "../../lib/stores";
   import { peakTip } from "../../lib/tips";
   import { tip } from "../../lib/tooltip.svelte";
   import type { PlayerCard } from "../../lib/types";
   import Skel from "../Skel.svelte";
+  import RecordValue from "./RecordValue.svelte";
 
-  let { card, stats }: { card: PlayerCard | null; stats: StatCell[] | null } = $props();
+  let { card, stats, note = "" }: { card: PlayerCard | null; stats: StatCell[] | null; note?: string } = $props();
 
   const cur = $derived(card ? rankCell(card.rank, $meta) : undefined);
   const peak = $derived(card ? peakCell(card.peak, $meta) : undefined);
   const prev = $derived(card ? prevCell(card.prevActTier, $meta) : undefined);
+  /**
+   * The current rank's exact RR alone. This drawer never shows the RR to the next tier (the approved prototype drops
+   * it), so the RR is composed from the card here rather than taken from `rankCell`, whose `sub` also carries the
+   * next-tier figure for the screens that still want it. Unknown rank → nothing; unranked → `No ranked games`;
+   * unknown RR with a known tier → `— RR`.
+   */
+  const curRr = $derived.by(() => {
+    const r = card?.rank;
+    if (r === undefined || r === null) return "";
+    if (!isRankedTier(r.tier)) return "No ranked games";
+    return r.rr === null ? `${DASH} RR` : `${r.rr} RR`;
+  });
   /** Loading: the five stats every player has (the user's Net RR joins once the card says who this is). */
-  const cells = $derived(stats ?? ["K/D", "Headshot %", "Win rate", "Record", "Avg ACS"].map((label) => ({ label, value: undefined, color: "", tip: "" })));
+  const cells: StatCell[] = $derived(stats ?? ["K/D", "Headshot %", "Win rate", "Record", "Avg ACS"].map((label) => ({ label, value: undefined, color: "", tip: "" })));
 </script>
 
 <div class="rc">
   <div class="ranks">
     <div class="cell main">
       {#if cur === undefined}
-        <Skel w={46} h={46} r="50%" block />
+        <Skel w={32} h={32} r="50%" block />
         <div class="col"><span class="lbl">CURRENT RANK</span><Skel w={120} h={18} block /><Skel w={110} h={11} block /></div>
       {:else}
         {#if cur.icon !== null}<img {@attach retryImg} class="i46" src={assetUrl("tier", cur.icon)} alt="" />{:else}<span class="i46"></span>{/if}
         <div class="col">
           <span class="lbl">CURRENT RANK</span>
           <span class="nm big" style:color={cur.color}>{cur.name}</span>
-          {#if cur.sub}<span class="sub" data-ellipsis>{cur.sub}</span>{/if}
+          {#if curRr}<span class="sub" data-ellipsis>{curRr}</span>{/if}
         </div>
       {/if}
     </div>
@@ -58,19 +76,25 @@
         <div class="col">
           <span class="lbl">LAST ACT</span>
           <span class="nm" style:color={prev.color}>{prev.name}</span>
-          {#if prev.sub}<span class="sub" data-ellipsis>{prev.sub}</span>{/if}
+          {#if prev.sub && prev.sub !== "Final rank"}<span class="sub" data-ellipsis>{prev.sub}</span>{/if}
         </div>
       {/if}
     </div>
   </div>
-  <div class="stats">
+  <div class="stats" class:has-six={cells.length === 6}>
     {#each cells as s, i (s.label)}
       <div class={["stat", i > 0 && "sep"]} use:tip={s.tip}>
         <span class="sl">{s.label}</span>
-        {#if s.value === undefined}<Skel w={52} h={22} block />{:else}<span class="sv" style:color={s.color}>{s.value}</span>{/if}
+        {#if s.value === undefined}<Skel w={52} h={22} block />{:else if "record" in s}<RecordValue record={s.record ?? null} />{:else}<span
+            class="sv"
+            style:color={s.color}>{s.value}</span
+          >{/if}
       </div>
     {/each}
   </div>
+  {#if note.trim()}
+    <div class="overview-note"><span class="lbl">NOTE</span><p>{note}</p></div>
+  {/if}
 </div>
 
 <style>
@@ -84,28 +108,26 @@
 
   .ranks {
     display: grid;
-    grid-template-columns: 1.35fr 1fr 1fr;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
   .cell {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 16px 18px;
-    border-left: 1px solid var(--line-card);
+    gap: 8px;
+    padding: 12px 10px;
     min-width: 0;
     cursor: default;
   }
 
   .cell.main {
-    gap: 14px;
-    background: var(--nav-active);
+    gap: 8px;
     border-left: none;
   }
 
   .i46 {
-    width: 46px;
-    height: 46px;
+    width: 32px;
+    height: 32px;
     display: block;
     flex: none;
   }
@@ -124,7 +146,7 @@
   .col {
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 5px;
     min-width: 0;
   }
 
@@ -140,7 +162,7 @@
   }
 
   .nm.big {
-    font-size: 21px;
+    font-size: 17px;
   }
 
   .sub {
@@ -153,7 +175,7 @@
 
   .stats {
     border-top: 1px solid var(--line-card);
-    padding: 13px 18px 15px;
+    padding: 10px 12px 12px;
     display: flex;
   }
 
@@ -162,13 +184,12 @@
     min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 7px;
+    gap: 5px;
     cursor: default;
   }
 
   .stat.sep {
-    padding-left: 14px;
-    border-left: 1px solid var(--line-card);
+    padding-left: 10px;
   }
 
   .sl {
@@ -181,5 +202,33 @@
     font: 600 22px/1 var(--font);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
+  }
+
+  .overview-note {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr);
+    gap: 8px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--line-card);
+    background: var(--surface);
+  }
+
+  .overview-note p {
+    margin: 0;
+    font: 500 13px/1.45 var(--font);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    color: var(--text-2);
+  }
+
+  /* Six stats only fit one row from ~720px up; below that they wrap to a 3×2 grid (approved prototype). */
+  @container profile (width < 720px) {
+    .has-six { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .has-six .stat:nth-child(3n + 1) { padding-left: 0; }
+  }
+
+  @container profile (width < 620px) {
+    .nm { white-space: normal; line-height: 1.1; }
+    .cell { align-items: flex-start; }
   }
 </style>

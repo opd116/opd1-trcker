@@ -32,7 +32,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-const STORED: Settings = { ...DEFAULT_SETTINGS, boot: false, onTop: false };
+const STORED: Settings = { ...DEFAULT_SETTINGS, boot: false, savedAlert: false };
 
 describe("updateSettings", () => {
   afterEach(() => vi.clearAllMocks());
@@ -45,10 +45,10 @@ describe("updateSettings", () => {
     expect(api.saveSettings).not.toHaveBeenCalled();
 
     applyStoredSettings(STORED);
-    expect(get(settings)).toMatchObject({ highlight: false, boot: false, onTop: false });
+    expect(get(settings)).toMatchObject({ highlight: false, boot: false, savedAlert: false });
     await done;
     expect(api.saveSettings).toHaveBeenCalledTimes(1);
-    expect(api.saveSettings.mock.calls[0][0]).toMatchObject({ highlight: false, boot: false, onTop: false });
+    expect(api.saveSettings.mock.calls[0][0]).toMatchObject({ highlight: false, boot: false, savedAlert: false });
   });
 
   it("quick changes are saved in order, and an older answer never undoes a newer change", async () => {

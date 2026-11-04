@@ -54,8 +54,9 @@
     overflow-x: hidden;
     display: flex;
     flex-direction: column;
-    padding: 18px 24px 20px;
+    padding: 16px;
     gap: 12px;
+    min-width: 0;
   }
 
   .head {
@@ -89,5 +90,19 @@
     display: grid;
     grid-template-columns: repeat(3, minmax(0, 1fr));
     gap: 12px;
+  }
+
+  .top :global(.today) { border-left-color: var(--line-strong); }
+  .top :global(.today span) { color: var(--text-label); }
+  .top :global(.enddot) { box-shadow: none; }
+
+  @media (max-width: 1000px) {
+    .top, .three { grid-template-columns: minmax(0, 1fr); }
+    .top :global([aria-label="Rank now"] .grid) { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+    .screen :global(.strip) { flex-wrap: wrap; gap: 16px; }
+    .screen :global(.strip .chips) { flex-basis: 100%; padding: 12px 0 0; border-left: 0; border-top: 1px solid var(--line); }
+    .screen :global(.strip .blk) { padding-left: 14px; }
+    .three :global(.row:nth-child(even)) { background: var(--surface); }
+    .three :global(.row) { padding-inline: 8px; min-height: 38px; border-radius: 4px; }
   }
 </style>

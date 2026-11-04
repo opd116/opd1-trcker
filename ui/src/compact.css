@@ -1,0 +1,14 @@
+/* Approved competition roster: one shared visual language, including retained pages. */
+@font-face{font-family:BarlowSemi;src:url('./assets/fonts/BarlowSemiCondensed-500.ttf');font-weight:500;font-display:block}
+@font-face{font-family:BarlowSemi;src:url('./assets/fonts/BarlowSemiCondensed-600.ttf');font-weight:600;font-display:block}
+@font-face{font-family:BarlowSemi;src:url('./assets/fonts/BarlowSemiCondensed-700.ttf');font-weight:700;font-display:block}
+body{font-variant-numeric:tabular-nums}
+::selection{background:var(--accent);color:var(--text)}
+input,textarea{accent-color:var(--accent);caret-color:var(--accent)}
+#app img{filter:saturate(1.22)}
+#app{--row-alternate:#191718;--roster-columns:16px minmax(188px,1fr) 232px 44px 48px 48px 10px;--roster-gap:10px}
+/* Flexible table rows spend the former bottom void on readable rows. */
+.compact-live{--live-row:clamp(48px,calc((100dvh - 228px)/10),80px)}
+.compact-live:has(>.lost){--live-row:clamp(46px,calc((100dvh - 288px)/10),80px)}
+@media(max-width:699px){#app{--roster-columns:16px minmax(170px,1fr) 228px 44px 48px 48px 10px;--roster-gap:8px}}
+@media(prefers-reduced-motion:reduce){.compact-live *{animation:none!important;transition:none!important}}

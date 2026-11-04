@@ -1,17 +1,17 @@
-// Every v2 screen fits (CLAUDE.md "Design rules": verify every screen at 1280×800, 1180×760 and, for Live, the 420px
-// glance column). For each screen and its important demo states (demo/feed.ts parameters) at each size: #app fills the
+// Every retained screen fits the approved compact window (700×860, minimum 680×760, Glance 420×420).
+// For each screen and its important demo states (demo/feed.ts parameters) at each size: #app fills the
 // viewport, nothing scrolls sideways, no text is clipped (only the `data-ellipsis` elements may truncate, with an
 // ellipsis), no two texts overlap, every font size is one the design uses (9–10px badges, 10.5px Geist Mono
 // micro-labels, nothing else under 12px except the design's own 11 / 11.5px: checks.ts `checkType`), the fonts are the
-// three bundled families, and a hidden name never reaches the DOM. The Live board does not scroll at the design's
-// 1280×800 baseline; at the 1180×760 minimum, with the lost banner, and in the glance column it may, as the design's
+// approved bundled families, and a hidden name never reaches the DOM. The Live board does not scroll at the design's
+// 700×860 default; at the 680×760 minimum, with the lost banner, and in the glance square it may, as the design's
 // own containers do (TrackerApp.dc.html 46, 180: `overflow:auto`). The page clock is frozen (harness NOW). A few dense
 // states run again at DPR 1.5 (Windows at 150%), where text metrics round differently.
 import { expect, test } from "@playwright/test";
 import { PUUID } from "../src/lib/demo/cdv8";
 import { RECAP_MATCH_ID } from "../src/lib/demo/v2/status";
 import { fitChecks } from "./checks";
-import { openScene, pointerAway, SIZES, watchFontCdn } from "./harness";
+import { openScene, pointerAway, COMPACT_SIZES as SIZES, watchFontCdn } from "./harness";
 
 type Size = keyof typeof SIZES;
 type Case = {
@@ -19,7 +19,7 @@ type Case = {
   name: string;
   scene: string;
   params?: Record<string, string>;
-  /** The Live screen: at 1280×800 (no lost banner) nothing may scroll there. */
+  /** The Live screen: at 700×860 (no lost banner) nothing may scroll there. */
   live?: boolean;
   sizes: readonly Size[];
 };
@@ -121,7 +121,7 @@ test.describe("at DPR 1.5", () => {
   test.use({ deviceScaleFactor: 1.5 });
   const DENSE = ["live in game, longest names", "live agent select", "profile, longest names", "scoreboard, longest names", "comp, longest names", "history"];
   for (const c of CASES.filter((c) => DENSE.includes(c.name))) {
-    test(`fit: ${c.name} at 1180×760, DPR 1.5`, async ({ page }) => {
+    test(`fit: ${c.name} at 680×760, DPR 1.5`, async ({ page }) => {
       await run(page, c, "min");
     });
   }

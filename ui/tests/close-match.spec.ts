@@ -10,7 +10,8 @@ import { detailsFor, encounterMatchId, matchFor, PUUID, recentMatchId } from "..
 import { SCENES } from "../src/lib/demo/scenes";
 import { DEFAULT_SETTINGS } from "../src/lib/demo/v2/store";
 import { demoStatus } from "../src/lib/demo/v2/status";
-import { APP_READY, gotoApp, NOW, routeMedia, UI_DIR } from "./harness";
+import { APP_READY, gotoApp, NOW, openScreen, screenNav, routeMedia, UI_DIR } from "./harness";
+test.use({ viewport: { width: 700, height: 860 } });
 
 const MARA = PUUID.mara!;
 const FAHAD = PUUID.fahad!;
@@ -94,7 +95,7 @@ async function bootInTauri(page: Page): Promise<void> {
 
 const dialog = (page: Page) => page.getByRole("dialog");
 const board = (page: Page) => page.locator('main .match[aria-busy="false"]');
-const nav = (page: Page, label: string) => page.locator(`nav.rail button[aria-label="${label}"]`);
+const nav = (page: Page, label: string) => screenNav(page, label);
 
 /** The app's own double-click guard (lib/clickGuard.ts): a click within 400 ms of opening a drawer is swallowed. */
 async function guardDone(page: Page): Promise<void> {
@@ -153,7 +154,7 @@ test.describe("close_details / close_match", () => {
     await bootInTauri(page);
     await openEncounter(page);
     await mark(page);
-    await nav(page, "Live").click();
+    await openScreen(page, "Live");
     await expect(page.locator("main .match")).toHaveCount(0);
     await expect.poll(() => pageCalls(page)).toEqual(["close_match"]);
     expect((await closes(page)).at(-1)).toBe(`close_match:${JSON.stringify({ matchId: ENC })}`);
@@ -161,7 +162,7 @@ test.describe("close_details / close_match", () => {
     // And from the drawer straight to another screen.
     await openDrawer(page, "Mara");
     await mark(page);
-    await nav(page, "Saved").click();
+    await openScreen(page, "Saved");
     await expect(dialog(page)).toHaveCount(0);
     await expect.poll(() => pageCalls(page)).toEqual(["close_details"]);
     expect((await closes(page)).at(-1)).toBe(`close_details:${JSON.stringify({ puuid: MARA })}`);

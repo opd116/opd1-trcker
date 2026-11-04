@@ -153,7 +153,7 @@ html,
 body {
   margin: 0;
   height: 100%;
-  background: var(--bg, #0c0d10);
+  background: var(--bg, #0c0b0c);
 }
 
 /* The design sizes every box border-box (its `*{box-sizing:border-box}`); the screens are ported 1:1 from it. */
@@ -240,4 +240,3 @@ input::placeholder {
     transform: translateX(250%);
   }
 }
-

@@ -5,10 +5,11 @@
 // scrolled into view. The page clock is Playwright's fake one, so no timing here depends on real timers.
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { openScene, pointerAway } from "./harness";
+test.use({ viewport: { width: 700, height: 860 } });
 
 const tip = (page: Page) => page.locator("#tooltip");
-const pin = (page: Page) => page.locator('#app > header button[aria-label="Keep on top during matches"]');
-const rank = (page: Page) => page.locator('nav.rail button[aria-label="Your rank: open Competitive"]');
+const editNote = (page: Page) => page.getByRole("button", { name: "Edit note on Mara", exact: true });
+const addNote = (page: Page) => page.getByRole("button", { name: "Add a note on Kilo", exact: true });
 
 /** The tip's text, and that it is placed like a hover's: centred on the trigger, 8px above or below it. */
 async function readTip(page: Page, trigger: Locator): Promise<string> {
@@ -24,7 +25,7 @@ async function readTip(page: Page, trigger: Locator): Promise<string> {
 
 test("a hover's tip shows at 450 ms, not at 400 ms; leaving the trigger hides it at once", async ({ page }) => {
   await openScene(page, "ingame", {}, { clock: "manual" });
-  const peak = page.locator("main [data-row] .peak").first();
+  const peak = page.locator("main [data-row] .peak-gap").first();
   await peak.hover();
   await page.clock.runFor(400);
   await expect(tip(page)).toHaveCount(0);
@@ -37,7 +38,7 @@ test("a hover's tip shows at 450 ms, not at 400 ms; leaving the trigger hides it
 
 test("a click while a tip is open hides it", async ({ page }) => {
   await openScene(page, "ingame", {}, { clock: "manual" });
-  const col = page.locator("main .col.help").first();
+  const col = page.locator("main .metric.combat").first();
   await col.hover();
   await page.clock.runFor(460);
   await expect(tip(page)).toHaveCount(1);
@@ -47,8 +48,8 @@ test("a click while a tip is open hides it", async ({ page }) => {
 });
 
 test("keyboard: a focusable trigger shows its tip on Tab (same delay and placement); Escape, Tab away and Enter hide it", async ({ page }) => {
-  await openScene(page, "ingame", {}, { clock: "manual" });
-  const btn = pin(page);
+  await openScene(page, "ingame", { screen: "saved" }, { clock: "manual" });
+  const btn = editNote(page);
   await page.keyboard.press("Tab");
   await btn.focus();
   await expect(btn).toBeFocused();
@@ -56,38 +57,39 @@ test("keyboard: a focusable trigger shows its tip on Tab (same delay and placeme
   await page.clock.runFor(440);
   await expect(tip(page)).toHaveCount(0); // not before 450 ms
   await page.clock.runFor(20);
-  expect(await readTip(page, btn)).toBe("Keep on top during matches");
+  expect(await readTip(page, btn)).toBe("Edit note on Mara");
   await expect(tip(page)).toHaveAttribute("id", "tooltip");
   await expect(btn).toHaveAttribute("aria-describedby", "tooltip");
 
-  // Escape: gone, with its description, and nothing else happens (still focused).
+  // Escape: gone, with its description, and nothing else happens (still focused, the editor stays closed).
   await page.keyboard.press("Escape");
   await expect(tip(page)).toHaveCount(0);
   await expect(btn).not.toHaveAttribute("aria-describedby", /.+/);
   await expect(btn).toBeFocused();
+  await expect(page.getByRole("textbox", { name: "Edit note on Mara" })).toHaveCount(0);
 
   // Tab away: the next trigger's tip replaces it, and the old one's description goes.
-  await rank(page).focus();
+  await addNote(page).focus();
   await page.clock.runFor(460);
-  expect(await readTip(page, rank(page))).toBe("Your rank · open Competitive");
+  expect(await readTip(page, addNote(page))).toBe("Add a note on Kilo");
   await expect(btn).not.toHaveAttribute("aria-describedby", /.+/);
   await btn.focus();
-  await expect(rank(page)).not.toHaveAttribute("aria-describedby", /.+/);
+  await expect(addNote(page)).not.toHaveAttribute("aria-describedby", /.+/);
   await page.clock.runFor(460);
   await expect(tip(page)).toHaveCount(1);
 
-  // Enter on the rank widget clicks it: the tip goes with the click (and Competitive opens).
-  await rank(page).focus();
+  // Enter on the note button clicks it: the tip goes with the click and the editor opens.
+  await btn.focus();
   await page.clock.runFor(460);
   await expect(tip(page)).toHaveCount(1);
   await page.keyboard.press("Enter");
   await expect(tip(page)).toHaveCount(0);
-  await expect(page.locator('nav.rail button[aria-label="Comp"]')).toHaveAttribute("aria-current", "page");
+  await expect(page.getByRole("textbox", { name: "Edit note on Mara" })).toBeFocused();
 });
 
 test("keyboard: a mouse-focused trigger opens no tip through its focus, and has no :focus-visible", async ({ page }) => {
-  await openScene(page, "ingame", {}, { clock: "manual" });
-  const btn = pin(page);
+  await openScene(page, "ingame", { screen: "saved" }, { clock: "manual" });
+  const btn = editNote(page);
   const box = (await btn.boundingBox())!;
   // Press on it (focus), then move off before the delay ends: the hover's tip is cancelled by the move, the focus owes none.
   await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
@@ -97,7 +99,9 @@ test("keyboard: a mouse-focused trigger opens no tip through its focus, and has 
   await page.clock.runFor(1000);
   await expect(tip(page)).toHaveCount(0);
   await expect(btn).not.toHaveAttribute("aria-describedby", /.+/);
+  // The press happened on the button and the release elsewhere: it focuses it but never clicks it open.
   if (await btn.evaluate((el) => el === document.activeElement)) expect(await btn.evaluate((el) => el.matches(":focus-visible"))).toBe(false);
+  await expect(page.getByRole("textbox", { name: "Edit note on Mara" })).toHaveCount(0);
 });
 
 test("scrolling a list hides an open hover tip", async ({ page }) => {

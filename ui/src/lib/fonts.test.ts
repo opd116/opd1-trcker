@@ -19,6 +19,7 @@ const FACES: Face[] = [
   ["Cascadia Mono", "cascadia-mono", 400, "normal", "symbols2"],
 ];
 const FILES = FACES.map(([, slug, w, st, sub]) => `${slug}-${sub}-${w}-${st}.woff2`);
+const COMPACT_FILES = [500,600,700].map(w => `BarlowSemiCondensed-${w}.ttf`);
 
 const walk = (dir: URL): URL[] =>
   readdirSync(dir, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(new URL(`${e.name}/`, dir)) : [new URL(e.name, dir)]));
@@ -39,11 +40,22 @@ describe("bundled fonts (design v2)", () => {
 
   it("no other font files are shipped (IBM Plex and Archivo are gone)", () => {
     const woff = readdirSync(FONTS).filter((f) => /\.(woff2?|ttf|otf)$/.test(f));
-    expect(woff.sort()).toEqual([...FILES].sort());
+    expect(woff.sort()).toEqual([...FILES,...COMPACT_FILES].sort());
   });
 
   it("every file is a real woff2", () => {
     for (const f of FILES) expect(readFileSync(new URL(f, FONTS)).subarray(0, 4).toString("latin1"), f).toBe("wOF2");
+  });
+  it('the approved condensed roster faces are local TrueType files, under 350 KB total', () => {
+    let total=0;
+    const css=readFileSync(new URL('compact.css',SRC),'utf8');
+    for (const f of COMPACT_FILES) {
+      const bytes=readFileSync(new URL(f,FONTS));
+      expect(bytes.readUInt32BE(0)).toBe(0x00010000);
+      expect(css).toContain(f);
+      total+=bytes.length;
+    }
+    expect(total).toBeLessThan(350*1024);
   });
 
   it("OFL.txt carries all four families' licence texts", () => {

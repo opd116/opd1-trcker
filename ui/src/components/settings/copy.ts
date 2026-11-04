@@ -19,10 +19,6 @@ export const TOGGLES: Record<ToggleKey, { label: string; desc: string }> = {
     desc: "A Windows notification with your note when someone you saved loads in.",
   },
   sound: { label: "Play a sound with alerts", desc: "A short chime at the Windows notification volume." },
-  onTop: {
-    label: "Keep on top during matches",
-    desc: "Stays above the game while a match is live. Same as the pin in the title bar.",
-  },
   boot: { label: "Launch with Windows", desc: "Starts minimized in the tray." },
   tray: { label: "Close to tray", desc: "The × button hides the window instead of quitting." },
 };
@@ -76,7 +72,6 @@ export const GROUPS: readonly { title: string; desc: string; rows: readonly Row[
     title: "Window and startup",
     desc: "How OPD1 behaves alongside the game.",
     rows: [
-      { kind: "toggle", key: "onTop" },
       { kind: "toggle", key: "boot" },
       { kind: "toggle", key: "tray" },
     ],

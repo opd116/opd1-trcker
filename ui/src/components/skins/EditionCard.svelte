@@ -89,7 +89,7 @@
 
   .chip.on {
     background: var(--accent-soft);
-    border-color: rgba(157, 140, 255, 0.5);
+    border-color: var(--accent);
   }
 
   .sw {
@@ -107,5 +107,10 @@
     font: 700 14px/1 var(--font);
     color: var(--text);
     font-variant-numeric: tabular-nums;
+  }
+
+  @media (max-width: 1000px) {
+    .card { padding: 10px 12px; gap: 8px; }
+    .chip { gap: 5px; height: 30px; padding-inline: 8px; }
   }
 </style>

@@ -484,7 +484,6 @@ export interface Settings {
   smurf: SmurfLevel;
   savedAlert: boolean;
   sound: boolean;
-  onTop: boolean;
   boot: boolean;
   tray: boolean;
 }

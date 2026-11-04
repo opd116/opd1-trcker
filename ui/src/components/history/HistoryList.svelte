@@ -244,9 +244,9 @@
               <span class="score">{r.roundsWon !== null && r.roundsLost !== null ? `${r.roundsWon}–${r.roundsLost}` : "—"}</span>
             </div>
             <div class="map">
-              {#if r.mapId}<img {@attach retryImg} class="mimg" src={assetUrl("mapList", r.mapId)} alt="" />{:else}<div class="mimg"></div>{/if}
+              {#if r.mapId}<img {@attach retryImg} class="mimg" src={assetUrl("mapSplash", r.mapId)} alt="" />{:else}<div class="mimg"></div>{/if}
               <div class="mtext">
-                <span class="mname">{map ?? "—"}</span>
+                <span class="mname" data-ellipsis>{map ?? "—"}</span>
                 <span class="when" use:tip={stamp(endMs(r), $now).exact}>{whenText(r, $now)}</span>
               </div>
             </div>
@@ -324,8 +324,9 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    padding: 18px 24px 18px;
-    gap: 14px;
+    padding: 16px;
+    gap: 12px;
+    min-width: 0;
   }
 
   .head {
@@ -333,6 +334,7 @@
     align-items: flex-end;
     gap: 16px;
     flex: none;
+    flex-wrap: wrap;
   }
 
   .title {
@@ -383,7 +385,7 @@
   }
 
   .tab.on .cnt {
-    color: #c9c2ff;
+    color: var(--text);
   }
 
   .card {
@@ -400,10 +402,10 @@
   .cols,
   .row {
     display: grid;
-    grid-template-columns: 112px minmax(0, 1fr) 34px 112px 48px 48px 48px 84px 10px;
-    column-gap: 16px;
+    grid-template-columns: 74px minmax(104px, 1fr) 28px 76px 34px 34px 42px 58px 8px;
+    column-gap: 6px;
     align-items: center;
-    padding: 0 14px 0 17px;
+    padding: 0 10px;
   }
 
   .cols {
@@ -415,7 +417,7 @@
     background: var(--card-head);
     border-bottom: 1px solid var(--line-media);
     font: 500 10.5px/1 var(--font-mono);
-    letter-spacing: 0.06em;
+    letter-spacing: 0.02em;
     color: var(--text-muted);
   }
 
@@ -428,8 +430,8 @@
     display: flex;
     align-items: center;
     gap: 10px;
-    height: 42px;
-    padding: 0 40px 0 17px;
+    height: 38px;
+    padding: 0 12px;
     background: var(--sunken);
     border-bottom: 1px solid var(--line);
   }
@@ -503,7 +505,7 @@
   .row {
     position: relative;
     flex: none;
-    height: 56px;
+    height: 72px;
     border-bottom: 1px solid var(--line-soft);
     cursor: pointer;
   }
@@ -541,7 +543,7 @@
   .res {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 6px;
   }
 
   .badge {
@@ -556,29 +558,41 @@
   }
 
   .score {
-    font: 700 19px/1 var(--font);
+    font: 700 17px/1 var(--font);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
 
   .map {
+    position: relative;
     display: flex;
     align-items: center;
-    gap: 12px;
+    height: 58px;
+    overflow: hidden;
+    border-radius: 5px;
     min-width: 0;
+    background: var(--surface);
   }
 
   .mimg {
-    width: 84px;
-    height: 36px;
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
     object-fit: cover;
     border-radius: 5px;
     display: block;
     flex: none;
-    background: var(--skel);
+    opacity: .7;
   }
 
   .mtext {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    justify-content: center;
+    padding: 6px 8px;
+    background: linear-gradient(90deg, rgba(12, 11, 12, .85), rgba(12, 11, 12, .2));
     display: flex;
     flex-direction: column;
     gap: 6px;
@@ -586,33 +600,34 @@
   }
 
   .mname {
-    font: 600 15px/1 var(--font);
+    font: 600 15px/20px var(--font);
   }
 
   .when {
-    font: 500 12.5px/1 var(--font);
-    color: var(--text-label);
+    font: 500 12px/1 var(--font);
+    color: var(--text-2);
     white-space: nowrap;
     align-self: flex-start;
   }
 
   .agent {
-    width: 34px;
-    height: 34px;
+    width: 28px;
+    height: 28px;
     border-radius: 6px;
     display: block;
     background: var(--skel);
   }
 
   .kda {
-    font: 500 15px/1 var(--font);
+    font: 500 14px/1 var(--font);
+    text-align: center;
     color: var(--text-soft);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
   }
 
   .num {
-    font: 600 15px/1 var(--font);
+    font: 600 14px/1 var(--font);
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
@@ -621,18 +636,18 @@
     display: flex;
     align-items: center;
     justify-content: flex-end;
-    gap: 7px;
+    gap: 3px;
   }
 
   .ricon {
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
     display: block;
   }
 
   .rr {
-    font: 700 17px/1 var(--font);
-    min-width: 32px;
+    font: 700 15px/1 var(--font);
+    min-width: 28px;
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
@@ -702,4 +717,10 @@
     letter-spacing: 0.08em;
     color: var(--text-label);
   }
+
+  .row:nth-child(even) { background-color: var(--surface); }
+  .row:hover { background-color: var(--row-hover); }
+  .cols > :nth-child(3), .cols > :nth-child(4) { text-align: center; }
+  .mname { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .skel .map { overflow: hidden; }
 </style>

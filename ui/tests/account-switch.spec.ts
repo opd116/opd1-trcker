@@ -3,7 +3,7 @@
 // puuid changes). An open screen must not keep the previous account's data: History, Skins and Saved re-ask for the
 // self card's account and drop a response that was issued for the old one, the profile drawer / scoreboard (whose
 // values are relative to the user) close instead of showing the old account's numbers, and the My Stats-driven
-// surfaces (Competitive, the nav rail's rank, the waiting view's last match/session) only draw the snapshot of the
+// surfaces (Competitive, the waiting view's last match/session) only draw the snapshot of the
 // account on screen until Rust's push for the new account lands.
 //
 // The DEV browser has no Rust, so this spec puts a fake behind Tauri's own door (window.isTauri,
@@ -26,7 +26,8 @@ import type {
   OwnedSkin,
   SavedPlayer,
 } from "../src/lib/types";
-import { APP_READY, gotoApp, NOW, routeMedia, UI_DIR } from "./harness";
+import { APP_READY, gotoApp, NOW, openScreen, routeMedia, UI_DIR } from "./harness";
+test.use({ viewport: { width: 700, height: 860 } });
 
 /** Account A is the demo scene's user (Fahad); account B is the account the Riot client switches to. */
 const A_PUUID = PUUID.fahad!;
@@ -197,7 +198,6 @@ type Fake = {
 };
 
 const calls = (page: Page): Promise<string[]> => page.evaluate(() => (window as unknown as Fake).__calls.slice());
-const nav = (page: Page, label: string) => page.locator(`nav.rail button[aria-label="${label}"]`);
 
 /** The app's own double-click guard (lib/clickGuard.ts): a click within 400 ms of opening a drawer may be swallowed. */
 async function guardDone(page: Page): Promise<void> {
@@ -282,7 +282,7 @@ async function bootInTauri(page: Page, start: Start = "ingame"): Promise<void> {
   await page.clock.setFixedTime(NOW);
   await gotoApp(page, "/", APP_READY);
   if (start === "ingame") await page.locator("main [data-row]").first().waitFor();
-  else await page.locator("nav.rail button").first().waitFor();
+  else await page.locator("nav.compact-nav button").first().waitFor();
   // Nothing went wrong on the way in (the app reports its own errors through `ui_log`).
   expect((await calls(page)).filter((c) => c === "ui_log")).toEqual([]);
 }
@@ -302,7 +302,7 @@ async function switchAccount(page: Page, live: LiveState = LIVE_B): Promise<void
 test.describe("Riot account switch", () => {
   test("an open History page replaces account A's rows with account B's", async ({ page }) => {
     await bootInTauri(page);
-    await nav(page, "History").click();
+    await openScreen(page, "History");
     await expect(page.locator(`main [data-match-id="${ROW_A}"]`)).toHaveCount(1);
 
     await switchAccount(page);
@@ -315,7 +315,7 @@ test.describe("Riot account switch", () => {
     await bootInTauri(page);
     // Account A's first page never answers on its own: the switch happens while it is in flight.
     await page.evaluate(() => ((window as unknown as Fake).__hangHistory = true));
-    await nav(page, "History").click();
+    await openScreen(page, "History");
     // The request really is held in the fake and has not answered (not just "slow to mount").
     await expect.poll(() => page.evaluate(() => (window as unknown as Fake).__hungHistory)).toBe(true);
     await expect(page.locator(`main [data-match-id="${ROW_A}"]`)).toHaveCount(0); // still loading: no rows yet
@@ -338,7 +338,7 @@ test.describe("Riot account switch", () => {
 
   test("an open Skins page clears account A's collection and draws account B's", async ({ page }) => {
     await bootInTauri(page);
-    await nav(page, "Skins").click();
+    await openScreen(page, "Skins");
     await expect(page.locator("main .value .num")).toHaveText("875");
 
     await switchAccount(page);
@@ -348,7 +348,7 @@ test.describe("Riot account switch", () => {
 
   test("an open Saved page reloads the records for the new account", async ({ page }) => {
     await bootInTauri(page);
-    await nav(page, "Saved").click();
+    await openScreen(page, "Saved");
     const row = page.locator("main [data-row]").filter({ hasText: "Nova" });
     await expect(row.locator(".rec").first().locator(".games")).toHaveText("3 games");
 
@@ -370,7 +370,7 @@ test.describe("Riot account switch", () => {
 
   test("an open scoreboard closes on the switch, and the list under it is the new account's", async ({ page }) => {
     await bootInTauri(page);
-    await nav(page, "History").click();
+    await openScreen(page, "History");
     await page.locator(`main [data-match-id="${ROW_A}"]`).click();
     const board = page.locator('main .match[aria-busy="false"]');
     await expect(board).toHaveCount(1);
@@ -406,7 +406,7 @@ test.describe("Riot account switch", () => {
   test.describe("while VALORANT is closed: only the live state's selfPuuid names the account", () => {
     test("History replaces account A's rows", async ({ page }) => {
       await bootInTauri(page, "closed");
-      await nav(page, "History").click();
+      await openScreen(page, "History");
       await expect(page.locator(`main [data-match-id="${ROW_A}"]`)).toHaveCount(1);
 
       await switchAccount(page, CLOSED_B);
@@ -417,7 +417,7 @@ test.describe("Riot account switch", () => {
 
     test("Skins clears account A's collection and draws account B's", async ({ page }) => {
       await bootInTauri(page, "closed");
-      await nav(page, "Skins").click();
+      await openScreen(page, "Skins");
       await expect(page.locator("main .value .num")).toHaveText("875");
 
       await switchAccount(page, CLOSED_B);
@@ -427,7 +427,7 @@ test.describe("Riot account switch", () => {
 
     test("Saved reloads the records and the open drawer closes", async ({ page }) => {
       await bootInTauri(page, "closed");
-      await nav(page, "Saved").click();
+      await openScreen(page, "Saved");
       const row = page.locator("main [data-row]").filter({ hasText: "Nova" });
       await expect(row.locator(".rec").first().locator(".games")).toHaveText("3 games");
       await row.click();
@@ -446,8 +446,7 @@ test.describe("Riot account switch", () => {
   // must not be drawn. The fake keeps account A's snapshot after the switch (the event for B is emitted at the end).
   test("a switch with My Stats still on account A resets it and asks the DB once", async ({ page }) => {
     await bootInTauri(page, "closed");
-    // A's snapshot is on screen: the nav rail's rank, the waiting view's last match and its rank card.
-    await expect(page.locator("nav.rail .rank .rr")).toHaveText("111 RR");
+    // A's snapshot is on screen: the waiting view's last match and rank card.
     await expect(page.locator("main .lm-cap")).toHaveCount(1);
     await expect(page.locator("main .rk-col .mono.dim")).toHaveText("111 / 100 RR");
     const asks = async () => (await calls(page)).filter((c) => c === "my_stats").length;
@@ -456,7 +455,7 @@ test.describe("Riot account switch", () => {
     // The account switches. The fake's DB-only `my_stats` answers null for B (not computable yet): the store resets
     // at once and the switch asks once for the account on screen (not once per surface).
     await switchAccount(page, CLOSED_B);
-    await expect(page.locator("nav.rail .rank .rr")).toHaveText("— RR");
+    await expect(page.locator("main")).not.toContainText("111 / 100 RR");
     await expect(page.locator("main .lm-cap")).toHaveCount(0); // the last match card is left out: not B's
     await expect(page.locator("main .rk-col .mono.dim")).toHaveCount(0);
     await expect(page.locator("main")).not.toContainText("111 / 100 RR");
@@ -464,7 +463,7 @@ test.describe("Riot account switch", () => {
 
     // Competitive leaves the skeleton: the null answer settles it on its `—` frames (never A's numbers). Opening the
     // page while the store is still empty also asks the existing page-open question (refreshMyStats's gate): +1.
-    await nav(page, "Comp").click();
+    await openScreen(page, "Comp");
     await expect(page.locator("main .mystats")).toHaveAttribute("aria-busy", "false");
     await expect(page.locator("main")).not.toContainText("111 / 100 RR");
     await expect(page.locator("main")).not.toContainText("222 / 100 RR");
@@ -473,6 +472,6 @@ test.describe("Riot account switch", () => {
     // Rust's push for B (once it becomes computable) fills the page again.
     await page.evaluate((stats) => (window as unknown as Fake).__emit("mystats", stats), STATS_B);
     await expect(page.locator("main")).toContainText("222 / 100 RR");
-    await expect(page.locator("nav.rail .rank .rr")).toHaveText("222 RR");
+    await expect(page.locator("main")).not.toContainText("111 / 100 RR");
   });
 });

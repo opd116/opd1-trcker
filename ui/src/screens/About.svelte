@@ -66,7 +66,7 @@
         OPD1 TRCKER is proprietary software. Game data and images come from valorant-api.com. Not affiliated with or
         endorsed by Riot Games.
       </p>
-        <p class="credit">Fonts: Barlow, Saira Condensed and Geist Mono, under the SIL Open Font License 1.1.</p>
+        <p class="credit">Fonts: Barlow Semi Condensed, Barlow, Saira Condensed and Geist Mono, under the SIL Open Font License 1.1.</p>
       </div>
     </SettingsGroup>
   </div>
@@ -77,7 +77,7 @@
     flex: 1;
     min-height: 0;
     overflow: auto;
-    padding: 18px 24px 28px;
+    padding: 16px 16px 24px;
   }
 
   .col {
@@ -103,7 +103,7 @@
   }
 
   .sub {
-    font: 500 13px/1 var(--font);
+    font: 500 13px/1.4 var(--font);
     color: var(--text-muted);
   }
 
@@ -147,8 +147,8 @@
 
   .row {
     display: grid;
-    grid-template-columns: 160px minmax(0, 1fr);
-    column-gap: 24px;
+    grid-template-columns: 120px minmax(0, 1fr);
+    column-gap: 16px;
     align-items: center;
     min-height: 46px;
     padding: 14px 0;
@@ -173,6 +173,7 @@
     font: 600 14.5px/1.2 var(--font);
     color: var(--text);
     font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
   }
 
   .skel {

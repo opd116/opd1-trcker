@@ -1,4 +1,7 @@
-The font files in this folder are latin-subset woff2 builds of three families,
+The font files in this folder include Barlow Semi Condensed 500/600/700
+TrueType faces from the approved prototype (Barlow Project Authors,
+https://github.com/jpt/barlow), covered by the Barlow SIL OFL below,
+and latin-subset woff2 builds of the retained families,
 all licensed under the SIL Open Font License 1.1. The licence text of each
 family follows, as shipped in the @fontsource npm package it was taken from
 (@fontsource/barlow 5.3.0, @fontsource/saira-condensed 5.3.0,

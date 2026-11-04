@@ -2,20 +2,21 @@
   Who the player queues with most (prototype 1050–1062; `topTeammates`, current act): the agent when that teammate is
   on the live screen with a visible name (else a silhouette, so a row never reveals who is behind a hidden card), the
   name as the data gives it (hidden-name rules applied upstream, R93), and the games together. On the user's own
-  profile the design adds the record under the name ("10W – 4L together", prototype 1502), left out while no shared
-  match has a winner.
+  profile the design adds the typed record under the name ("10W – 4L together", prototype 1502): a supplied record that
+  is unknown or invalid is left out, a known 0–0 shows neutral zeros.
 -->
 <script lang="ts">
   import { assetUrl } from "../../lib/assets";
   import { liveTeammate } from "../../lib/details";
   import { retryImg } from "../../lib/imgRetry";
-  import { nameView, type PartyChip } from "../../lib/profile";
+  import { nameView, recordParts, type PartyChip } from "../../lib/profile";
   import { meta } from "../../lib/stores";
   import { liveTip } from "../../lib/tips";
   import { tip } from "../../lib/tooltip.svelte";
   import type { LiveState, TeammateSummary } from "../../lib/types";
   import EyeOff from "../icons/EyeOff.svelte";
   import Skel from "../Skel.svelte";
+  import RecordValue from "./RecordValue.svelte";
 
   interface Props {
     /** null while the details load. */
@@ -34,7 +35,7 @@
       puuid: m.puuid,
       nv: nameView(m.name, $meta),
       count: m.count,
-      record: isSelf && m.wins + m.losses > 0 ? `${m.wins}W – ${m.losses}L together` : null,
+      record: isSelf ? recordParts(m.wins, m.losses) : null,
       lv: liveTeammate(m.puuid, live),
       inParty: !!party?.mates.some((x) => x.puuid === m.puuid),
     })),
@@ -73,7 +74,7 @@
             <span class={["nm", m.nv?.style]} dir="auto" data-ellipsis>{m.nv?.text ?? "—"}</span>
             {#if m.nv?.tag}<span class="tg">{m.nv.tag}</span>{/if}
           </div>
-          {#if m.record}<span class="sub">{m.record}</span>{/if}
+          {#if m.record}<span class="sub"><RecordValue record={m.record} compact /> together</span>{/if}
         </div>
         <div class="g"><span class="gn">{m.count}</span><span class="gl">{m.count === 1 ? "game" : "games"}</span></div>
       </div>

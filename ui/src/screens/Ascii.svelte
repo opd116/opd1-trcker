@@ -279,7 +279,7 @@
     flex: 1;
     min-height: 0;
     overflow-y: auto;
-    padding: 18px 24px 24px;
+    padding: 16px 16px 24px;
     display: flex;
     flex-direction: column;
     gap: 14px;
@@ -445,5 +445,15 @@
     grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
     grid-auto-rows: 160px;
     gap: 10px;
+  }
+
+  @media (max-width: 1000px) {
+    .editor { height: auto; grid-template-columns: minmax(0, 1fr); }
+    .controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; overflow: visible; }
+    .field, .actions, .status { grid-column: 1 / -1; }
+    .rule, .spacer { display: none; }
+    .toolrow { align-self: start; min-width: 0; flex-wrap: wrap; }
+    .controls :global(.backdrop) { min-height: 320px; }
+    .gallery { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
 </style>

@@ -10,6 +10,7 @@
   import { tip } from "../../lib/tooltip.svelte";
   import type { StatRow } from "../../lib/types";
   import Skel from "../Skel.svelte";
+  import RecordValue from "./RecordValue.svelte";
 
   /** `rows` undefined while `profile_extras` is pending; [] when it failed or has none. */
   let { rows, pad }: { rows: StatRow[] | undefined; pad: boolean } = $props();
@@ -23,6 +24,7 @@
       <div class="row" aria-hidden="true"><Skel w={104} h={28} r={5} block /><Skel w={180} h={6} block /><span></span><span></span></div>
     {/each}
   {:else}
+    {#if views.length === 0}<span class="empty">—</span>{/if}
     {#each views as m (m.id)}
       <div class="row" use:tip={m.tip}>
         <div class="strip">
@@ -32,7 +34,7 @@
         </div>
         <div class="bar"><div style:width={`${m.wr}%`} style:background={m.barColor}></div></div>
         <span class="wr" style:color={m.textColor}>{m.wr}%</span>
-        <span class="rec">{m.record}</span>
+        <span class="rec"><RecordValue record={m.recordParts ?? null} compact /></span>
       </div>
     {/each}
   {/if}
@@ -52,8 +54,8 @@
 
   .row {
     display: grid;
-    grid-template-columns: 104px minmax(0, 1fr) 40px 44px;
-    column-gap: 10px;
+    grid-template-columns: minmax(88px, 1fr) minmax(24px, .65fr) 42px max-content;
+    column-gap: 8px;
     align-items: center;
     cursor: default;
   }
@@ -115,4 +117,6 @@
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
+
+  .empty { color: var(--text-muted); font: 500 14px/1.4 var(--font); }
 </style>

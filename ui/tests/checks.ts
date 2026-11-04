@@ -5,32 +5,36 @@ import type { Page } from "@playwright/test";
 
 // ── the type scale ───────────────────────────────────────────────────────────────────────────────────────────────
 /**
- * Every font size the v2 design file sets (`.superpowers/design/v2/TrackerApp.dc.html`, its `font:` shorthands and
- * `font-size` overrides), in px. Nothing on screen may use a size the design does not have.
+ * Every font size the approved compact design sets, in px (its `font:` shorthands and `font-size` overrides plus the
+ * retained pages' own scale). Nothing on screen may use a size the design does not have.
  */
 export const DESIGN_SIZES = [
-  9, 10, 10.5, 11, 11.5, 12, 12.5, 13, 13.5, 14, 14.5, 15, 15.5, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 28, 30, 32, 34, 36, 46, 54, 76,
+  9, 10, 10.5, 11, 11.5, 12, 12.5, 13, 13.5, 14, 14.5, 15, 15.5, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 28, 30, 32, 34, 36, 44, 46, 54,
+  64, 76,
 ] as const;
 
 /**
- * The sizes under the 12px body floor, by family, exactly as the design uses them (CLAUDE.md "Design rules": the
- * uppercase Geist Mono micro-labels are 10.5px, the badges 9–10px):
- *   Geist Mono  9 (the nav rail's count badge), 10 (YOU / MVP badges, W/L chips, the compact table heads), 10.5 (the
- *               micro-labels), 11 and 11.5 (small figures)
- *   Barlow      11 and 11.5 (chips, sub-captions, the nav labels); 10 only for a bare arrow glyph (the sort and RR
- *               arrows: no letter or digit)
- *   Saira Condensed never below 12 (it is the display face)
+ * The sizes under the 12px body floor, by family, exactly as the compact design uses them (CLAUDE.md "Design rules":
+ * the uppercase Geist Mono micro-labels are 10.5px, the badges 9–10px):
+ *   Geist Mono   9 (badges), 10 (YOU / MVP badges, W/L chips, the table heads), 10.5 (the micro-labels), 11 and 11.5
+ *                (small figures)
+ *   BarlowSemi   11 and 11.5 (chips, sub-captions, the nav labels and metadata); 10 only for a bare arrow glyph (the
+ *                sort and RR arrows: no letter or digit)
+ *   The body face never drops below 12px otherwise (it is Barlow Semi Condensed, the compact display/body family).
  */
 export const SMALL_SIZES: Record<string, readonly number[]> = {
   "Geist Mono": [9, 10, 10.5, 11, 11.5],
-  Barlow: [11, 11.5],
-  "Saira Condensed": [],
+  BarlowSemi: [11, 11.5],
 };
-/** The one Barlow size below 11 the design uses, for glyph-only text. */
+/** The one BarlowSemi size below 11 the design uses, for glyph-only text. */
 export const GLYPH_SIZE = 10;
 
-/** The three bundled families (fonts.test.ts checks the files; this checks what renders). */
-export const FAMILIES = ["Barlow", "Saira Condensed", "Geist Mono"] as const;
+/**
+ * The bundled families that may render text (fonts.test.ts checks the files; this checks what renders). The compact
+ * design uses Barlow Semi Condensed for the UI and Geist Mono for code/micro-labels; a retained-but-unused face
+ * (Barlow, Saira Condensed) is not required to load, and any other family fails `checkType`.
+ */
+export const FAMILIES = ["BarlowSemi", "Geist Mono"] as const;
 /**
  * The design's ASCII art face (TrackerApp.dc.html 895: `'Cascadia Mono', Consolas, … 'Geist Mono'`), a Windows system
  * font: allowed for the art, never loaded by the app.
@@ -41,8 +45,9 @@ export const ART_SELECTOR = "pre.canvas, .art pre";
 
 /**
  * Every rendered text under #app: its size is one the design uses; below 12px only the design's small sizes for that
- * family (see SMALL_SIZES); never below 9px; and its family is one of the three bundled ones (or the ASCII studio's
- * art face). The ASCII art itself (ART_SELECTOR) is scaled to its frame and is not type.
+ * family (see SMALL_SIZES); never below 9px; and its family is one of the bundled ones (or the ASCII studio's art
+ * face). Text that an `opacity:0` ancestor hides (the peak/current rank layers) is not visible type and is skipped.
+ * The ASCII art itself (ART_SELECTOR) is scaled to its frame and is not type.
  */
 export async function checkType(page: Page): Promise<string[]> {
   return page.evaluate(
@@ -57,6 +62,7 @@ export async function checkType(page: Page): Promise<string[]> {
         if (el.getClientRects().length === 0 || el.closest(art)) continue;
         const s = getComputedStyle(el);
         if (s.visibility === "hidden") continue;
+        if (s.opacity === "0") continue;
         const px = parseFloat(s.fontSize);
         const family = s.fontFamily.split(",")[0]!.replace(/["']/g, "").trim();
         const short = text.length > 40 ? `${text.slice(0, 40)}…` : text;
@@ -66,7 +72,7 @@ export async function checkType(page: Page): Promise<string[]> {
         else if (px < 12) {
           const okSizes = small[family] ?? [];
           const glyphOnly = !/[\p{L}\p{N}]/u.test(text);
-          const ok = okSizes.some((d) => Math.abs(d - px) < 0.01) || (family === "Barlow" && glyphOnly && Math.abs(px - glyph) < 0.01);
+          const ok = okSizes.some((d) => Math.abs(d - px) < 0.01) || (family === "BarlowSemi" && glyphOnly && Math.abs(px - glyph) < 0.01);
           if (!ok) out.add(`"${short}" is ${px}px ${family} (the design has no such small text)`);
         }
       }
@@ -76,18 +82,32 @@ export async function checkType(page: Page): Promise<string[]> {
   );
 }
 
-/** #app uses Barlow, and the three families are loaded (bundled woff2, never a CDN). */
+/**
+ * The rendered text uses Barlow Semi Condensed (`#app`'s family) and every family that actually paints text has a
+ * loaded faced — only what is used, so a retained-but-unused face (Barlow, Saira Condensed) is never required to
+ * download. The ASCII studio's bundled Cascadia Mono is checked the same way when it paints. A CDN request is caught
+ * separately (`watchFontCdn`).
+ */
 export async function checkFonts(page: Page): Promise<string[]> {
-  return page.evaluate((families) => {
+  return page.evaluate(() => {
     const out: string[] = [];
-    const ff = getComputedStyle(document.getElementById("app")!).fontFamily;
-    if (!ff.replace(/["']/g, "").startsWith("Barlow")) out.push(`#app font-family is ${ff}`);
-    for (const f of families) {
+    const app = document.getElementById("app")!;
+    const ff = getComputedStyle(app).fontFamily;
+    if (!ff.replace(/["']/g, "").startsWith("BarlowSemi")) out.push(`#app font-family is ${ff}`);
+    const used = new Set<string>();
+    const walker = document.createTreeWalker(app, NodeFilter.SHOW_TEXT);
+    for (let n = walker.nextNode(); n; n = walker.nextNode()) {
+      if (!n.textContent?.trim()) continue;
+      const el = n.parentElement;
+      if (!el || el.getClientRects().length === 0) continue;
+      used.add(getComputedStyle(el).fontFamily.split(",")[0]!.replace(/["']/g, "").trim());
+    }
+    for (const f of used) {
       const loaded = [...document.fonts].some((face) => face.family.replace(/["']/g, "") === f && face.status === "loaded");
       if (!loaded) out.push(`${f} is not loaded`);
     }
     return out;
-  }, [...FAMILIES] as string[]);
+  });
 }
 
 // ── the window ───────────────────────────────────────────────────────────────────────────────────────────────────
@@ -178,6 +198,11 @@ export async function checkText(page: Page): Promise<{ clip: string[]; overlap: 
     };
     const transform = (t: string, how: string) =>
       how === "uppercase" ? t.toUpperCase() : how === "lowercase" ? t.toLowerCase() : how === "capitalize" ? t.replace(/\b\p{L}/gu, (c) => c.toUpperCase()) : t;
+    /** An `opacity:0` ancestor (the peak/current rank layers) paints no text: it can neither clip nor overlap. */
+    const transparent = (el: Element): boolean => {
+      for (let a: Element | null = el; a && a !== app.parentElement; a = a.parentElement) if (getComputedStyle(a).opacity === "0") return true;
+      return false;
+    };
 
     const walker = document.createTreeWalker(app, NodeFilter.SHOW_TEXT);
     for (let n = walker.nextNode(); n; n = walker.nextNode()) {
@@ -186,7 +211,7 @@ export async function checkText(page: Page): Promise<{ clip: string[]; overlap: 
       if (!text) continue;
       const el = n.parentElement!;
       const s = getComputedStyle(el);
-      if (s.visibility === "hidden" || el.getClientRects().length === 0) continue;
+      if (s.visibility === "hidden" || el.getClientRects().length === 0 || transparent(el)) continue;
       ctx.font = `${s.fontStyle} ${s.fontWeight} ${s.fontSize} ${s.fontFamily}`;
       const m = ctx.measureText(transform(text, s.textTransform));
       const range = document.createRange();
@@ -276,12 +301,18 @@ async function checkDecorations(page: Page): Promise<string[]> {
   const labels = await page.evaluate(() => {
     const label = (el: Element) => el.tagName.toLowerCase() + [...el.classList].filter((c) => !/^s(velte)?-/.test(c)).map((c) => `.${c}`).join("");
     const found: string[] = [];
-    /** Fully on screen: inside the viewport (with the 10px band the probe shoots under it) and every scroll container. */
+    /** Fully on screen (and visible): inside the viewport (with the 10px band the probe shoots under it), no `opacity:0`
+     *  ancestor, not covered at its centre by another element (the compact drawer fills `main`, hiding the board under
+     *  it), and inside every scroll container that can show it whole. */
     const shown = (el: HTMLElement) => {
       const r = el.getBoundingClientRect();
       if (r.top < 0 || r.bottom + 12 > window.innerHeight) return false;
+      const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      // `hit.contains(el)` covers a `pointer-events: none` text element: the topmost hittable box there is its ancestor.
+      if (!hit || !(hit === el || el.contains(hit) || hit.contains(el))) return false;
       for (let a = el.parentElement; a; a = a.parentElement) {
         const s = getComputedStyle(a);
+        if (s.opacity === "0") return false;
         if (s.overflowY !== "auto" && s.overflowY !== "scroll") continue;
         const b = a.getBoundingClientRect();
         if (r.top < b.top || r.bottom + 12 > b.bottom) return false;

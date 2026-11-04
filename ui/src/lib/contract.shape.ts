@@ -363,7 +363,6 @@ export const shapes = {
     smurf: { kinds: ["string"], enum: "smurfLevel" },
     savedAlert: bool,
     sound: bool,
-    onTop: bool,
     boot: bool,
     tray: bool,
   } satisfies ShapeOf<Settings>,

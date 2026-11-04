@@ -6,6 +6,7 @@ import { CONTENT_TIERS } from "./details";
 import { DASH, kd2, pct0, rrDelta, score } from "./format";
 import { agentName, isRankedTier, mapName } from "./meta";
 import { EDITION_COLORS, PARTY_COLORS, tierColor, tierName, tierShort as shortTier, type Edition } from "./theme";
+import { profileHsColor, profileKdColor, profileWrColor } from "./statColors";
 import { nameTip } from "./tips";
 import type {
   DisplayName,
@@ -146,6 +147,8 @@ export function prevCell(tier: number | null | undefined, meta: Meta | null): Ra
 // ── stats row ────────────────────────────────────────────────────────────────────
 
 export interface StatCell {
+  /** The Record cell's typed W/L counts (undefined while loading, null when unknown or invalid); other cells omit it. */
+  record?: RecordCounts | null | undefined;
   label: string;
   /** undefined while loading (a skeleton). */
   value: string | undefined;
@@ -153,11 +156,33 @@ export interface StatCell {
   tip: string;
 }
 
-/** A stat value's colour: standout white at `hi` and above (prototype), the stat colour otherwise; flat with highlight off. */
-const tone = (v: number | null | undefined, hi: number, on: boolean): string =>
-  !on ? "var(--text-soft)" : typeof v === "number" && v >= hi ? "var(--text-hi)" : "var(--text-mid)";
+/** A record's typed wins/losses, so the view never parses them back out of a formatted string. */
+export interface RecordCounts {
+  wins: number;
+  losses: number;
+}
 
-/** Mean ACS over the recent rows that have one, and how many that is; null when none has. */
+/**
+ * Typed W/L from already-separate wins and losses (used for maps and the self teammates, where a draw is neither):
+ * undefined while loading, null when unknown or invalid (null, negative, non-integer or unsafe).
+ */
+export function recordParts(wins: number | null | undefined, losses: number | null | undefined): RecordCounts | null | undefined {
+  if (wins === undefined || losses === undefined) return undefined;
+  if (wins === null || losses === null || !Number.isSafeInteger(wins) || !Number.isSafeInteger(losses) || wins < 0 || losses < 0) return null;
+  return { wins, losses };
+}
+
+/**
+ * Typed W/L from wins and total games (`losses = games − wins`, so a draw is neither): undefined while loading, null
+ * when unknown or invalid (null, a negative or unsafe games, a negative/non-integer wins, or wins above games).
+ */
+export function recordCounts(wins: number | null | undefined, games: number | null | undefined): RecordCounts | null | undefined {
+  if (wins === undefined || games === undefined) return undefined;
+  if (wins === null || games === null || !Number.isSafeInteger(games) || games < 0 || wins > games) return null;
+  return recordParts(wins, games - wins);
+}
+
+/** Mean ACS over the recent rows that have one, and how many; null when none has. */
 export function avgAcs(recent: readonly MatchSummary[]): { acs: number; n: number } | null {
   const xs = recent.map((m) => m.acs).filter((a): a is number => typeof a === "number");
   if (xs.length === 0) return null;
@@ -178,24 +203,25 @@ export function statCells(
   const heroScope = `Last ${n} competitive · this act`;
   const wins = card.actWins;
   const games = card.actGames;
-  const losses = typeof wins === "number" && typeof games === "number" ? games - wins : null;
+  const record = recordCounts(wins, games);
+  const losses = record?.losses ?? null;
   const out: StatCell[] = [
     {
       label: "K/D",
       value: details ? kd2(details.heroKd) : undefined,
-      color: tone(details?.heroKd, 1.3, on),
+      color: profileKdColor(details?.heroKd, on),
       tip: details && details.heroKd !== null ? `Kills per death\n${heroScope}` : "",
     },
     {
       label: "Headshot %",
       value: details ? pct0(details.heroHs) : undefined,
-      color: tone(details?.heroHs == null ? null : details.heroHs * 100, 28, on),
+      color: profileHsColor(details?.heroHs, on),
       tip: details && details.heroHs !== null ? `Share of hits that landed on the head\n${heroScope}` : "",
     },
     {
       label: "Win rate",
       value: card.actWinrate === undefined ? undefined : pct0(card.actWinrate),
-      color: tone(card.actWinrate == null ? null : card.actWinrate * 100, 60, on),
+      color: profileWrColor(card.actWinrate, on),
       tip:
         typeof wins === "number" && typeof games === "number"
           ? `${wins} ${wins === 1 ? "win" : "wins"} in ${games} ${games === 1 ? "game" : "games"}\nThis act · competitive`
@@ -203,7 +229,8 @@ export function statCells(
     },
     {
       label: "Record",
-      value: wins === undefined || games === undefined ? undefined : score(wins, losses),
+      record,
+      value: record === undefined ? undefined : record === null ? DASH : score(record.wins, record.losses),
       color: on ? "var(--text-mid)" : "var(--text-soft)",
       tip: losses === null ? "" : "Wins – losses\nThis act · competitive",
     },
@@ -334,6 +361,8 @@ export function encounterView(e: EncounterDetailRow, them: NameView | undefined,
 // ── maps ─────────────────────────────────────────────────────────────────────────
 
 export interface MapRowView {
+  /** The row's typed W/L counts (undefined while loading, null when unknown or invalid). */
+  recordParts: RecordCounts | null | undefined;
   id: string;
   map: string | null | undefined;
   /** Win rate 0–100 (rounded). */
@@ -356,6 +385,7 @@ export function mapRows(rows: readonly StatRow[], meta: Meta | null, max = 5): M
       map: name,
       wr,
       record: score(r.wins, r.losses),
+      recordParts: recordParts(r.wins, r.losses),
       barColor: wr >= 55 ? "var(--win)" : wr <= 45 ? "var(--loss)" : "var(--text-faint)",
       textColor: wr >= 55 ? "var(--text)" : "var(--text-2)",
       tip: `${label}: ${r.wins} ${r.wins === 1 ? "win" : "wins"}, ${r.losses} ${r.losses === 1 ? "loss" : "losses"}${rr}\nThis act · competitive`,

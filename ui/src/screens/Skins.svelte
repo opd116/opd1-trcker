@@ -165,8 +165,9 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    padding: 18px 24px 18px;
+    padding: 16px;
     gap: 14px;
+    min-width: 0;
   }
 
   .head {
@@ -221,7 +222,7 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: 290px minmax(0, 1fr);
+    grid-template-columns: 250px minmax(0, 1fr);
     gap: 12px;
   }
 
@@ -277,7 +278,7 @@
 
   .grid {
     display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(178px, 1fr));
+    grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     gap: 10px;
   }
 
@@ -333,5 +334,13 @@
     font: 500 14px/1.55 var(--font);
     color: var(--text-dim);
     text-wrap: pretty;
+  }
+
+  @media (max-width: 1000px) {
+    .cols { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
+    .left { height: 156px; max-height: 156px; }
+    .skcard { overflow: hidden; max-height: 132px; }
+    .skcard :global(*) { max-width: 100%; }
+    .tiers { overflow: hidden; }
   }
 </style>

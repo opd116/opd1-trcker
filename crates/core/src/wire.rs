@@ -234,7 +234,6 @@ pub struct Settings {
     pub smurf: SmurfLevel,
     pub saved_alert: bool,
     pub sound: bool,
-    pub on_top: bool,
     pub boot: bool,
     pub tray: bool,
 }
@@ -247,7 +246,6 @@ impl Default for Settings {
             smurf: SmurfLevel::Cautious,
             saved_alert: true,
             sound: false,
-            on_top: true,
             boot: true,
             tray: true,
         }
@@ -371,5 +369,26 @@ mod tests {
         let json = serde_json::to_string(&Settings::default()).unwrap();
         assert!(json.contains("\"enemyFirst\":false"));
         assert!(json.contains("\"smurf\":\"cautious\""));
+    }
+
+    /// A stored copy written before the pin/always-on-top removal carries the
+    /// `onTop` key (`ui_settings` JSON, `v2::settings::load`): an unknown
+    /// legacy key is ignored and the known ones keep their stored values —
+    /// no migration, nothing else resets.
+    #[test]
+    fn legacy_stored_settings_with_on_top_deserialize_without_it() {
+        let legacy =
+            r#"{"highlight":false,"onTop":false,"savedAlert":false,"boot":false,"tray":false}"#;
+        let s: Settings = serde_json::from_str(legacy).unwrap();
+        assert!(!s.highlight);
+        assert!(!s.saved_alert);
+        assert!(!s.boot);
+        assert!(!s.tray);
+        // The keys the legacy copy did not carry still fill from the defaults.
+        assert_eq!(s.smurf, SmurfLevel::Cautious);
+        // The field is gone from the wire: a fresh copy never writes it again.
+        assert!(!serde_json::to_string(&Settings::default())
+            .unwrap()
+            .contains("onTop"));
     }
 }

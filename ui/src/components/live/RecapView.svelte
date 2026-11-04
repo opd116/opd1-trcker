@@ -221,7 +221,9 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 330px;
+    grid-template-columns: minmax(0, 1fr);
+    align-content: start;
+    overflow: auto;
     gap: 12px;
   }
 
@@ -232,6 +234,16 @@
     gap: 12px;
     min-height: 0;
   }
+
+  .right {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-items: start;
+    gap: 10px;
+  }
+
+  .right > .fill { display: none; }
+  .right > .primary, .right > .clears { grid-column: 1 / -1; }
 
   .mono {
     font: 500 10.5px/1 var(--font-mono);
@@ -250,8 +262,8 @@
   .hero {
     position: relative;
     flex: none;
-    height: 206px;
-    border-radius: 12px;
+    height: clamp(190px, 25dvh, 220px);
+    border-radius: 8px;
     overflow: hidden;
     border: 1px solid var(--line);
     background: var(--card);
@@ -271,13 +283,13 @@
     width: 100%;
     height: 100%;
     object-fit: cover;
-    opacity: 0.42;
+    opacity: 0.68;
   }
 
   .hero-fade {
     position: absolute;
     inset: 0;
-    background: linear-gradient(90deg, #0f1114 0%, rgba(15, 17, 20, 0.82) 45%, rgba(15, 17, 20, 0.35) 100%);
+    background: linear-gradient(90deg, rgba(12, 11, 12, 0.92), rgba(12, 11, 12, 0.5) 55%, rgba(12, 11, 12, 0.12));
   }
 
   .hero-in {
@@ -286,7 +298,7 @@
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    padding: 20px 24px;
+    padding: 18px 20px;
   }
 
   .res {
@@ -296,7 +308,7 @@
   }
 
   .word {
-    font: 700 76px/0.8 var(--font-display);
+    font: 700 64px/0.9 var(--font);
     letter-spacing: 0.02em;
   }
 
@@ -312,7 +324,9 @@
 
   .stats {
     display: flex;
-    gap: 30px;
+    gap: 24px;
+    align-items: center;
+    flex-wrap: wrap;
   }
 
   .stat {
@@ -342,17 +356,17 @@
   }
 
   .teams {
-    flex: 1;
+    flex: none;
     min-height: 0;
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 12px;
+    gap: 10px;
   }
 
   .team {
     background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: 8px;
     overflow: hidden;
     display: flex;
     flex-direction: column;
@@ -362,17 +376,17 @@
   .t-head {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 6px;
     height: 36px;
-    padding: 0 14px;
+    padding: 0 8px;
     border-bottom: 1px solid var(--line);
     background: var(--card-head);
     flex: none;
   }
 
   .t-label {
-    font: 700 14px/1 var(--font-display);
-    letter-spacing: 0.12em;
+    font: 700 12px/1 var(--font);
+    letter-spacing: 0.04em;
   }
 
   .t-score {
@@ -390,12 +404,12 @@
   }
 
   .kda {
-    width: 66px;
+    width: 62px;
     white-space: nowrap;
   }
 
   .sp {
-    width: 28px;
+    width: 24px;
     flex: none;
   }
 
@@ -404,16 +418,17 @@
   }
 
   .t-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: 24px 18px minmax(0, 1fr) 32px 62px 24px;
     align-items: center;
-    gap: 10px;
-    height: 44px;
-    padding: 0 8px 0 14px;
+    gap: 6px;
+    height: 40px;
+    padding: 0 8px;
     flex: none;
   }
 
   .t-row.bb {
-    border-bottom: 1px solid #1b1e22;
+    border-bottom: 1px solid var(--line-soft);
   }
 
   .t-row.self {
@@ -421,8 +436,8 @@
   }
 
   .t-agent {
-    width: 28px;
-    height: 28px;
+    width: 24px;
+    height: 24px;
     border-radius: 5px;
     background: var(--skel);
     overflow: hidden;
@@ -479,9 +494,12 @@
     border-radius: 3px;
   }
 
+  .t-row > .fill { display: none; }
+  .t-row .t-mvp { display: none; }
+
   .t-acs {
     font: 600 14px/1 var(--font);
-    width: 36px;
+    width: 32px;
     text-align: right;
     flex: none;
     font-variant-numeric: tabular-nums;
@@ -490,14 +508,14 @@
   .t-kda {
     font: 500 12.5px/1 var(--font);
     color: var(--text-muted);
-    width: 66px;
+    width: 62px;
     text-align: right;
     white-space: nowrap;
     flex: none;
   }
 
   .save {
-    width: 28px;
+    width: 24px;
     height: 28px;
     flex: none;
     border-radius: 6px;
@@ -523,14 +541,14 @@
     flex: none;
     background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 12px;
-    padding: 18px;
+    border-radius: 8px;
+    padding: 12px;
     display: flex;
     flex-direction: column;
   }
 
   .r-rank {
-    gap: 16px;
+    gap: 10px;
   }
 
   .rk {
@@ -540,8 +558,8 @@
   }
 
   .rk img {
-    width: 54px;
-    height: 54px;
+    width: 38px;
+    height: 38px;
     display: block;
   }
 
@@ -552,7 +570,7 @@
   }
 
   .rk-name {
-    font: 600 24px/1 var(--font-display);
+    font: 600 21px/1 var(--font);
   }
 
   .rk-rr {
@@ -575,12 +593,12 @@
   }
 
   .rk-next {
-    font: 500 13px/1.4 var(--font);
+    font: 500 12px/1.3 var(--font);
     color: var(--text-dim);
   }
 
   .r-session {
-    gap: 12px;
+    gap: 10px;
   }
 
   .cap {
@@ -635,7 +653,7 @@
     height: 36px;
     border-radius: 8px;
     background: var(--accent);
-    color: var(--on-accent);
+    color: var(--text);
     border: none;
     font: 600 13.5px/1 var(--font);
     cursor: pointer;

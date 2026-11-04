@@ -6,7 +6,8 @@
 // (inside for an inset ring, outside for an outer one): a side that is clipped has none.
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { PUUID } from "../src/lib/demo/cdv8";
-import { openScene } from "./harness";
+import { openScene, openScreen, screenNav } from "./harness";
+test.use({ viewport: { width: 700, height: 860 } });
 
 type Sides = { top: number; right: number; bottom: number; left: number; w: number; h: number };
 
@@ -105,18 +106,18 @@ type Target = {
 
 const MARA = PUUID.mara!;
 const FAHAD = PUUID.fahad!;
-const rail = (label: string) => (page: Page) => page.locator(`nav.rail button[aria-label="${label}"]`);
+const rail = (label: string) => (page: Page) => screenNav(page, label);
 const titleButton = (label: string) => (page: Page) => page.locator(`#app > header button[aria-label="${label}"]`);
 const scoreboardRows = (page: Page) => page.getByRole("dialog").getByRole("button", { name: /Open scoreboard$/ });
 
 const TARGETS: Target[] = [
-  { name: "nav rail: Live (the first item)", scene: "ingame", el: rail("Live"), inset: true },
-  { name: "nav rail: About (the last item)", scene: "ingame", el: rail("About"), inset: true },
-  { name: "nav rail: the rank widget", scene: "ingame", el: rail("Your rank: open Competitive") },
+  { name: "compact nav: Live (the first item)", scene: "ingame", el: rail("Live") },
+  { name: "compact nav: About (the last item)", scene: "ingame", el: rail("About") },
+  { name: "compact nav: Records disclosure", scene: "ingame", el: rail("Comp") },
   { name: "title bar: Minimize", scene: "ingame", el: titleButton("Minimize"), inset: true },
   { name: "title bar: Close (the window's right edge)", scene: "ingame", el: titleButton("Close"), inset: true },
-  { name: "board: the first row of a team", scene: "ingame", el: (p) => p.locator("main section.team").first().locator("[data-row]").first(), inset: true },
-  { name: "board: the last row of a team", scene: "ingame", el: (p) => p.locator("main section.team").first().locator("[data-row]").last(), inset: true },
+  { name: "board: the first row of a team", scene: "ingame", el: (p) => p.locator("main section.compact-team").first().locator("[data-row]").first(), inset: true },
+  { name: "board: the last row of a team", scene: "ingame", el: (p) => p.locator("main section.compact-team").first().locator("[data-row]").last(), inset: true },
   { name: "history: the first row", scene: "closed", params: { screen: "history" }, el: (p) => p.locator("main .row[data-row]").first(), inset: true },
   { name: "history: the last row (below the fold)", scene: "closed", params: { screen: "history" }, el: (p) => p.locator("main .row[data-row]").last(), inset: true },
   { name: "saved: the first row", scene: "closed", params: { screen: "saved" }, el: (p) => p.locator("main .row[data-row]").first(), inset: true },
@@ -140,8 +141,8 @@ for (const t of TARGETS) {
 
 test("a mouse click leaves no ring (on a row, a nav item and Back)", async ({ page }) => {
   await openScene(page, "closed", { screen: "history" });
-  const nav = page.locator('nav.rail button[aria-label="History"]');
-  await nav.click();
+  const nav = screenNav(page, "History");
+  await openScreen(page, "History");
   expect(await focusVisible(nav)).toBe(false);
   expect((await outlineOf(nav)).style).toBe("none");
   const row = page.locator("main .row[data-row]").first();

@@ -1,7 +1,8 @@
 <!--
-  Glance mode (design v2 29–94): the window is a 420px column (`set_glance`); this is its frame: the backdrop, the
-  column, and its 32px title bar (wordmark, GLANCE MODE, the status dot, the pin, Exit glance, close). The body (map
-  header, the two team tables, the saved-player note) is components/live/GlanceView.svelte.
+  Glance mode (R205, compact-design): the 420×420 logical-px square window (`set_glance`); this is its frame: the
+  32px title bar (wordmark, GLANCE, the status dot, Exit glance, close) with 1px side rails at the window's
+  edges. The body (map strip, the two five-row team columns, the callout / hover detail) is
+  components/live/GlanceView.svelte.
 -->
 <script lang="ts">
   import { retryOnNextUpdate } from "../../lib/boundary";
@@ -11,7 +12,6 @@
   import { reportError } from "../../lib/uilog";
   import GlanceView from "../live/GlanceView.svelte";
   import { close } from "./appWindow";
-  import PinButton from "./PinButton.svelte";
   import StatusPill from "./StatusPill.svelte";
 </script>
 
@@ -19,11 +19,10 @@
   <div class="col">
     <header class="bar" data-tauri-drag-region>
       <div class="logo"></div>
-      <span class="word">OPD1</span>
-      <span class="sub">GLANCE MODE</span>
+      <span class="word">OPD1 <span>TRCKER</span></span>
+      <span class="sub">GLANCE</span>
       <div class="status"><StatusPill dotOnly /></div>
       <div class="fill" data-tauri-drag-region></div>
-      <PinButton glance />
       <button type="button" class="exit" use:tip={"Back to the full window"} onclick={() => setGlance(false)}
         ><svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" aria-hidden="true"
           ><path d="M9.5 2H14v4.5M14 2L9 7M6.5 14H2V9.5M2 14l5-5"></path></svg
@@ -90,22 +89,24 @@
     width: 11px;
     height: 11px;
     background: var(--accent);
-    clip-path: polygon(0 0, 100% 0, 100% 64%, 64% 100%, 0 100%);
+    border-radius: 2px;
   }
 
   .word {
-    font: 700 13px/1 var(--font-display);
-    letter-spacing: 0.14em;
+    font: 700 12px/1 var(--font);
+    letter-spacing: 0.06em;
   }
 
+  .word span { color: var(--text-muted); font-weight: 500; }
+
   .sub {
-    font: 500 10.5px/1 var(--font-mono);
+    font: 500 11px/1 var(--font-mono);
     letter-spacing: 0.06em;
     color: var(--text-muted);
   }
 
   .status {
-    margin-left: 6px;
+    margin-left: 0;
     display: flex;
   }
 
@@ -116,11 +117,11 @@
 
   .exit {
     height: 24px;
-    padding: 0 9px;
+    padding: 0 6px;
     margin: 0 4px 0 0;
     border-radius: 6px;
-    background: var(--button);
-    border: 1px solid var(--line-control);
+    background: transparent;
+    border: 1px solid transparent;
     color: var(--text);
     display: flex;
     align-items: center;
@@ -135,7 +136,7 @@
   }
 
   .wb {
-    width: 40px;
+    width: 28px;
     height: 32px;
     padding: 0;
     margin: 0;

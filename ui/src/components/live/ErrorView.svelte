@@ -99,12 +99,13 @@
     justify-content: center;
     background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: 8px;
+    overflow: auto;
   }
 
   .box {
     width: 100%;
-    max-width: 580px;
+    max-width: 520px;
     display: flex;
     flex-direction: column;
     gap: 20px;
@@ -112,11 +113,8 @@
   }
 
   .icon {
-    width: 48px;
-    height: 48px;
-    border-radius: 12px;
-    background: rgba(239, 106, 91, 0.1);
-    border: 1px solid rgba(239, 106, 91, 0.35);
+    width: 32px;
+    height: 32px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -130,9 +128,8 @@
 
   h1 {
     margin: 0;
-    font: 700 32px/1.05 var(--font-display);
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
+    font: 700 30px/1.1 var(--font);
+    text-wrap: balance;
   }
 
   p {
@@ -171,7 +168,7 @@
     padding: 0 18px;
     border-radius: 8px;
     background: var(--accent);
-    color: var(--on-accent);
+    color: var(--text);
     border: none;
     font: 600 13.5px/1 var(--font);
     cursor: pointer;

@@ -199,6 +199,124 @@
     const s = (e.currentTarget as HTMLElement).scrollTop > 4;
     if (s !== scrolled) scrolled = s;
   }
+
+  // ── lightweight measured layout ─────────────────────────────────────────────
+  let contentEl = $state<HTMLElement | null>(null);
+  let encEl = $state<HTMLElement | null>(null);
+  let matesEl = $state<HTMLElement | null>(null);
+  let recentEl = $state<HTMLElement | null>(null);
+  let mapsEl = $state<HTMLElement | null>(null);
+  let loadoutEl = $state<HTMLElement | null>(null);
+  let isNarrow = $state(false);
+
+  const hasEncounters = $derived(!isSelf && encExpected);
+  let lastLayoutKey = "";
+
+  function updateProfileLayout() {
+    if (!panel || !contentEl) return;
+    const narrow = panel.clientWidth < 600;
+    if (narrow !== isNarrow) {
+      isNarrow = narrow;
+    }
+
+    const elements = [encEl, matesEl, recentEl, mapsEl, loadoutEl].filter(Boolean) as HTMLElement[];
+
+    if (narrow) {
+      if (lastLayoutKey !== "narrow") {
+        elements.forEach((el) => {
+          el.style.position = "";
+          el.style.left = "";
+          el.style.top = "";
+          el.style.width = "";
+        });
+        contentEl.style.height = "";
+        lastLayoutKey = "narrow";
+      }
+      return;
+    }
+
+    const hasEnc = hasEncounters && encEl !== null && encEl.offsetParent !== null;
+    const gap = 16;
+    const colWidth = "calc(50% - " + (gap / 2) + "px)";
+    const leftCol = "0px";
+    const rightCol = "calc(50% + " + (gap / 2) + "px)";
+
+    const encH = encEl && hasEnc ? Math.round(encEl.offsetHeight) : 0;
+    const matesH = matesEl ? Math.round(matesEl.offsetHeight) : 0;
+    const recentH = recentEl ? Math.round(recentEl.offsetHeight) : 0;
+    const mapsH = mapsEl ? Math.round(mapsEl.offsetHeight) : 0;
+    const loadoutH = loadoutEl ? Math.round(loadoutEl.offsetHeight) : 0;
+    const panelW = Math.round(panel.clientWidth);
+
+    const layoutKey = `${panelW}|${hasEnc}|${encH}|${matesH}|${recentH}|${mapsH}|${loadoutH}`;
+    if (layoutKey === lastLayoutKey) return;
+    lastLayoutKey = layoutKey;
+
+    elements.forEach((el) => {
+      el.style.position = "absolute";
+    });
+
+    let leftHeight = 0;
+    let rightHeight = 0;
+
+    if (hasEnc && encEl && matesEl && recentEl && mapsEl) {
+      // WITH encounters:
+      // Left: Encounters -> Recent matches
+      encEl.style.width = colWidth;
+      encEl.style.left = leftCol;
+      encEl.style.top = "0px";
+
+      recentEl.style.width = colWidth;
+      recentEl.style.left = leftCol;
+      recentEl.style.top = `${encH + gap}px`;
+      leftHeight = encH + gap + recentH;
+
+      // Right: Top teammates -> Map performance
+      matesEl.style.width = colWidth;
+      matesEl.style.left = rightCol;
+      matesEl.style.top = "0px";
+
+      mapsEl.style.width = colWidth;
+      mapsEl.style.left = rightCol;
+      mapsEl.style.top = `${matesH + gap}px`;
+      rightHeight = matesH + gap + mapsH;
+    } else if (matesEl && recentEl && mapsEl) {
+      // WITHOUT encounters:
+      // Left: Top teammates -> Map performance
+      matesEl.style.width = colWidth;
+      matesEl.style.left = leftCol;
+      matesEl.style.top = "0px";
+
+      mapsEl.style.width = colWidth;
+      mapsEl.style.left = leftCol;
+      mapsEl.style.top = `${matesH + gap}px`;
+      leftHeight = matesH + gap + mapsH;
+
+      // Right: Recent matches
+      recentEl.style.width = colWidth;
+      recentEl.style.left = rightCol;
+      recentEl.style.top = "0px";
+      rightHeight = recentH;
+    }
+
+    if (loadoutEl) {
+      const contentTop = Math.max(leftHeight, rightHeight) + gap;
+      loadoutEl.style.width = "100%";
+      loadoutEl.style.left = "0px";
+      loadoutEl.style.top = `${contentTop}px`;
+      contentEl.style.height = `${contentTop + loadoutH}px`;
+    }
+  }
+
+  $effect(() => {
+    if (!panel || !contentEl) return;
+    const ro = new ResizeObserver(() => updateProfileLayout());
+    ro.observe(panel);
+    const elements = [encEl, matesEl, recentEl, mapsEl, loadoutEl].filter(Boolean) as HTMLElement[];
+    elements.forEach((el) => ro.observe(el));
+    updateProfileLayout();
+    return () => ro.disconnect();
+  });
 </script>
 
 <svelte:window onkeydown={windowKey} />
@@ -332,26 +450,33 @@
         </div>
       {/if}
 
-      <div class="grid" class:has-encounters={!isSelf && encExpected}>
-        {#if !isSelf && encExpected}
-          <section class="map-section encounter-section" aria-label="Encounters">
+      <div
+        bind:this={contentEl}
+        class="profile-content grid"
+        class:has-encounters={hasEncounters}
+        class:is-narrow={isNarrow}
+      >
+        {#if hasEncounters}
+          <section bind:this={encEl} class="section map-section encounter-section" aria-label="Encounters">
             <div class="shead"><span class="mlabel">ENCOUNTERS</span><span class="hint">Your result</span></div>
             <Encounters rows={encRows} {puuid} them={nv} expected={encExpected} />
           </section>
         {/if}
-        <section class="map-section mates-section" aria-label="Top teammates">
+        <section bind:this={matesEl} class="section map-section mates-section" aria-label="Top teammates">
           <span class="mlabel">TOP TEAMMATES</span>
           <Mates mates={details ? details.topTeammates : null} live={$live} {party} {isSelf} />
         </section>
-        <section class="map-section recent-section" aria-label="Recent matches">
+        <section bind:this={recentEl} class="section map-section recent-section" aria-label="Recent matches">
           <RecentTable rows={details ? details.recent : null} {extras} {isSelf} {puuid} />
         </section>
-        <section class="map-section maps-section" aria-label="Map performance">
+        <section bind:this={mapsEl} class="section map-section maps-section" aria-label="Map performance">
           <span class="mlabel">MAP PERFORMANCE</span>
           <Maps rows={extras === undefined ? undefined : (extras?.maps ?? [])} pad={false} />
         </section>
+        <div bind:this={loadoutEl} class="loadout-wrap">
+          <Loadout loadout={details ? details.loadout : null} wide={true} />
+        </div>
       </div>
-      <Loadout loadout={details ? details.loadout : null} wide={true} />
     </div>
   </div>
 </div>
@@ -697,46 +822,52 @@
     overscroll-behavior: contain;
   }
 
-  .grid {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    gap: 16px;
-    align-items: start;
+  .profile-content {
+    position: relative;
+    width: 100%;
   }
 
-  .grid:not(.has-encounters) .mates-section {
-    grid-column: 1;
-    grid-row: 1;
-  }
-
-  .grid:not(.has-encounters) .maps-section {
-    grid-column: 1;
-    grid-row: 2;
-  }
-
-  .grid:not(.has-encounters) .recent-section {
-    grid-column: 2;
-    grid-row: 1 / span 2;
-  }
-
-  .map-section {
+  .map-section,
+  .section {
     min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 10px;
   }
 
+  .loadout-wrap {
+    width: 100%;
+  }
+
   @container profile (width < 600px) {
-    .grid { grid-template-columns: minmax(0, 1fr); }
-    .grid:not(.has-encounters) .mates-section,
-    .grid:not(.has-encounters) .maps-section,
-    .grid:not(.has-encounters) .recent-section {
-      grid-column: auto;
-      grid-row: auto;
+    .profile-content {
+      display: flex !important;
+      flex-direction: column !important;
+      gap: 16px !important;
+      height: auto !important;
+    }
+    .profile-content > .section,
+    .profile-content > .loadout-wrap {
+      position: static !important;
+      width: 100% !important;
+      transform: none !important;
     }
     .hrow { flex-wrap: wrap; }
     .who { flex-basis: 200px; }
     .btn { padding-inline: 9px; }
+  }
+
+  .profile-content.is-narrow {
+    display: flex !important;
+    flex-direction: column !important;
+    gap: 16px !important;
+    height: auto !important;
+  }
+  .profile-content.is-narrow > .section,
+  .profile-content.is-narrow > .loadout-wrap {
+    position: static !important;
+    width: 100% !important;
+    transform: none !important;
   }
 
   .mlabel {

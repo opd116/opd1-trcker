@@ -3,29 +3,31 @@
 // error, lost and recap views, and glance mode. The page clock is pinned at the demo's NOW (harness), so the demo's
 // countdowns read as the design's (0:42, 1:24, 42 s, 8S).
 import { expect, test, type Page } from "@playwright/test";
-import { openScene, pointerAway } from "./harness";
+import { openScene, pointerAway, screenNav } from "./harness";
+test.use({ viewport: { width: 700, height: 860 } });
 
 const box = async (page: Page, sel: string) => (await page.locator(sel).first().boundingBox())!;
 const tipText = (page: Page) => page.locator("#tooltip").innerText();
 
 for (const [w, h] of [
-  [1280, 800],
-  [1180, 760],
+  [700, 860],
+  [680, 760],
 ] as const) {
-  test(`in game at ${w}×${h}: header, two teams of five 56px rows, no sideways overflow`, async ({ page }) => {
+  test(`in game at ${w}×${h}: header, two teams of five responsive rows, no sideways overflow`, async ({ page }) => {
     await page.setViewportSize({ width: w, height: h });
     await openScene(page, "ingame");
-    const head = await box(page, "main .live > .head");
-    expect(head.height).toBe(62);
-    expect(head.x).toBe(76 + 24);
-    const teams = page.locator("main section.team");
+    const head = await box(page, "main .live > .compact-match");
+    expect(head.height).toBe(58);
+    expect(head.x).toBe(16);
+    const teams = page.locator("main section.compact-team");
     await expect(teams).toHaveCount(2);
     await expect(teams.nth(0)).toHaveAttribute("aria-label", "Your team");
     const rows = page.locator("main [data-row]");
     await expect(rows).toHaveCount(10);
-    for (let i = 0; i < 10; i++) expect(Math.round((await rows.nth(i).boundingBox())!.height)).toBe(56);
+    const rowHeight = Math.max(48, Math.min(80, (h - 228) / 10));
+    for (let i = 0; i < 10; i++) expect((await rows.nth(i).boundingBox())!.height).toBeCloseTo(rowHeight, 1);
     // The user's row comes first and carries YOU.
-    await expect(rows.nth(0).locator(".you")).toHaveText("YOU");
+    await expect(rows.nth(0).locator(".you")).toHaveText("You");
     const sw = await page.evaluate(() => document.documentElement.scrollWidth);
     expect(sw).toBe(w);
     // Nothing but a name, a note or a rank name may be cut off sideways.
@@ -33,47 +35,50 @@ for (const [w, h] of [
       [...document.querySelectorAll<HTMLElement>("main .live *")]
         .filter((e) => e.scrollWidth > e.clientWidth + 1 && getComputedStyle(e).overflowX !== "visible")
         // An <img> still decoding can report its alt text's width for a moment: not layout.
-        .filter((e) => !e.matches(".n, .note-t, .rank-name, .text, .tables, img"))
+        .filter((e) => !e.matches("[data-ellipsis], .rank-detail > b, .text, .tables, img"))
         .map((e) => `${e.tagName}.${e.className} in ${e.parentElement?.className} (${e.scrollWidth}>${e.clientWidth})`),
     );
     expect(cut).toEqual([]);
+    // R205: no visible smurf decoration, even though the demo's flagged player (wisp) is on this board.
+    await expect(page.locator("main .smurf, [aria-label='Automated smurf signal']")).toHaveCount(0);
+    await expect(page.locator("main .live")).not.toContainText(/smurf/i);
   });
 }
 
 test("agent select: chip, countdown, lock count, your team only, the enemy placeholder, picking tiles", async ({ page }) => {
   await openScene(page, "pregame");
-  await expect(page.locator(".head .chip")).toHaveText("AGENT SELECT");
-  await expect(page.locator(".head .timer")).toHaveText("0:42");
+  await expect(page.locator(".compact-match .pregame span").first()).toHaveText("Agent select");
+  await expect(page.locator(".compact-match .pregame b")).toHaveText("0:42");
   // The lock count agrees with the rows: 5 allies, 3 of them "Picking…" (a hover, an undecided ally, a hidden player).
-  await expect(page.locator(".head .locked")).toHaveText("2 OF 5 LOCKED");
-  await expect(page.locator("main section.team")).toHaveCount(1);
+  await expect(page.locator(".compact-match .pregame span").last()).toHaveText("2/5 locked");
+  await expect(page.locator("main section.compact-team")).toHaveCount(1);
   await expect(page.locator(".enemy-ph .ph-label")).toHaveText("ENEMY TEAM");
-  await expect(page.locator("main [data-row] .agent .q")).toHaveCount(3);
-  await expect(page.locator("main [data-row] .n.hidden")).toHaveText(["Hidden player"]);
+  await expect(page.locator("main [data-row] .portrait:not(:has(img))")).toHaveCount(3);
+  await expect(page.locator("main [data-row] strong.hidden")).toHaveText(["Hidden player"]);
   // The enemy side of the matchup is unknown.
-  await expect(page.locator(".matchup .side").nth(1).locator(".wr")).toHaveText("?");
+  await expect(page.locator(".enemy-ph [data-row]")).toHaveCount(0);
 });
 
 test("loading: LOADING PLAYERS 0 / 10 and ten skeleton rows", async ({ page }) => {
   await openScene(page, "ingame-loading");
-  await expect(page.locator(".head .loading .ld-n")).toHaveText("0 / 10");
-  await expect(page.locator("main .row.skel")).toHaveCount(10);
+  await expect(page.getByRole("progressbar", { name: "Loading players" })).toHaveAttribute("aria-valuenow", "0");
+  await expect(page.locator("main .compact-player:not([data-row])")).toHaveCount(10);
   await expect(page.locator("main [data-row]")).toHaveCount(0);
 });
 
 test("partial cards: a loading cell shimmers, the rest of the row is drawn", async ({ page }) => {
   await openScene(page, "ingame-partial");
-  await expect(page.locator(".head .loading .ld-n")).toHaveText(/\d \/ 10/);
+  await expect(page.getByRole("progressbar", { name: "Loading players" })).toHaveAttribute("aria-valuemax", "10");
   await expect(page.locator("main [data-row] .sk").first()).toBeVisible();
 });
 
 test("hidden names: the agent name in italic without a tag; a remembered name is dotted with its source on hover", async ({ page }) => {
   await openScene(page, "ingame", {}, { clock: "manual" });
-  const hidden = page.locator("main [data-row] .n.hidden");
+  const hidden = page.locator("main [data-row] strong.hidden");
   await expect(hidden).toHaveText(["Cypher"]);
   expect(await hidden.evaluate((e) => getComputedStyle(e).fontStyle)).toBe("italic");
-  await expect(hidden.locator("xpath=following-sibling::span")).toHaveCount(0);
-  const rem = page.locator("main [data-row] .n.remembered").first();
+  await expect(hidden.locator('xpath=ancestor::*[@data-row]').locator(".tag")).toHaveCount(0);
+  const rem = page.locator("main [data-row] strong.remembered").first();
   expect(await rem.evaluate((e) => getComputedStyle(e).textDecorationStyle)).toBe("dotted");
   await rem.hover();
   await page.clock.runFor(500);
@@ -89,15 +94,15 @@ test("tooltips: peak (with its tier image), played before (key/value), party, wi
     await page.locator(sel).first().hover();
     await page.clock.runFor(500);
   };
-  await hover("main [data-row] .peak");
-  await expect(page.locator("#tooltip img")).toHaveCount(1);
+  await hover("main [data-row] .peak-gap");
+  expect(await tipText(page)).toMatch(/Ascendant|Immortal|Radiant|Diamond|Platinum/);
   expect(await tipText(page)).toMatch(/1mo ago|This act/);
-  await hover("main [data-row] .met");
+  await hover("main [data-row] .encounters");
   expect(await tipText(page)).toMatch(/^Played before\nWith you\n\d+\nAgainst you\n\d+$/);
-  await hover("main [data-row] .gutter:has(.pdot)");
+  await hover("main [data-row] .party-link");
   expect(await tipText(page)).toMatch(/^(Probably q|Q)ueued together\n/);
-  await hover("main [data-row] .wr-cell .big");
-  expect(await tipText(page)).toMatch(/^\d+W\n\d+L$/);
+  await hover("main [data-row] .win .reading");
+  expect(await tipText(page)).toMatch(/^This act · \d+ wins · \d+ losses$/);
 });
 
 test("keyboard: Tab reaches the rows, Enter opens the profile and keeps the row marked", async ({ page }) => {
@@ -107,9 +112,9 @@ test("keyboard: Tab reaches the rows, Enter opens the profile and keeps the row 
   await page.keyboard.press("Tab");
   await expect(rows.nth(1)).toBeFocused();
   await page.keyboard.press("Enter");
-  await expect(rows.nth(1)).toHaveClass(/\bsel\b/);
+  await expect(rows.nth(1)).toHaveClass(/\bselected\b/);
   await page.keyboard.press("Escape");
-  await expect(rows.nth(1)).toHaveClass(/\bsel\b/);
+  await expect(rows.nth(1)).toHaveClass(/\bselected\b/);
 });
 
 test("waiting (closed): copy, checks, Launch VALORANT; last match, today and rank cards", async ({ page }) => {
@@ -121,7 +126,7 @@ test("waiting (closed): copy, checks, Launch VALORANT; last match, today and ran
   await expect(page.locator(".wait .rk-name")).toBeVisible();
   // The last match opens its scoreboard on the History screen.
   await page.locator(".wait .lm-open").click();
-  await expect(page.locator('nav.rail button[aria-label="History"]')).toHaveAttribute("aria-current", "page");
+  await expect(screenNav(page, "History")).toHaveClass(/active/);
 });
 
 test("waiting (menus): the party and the queue timer", async ({ page }) => {
@@ -199,7 +204,7 @@ test("recap: hero, both teams by ACS with bookmarks, the full scoreboard", async
   expect(nums).toEqual([...nums].sort((a, b) => b - a));
   await expect(page.locator(".recap .save").first()).toBeVisible();
   await page.locator(".recap .primary").click();
-  await expect(page.locator('nav.rail button[aria-label="History"]')).toHaveAttribute("aria-current", "page");
+  await expect(screenNav(page, "History")).toHaveClass(/active/);
 });
 
 // A keyboard open starts the scoreboard on Back; Back puts the focus on what opened it, not on the page.
@@ -218,15 +223,22 @@ for (const c of [
   });
 }
 
-test("glance: enemy team first, 52px rows, the saved-player callout", async ({ page }) => {
-  await page.setViewportSize({ width: 420, height: 800 });
+test("glance: square window, ten compact rows, enemy team first and saved-player callout", async ({ page }) => {
+  await page.setViewportSize({ width: 420, height: 420 });
   await openScene(page, "ingame", { glance: "1" });
   const teams = page.locator(".glance-body section.team");
   await expect(teams).toHaveCount(2);
   await expect(teams.nth(0)).toHaveAttribute("aria-label", "Enemy team");
   const row = page.locator(".glance-body [data-row]").first();
-  expect(Math.round((await row.boundingBox())!.height)).toBe(52);
+  await expect(page.locator(".glance-body [data-row]")).toHaveCount(10);
+  expect(Math.round((await row.boundingBox())!.height)).toBe(49);
   await expect(page.locator(".glance-body .callout .c-head")).toHaveText(/ is on (the enemy|your) team$/);
+  // The callout is two lines (head + the saved player's note) so neither line crowds the other.
+  await expect(page.locator(".glance-body .callout .c-note")).toHaveText(/Entry every round/);
   const sw = await page.evaluate(() => document.documentElement.scrollWidth);
   expect(sw).toBe(420);
+  await row.hover();
+  await expect(page.locator("#glance-player-detail .name")).toHaveText("Mara");
+  await expect(page.locator("#glance-player-detail .tag")).toHaveText("#7788");
+  await expect(page.locator("#glance-player-detail .note")).toContainText("Entry every round");
 });

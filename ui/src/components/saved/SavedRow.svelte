@@ -164,10 +164,10 @@
 <style>
   .row {
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1.05fr) 128px 128px minmax(0, 2.3fr) 96px 12px;
-    column-gap: 16px;
+    grid-template-columns: minmax(140px, 1fr) 78px 66px 66px minmax(120px, 1fr) 68px 8px;
+    column-gap: 8px;
     align-items: center;
-    padding: 12px 14px 12px 16px;
+    padding: 12px 10px;
     border-bottom: 1px solid var(--line-soft);
     cursor: pointer;
   }
@@ -214,14 +214,14 @@
   .player {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
     min-width: 0;
     min-height: 40px;
   }
 
   .agent {
-    width: 40px;
-    height: 40px;
+    width: 32px;
+    height: 32px;
     flex: none;
     border-radius: 8px;
     overflow: hidden;
@@ -260,14 +260,14 @@
   .rankcell {
     display: flex;
     align-items: center;
-    gap: 9px;
+    gap: 4px;
     min-width: 0;
     min-height: 40px;
   }
 
   .ricon {
-    width: 26px;
-    height: 26px;
+    width: 22px;
+    height: 22px;
     display: block;
     flex: none;
   }
@@ -282,7 +282,7 @@
   .rec {
     display: flex;
     align-items: center;
-    gap: 8px;
+    gap: 4px;
     min-height: 40px;
     justify-self: start;
   }
@@ -297,9 +297,9 @@
   .wl {
     display: flex;
     gap: 4px;
-    padding: 3px 6px;
+    padding: 2px 0;
     border-radius: 4px;
-    background: #1c1f24;
+    background: transparent;
     font: 600 12px/1 var(--font);
     white-space: nowrap;
     font-variant-numeric: tabular-nums;
@@ -337,7 +337,7 @@
     flex: 1;
     min-width: 0;
     font: 500 13.5px/1.45 var(--font);
-    color: #ddd8ff;
+    color: var(--text-2);
     display: -webkit-box;
     -webkit-box-orient: vertical;
     -webkit-line-clamp: 2;
@@ -398,10 +398,10 @@
     height: 76px;
     resize: vertical;
     background: var(--input);
-    border: 1px solid rgba(157, 140, 255, 0.45);
+    border: 1px solid var(--accent);
     border-radius: 7px;
     padding: 8px 10px;
-    color: #e2ddff;
+    color: var(--text);
     font: 500 13.5px/1.45 var(--font);
     cursor: text;
   }
@@ -450,5 +450,16 @@
     min-height: 40px;
     display: flex;
     align-items: center;
+  }
+
+  .row:nth-child(even):not(.live) { background: var(--surface); }
+  .row:hover { background: var(--row-hover); }
+  .rec { flex-direction: column; align-items: flex-start; justify-content: center; gap: 3px; }
+  @media (max-width: 760px) {
+    .row { grid-template-columns: minmax(140px, 1fr) 78px 66px 66px 68px 8px; row-gap: 8px; }
+    .notecell { grid-column: 1 / -1; grid-row: 2; padding-top: 8px; border-top: 1px solid var(--line-soft); }
+    .seen { grid-column: 5; grid-row: 1; }
+    .chev { grid-column: 6; grid-row: 1; }
+    .hint { line-height: 1.3; }
   }
 </style>

@@ -38,14 +38,19 @@ Colors are evaluated strictly from RAW numerical values before rounding or displ
 
 ## Compact profile sections (R209, R210)
 
-After rank/stats, show Encounters first when any are stored/expected, then Top teammates. With no encounters, omit the empty encounter panel and start with Top teammates. Use the same two-column half-width layout for Encounters and Recent matches as Top teammates and Map performance, not full-width horizontal strips.
+After rank/stats, show Encounters first when any are stored/expected, then Top teammates. With no encounters, omit the empty encounter panel and start with Top teammates.
 
-**R210 single vertical scroll flow & layout refinement:**
+**Lightweight measured layout & section placement:**
+- **Deterministic column placement (>= 600px):**
+  - **With encounters:** Left column renders Encounters then Recent matches; Right column renders Top teammates then Map performance directly beneath it with an exact 12–20px vertical gap (nominally 16px).
+  - **Without encounters:** Left column renders Top teammates then Map performance directly beneath it with an exact 12–20px vertical gap (nominally 16px); Right column renders Recent matches.
+  - **Loadout:** Spans full width at the bottom below both columns.
+- **Priority DOM, reading & keyboard order:** Sections are direct sequential children of `.profile-content` in priority sequence: Encounters (if present) → Top teammates → Recent matches → Map performance → Loadout. Screen readers and Tab key navigation follow this sequence naturally without tabindex overrides.
 - **Single vertical scroll flow:** Eliminate internal Recent matches scrolling and the 340px height cap in `RecentTable.svelte`. The entire profile drawer content flows naturally within one main vertical scroll container (`ProfileDrawer.svelte`), and all six recent matches are fully rendered and reachable via profile vertical scrolling.
-- **No grid-row gaps:** Remove artificial grid-row height gaps below Top teammates in normal viewports.
+- **No grid-row gaps:** Lightweight measured positioning (`ResizeObserver`, zero new dependencies) eliminates artificial height gaps below Top teammates in both variants.
 - **Unified section headings:** Section headings across profile components (`Encounters`, `Mates`, `RecentTable`, `Maps`) use unified placement, `.mlabel` typography, and spacing.
 - **Header headroom:** RecentTable map area retains at least 48px headroom with no clipped descenders.
-- **Responsive fallback:** Below 600px drawer width the existing single-column fallback remains. Personal notes, loadout, all data, keyboard access, and scoreboard navigation rules are preserved.
+- **Responsive fallback:** Below 600px drawer width the single-column fallback stacks sections in identical priority sequence, preserving focus across resize without node remounting. Personal notes, loadout, all data, keyboard access, and scoreboard navigation rules are preserved.
 
 ## Verification boundaries
 

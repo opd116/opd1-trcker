@@ -169,8 +169,12 @@
             <div class="rank"></div>
           {/if}
           <PlayerName name={p.name} size="board" />
-          {#if p.isSelf}<span class="you">YOU</span>{/if}
-          {#if mvp.match === p.puuid}<span class="mvp">MATCH MVP</span>{:else if mvp.team.has(p.puuid)}<span class="mvp">TEAM MVP</span>{/if}
+          {#if p.isSelf || mvp.match === p.puuid || mvp.team.has(p.puuid)}
+            <span class="accolades">
+              {#if p.isSelf}<span class="you">YOU</span>{/if}
+              {#if mvp.match === p.puuid}<span class="mvp">MATCH MVP</span>{:else if mvp.team.has(p.puuid)}<span class="mvp">TEAM MVP</span>{/if}
+            </span>
+          {/if}
         </div>
         <span class="acs">{num(p.acs)}</span>
         <span class="kda">{kdaText(p.kills, p.deaths, p.assists)}</span>
@@ -289,7 +293,8 @@
     overflow: auto;
     display: flex;
     flex-direction: column;
-    padding: 18px 24px 18px;
+    padding: 16px;
+    min-width: 0;
     gap: 12px;
   }
 
@@ -335,7 +340,7 @@
   .hero {
     position: relative;
     flex: none;
-    height: 132px;
+    min-height: 132px;
     border-radius: 12px;
     overflow: hidden;
     border: 1px solid var(--line);
@@ -354,7 +359,7 @@
   .shade {
     position: absolute;
     inset: 0;
-    background: linear-gradient(90deg, #101215 0%, rgba(16, 18, 21, 0.75) 50%, rgba(16, 18, 21, 0.5) 100%);
+    background: linear-gradient(90deg, #101010 0%, rgba(16, 16, 16, 0.75) 50%, rgba(16, 16, 16, 0.5) 100%);
   }
 
   .hin {
@@ -362,8 +367,8 @@
     height: 100%;
     display: flex;
     align-items: center;
-    gap: 28px;
-    padding: 0 28px;
+    gap: 16px;
+    padding: 18px;
   }
 
   .hl {
@@ -377,7 +382,7 @@
     font: 700 46px/0.9 var(--font-display);
     letter-spacing: 0.05em;
     text-transform: uppercase;
-    white-space: nowrap;
+    white-space: normal;
   }
 
   .hmeta {
@@ -429,7 +434,7 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
-    min-width: 120px;
+    min-width: 88px;
   }
 
   .ylabel {
@@ -467,10 +472,10 @@
   .thead,
   .srow {
     display: grid;
-    grid-template-columns: 18px minmax(0, 1fr) 64px 120px 56px 56px 56px 56px 32px;
-    column-gap: 14px;
+    grid-template-columns: 4px minmax(140px, 1fr) 36px 78px 30px 34px 36px 38px 28px;
+    column-gap: 6px;
     align-items: center;
-    padding-right: 10px;
+    padding-right: 8px;
   }
 
   .thead {
@@ -492,7 +497,7 @@
   .tname {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 6px;
     min-width: 0;
   }
 
@@ -509,7 +514,7 @@
 
   .tlabel {
     font: 700 15px/1 var(--font-display);
-    letter-spacing: 0.12em;
+    letter-spacing: 0.03em;
     text-transform: uppercase;
     white-space: nowrap;
     overflow: hidden;
@@ -523,7 +528,7 @@
 
   .h {
     font: 500 10.5px/1 var(--font-mono);
-    letter-spacing: 0.06em;
+    letter-spacing: 0.02em;
     color: var(--text-label);
     white-space: nowrap;
   }
@@ -538,8 +543,8 @@
 
   .srow {
     position: relative;
-    height: 46px;
-    border-bottom: 1px solid #1b1e22;
+    min-height: 60px;
+    border-bottom: 1px solid var(--line-soft);
   }
 
   .srow.last {
@@ -547,7 +552,7 @@
   }
 
   .srow.self {
-    background: rgba(157, 140, 255, 0.06);
+    background: color-mix(in srgb, var(--accent) 6%, var(--card));
   }
 
   .selfbar {
@@ -564,15 +569,17 @@
   }
 
   .who {
-    display: flex;
+    display: grid;
+    grid-template-columns: 28px 18px minmax(0, 1fr);
     align-items: center;
-    gap: 10px;
+    gap: 4px 6px;
     min-width: 0;
+    padding-block: 8px;
   }
 
   .agent {
-    width: 32px;
-    height: 32px;
+    width: 28px;
+    height: 28px;
     border-radius: 6px;
     display: block;
     background: var(--skel);
@@ -580,8 +587,8 @@
   }
 
   .rank {
-    width: 20px;
-    height: 20px;
+    width: 18px;
+    height: 18px;
     display: block;
     flex: none;
   }
@@ -647,5 +654,31 @@
 
   .save.on {
     color: var(--accent);
+  }
+
+  .accolades {
+    grid-column: 3;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  .srow:nth-child(odd):not(.self) { background: var(--surface); }
+  .hmeta { white-space: normal; line-height: 1.5; }
+  .halves { white-space: nowrap; letter-spacing: 0; }
+  .hscore { flex: none; }
+  .yrank { white-space: normal; line-height: 1.2; }
+  .vdiv { flex: none; }
+  .acs { font-size: 15px; }
+  .stat, .kda { font-size: 13px; }
+  .mvp { font-size: 9px; letter-spacing: 0; padding: 2px 3px; }
+  .you { font-size: 9px; padding: 2px 3px; }
+  @media (max-width: 760px) {
+    .hin { gap: 12px; padding: 16px; }
+    .hmap { font-size: 36px; }
+    .big { font-size: 44px; }
+    .yval { font-size: 30px; }
+    .colon { margin-inline: 6px; }
+    .blabel { max-width: 200px; }
   }
 </style>

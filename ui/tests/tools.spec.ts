@@ -3,10 +3,11 @@
 // painting, copy, save, delete, the gallery), Settings' switches and radiogroups, and About's rows.
 import { expect, test, type Page } from "@playwright/test";
 import { openScene } from "./harness";
+test.use({ viewport: { width: 700, height: 860 } });
 
 const SIZES = [
-  [1280, 800],
-  [1180, 760],
+  [700, 860],
+  [680, 760],
 ] as const;
 
 const open = (page: Page, screen: string) => openScene(page, "closed", { screen });
@@ -14,11 +15,14 @@ const box = async (page: Page, sel: string) => (await page.locator(sel).first().
 const canvasText = (page: Page) => page.locator("pre.canvas").evaluate((el) => el.firstChild?.textContent ?? "");
 
 for (const [w, h] of SIZES) {
-  test(`ascii layout at ${w}×${h}: 440px editor (300px controls), the page scrolls, no sideways overflow`, async ({ page }) => {
+  test(`ascii layout at ${w}×${h}: compact reflow (one column, two-column controls), the page scrolls, no sideways overflow`, async ({ page }) => {
     await page.setViewportSize({ width: w, height: h });
     await open(page, "ascii");
-    expect((await box(page, ".editor")).height).toBe(440);
-    expect((await box(page, ".controls")).width).toBe(300);
+    // At the compact widths the studio reflows: the editor stacks (one column, auto height) and its controls run in two
+    // columns at the editor's full width, instead of the 440px / 300px two-pane layout the wide window uses.
+    expect(await page.locator(".editor").evaluate((el) => getComputedStyle(el).gridTemplateColumns.split(" ").length)).toBe(1);
+    expect(await page.locator(".controls").evaluate((el) => getComputedStyle(el).gridTemplateColumns.split(" ").length)).toBe(2);
+    expect((await box(page, ".controls")).width).toBeCloseTo((await box(page, ".editor")).width, 0);
     const [sw, cw, sh, ch] = await page.locator("main .page").evaluate((el) => [el.scrollWidth, el.clientWidth, el.scrollHeight, el.clientHeight]);
     expect(sw).toBe(cw);
     expect(sh).toBeGreaterThan(ch);
@@ -148,67 +152,31 @@ test("ascii: Save stores the drawing first in the gallery, marked as yours; Dele
 });
 
 for (const [w, h] of SIZES) {
-  test(`settings layout at ${w}×${h}: the 780px column, four groups, the design's words`, async ({ page }) => {
+  test(`settings at ${w}×${h}: intentionally empty, no unavailable controls`, async ({ page }) => {
     await page.setViewportSize({ width: w, height: h });
     await open(page, "settings");
-    expect((await box(page, "main .col")).width).toBe(780);
     await expect(page.locator("main h1")).toHaveText("Settings");
-    await expect(page.locator("section.group")).toHaveCount(4);
-    await expect(page.getByRole("switch")).toHaveCount(7);
-    expect((await box(page, '[role="switch"]')).width).toBe(42);
-    await expect(page.getByText("Flags only when 3 of 4 signals agree", { exact: false })).toBeVisible();
-    const [sw, cw] = await page.locator("main .page").evaluate((el) => [el.scrollWidth, el.clientWidth]);
+    await expect(page.locator("main button, main input, main [role=switch], main [role=radio]")).toHaveCount(0);
+    await expect(page.locator("main")).toHaveText("Settings");
+    const [sw, cw] = await page.locator("main").evaluate((el) => [el.scrollWidth, el.clientWidth]);
     expect(sw).toBe(cw);
   });
 }
 
-test("settings: switches flip and persist through updateSettings; Play a sound waits for the alert", async ({ page }) => {
+test("R206: the title bar has no always-on-top pin; Settings stays empty and the stored defaults hold", async ({ page }) => {
   await open(page, "settings");
-  const enemy = page.getByRole("switch", { name: "Enemy team first" });
-  await expect(enemy).toHaveAttribute("aria-checked", "false");
-  await enemy.click();
-  await expect(enemy).toHaveAttribute("aria-checked", "true");
-  // Keyboard: Space on a focused switch.
-  await enemy.focus();
-  await page.keyboard.press("Space");
-  await expect(enemy).toHaveAttribute("aria-checked", "false");
-
-  const alert = page.getByRole("switch", { name: "Saved player in my match" });
-  const sound = page.getByRole("switch", { name: "Play a sound with alerts" });
-  await expect(sound).not.toHaveAttribute("aria-disabled", "true");
-  await alert.click();
-  await expect(sound).toHaveAttribute("aria-disabled", "true");
-  await expect(sound).toHaveAttribute("data-tip", "Turn on “Saved player in my match” first");
-  const before = await sound.getAttribute("aria-checked");
-  await sound.click({ force: true });
-  await expect(sound).toHaveAttribute("aria-checked", before!);
-  expect(await sound.evaluate((el) => getComputedStyle(el).opacity)).toBe("0.5");
-  await alert.click();
-  await expect(sound).not.toHaveAttribute("aria-disabled", "true");
-
-  // The pin in the title bar and the setting are one value.
-  const onTop = page.getByRole("switch", { name: "Keep on top during matches" });
-  const pin = page.locator('#app > header button[aria-label="Keep on top during matches"]');
-  await expect(onTop).toHaveAttribute("aria-checked", "true");
-  await expect(pin).toHaveAttribute("aria-pressed", "true");
-  await onTop.click();
-  await expect(pin).toHaveAttribute("aria-pressed", "false");
-  await pin.click();
-  await expect(onTop).toHaveAttribute("aria-checked", "true");
-});
-
-test("settings: smurf warnings radiogroup (arrow keys) and its option table", async ({ page }) => {
-  await open(page, "settings");
-  const g = page.getByRole("radiogroup", { name: "Smurf warnings" });
-  await expect(g.getByRole("radio", { name: "Cautious" })).toHaveAttribute("aria-checked", "true");
-  await expect(g.getByRole("radio", { name: "Cautious" })).toHaveAttribute("tabindex", "0");
-  await expect(g.getByRole("radio", { name: "Off" })).toHaveAttribute("tabindex", "-1");
-  await g.getByRole("radio", { name: "Cautious" }).focus();
-  await page.keyboard.press("ArrowRight");
-  await expect(g.getByRole("radio", { name: "Eager" })).toHaveAttribute("aria-checked", "true");
-  await expect(page.locator(".table .r.on .name")).toHaveText("Eager");
-  await g.getByRole("radio", { name: "Off" }).click();
-  await expect(page.locator(".table .r.on .name")).toHaveText("Off");
+  // R206 removed the pin from both shell bars: the title bar carries only the window buttons.
+  const labels = await page
+    .locator("#app > header")
+    .getByRole("button")
+    .evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
+  expect(labels).toEqual(["Minimize", "Maximize", "Close"]);
+  await expect(page.locator('#app > header button[aria-label="Keep on top during matches"]')).toHaveCount(0);
+  // The postponed Settings page still shows only its title, and the stored defaults are the documented seven.
+  const readSettings = () =>
+    page.evaluate(`import('/src/lib/appdata.svelte.ts').then(({settings}) => { let value; settings.subscribe(v => value = v)(); return value; })`);
+  expect(await readSettings()).toEqual({ highlight: true, enemyFirst: false, smurf: "cautious", savedAlert: true, sound: false, boot: true, tray: true });
+  await expect(page.locator("main")).toHaveText("Settings");
 });
 
 test("about: wordmark and the six rows from app_info and the status", async ({ page }) => {

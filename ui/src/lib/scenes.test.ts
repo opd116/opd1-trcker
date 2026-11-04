@@ -15,7 +15,7 @@ import type { DisplayName, LiveState, MatchDetailsView, Meta, MyStats, PlayerCar
 
 const NAMES: SceneName[] = [
   "boot", "closed", "closed-empty", "lobby1", "lobby2", "lobby2-loading", "lobby2-unranked", "lobby3", "lobby4", "lobby5",
-  "pregame", "pregame-nomap", "pregame-loading", "ingame", "ingame-longnames", "ingame-parties4", "ingame-partial",
+  "pregame", "pregame-nomap", "pregame-loading", "ingame", "ingame-longnames", "ingame-parties4", "ingame-trio-duo", "ingame-partial",
   "ingame-unranked", "ingame-loading", "ingame-nometa", "ingame-remembered", "ingame-rr-unknown",
   "details", "details-more", "details-self", "details-hidden", "details-empty", "details-loading", "details-longnames",
   "details-partial", "details-nostats",
@@ -121,6 +121,25 @@ describe("live scenes", () => {
     expect(p.filter((c) => c.team === "enemy")).toHaveLength(5);
     expect(p.filter((c) => c.isSelf)).toHaveLength(1);
     expect(p[0]?.isSelf).toBe(true);
+  });
+
+  it("the trio+duo fixture keeps enemy groups distinct without changing allies or player data", () => {
+    const p = players("ingame-trio-duo");
+    const original = players("ingame-parties4");
+    const enemy = p.filter((c) => c.team === "enemy");
+    expect(p).toHaveLength(10);
+    expect(enemy).toHaveLength(5);
+    expect(enemy.map((c) => c.party)).toEqual([
+      { group: 2, confirmed: true },
+      { group: 2, confirmed: true },
+      { group: 2, confirmed: true },
+      { group: 3, confirmed: false },
+      { group: 3, confirmed: false },
+    ]);
+    expect(p.filter((c) => c.team === "ally")).toEqual(original.filter((c) => c.team === "ally"));
+    expect(new Set(p.flatMap((c) => c.party ? [c.party.group] : [])).size).toBe(4);
+    expect(p.map((c) => ({ ...c, party: null }))).toEqual(original.map((c) => ({ ...c, party: null })));
+    expect(original.filter((c) => c.team === "enemy").map((c) => c.party?.group ?? null)).toEqual([2, 2, 3, 3, null]);
   });
 
   it("Fahad's last5 results are newest first", () => {

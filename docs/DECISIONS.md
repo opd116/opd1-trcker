@@ -1492,10 +1492,14 @@ Every ruling made while building OPD1 TRCKER, in number order (R1 to R176). Each
   - **Profile Layout Refinement:**
     - Single main vertical scroll area for profile content (`ProfileDrawer.svelte`); eliminate Recent matches' internal scrolling and 340px height cap in `RecentTable.svelte`.
     - All six recent matches remain displayed and reachable through profile vertical scroll.
-    - Remove artificial grid-row height gaps below Top teammates in normal viewports.
-    - Section ordering: When encounters exist, Encounters displays first followed by Top teammates; when encounters are absent/empty, the Encounters section is omitted and Top teammates becomes first priority.
+    - Lightweight measured layout (`ResizeObserver`, zero new dependencies) eliminates artificial height gaps below Top teammates in normal viewports (asserted strictly within 12–20px, nominally 16px).
+    - Deterministic column placement (>= 600px):
+      - With encounters: Left column renders Encounters then Recent matches; Right column renders Top teammates then Map performance directly beneath it.
+      - Without encounters: Left column renders Top teammates then Map performance directly beneath it; Right column renders Recent matches.
+      - Loadout spans full width at the bottom below both columns.
+    - Priority DOM, reading & keyboard sequence: Sections are direct sequential children of `.profile-content` in priority order: Encounters (if present) → Top teammates → Recent matches → Map performance → Loadout.
     - Standardize section headings across profile components (`Encounters`, `Mates`, `RecentTable`, `Maps`) using unified `.mlabel` placement, typography, and spacing.
-    - Compact half-width sections render side-by-side at normal widths with narrow-container (<600px) single-column fallback.
+    - Compact half-width sections render side-by-side at normal widths with narrow-container (<600px) single-column fallback preserving focus across resize without node remounting.
     - RecentTable map area retains at least 48px headroom with no clipped descenders.
   - **Windows NSIS Review Installer Authorization:** User authorizes building a review installer (`OPD1-TRCKER-<version>-compact-review-<shortsha>-setup.exe`) delivered directly to the Desktop (`C:\Users\Administrator\Desktop`) with production packaging limits (<= 10 MiB, no DEV fixtures, no CDN fonts, SHA-256 verified, unsigned, no auto-install/execution) alongside a 10-section English review report and Arabic conclusion.
 - **Supersedes:** R209 metric palette and thresholds, internal Recent matches scrolling/340px cap and grid spacing gaps, and the previous prohibition on building a review installer.

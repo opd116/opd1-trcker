@@ -21,7 +21,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 | R207 | 2026-11-04 | superseded | Peak act-age subtitle; restored party brackets; initial metric color tables |
 | R208 | 2026-11-04 | active | Correct party reference: rounded vertical spine with small arrows into portraits |
 | R209 | 2026-11-04 | superseded (partial) | Solid party strokes; wider white thresholds; compact profile section order |
-| R210 | 2026-11-04 | active | Exact 6 metric colors & 5 continuous threshold arrays; Profile single vertical scroll (no 340px cap/scroll in RecentTable); remove grid-row gaps below Top teammates; unified .mlabel headings; review NSIS installer authorized (no auto-install/merge) |
+| R210 | 2026-11-04 | active | Exact 6 metric colors & 5 continuous threshold arrays; Profile single vertical scroll (no 340px cap/scroll in RecentTable); measured layout in ProfileDrawer (no grid gaps, exact 12–20px Mates-to-Maps gap, deterministic left/right placement); unified .mlabel headings; review NSIS installer authorized (no auto-install/merge) |
 
 
 ## Working with the user

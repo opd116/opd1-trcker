@@ -6,7 +6,8 @@
 import { expect, test, type Page } from "@playwright/test";
 import { DETAILS_RETRY_MS } from "../src/lib/boot";
 import { PUUID } from "../src/lib/demo/cdv8";
-import { gotoApp, NOW, openScene, routeMedia, sceneUrl, settle } from "./harness";
+import { gotoApp, NOW, openScene, routeMedia, sceneUrl, settle, screenNav } from "./harness";
+test.use({ viewport: { width: 700, height: 860 } });
 
 const NO_STATUS_TEXT = /error|fail|retry|try again|unavailable|offline|updated|loading/i;
 const MARA = PUUID.mara!;
@@ -32,7 +33,7 @@ const dialog = (page: Page) => page.getByRole("dialog");
  * subscribers never read it; the row's streak does).
  */
 const BREAK_BOARD = `import("/src/lib/stores.ts").then(({ live }) => { let s; live.subscribe((v) => (s = v))(); s = structuredClone(s); s.players[1].last5 = [null]; live.set(s); })`;
-const nav = (page: Page, label: string) => page.locator(`nav.rail button[aria-label="${label}"]`);
+const nav = (page: Page, label: string) => screenNav(page, label);
 
 test.describe("player_details that fails", () => {
   test("once: the skeleton stays for the 1s wait, then the retry fills the drawer", async ({ page }) => {
@@ -167,7 +168,7 @@ test("a crashed drawer takes no room from the screen, and opening another player
 // Glance mode has no other way out than its own title bar (no native frame, always on top).
 test("a glance body that throws keeps the glance title bar, and the next live update recovers it", async ({ page }) => {
   const errors = consoleErrors(page);
-  await page.setViewportSize({ width: 420, height: 800 });
+  await page.setViewportSize({ width: 420, height: 420 });
   await openScene(page, "ingame", { glance: "1" });
   await expect(page.locator(".glance-body [data-row]")).toHaveCount(10);
   await page.evaluate(BREAK_BOARD);
@@ -260,11 +261,13 @@ test("an unknown stage renders the waiting view instead of crashing", async ({ p
   await expect(page.locator("main .blank")).toHaveCount(0);
 });
 
-// A row click opens the drawer; the second click of a double-click lands on the scrim (the drawer covers <main> but
-// for its left strip), which would close it again. App swallows only repeated mouse clicks for 400 ms after a row opens the drawer.
+// A row click opens the drawer; the second click of a double-click lands on the scrim (at the compact 700px window the
+// 700px panel fills <main>, so these two use a wide window where the scrim is exposed left of it), which would close it
+// again. App swallows only repeated mouse clicks for 400 ms after a row opens the drawer.
 test.describe("double-click guard", () => {
-  /** A spot on the user's row that the drawer's scrim covers once it is open. */
+  /** A spot on the user's row that the drawer's scrim covers once it is open (only at a window wider than the panel). */
   async function scrimSpot(page: Page): Promise<{ x: number; y: number }> {
+    await page.setViewportSize({ width: 1280, height: 800 });
     const row = (await page.locator("main [data-row]").first().boundingBox())!;
     return { x: row.x + 60, y: row.y + row.height / 2 };
   }
@@ -292,7 +295,7 @@ test.describe("double-click guard", () => {
   });
 
   test("a double-click on a Glance row opens the drawer once: the second click neither closes it nor hits the rail", async ({ page }) => {
-    await page.setViewportSize({ width: 420, height: 800 });
+    await page.setViewportSize({ width: 420, height: 420 });
     await openScene(page, "ingame", { glance: "1" });
     const row = (await page.locator('.glance-body [data-row][role="button"]').first().boundingBox())!;
     await page.mouse.dblclick(row.x + 150, row.y + row.height / 2);

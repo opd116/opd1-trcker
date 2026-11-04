@@ -29,12 +29,12 @@ describe("palette (design v2)", () => {
   it("the core semantic variables carry the prototype's values", () => {
     const v = themeVars();
     expect(v).toMatchObject({
-      "--bg": "#0c0d10",
-      "--chrome": "#08090b",
-      "--rail": "#0a0b0d",
-      "--card": "#131519",
-      "--card-head": "#16181c",
-      "--row-hover": "#1a1d22",
+      "--bg": "#0c0b0c",
+      "--chrome": "#0c0b0c",
+      "--rail": "#0c0b0c",
+      "--card": "#101010",
+      "--card-head": "#151314",
+      "--row-hover": "#211e20",
       "--tip-bg": "#1d2026",
       "--line": "#1f2227",
       "--line-chrome": "#1a1c20",
@@ -42,9 +42,9 @@ describe("palette (design v2)", () => {
       "--line-tip": "#33373e",
       "--text": "#ecebe7",
       "--text-muted": "#a6a9b0",
-      "--accent": "#9d8cff",
-      "--accent-soft": "rgba(157,140,255,.12)",
-      "--focus": "#b7abff",
+      "--accent": "#d63743",
+      "--accent-soft": "rgba(214,55,67,.12)",
+      "--focus": "#f0747d",
       "--win": "#5fcf8f",
       "--loss": "#ef6a5b",
       "--warn": "#ff9a3c",
@@ -67,10 +67,10 @@ describe("palette (design v2)", () => {
 
   it("covers every hex the lead listed from the prototype", () => {
     const listed = [
-      "#050607", "#08090b", "#0a0b0d", "#0c0d10", "#0e1013", "#111317", "#121418", "#131519", "#15171b", "#16181c", "#1a1d22",
+      "#050607", "#0c0b0c", "#0e1013", "#101010", "#121418", "#15171b", "#151314", "#211e20",
       "#1c1f25", "#1d2026", "#1f2228", "#22252b", "#1a1c20", "#1f2227", "#23262c", "#262a30", "#2b2f36", "#33373e", "#3a3e46",
       "#4a4e56", "#ecebe7", "#d6d7da", "#d0d2d6", "#c9cbd0", "#b4b7bd", "#a6a9b0", "#9ba0a8", "#8f949c", "#8a8f97", "#7d828b",
-      "#6b7079", "#5b6068", "#9d8cff", "#b2a4ff", "#b7abff", "#8b7cf0", "#d6cfff", "#5fcf8f", "#8fe3b2", "#ef6a5b", "#ff8b7e",
+      "#6b7079", "#5b6068", "#d63743", "#ed5965", "#f0747d", "#b62c36", "#ffd6d9", "#5fcf8f", "#8fe3b2", "#ef6a5b", "#ff8b7e",
       "#ff9a3c", "#ffb36b", "#f0c75e", "#56c8d8", "#ff6b7d",
     ];
     const values = new Set(Object.values(themeVars()));

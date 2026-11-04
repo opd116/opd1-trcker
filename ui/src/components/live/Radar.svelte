@@ -1,8 +1,12 @@
 <!-- The waiting screen's radar (design v2 `radar`, TrackerApp.dc.html 2070–2076): three rings, a cross, a sweep. -->
-<div class="radar" aria-hidden="true">
+<script lang="ts">
+  let { size = 168 }: { size?: number } = $props();
+</script>
+
+<div class="radar" style:width="{size}px" style:height="{size}px" aria-hidden="true">
   <div class="ring" style:inset="0"></div>
-  <div class="ring" style:inset="26px"></div>
-  <div class="ring" style:inset="52px"></div>
+  <div class="ring" style:inset="16%"></div>
+  <div class="ring" style:inset="31%"></div>
   <div class="v"></div>
   <div class="hz"></div>
   <div class="sweep"></div>
@@ -45,7 +49,7 @@
     position: absolute;
     inset: 0;
     border-radius: 50%;
-    background: conic-gradient(from 0deg, rgba(157, 140, 255, 0) 0deg, rgba(157, 140, 255, 0) 290deg, rgba(157, 140, 255, 0.32) 360deg);
+    background: conic-gradient(from 0deg, transparent 0deg 290deg, var(--accent-soft) 360deg);
     animation: opdSweep 3.2s linear infinite;
   }
 
@@ -58,6 +62,9 @@
     margin: -5px 0 0 -5px;
     border-radius: 50%;
     background: var(--accent);
-    box-shadow: 0 0 0 4px rgba(157, 140, 255, 0.15);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sweep { animation: none; }
   }
 </style>

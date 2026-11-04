@@ -4,11 +4,13 @@
 import { expect, test, type Page } from "@playwright/test";
 import { AFTER_MATCH_MS } from "../src/lib/matchEnd";
 import { PUUID } from "../src/lib/demo/cdv8";
-import { gotoApp, NOW, openScene, routeMedia } from "./harness";
+import { checkText } from "./checks";
+import { gotoApp, NOW, openScene, routeMedia, screenNav } from "./harness";
+test.use({ viewport: { width: 700, height: 860 } });
 
 const SIZES = [
-  [1280, 800],
-  [1180, 760],
+  [700, 860],
+  [680, 760],
 ] as const;
 
 /** No sideways overflow anywhere in <main>, and the page itself never scrolls. */
@@ -182,7 +184,7 @@ test.describe("Saved players", () => {
     await expect(page.locator(".sum")).toHaveText("Nobody saved yet");
     await expect(page.locator(".etitle")).toHaveText("No saved players yet");
     await page.getByRole("button", { name: "Go to live match" }).click();
-    await expect(page.locator('nav.rail button[aria-label="Live"]')).toHaveAttribute("aria-current", "page");
+    await expect(screenNav(page, "Live")).toHaveAttribute("aria-current", "page");
   });
 });
 
@@ -193,11 +195,47 @@ test.describe("Match history", () => {
       await openScene(page, "closed", { screen: "history" });
       await expect(page.locator(".day")).not.toHaveCount(0);
       await noOverflow(page);
-      // 56px rows, 42px day headers.
-      expect((await page.locator(".row[data-row]").first().boundingBox())!.height).toBe(56);
-      expect((await page.locator(".day").first().boundingBox())!.height).toBe(42);
+      // The compact history rows are 72px with 38px day headers.
+      expect((await page.locator(".row[data-row]").first().boundingBox())!.height).toBe(72);
+      expect((await page.locator(".day").first().boundingBox())!.height).toBe(38);
     });
   }
+
+  /**
+   * The history map label must fit its own ink vertically even when the `data-ellipsis` marker the fit checks honour is
+   * taken off the rendered span (R205 regression: the room comes from the label's line-height, not from the marker),
+   * and a deliberately long name must elide horizontally. Restores the marker.
+   */
+  async function expectHistoryMapLabelFits(page: Page, w: number, h: number, dpr1 = false): Promise<void> {
+    await page.setViewportSize({ width: w, height: h });
+    await openScene(page, "closed", { screen: "history" });
+    await expect(page.locator(".row[data-row]").first()).toBeVisible();
+    await page.evaluate(() => document.querySelectorAll<HTMLElement>("main .mname").forEach((el) => el.removeAttribute("data-ellipsis")));
+    const clip = (await checkText(page)).clip.filter((m) => m.includes("span.mname"));
+    const probe = page.locator("main .mname").first();
+    const original = (await probe.textContent()) ?? "";
+    await probe.evaluate((el) => {
+      el.textContent = "Icebox".repeat(10);
+    });
+    const long = await probe.evaluate((el) => ({ elides: getComputedStyle(el).textOverflow === "ellipsis", cut: el.scrollWidth > el.clientWidth }));
+    const doc = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+    await probe.evaluate((el, t) => {
+      el.textContent = t as string;
+    }, original);
+    await page.evaluate(() => document.querySelectorAll<HTMLElement>("main .mname").forEach((el) => el.setAttribute("data-ellipsis", "")));
+    const where = `${w}×${h}${dpr1 ? " DPR 1.5" : ""}`;
+    expect(clip, `${where}: map label is cut vertically without the marker`).toEqual([]);
+    expect(long, `${where}: a long map name elides`).toEqual({ elides: true, cut: true });
+    expect(doc.sw, `${where}: the long name never widens the page`).toBe(doc.cw);
+  }
+
+  test("history map labels fit their ink without the truncation marker (line-height, not data-ellipsis)", async ({ page }) => {
+    for (const [w, h] of SIZES) await expectHistoryMapLabelFits(page, w, h);
+  });
+
+  test("history map labels fit their ink at 680×760, DPR 1.5", async ({ page }) => {
+    await expectHistoryMapLabelFits(page, 680, 760, true);
+  });
 
   test("tabs, day groups and rows", async ({ page }) => {
     await openScene(page, "closed", { screen: "history" });

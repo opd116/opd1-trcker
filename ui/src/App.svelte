@@ -2,7 +2,7 @@
   import { isTauri } from "@tauri-apps/api/core";
   import ProfileDrawer from "./components/profile/ProfileDrawer.svelte";
   import GlanceShell from "./components/shell/GlanceShell.svelte";
-  import NavRail from "./components/shell/NavRail.svelte";
+  import CompactNav from "./components/shell/CompactNav.svelte";
   import TitleBar from "./components/shell/TitleBar.svelte";
   import Tooltip from "./components/Tooltip.svelte";
   import { tauriBridge } from "./lib/api";
@@ -18,7 +18,6 @@
   import History from "./screens/History.svelte";
   import Live from "./screens/Live.svelte";
   import Saved from "./screens/Saved.svelte";
-  import Settings from "./screens/Settings.svelte";
   import Skins from "./screens/Skins.svelte";
 
   // Ctrl+Shift+L / Ctrl+Shift+D (no UI). Only meaningful with the Rust side present.
@@ -63,8 +62,8 @@
   </svelte:boundary>
 {:else}
   <TitleBar />
+  <CompactNav />
   <div class="row">
-    <NavRail />
     <main class="main">
       {#key pageKey}
         <svelte:boundary onerror={(err) => reportError("page", err)}>
@@ -81,7 +80,7 @@
           {:else if router.screen === "ascii"}
             <Ascii />
           {:else if router.screen === "settings"}
-            <Settings />
+            <section class="settings-placeholder" aria-label="Settings"><h1>Settings</h1></section>
           {:else}
             <About />
           {/if}
@@ -113,7 +112,7 @@
     position: relative;
     width: 100%;
     height: 100%;
-    min-width: 1180px;
+    min-width: 680px;
     min-height: 760px;
     overflow: hidden;
     background: var(--bg);
@@ -152,4 +151,6 @@
   .gone {
     display: none;
   }
+  .settings-placeholder { padding:20px 16px; }
+  .settings-placeholder h1 { margin:0; font:700 24px/1.2 var(--font); }
 </style>

@@ -3,6 +3,7 @@
 // My Stats state fitting without sideways scroll at both window sizes, and the Collection's filters and empty state.
 import { expect, test, type Page } from "@playwright/test";
 import { gotoApp, NOW, routeMedia, settle, type MediaOverride } from "./harness";
+test.use({ viewport: { width: 700, height: 860 } });
 
 /** DEV only: a value read from the app's own router instance (the dev server serves each module at one URL). */
 const routerState = (page: Page) =>
@@ -74,8 +75,8 @@ test.describe("Competitive", () => {
   });
 
   for (const size of [
-    { width: 1280, height: 800 },
-    { width: 1180, height: 760 },
+    { width: 700, height: 860 },
+    { width: 680, height: 760 },
   ]) {
     for (const scene of ["mystats", "mystats-new", "mystats-loading", "mystats-unranked", "mystats-immortal", "mystats-rrnull", "mystats-longnames"]) {
       test(`${scene} at ${size.width}×${size.height}: no sideways scroll, nothing spills out of a card`, async ({ page }) => {
@@ -164,8 +165,8 @@ test.describe("Collection", () => {
   });
 
   for (const size of [
-    { width: 1280, height: 800 },
-    { width: 1180, height: 760 },
+    { width: 700, height: 860 },
+    { width: 680, height: 760 },
   ]) {
     test(`fits ${size.width}×${size.height}: the page never scrolls, the lists scroll inside their cards`, async ({ page }) => {
       await page.setViewportSize(size);

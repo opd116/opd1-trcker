@@ -108,8 +108,8 @@
   const COLS: { k: SortKey | null; label: string; tip: string }[] = [
     { k: "name", label: "PLAYER", tip: "Sort by name" },
     { k: "rank", label: "RANK", tip: "Sort by current rank" },
-    { k: "with", label: "AS TEAMMATE", tip: "Stored matches where they were on your team, and your record together. Click to sort." },
-    { k: "against", label: "AS OPPONENT", tip: "Stored matches where they were on the other team, and your record against them. Click to sort." },
+    { k: "with", label: "WITH", tip: "Stored matches where they were on your team, and your record together. Click to sort." },
+    { k: "against", label: "AGAINST", tip: "Stored matches where they were on the other team, and your record against them. Click to sort." },
     { k: null, label: "NOTE", tip: "Your private note" },
     { k: "seen", label: "LAST SEEN", tip: "Sort by when you last met" },
   ];
@@ -209,8 +209,9 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    padding: 18px 24px 18px;
-    gap: 14px;
+    padding: 16px;
+    gap: 12px;
+    min-width: 0;
   }
 
   .head {
@@ -218,6 +219,7 @@
     align-items: flex-end;
     gap: 16px;
     flex: none;
+    flex-wrap: wrap;
   }
 
   .titles {
@@ -248,7 +250,8 @@
     align-items: center;
     gap: 8px;
     height: 34px;
-    width: 270px;
+    width: 240px;
+    max-width: 100%;
     padding: 0 4px 0 12px;
     border-radius: 8px;
     background: var(--surface);
@@ -298,9 +301,9 @@
   }
 
   .pill.on {
-    background: rgba(157, 140, 255, 0.14);
-    border-color: rgba(157, 140, 255, 0.5);
-    color: #e2ddff;
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--text);
   }
 
   .pcnt {
@@ -309,7 +312,7 @@
   }
 
   .pill.on .pcnt {
-    color: #c9c2ff;
+    color: var(--text);
   }
 
   .card {
@@ -324,8 +327,8 @@
   .cols,
   .skrow {
     display: grid;
-    grid-template-columns: minmax(0, 2fr) minmax(0, 1.05fr) 128px 128px minmax(0, 2.3fr) 96px 12px;
-    column-gap: 16px;
+    grid-template-columns: minmax(140px, 1fr) 78px 66px 66px minmax(120px, 1fr) 68px 8px;
+    column-gap: 8px;
     align-items: center;
   }
 
@@ -334,7 +337,7 @@
     top: 0;
     z-index: 1;
     height: 40px;
-    padding: 0 14px 0 16px;
+    padding: 0 10px;
     background: var(--card-head);
     border-bottom: 1px solid var(--line-media);
   }
@@ -356,7 +359,7 @@
     border: none;
     cursor: pointer;
     font: 500 10.5px/1 var(--font-mono);
-    letter-spacing: 0.06em;
+    letter-spacing: 0.02em;
     color: var(--text-muted);
     white-space: nowrap;
   }
@@ -379,7 +382,7 @@
   }
 
   .skrow {
-    padding: 12px 14px 12px 16px;
+    padding: 12px 10px;
     border-bottom: 1px solid var(--line-soft);
   }
 
@@ -451,5 +454,12 @@
   .golive:hover {
     background: var(--button-hover);
     border-color: var(--line-hover);
+  }
+
+  .skrow { overflow: hidden; }
+  .skrow > :global(*) { max-width: 100%; }
+  @media (max-width: 760px) {
+    .cols { grid-template-columns: minmax(140px, 1fr) 78px 66px 66px 68px 8px; }
+    .cols .ch:nth-child(5) { display: none; }
   }
 </style>

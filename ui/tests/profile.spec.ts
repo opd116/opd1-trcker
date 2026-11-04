@@ -3,7 +3,9 @@
 // the hidden and empty edge scenes, and the encounter → scoreboard hand-off. 1280×800 (playwright.config.ts).
 import { expect, test, type Page } from "@playwright/test";
 import { PUUID } from "../src/lib/demo/cdv8";
-import { gotoApp, routeMedia } from "./harness";
+import { checkText } from "./checks";
+import { gotoApp, routeMedia, screenNav } from "./harness";
+test.use({ viewport: { width: 700, height: 860 } });
 
 const MARA = PUUID.mara!;
 const FAHAD = PUUID.fahad!;
@@ -13,7 +15,7 @@ const dialog = (page: Page) => page.getByRole("dialog");
 
 /** A drawer row opened its scoreboard: History is the screen, the board loaded, the user's own row is there, Back names the player. */
 async function expectScoreboard(page: Page, back: string): Promise<void> {
-  await expect(page.locator('nav.rail button[aria-label="History"]')).toHaveAttribute("aria-current", "page");
+  await expect(screenNav(page, "History")).toHaveClass(/active/);
   await expect(page.locator('main .match[aria-busy="false"]')).toHaveCount(1);
   await expect(page.locator("main .match .srow.self")).toHaveCount(1);
   await expect(page.locator("main .match .back")).toHaveText(back);
@@ -47,6 +49,49 @@ test("another player: name, header actions, encounters, loadout, maps, recent ro
   // Nothing scrolls sideways.
   const overflow = await d.evaluate((el) => (el.lastElementChild as HTMLElement).scrollWidth - (el.lastElementChild as HTMLElement).clientWidth);
   expect(overflow).toBeLessThanOrEqual(0);
+});
+
+/**
+ * The recent-match map label must fit its own ink vertically even when the `data-ellipsis` marker the fit checks honour
+ * is taken off the rendered span (R205 regression: the room comes from the label's line-height, not from the marker),
+ * and a deliberately long name must elide horizontally instead of overflowing its column. Restores the marker.
+ */
+async function expectRecentMapLabelFits(page: Page, w: number, h: number, dpr1 = false): Promise<void> {
+  await page.setViewportSize({ width: w, height: h });
+  await open(page, "scene=details-more");
+  const d = dialog(page);
+  await expect(d).toHaveAttribute("aria-busy", "false");
+  const names = d.locator(".rm .mn");
+  await expect(names.first()).toBeVisible();
+  await page.evaluate(() => document.querySelectorAll<HTMLElement>(".rm .mn").forEach((el) => el.removeAttribute("data-ellipsis")));
+  const clip = (await checkText(page)).clip.filter((m) => m.includes("span.mn"));
+  const probe = names.first();
+  const original = (await probe.textContent()) ?? "";
+  await probe.evaluate((el) => {
+    el.textContent = "Ascent".repeat(10);
+  });
+  const long = await probe.evaluate((el) => ({ elides: getComputedStyle(el).textOverflow === "ellipsis", cut: el.scrollWidth > el.clientWidth }));
+  const page_ = await page.evaluate(() => ({ sw: document.documentElement.scrollWidth, cw: document.documentElement.clientWidth }));
+  await probe.evaluate((el, t) => {
+    el.textContent = t as string;
+  }, original);
+  await page.evaluate(() => document.querySelectorAll<HTMLElement>(".rm .mn").forEach((el) => el.setAttribute("data-ellipsis", "")));
+  const where = `${w}×${h}${dpr1 ? " DPR 1.5" : ""}`;
+  expect(clip, `${where}: map label is cut vertically without the marker`).toEqual([]);
+  expect(long, `${where}: a long map name elides`).toEqual({ elides: true, cut: true });
+  expect(page_.sw, `${where}: the long name never widens the page`).toBe(page_.cw);
+}
+
+test("recent-match map labels fit their ink without the truncation marker (line-height, not data-ellipsis)", async ({ page }) => {
+  for (const [w, h] of [
+    [700, 860],
+    [680, 760],
+  ] as const)
+    await expectRecentMapLabelFits(page, w, h);
+});
+
+test("recent-match map labels fit their ink at 680×760, DPR 1.5", async ({ page }) => {
+  await expectRecentMapLabelFits(page, 680, 760, true);
 });
 
 test("the user: personal notes, Competitive stats, Net RR, clickable recent rows", async ({ page }) => {
@@ -130,17 +175,29 @@ test("the scrim and × close the drawer", async ({ page }) => {
   await open(page, `scene=ingame&profile=${MARA}`);
   await dialog(page).getByRole("button", { name: "Close profile" }).click();
   await expect(dialog(page)).toHaveCount(0);
+  // The 700px panel fills <main> at the compact window: use a wide window so a click beside the drawer lands on the scrim.
+  await page.setViewportSize({ width: 1280, height: 800 });
   await gotoApp(page, `/?scene=ingame&profile=${MARA}`);
   await expect(dialog(page)).toBeVisible();
   await page.mouse.click(100, 400);
   await expect(dialog(page)).toHaveCount(0);
 });
 
+test("the flagged smurf player shows no automated smurf decoration (R205)", async ({ page }) => {
+  await open(page, `scene=ingame&profile=${PUUID.wisp}`);
+  const d = dialog(page);
+  await expect(d).toBeVisible();
+  // The compact drawer deliberately carries no smurf badge/panel; the underlying signal data still exists.
+  await expect(d.locator('[aria-label="Automated smurf signal"], .smurf')).toHaveCount(0);
+  await expect(d).not.toContainText(/smurf/i);
+});
+
 test("a hidden player: no tag, the hidden style, no name in the label", async ({ page }) => {
   await open(page, "scene=details-hidden");
   const d = dialog(page);
   await expect(d).toHaveAttribute("aria-label", "Hidden player profile");
-  await expect(d.getByText("No stored matches with this player before this one.")).toBeVisible();
+  await expect(d.getByRole("region", { name: "Encounters", exact: true })).toHaveCount(0);
+  await expect(d.getByRole("region", { name: "Top teammates", exact: true })).toBeVisible();
   await expect(d.locator("header").getByText(/#/)).toHaveCount(0);
 });
 

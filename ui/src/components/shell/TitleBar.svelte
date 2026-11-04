@@ -1,13 +1,11 @@
 <!--
-  The custom title bar (design v2 97–114; window `decorations: false`): 36px, the wordmark, the status pill, then the
-  pin and the window buttons. The bar and its non-interactive parts are the window's drag region; Tauri's drag script
+  The custom title bar (window `decorations: false`): 36px, the wordmark and window buttons. Always-on-top and its pin
+  were removed by the user's 2026-11-04 decision. The bar is the drag region; Tauri's drag script
   also turns a double-click there into maximize / restore. The wordmark reads TRCKER: the product name is spelled that
   way on purpose (the prototype's "TRACKER" is the one thing not copied).
 -->
 <script lang="ts">
   import { close, minimize, toggleMaximize, watchMaximized } from "./appWindow";
-  import PinButton from "./PinButton.svelte";
-  import StatusPill from "./StatusPill.svelte";
 
   let maximized = $state(false);
   $effect(() => watchMaximized((m) => (maximized = m)));
@@ -19,10 +17,7 @@
     <span class="word">OPD1</span>
     <span class="sub">TRCKER</span>
   </div>
-  <StatusPill />
   <div class="fill" data-tauri-drag-region></div>
-  <PinButton />
-  <div class="sep" aria-hidden="true"></div>
   <button type="button" class="wb" aria-label="Minimize" onclick={minimize}
     ><svg width="10" height="10" viewBox="0 0 10 10" stroke="currentColor" stroke-width="1.1" aria-hidden="true"><path d="M0 5h10"></path></svg></button
   >
@@ -70,26 +65,19 @@
   }
 
   .word {
-    font: 700 15px/1 var(--font-display);
-    letter-spacing: 0.14em;
+    font: 700 14px/1 var(--font-display);
+    letter-spacing: 0.09em;
   }
 
   .sub {
-    font: 500 10.5px/1 var(--font-mono);
-    letter-spacing: 0.06em;
+    font: 600 14px/1 var(--font);
+    letter-spacing: 0.09em;
     color: var(--text-muted);
   }
 
   .fill {
     flex: 1;
     align-self: stretch;
-  }
-
-  .sep {
-    width: 1px;
-    height: 16px;
-    background: var(--line);
-    margin: 0 4px;
   }
 
   .wb {

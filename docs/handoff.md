@@ -2,7 +2,29 @@
 
 ## Compact prototype integration — in progress, review branch only
 
-### Latest checkpoint — R210: Palette & continuous thresholds, profile layout refinement, and review installer authorization
+### Latest checkpoint — Compact redesign integration, profile layout refinement, and clean candidate delivery
+
+- **Candidate remediation and complete compact integration:**
+  - **Complete Tracked Allowlist:** All accumulated compact redesign integration changes are staged via an individually reviewed allowlist across Rust native geometry (`window.rs`, `tauri.conf.json`), UI view models (`profile.ts`, `livev2.ts`), screens, shell, roster components, local Barlow Semi Condensed fonts, and test specs.
+  - **Profile Layout Refinement (`ProfileDrawer.svelte`):**
+    - Lightweight measured layout using standard browser `ResizeObserver` (zero new dependencies) eliminates artificial height gaps below Top teammates in both variants.
+    - **Approved Normal-Width Arrangement (>= 600px):**
+      - *WITH encounters:* Left column = `Encounters`, then `Recent matches`; Right column = `Top teammates`, then `Map performance` directly beneath it (exact 12–20px gap, nominally 16px).
+      - *WITHOUT encounters:* Left column = `Top teammates`, then `Map performance` directly beneath it (exact 12–20px gap, nominally 16px); Right column = `Recent matches`.
+      - *Loadout:* Spans full width at the bottom.
+    - **DOM, Reading & Keyboard Priority Sequence:** Sections are direct sequential children of `.profile-content` in priority order: Encounters (if present) → Top teammates → Recent matches → Map performance → Loadout. Screen readers and Tab key navigation naturally follow this sequence without positive tabindex overrides.
+    - **Narrow Container Fallback (< 600px):** Single-column stack in identical DOM priority sequence. Focus is preserved across breakpoint resizing without node remounting.
+    - **Restored Layout Regressions (`compact-redesign.spec.ts`):** At both 700×860 and 680×760, with and without encounters, tests verify `Map performance` top minus `Top teammates` bottom is strictly between 12px and 20px, assert intended left/right column placements, verify absence of nested scrolling, and ensure all six recent matches are reachable.
+  - **Pre-Freeze Documentation Finalization:**
+    - All tracked repository documentation (`docs/handoff.md`, `docs/DECISIONS.md`, `docs/compact-design.md`, `CLAUDE.md`, `docs/requirements-raw.md`) is finalized prior to freezing the candidate SHA.
+    - Once committed, no tracked files are modified. All subsequent exact-SHA CI results, verification totals, and installer provenance are recorded exclusively in the external Desktop report (`C:\Users\Administrator\Desktop\OPD1-TRCKER-compact-review-<shortsha>.md`).
+  - **Review Installer Delivery:**
+    - Review installer built in an isolated clean worktree and delivered to Desktop as `OPD1-TRCKER-0.4.0-compact-review-<shortsha>-setup.exe` (production NSIS, <= 10 MiB, unsigned, bitwise matching source artifact, NOT executed or auto-installed).
+  - **Preserved Boundaries:**
+    - Strict merge prohibition: no merge, push, or auto-merge to `main`. Pushes restricted strictly to review branch `feat/compact-redesign`.
+    - No changes to Riot calculations, SQLite schema, credentials, or production settings.
+
+### Prior checkpoint — R210: Palette & continuous thresholds, profile layout refinement, and review installer authorization
 
 - **Decision R210 integration:**
   - **Exact statistic palette and continuous threshold bands:**
@@ -22,8 +44,9 @@
     - Ordering preserved: Encounters first when present, then Top teammates; when encounters are absent/empty, the section is omitted and Top teammates becomes first priority.
     - Map headroom: RecentTable map area preserves at least 48px headroom with no clipped descenders.
   - **Review installer authorization & delivery:**
-    - User explicitly authorized building a Windows NSIS review installer delivered to Desktop (`C:\Users\Administrator\Desktop\OPD1-TRCKER-<version>-compact-review-<shortsha>-setup.exe`), <= 10 MiB, unsigned, review-only, with SHA-256 and size verification, and no auto-execution or installation.
-    - Accompanying 10-section English review report at Desktop (`C:\Users\Administrator\Desktop\OPD1-TRCKER-compact-review-<shortsha>.md`) and Arabic conclusion.
+    - Candidate commit frozen and pushed: Full SHA `3fb7ff4031fe9d275ecdc5efda3ec7dd187d761f`, Short SHA `3fb7ff4` on branch `feat/compact-redesign`.
+    - User explicitly authorized building a Windows NSIS review installer delivered to Desktop (`C:\Users\Administrator\Desktop\OPD1-TRCKER-0.4.0-compact-review-3fb7ff4-setup.exe`), 4,402,337 bytes (<= 10 MiB limit satisfied), SHA-256 `EA7BC36E84035F58752CC41F2F7A785089CC825C46F605968912759B4EE05575`, unsigned (`NotSigned`), review-only, with packaging hygiene verified (no CDN fonts, no dev fixtures) and explicitly confirmed NOT executed or installed.
+    - Accompanying 10-section English review report delivered to Desktop at `C:\Users\Administrator\Desktop\OPD1-TRCKER-compact-review-3fb7ff4.md` with Arabic summary conclusion.
   - **Preserved constraints:**
     - Strict merge prohibition: no merge, push, or auto-merge to `main`; work confined to review branch `feat/compact-redesign`.
     - Preserved privacy rules, party connectors (solid strokes, arrows, group colors), and window geometry (700×860 default, 680×760 minimum, Glance 420×420, DPR 1.5 remembered underline repair).

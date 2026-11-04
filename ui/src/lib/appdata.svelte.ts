@@ -37,7 +37,6 @@ export const DEFAULT_SETTINGS: Settings = {
   smurf: "cautious",
   savedAlert: true,
   sound: false,
-  onTop: true,
   boot: true,
   tray: true,
 };

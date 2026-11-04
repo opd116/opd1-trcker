@@ -109,7 +109,6 @@
     height: 100%;
     border-radius: 5px;
     border: 1px dashed var(--line-hover);
-    background: repeating-linear-gradient(135deg, transparent 0 6px, rgba(255, 255, 255, 0.03) 6px 12px);
     display: flex;
     align-items: center;
     justify-content: center;
@@ -154,5 +153,10 @@
     border-radius: 2px;
     background: var(--text-dim);
     flex: none;
+  }
+
+  .lo { flex: none; }
+  @container profile (width < 600px) {
+    .wide .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
 </style>

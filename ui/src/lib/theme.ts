@@ -23,17 +23,17 @@ export const rgba = (h: string, a: number): string => `rgba(${rgb(h).join(",")},
 export const PALETTE = {
   // surfaces, darkest first
   bgDeep: "#050607", // glance mode's backdrop around the 420px column
-  chrome: "#08090b", // title bar
-  rail: "#0a0b0d", // nav rail
-  bg: "#0c0d10", // app background
+  chrome: "#0c0b0c", // slightly lifted near-black canvas
+  rail: "#0c0b0c", // navigation
+  bg: "#0c0b0c", // approved black/red design, lifted from #020202
   input: "#0e1013", // text fields, code wells
   sunken: "#101215", // table head strips
-  drawer: "#111317", // profile drawer
+  drawer: "#101010", // profile drawer
   surface: "#121418", // search box, the waiting status pill
-  card: "#131519", // cards / panels
+  card: "#101010", // cards / panels
   navActive: "#15171b", // the current nav item
-  cardHead: "#16181c", // card header strip; title-bar button hover
-  rowHover: "#1a1d22", // table row hover; secondary button
+  cardHead: "#151314", // card header strip; title-bar button hover
+  rowHover: "#211e20", // table row hover; secondary button
   skel: "#1c1f25", // skeleton bars, agent/avatar wells
   tipBg: "#1d2026", // tooltip
   chipHover: "#1f2228", // small chip/button hover
@@ -65,11 +65,11 @@ export const PALETTE = {
   textGhost: "#6b7079", // chevrons
   textDisabled: "#5b6068", // unknown values ("?")
   // accent (violet)
-  accent: "#9d8cff",
-  accentHover: "#b2a4ff",
-  accentText: "#b7abff", // links, focus ring
-  accentDeep: "#8b7cf0", // focused field border
-  accentPale: "#d6cfff", // text on accent tints, link hover
+  accent: "#d63743",
+  accentHover: "#ed5965",
+  accentText: "#f0747d", // links, focus ring
+  accentDeep: "#b62c36", // focused field border
+  accentPale: "#ffd6d9", // text on accent tints, link hover
   // results and signals
   win: "#5fcf8f",
   winText: "#8fe3b2",
@@ -92,8 +92,8 @@ export const PALETTE = {
 export const PARTY_COLORS = ["#6fa8ff", "#f0c75e", "#e88fbf", "#9fd36b"] as const;
 
 /** The design's three families (bundled in app.css). */
-export const FONT_BODY = "'Barlow', system-ui, sans-serif";
-export const FONT_DISPLAY = "'Saira Condensed', sans-serif";
+export const FONT_BODY = "'BarlowSemi', 'Barlow', system-ui, sans-serif";
+export const FONT_DISPLAY = "'BarlowSemi', 'Barlow', sans-serif";
 export const FONT_MONO = "'Geist Mono', monospace";
 
 const P = PALETTE;

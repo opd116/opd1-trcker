@@ -14,6 +14,9 @@
   /** The keyboard cursor (cell), null until the canvas is used from the keyboard. */
   let cursor = $state<[number, number] | null>(null);
   let focused = $state(false);
+  let availableWidth = $state(0);
+  // Fit ordinary art to the compact editor; unusually wide saved drawings remain scrollable rather than illegible.
+  const fontPx = $derived(availableWidth > 0 ? Math.min(canvas.fontPx, Math.max(8, (availableWidth - 40) / (canvas.W * .61))) : canvas.fontPx);
 
   function paint(x: number, y: number) {
     const k = `${x},${y}`;
@@ -65,7 +68,7 @@
 
 <svelte:window onmouseup={up} />
 
-<div class="backdrop" role="presentation" onmouseup={up} onmouseleave={up}>
+<div class="backdrop" bind:clientWidth={availableWidth} role="presentation" onmouseup={up} onmouseleave={up}>
   <!-- A drawing surface: the pointer and the keyboard both paint on it (role="application"). -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <pre
@@ -73,7 +76,7 @@
     role="application"
     aria-label="ASCII art. Click and drag to draw on it. From the keyboard, arrow keys move the cursor and Space draws."
     tabindex="0"
-    style:font-size="{canvas.fontPx}px"
+    style:font-size="{fontPx}px"
     onmousedown={down}
     onmousemove={move}
     onkeydown={key}
@@ -92,10 +95,10 @@
     min-height: 0;
     border-radius: 12px;
     border: 1px solid var(--line);
-    background: var(--rail) radial-gradient(circle, #191b20 1px, transparent 1.2px) 0 0 / 16px 16px;
+    background: var(--rail);
     display: flex;
-    align-items: center;
-    justify-content: center;
+    align-items: safe center;
+    justify-content: safe center;
     overflow: auto;
     padding: 20px;
     user-select: none;
@@ -108,7 +111,7 @@
     font-family: "Cascadia Mono", Consolas, "DejaVu Sans Mono", Menlo, var(--font-mono);
     font-weight: 400;
     line-height: 1;
-    color: #e9e6ff;
+    color: var(--text);
     letter-spacing: 0;
     font-variant-ligatures: none;
     white-space: pre;
@@ -119,7 +122,6 @@
       linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
     background-size: 1ch 1em;
     outline: 1px solid var(--line-soft);
-    text-shadow: 0 0 24px rgba(157, 140, 255, 0.35);
   }
 
   .canvas:focus-visible {
@@ -132,7 +134,7 @@
     width: 1ch;
     height: 1em;
     outline: 1px solid var(--accent);
-    background: rgba(157, 140, 255, 0.25);
+    background: var(--accent-soft);
     pointer-events: none;
   }
 </style>

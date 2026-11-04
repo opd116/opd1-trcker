@@ -7,7 +7,7 @@ describe("Settings copy", () => {
     expect(GROUPS.map((g) => g.title)).toEqual(["Live match", "Player signals", "Alerts", "Window and startup"]);
     const keys = GROUPS.flatMap((g) => g.rows.map((r) => (r.kind === "toggle" ? r.key : "smurf")));
     expect(keys.sort()).toEqual(Object.keys(DEFAULT_SETTINGS).sort());
-    expect(Object.keys(TOGGLES)).toHaveLength(7);
+    expect(Object.keys(TOGGLES)).toHaveLength(6);
     expect(SMURF.options.map((o) => o.label)).toEqual(["Off", "Cautious", "Eager"]);
   });
   it("Play a sound needs the saved-player alert", () => {

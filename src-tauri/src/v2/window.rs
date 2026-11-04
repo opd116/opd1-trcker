@@ -1,5 +1,5 @@
 //! Window behaviour (R189, user 2026-10-22): the custom title bar's window
-//! (no decorations, 1280×800, at least 1180×760), Glance mode, the tray,
+//! (no decorations, 700×860, at least 680×760), Glance mode, the tray,
 //! close to tray, launch with Windows and the saved-player toast.
 //!
 //! - [`setup`] (from `lib.rs`): the tray icon, the
@@ -7,7 +7,7 @@
 //!   autostart entry passes it: the window stays hidden in the tray).
 //! - [`on_window_event`]: the title bar's × (`getCurrentWindow().close()`)
 //!   hides to the tray when the `tray` setting is on, else quits.
-//! - [`apply_settings`]: `onTop`, `boot`, `tray` (also from `set_settings`).
+//! - [`apply_settings`]: `tray` (also from `set_settings`).
 //! - [`set_glance`]: the 420px column and back.
 //! - [`notify_saved_player`]: the Windows toast.
 
@@ -33,10 +33,11 @@ const AUTOSTART_NAME: &str = "OPD1 TRCKER";
 const TRAY_ID: &str = "main";
 
 /// The normal window's minimum (logical px), as `tauri.conf.json` sets it.
-pub const NORMAL_MIN: (f64, f64) = (1180.0, 760.0);
+pub const NORMAL_MIN: (f64, f64) = (680.0, 760.0);
 /// Glance mode's minimum and width (logical px).
-pub const GLANCE_MIN: (f64, f64) = (380.0, 600.0);
+pub const GLANCE_MIN: (f64, f64) = (420.0, 420.0);
 pub const GLANCE_WIDTH: f64 = 420.0;
+pub const GLANCE_HEIGHT: f64 = 420.0;
 
 /// A window's place: outer position and inner size, physical px.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,11 +58,11 @@ fn to_physical(logical: f64, scale: f64) -> u32 {
 }
 
 /// The Glance column for a window at `current`: [`GLANCE_WIDTH`] wide, its
-/// height kept (never below Glance's minimum), its top-left kept.
+/// 420 logical px high like the approved prototype, its top-left kept.
 pub fn glance_geometry(current: Geometry, scale: f64) -> Geometry {
     Geometry {
         width: to_physical(GLANCE_WIDTH, scale),
-        height: current.height.max(to_physical(GLANCE_MIN.1, scale)),
+        height: to_physical(GLANCE_HEIGHT, scale),
         ..current
     }
 }
@@ -81,8 +82,6 @@ pub fn restore_geometry(saved: Geometry, scale: f64) -> Geometry {
 pub struct WindowFlags {
     /// The `tray` setting: × hides to the tray.
     close_to_tray: AtomicBool,
-    /// The `onTop` setting, restored when Glance ends.
-    on_top: AtomicBool,
     /// While Glance is on: the window it replaced, and whether it was
     /// maximized.
     glance: Mutex<Option<(Geometry, bool)>>,
@@ -94,7 +93,6 @@ impl Default for WindowFlags {
         let d = Settings::default();
         WindowFlags {
             close_to_tray: AtomicBool::new(d.tray),
-            on_top: AtomicBool::new(d.on_top),
             glance: Mutex::new(None),
         }
     }
@@ -235,24 +233,14 @@ pub fn on_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
     }
 }
 
-/// Applies `onTop` (kept on while Glance is on) and `tray` (close to tray;
-/// the tray icon shows only with it). Failures are logged. `boot` is not
-/// applied here: [`set_autostart`] runs only when it changes, and
-/// [`autostart_at_start`] at startup, so a switch-off in Task Manager is
-/// never undone by an unrelated save or a restart.
+/// Applies `tray` (close to tray; the tray icon shows only with it).
+/// Failures are logged. `boot` is not applied here: [`set_autostart`] runs
+/// only when it changes, and [`autostart_at_start`] at startup, so a
+/// switch-off in Task Manager is never undone by an unrelated save or a
+/// restart.
 pub fn apply_settings(app: &AppHandle, settings: &Settings) {
-    let mut glance = false;
     if let Some(flags) = app.try_state::<WindowFlags>() {
-        flags.on_top.store(settings.on_top, Ordering::Relaxed);
         flags.close_to_tray.store(settings.tray, Ordering::Relaxed);
-        glance = lock(&flags.glance).is_some();
-    }
-    if !glance {
-        if let Some(w) = main_window(app) {
-            if let Err(e) = w.set_always_on_top(settings.on_top) {
-                log::warn!("always on top: {e}");
-            }
-        }
     }
     if let Some(tray) = app.tray_by_id(TRAY_ID) {
         let _ = tray.set_visible(settings.tray);
@@ -366,11 +354,11 @@ impl NoAutostart {
     }
 }
 
-/// Glance mode: a 420px-wide column (on) or the normal window (off). On:
+/// Glance mode: a 420×420 window (on) or the normal window (off). On:
 /// the window is remembered (and un-maximized), its minimum drops to
-/// 380×600 and it stays on top. Off: the remembered window comes back
-/// (maximized again if it was), with the 1180×760 minimum and the `onTop`
-/// setting. Asking for the mode it is already in changes nothing.
+/// 420×420. Off: the remembered window comes back (maximized again if it
+/// was), with the 680×760 minimum. Asking for the mode it is already in
+/// changes nothing.
 #[tauri::command]
 pub fn set_glance(on: bool, app: AppHandle) -> Result<(), String> {
     let window = main_window(&app).ok_or("no main window")?;
@@ -405,7 +393,6 @@ pub fn set_glance(on: bool, app: AppHandle) -> Result<(), String> {
         window
             .set_size(PhysicalSize::new(target.width, target.height))
             .map_err(err)?;
-        window.set_always_on_top(true).map_err(err)?;
     } else {
         let Some((before, maximized)) = saved.take() else {
             return Ok(());
@@ -425,9 +412,6 @@ pub fn set_glance(on: bool, app: AppHandle) -> Result<(), String> {
         if maximized {
             window.maximize().map_err(err)?;
         }
-        window
-            .set_always_on_top(flags.on_top.load(Ordering::Relaxed))
-            .map_err(err)?;
     }
     Ok(())
 }
@@ -489,22 +473,22 @@ mod tests {
     }
 
     #[test]
-    fn glance_is_420_wide_keeps_the_height_and_the_top_left() {
+    fn glance_is_420_square_and_keeps_the_top_left() {
         assert_eq!(
             glance_geometry(AT, 1.0),
             Geometry {
                 x: 100,
                 y: 50,
                 width: 420,
-                height: 800
+                height: 420
             }
         );
         // 150% scaling: physical px.
         assert_eq!(glance_geometry(AT, 1.5).width, 630);
-        // Never shorter than Glance's minimum.
+        // Normal height never leaks into the compact Glance footprint.
         let short = Geometry { height: 500, ..AT };
-        assert_eq!(glance_geometry(short, 1.0).height, 600);
-        assert_eq!(glance_geometry(short, 1.25).height, 750);
+        assert_eq!(glance_geometry(short, 1.0).height, 420);
+        assert_eq!(glance_geometry(short, 1.25).height, 525);
         // A nonsense scale is 1.
         assert_eq!(glance_geometry(AT, 0.0).width, 420);
         assert_eq!(glance_geometry(AT, f64::NAN).width, 420);
@@ -514,7 +498,7 @@ mod tests {
     fn leaving_glance_restores_the_window_never_below_the_normal_minimum() {
         assert_eq!(restore_geometry(AT, 1.0), AT);
         let small = Geometry {
-            width: 900,
+            width: 600,
             height: 700,
             ..AT
         };
@@ -523,15 +507,31 @@ mod tests {
             Geometry {
                 x: 100,
                 y: 50,
-                width: 1180,
+                width: 680,
                 height: 760
             }
         );
-        assert_eq!(restore_geometry(small, 2.0).width, 2360);
+        assert_eq!(restore_geometry(small, 2.0).width, 1360);
         // A round trip gives the window back.
         let there = glance_geometry(AT, 1.0);
         assert_ne!(there, AT);
         assert_eq!(restore_geometry(AT, 1.0), AT);
+    }
+
+    #[test]
+    fn compact_normal_window_round_trip_keeps_its_size_at_both_scales() {
+        for scale in [1.0, 1.5] {
+            let normal = Geometry {
+                width: to_physical(700.0, scale),
+                height: to_physical(860.0, scale),
+                ..AT
+            };
+            let glance = glance_geometry(normal, scale);
+            assert_eq!(glance.width, to_physical(420.0, scale));
+            assert_eq!(glance.height, to_physical(420.0, scale));
+            assert_eq!((glance.x, glance.y), (normal.x, normal.y));
+            assert_eq!(restore_geometry(normal, scale), normal);
+        }
     }
 
     #[test]
@@ -553,7 +553,6 @@ mod tests {
         let flags = WindowFlags::default();
         let d = Settings::default();
         assert_eq!(flags.close_to_tray.load(Ordering::Relaxed), d.tray);
-        assert_eq!(flags.on_top.load(Ordering::Relaxed), d.on_top);
         assert!(lock(&flags.glance).is_none());
     }
 }

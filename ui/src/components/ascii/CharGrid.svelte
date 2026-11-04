@@ -89,8 +89,8 @@
   }
 
   .cell.lit {
-    background: rgba(157, 140, 255, 0.16);
-    border-color: rgba(157, 140, 255, 0.6);
+    background: var(--accent-soft);
+    border-color: var(--accent);
   }
 
   /* The design's hover edge wins, the checked cell's included. */

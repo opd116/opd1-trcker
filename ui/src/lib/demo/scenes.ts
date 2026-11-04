@@ -41,7 +41,7 @@ import {
 
 export type SceneName =
   | "boot" | "closed" | "closed-empty" | "lobby1" | "lobby2" | "lobby2-loading" | "lobby2-unranked" | "lobby3" | "lobby4" | "lobby5"
-  | "pregame" | "pregame-nomap" | "pregame-loading" | "ingame" | "ingame-longnames" | "ingame-parties4" | "ingame-partial" | "ingame-unranked"
+  | "pregame" | "pregame-nomap" | "pregame-loading" | "ingame" | "ingame-longnames" | "ingame-parties4" | "ingame-trio-duo" | "ingame-partial" | "ingame-unranked"
   | "ingame-loading" | "ingame-nometa" | "ingame-remembered" | "ingame-rr-unknown"
   | "details" | "details-more" | "details-self" | "details-hidden" | "details-empty" | "details-loading" | "details-longnames" | "details-partial"
   | "details-nostats"
@@ -169,6 +169,13 @@ function parties4(): PlayerCard[] {
   mark(6, 2, false);
   mark(7, 3, true); // wisp, Rook: confirmed
   mark(8, 3, true);
+  return p;
+}
+
+/** DEV-only regression fixture: distinct enemy trio + duo, with both ally groups retained. */
+function enemyTrioDuo(): PlayerCard[] {
+  const p = parties4();
+  for (let i = 5; i < 10; i++) p[i]!.party = { group: i < 8 ? 2 : 3, confirmed: i < 8 };
   return p;
 }
 
@@ -416,6 +423,7 @@ export const SCENES: Record<SceneName, Scene> = {
   ingame: { live: ingame(), route: LIVE_ROUTE },
   "ingame-longnames": { live: ingame(longnames()), route: LIVE_ROUTE },
   "ingame-parties4": { live: ingame(parties4()), route: LIVE_ROUTE },
+  "ingame-trio-duo": { live: ingame(enemyTrioDuo()), route: LIVE_ROUTE },
   "ingame-partial": { live: ingame(partial()), route: LIVE_ROUTE },
   "ingame-unranked": { live: unrankedLive, route: LIVE_ROUTE },
   "ingame-loading": { live: state("ingame", null, []), route: LIVE_ROUTE },

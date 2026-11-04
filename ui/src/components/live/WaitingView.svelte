@@ -93,7 +93,7 @@
 
 <div class="wait">
   <div class="main">
-    <Radar />
+    <Radar size={120} />
     <div class="copy">
       {#if menus}
         <h1>In the lobby</h1>
@@ -127,7 +127,7 @@
 
   <div class="side">
     {#if menus && party.length > 0}
-      <div class="card pad">
+      <div class="card pad party-card">
         <div class="cap"><span class="mono">YOUR PARTY</span><span class="mono n">{party.length} / 5</span></div>
         <div class="party" class:dense={party.length >= 4}>
           {#each party as p (p.puuid)}
@@ -156,7 +156,7 @@
     {/if}
 
     {#if ms && last}
-      <div class="card">
+      <div class="card last-card">
         <div class="lm-hero">
           <img {@attach retryImg} src={assetUrl("mapSplash", last.mapId)} alt="" />
           <div class="lm-fade"></div>
@@ -215,20 +215,20 @@
     flex: 1;
     min-height: 0;
     display: grid;
-    grid-template-columns: minmax(0, 1fr) 340px;
+    grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr);
     gap: 12px;
   }
 
   .main {
     background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: 8px;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 26px;
-    padding: 40px;
+    gap: 22px;
+    padding: 24px 18px;
     min-height: 0;
   }
 
@@ -241,14 +241,14 @@
 
   h1 {
     margin: 0;
-    font: 700 36px/1 var(--font-display);
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
+    font: 700 30px/1.05 var(--font);
+    text-align: center;
+    text-wrap: balance;
   }
 
   p {
     margin: 0;
-    font: 500 15px/1.5 var(--font);
+    font: 500 14px/1.45 var(--font);
     color: var(--text-muted);
     text-align: center;
     max-width: 440px;
@@ -268,9 +268,9 @@
   .check {
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
     height: 42px;
-    padding: 0 14px;
+    padding: 0 10px;
     background: var(--drawer);
   }
 
@@ -304,7 +304,7 @@
     padding: 0 18px;
     border-radius: 8px;
     background: var(--accent);
-    color: var(--on-accent);
+    color: var(--text);
     border: none;
     font: 600 13.5px/1 var(--font);
     cursor: pointer;
@@ -334,8 +334,8 @@
     height: 36px;
     padding: 0 16px;
     border-radius: 18px;
-    background: rgba(157, 140, 255, 0.08);
-    border: 1px solid rgba(157, 140, 255, 0.3);
+    background: var(--accent-faint);
+    border: 1px solid var(--accent-line);
   }
 
   .s-label {
@@ -350,8 +350,9 @@
   }
 
   .side {
-    display: flex;
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    align-content: start;
     gap: 12px;
     min-height: 0;
     overflow: auto;
@@ -361,12 +362,15 @@
     flex: none;
     background: var(--card);
     border: 1px solid var(--line);
-    border-radius: 12px;
+    border-radius: 8px;
     overflow: hidden;
+    min-width: 0;
   }
 
+  .party-card, .last-card { grid-column: 1 / -1; }
+
   .pad {
-    padding: 16px;
+    padding: 12px;
   }
 
   .col {
@@ -394,7 +398,11 @@
   .cap {
     display: flex;
     justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 6px 8px;
   }
+
+  .cap .mono { line-height: 1.3; }
 
   .pad > .cap {
     margin-bottom: 12px;
@@ -510,7 +518,7 @@
   .lm-fade {
     position: absolute;
     inset: 0;
-    background: linear-gradient(180deg, rgba(19, 21, 25, 0.1), var(--card));
+    background: linear-gradient(180deg, transparent, var(--card));
   }
 
   .lm-cap {
@@ -605,12 +613,13 @@
 
   .chips {
     display: flex;
+    flex-wrap: wrap;
     gap: 4px;
   }
 
   .chip {
-    flex: 1;
-    height: 22px;
+    flex: 0 0 18px;
+    height: 20px;
     border-radius: 3px;
     display: flex;
     align-items: center;
@@ -625,12 +634,14 @@
   .rank {
     display: flex;
     align-items: center;
-    gap: 14px;
+    flex-direction: column;
+    justify-content: center;
+    gap: 8px;
   }
 
   .rk-icon {
-    width: 44px;
-    height: 44px;
+    width: 36px;
+    height: 36px;
     display: block;
     flex: none;
   }
@@ -640,16 +651,20 @@
     display: flex;
     flex-direction: column;
     gap: 8px;
+    width: 100%;
+    min-width: 0;
   }
 
   .rk-top {
     display: flex;
     justify-content: space-between;
     align-items: baseline;
+    flex-wrap: wrap;
+    gap: 6px;
   }
 
   .rk-name {
-    font: 600 20px/1 var(--font-display);
+    font: 600 17px/1 var(--font);
   }
 
   .rk-track {

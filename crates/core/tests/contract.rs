@@ -1652,7 +1652,6 @@ fn settings_value() -> Value {
         smurf: SmurfLevel::Eager,
         saved_alert: false,
         sound: true,
-        on_top: false,
         boot: false,
         tray: false,
     };
@@ -1768,7 +1767,6 @@ fn v2_wire_keys_are_the_ones_types_ts_spells() {
             "smurf",
             "savedAlert",
             "sound",
-            "onTop",
             "boot",
             "tray"
         ])

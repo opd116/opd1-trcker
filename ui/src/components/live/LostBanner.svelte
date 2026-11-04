@@ -40,12 +40,12 @@
     flex: none;
     display: flex;
     align-items: center;
-    gap: 12px;
+    gap: 8px;
     padding: 0 8px 0 14px;
-    height: 40px;
+    min-height: 40px;
     border-radius: 8px;
     background: var(--warn-faint);
-    border: 1px solid rgba(255, 154, 60, 0.32);
+    border: 1px solid var(--line-control);
   }
 
   .head {
@@ -81,5 +81,13 @@
 
   button:hover {
     background: rgba(255, 154, 60, 0.12);
+  }
+
+  @media (max-width: 760px) {
+    .lost { display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; padding: 8px 10px; row-gap: 5px; }
+    .head { grid-column: 2; }
+    .text { grid-column: 2; grid-row: 2; font-size: 12px; }
+    .fill { display: none; }
+    button { grid-column: 3; grid-row: 1 / 3; }
   }
 </style>

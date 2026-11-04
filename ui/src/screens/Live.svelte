@@ -9,9 +9,9 @@
 <script lang="ts">
   import ErrorView from "../components/live/ErrorView.svelte";
   import LostBanner from "../components/live/LostBanner.svelte";
-  import MatchHeader from "../components/live/MatchHeader.svelte";
+  import CompactMatchHeader from "../components/live/CompactMatchHeader.svelte";
   import RecapView from "../components/live/RecapView.svelte";
-  import TeamTable from "../components/live/TeamTable.svelte";
+  import CompactTeam from "../components/live/CompactTeam.svelte";
   import WaitingView from "../components/live/WaitingView.svelte";
   import { appStatus, marks, settings } from "../lib/appdata.svelte";
   import { cardOpenGuard } from "../lib/clickGuard";
@@ -22,6 +22,7 @@
   import type { LiveState } from "../lib/types";
 
   let { live }: { live: LiveState | null } = $props();
+  let peak = $state(false);
 
   const status = $derived($appStatus);
   const onBoard = $derived(!!live && (live.stage === "pregame" || live.stage === "ingame"));
@@ -72,24 +73,26 @@
   }
 </script>
 
-<div class="live">
+<div class="live compact-live">
   {#if status?.conn === "lost" && view !== "error"}
     <LostBanner {status} />
   {/if}
   {#if view === "error" && status}
     <ErrorView {status} />
   {:else if view === "board" && live}
-    <MatchHeader
+    <CompactMatchHeader
       mapId={live.mapId}
       mapName={live.mapId ? mapName($meta, live.mapId) : null}
       {pregame}
       {progress}
       matchup={matchup(live)}
+      {peak}
+      ontoggle={() => peak = !peak}
       onglance={() => setGlance(true)}
     />
     <div class="tables">
       {#each teams as t (t.team)}
-        <TeamTable label={t.label} color={t.color} rows={t.rows} placeholders={t.placeholders} onopen={open} />
+        <CompactTeam label={t.label} color={t.color} rows={t.rows} cards={t.cards} placeholders={t.placeholders} {peak} onopen={open} />
       {/each}
       {#if live.stage === "pregame"}
         <div class="enemy-ph">
@@ -111,7 +114,7 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    padding: 18px 24px;
+    padding: 10px 16px 12px;
     gap: 10px;
   }
 
@@ -126,7 +129,7 @@
 
   .enemy-ph {
     flex: 1;
-    min-height: 250px;
+    min-height: 160px;
     border: 1px dashed var(--line-control);
     border-radius: 10px;
     display: flex;

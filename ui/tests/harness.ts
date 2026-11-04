@@ -8,18 +8,25 @@ import type { Page, Request } from "@playwright/test";
 /** The page clock (spec §8.1): only at 21:59 do the demo's `45 min ago` / `2h` agree with its clock times. */
 export const NOW = new Date("2026-09-29T21:59:00Z");
 
-/** The v2 design's three families (R189): Barlow for the UI, Saira Condensed for display figures, Geist Mono for labels. */
-export const FONTS = ["Barlow", "Saira Condensed", "Geist Mono"] as const;
+/** The approved compact design's two text families (R205): Barlow Semi Condensed for the UI, Geist Mono for code/labels. */
+export const FONTS = ["BarlowSemi", "Geist Mono"] as const;
 export type Font = (typeof FONTS)[number];
 
-/** The v2 design's one accent (violet, R189); there is no accent option any more. */
-export const ACCENT = "#9d8cff";
+/** The compact design's one accent (red, R205). */
+export const ACCENT = "#d63743";
 
-/** The window sizes (R190): the default, the minimum, and the glance column (Live only). */
+/** Frozen v2 screenshot viewports; do not silently resize unapproved historical baselines. */
 export const SIZES = {
   default: { width: 1280, height: 800 },
   min: { width: 1180, height: 760 },
   glance: { width: 420, height: 800 },
+} as const;
+
+/** Approved compact window; legacy SIZES stays frozen for the pending visual baseline review. */
+export const COMPACT_SIZES = {
+  default: { width: 700, height: 860 },
+  min: { width: 680, height: 760 },
+  glance: { width: 420, height: 420 },
 } as const;
 
 const HERE = dirname(fileURLToPath(import.meta.url));
@@ -129,6 +136,26 @@ export function watchFontCdn(page: Page): string[] {
  */
 export function sceneUrl(scene: string, params: Record<string, string> = {}): string {
   return `/?${new URLSearchParams({ scene, ...params })}`;
+}
+
+/** Navigate through the real compact disclosure, never the router or a hidden menu item. */
+export async function openScreen(page: Page, label: string): Promise<void> {
+  const name = label === "Saved" ? "Saved players" : label === "Comp" ? "Competitive" : label;
+  const group = ["History", "Saved players", "Competitive"].includes(name) ? "Records"
+    : ["Skins", "ASCII"].includes(name) ? "Tools" : null;
+  const nav = page.getByRole("navigation", { name: "Screens" });
+  if (group) {
+    const disclosure = nav.getByRole("button", { name: new RegExp(`^${group}`) });
+    if (await disclosure.getAttribute("aria-expanded") !== "true") await disclosure.click();
+  }
+  await nav.getByRole("button", { name, exact: true }).click();
+}
+
+/** Active screen remains observable after its disclosure has closed. */
+export function screenNav(page: Page, label: string) {
+  const name = ["History", "Saved", "Comp"].includes(label) ? "Records"
+    : ["Skins", "ASCII"].includes(label) ? "Tools" : label;
+  return page.getByRole("navigation", { name: "Screens" }).getByRole("button", { name: new RegExp(`^${name}$|^${name} \\d+$`) });
 }
 
 export type OpenOpts = {

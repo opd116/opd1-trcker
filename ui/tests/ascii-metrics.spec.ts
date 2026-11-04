@@ -15,6 +15,16 @@ for (const width of [680, 700]) {
         const usable = frame.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
         return { clipped: pre.getBoundingClientRect().width > usable + 1, sideways: frame.scrollWidth > frame.clientWidth + 1 };
       })).toEqual({ clipped: false, sideways: false });
+      // A single fitting frame can hide a ResizeObserver feedback oscillation. The settled geometry must stay fixed.
+      await expect.poll(() => page.locator("pre.canvas").evaluate(async (pre) => {
+        const frames: string[] = [];
+        for (let i = 0; i < 10; i++) {
+          await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+          const box = pre.getBoundingClientRect();
+          frames.push(`${getComputedStyle(pre).fontSize}|${box.width}|${box.height}`);
+        }
+        return new Set(frames).size;
+      })).toBe(1);
       expect(await page.locator("pre.canvas").textContent()).toBe(composeCanvas(INITIAL.text, INITIAL.char, INITIAL.effect, {}).out);
       await page.screenshot({ path: info.outputPath("ascii-fitted.png") });
     });

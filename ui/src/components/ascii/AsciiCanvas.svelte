@@ -19,14 +19,19 @@
   let fittedPx = $state<number | null>(null);
   const fontPx = $derived(Math.min(canvas.fontPx, fittedPx ?? canvas.fontPx));
 
-  // Measure the real rendered advance, including symbol fallback fonts, rather than assuming every glyph is .61em.
+  // Measure glyph advances at the model's preferred size, including symbol fallback fonts, not an assumed .61em.
+  // Measuring at a fixed size avoids feedback from repeatedly scaling an already-fitted, pixel-rounded surface.
   // Preserve the existing 8px art floor: unusually wide saved drawings still scroll instead of being clipped.
   $effect(() => {
     const frame = backdrop;
     const pre = surface;
     const preferred = canvas.fontPx;
-    void canvas.out;
+    const lines = canvas.out.split("\n");
     if (!frame || !pre) return;
+    const probe = document.createElement("canvas");
+    probe.width = probe.height = 1;
+    const measure = probe.getContext("2d");
+    if (!measure) return;
     let pending = 0;
     let active = true;
     const fit = () => {
@@ -34,10 +39,11 @@
       if (!active) return;
       const style = getComputedStyle(frame);
       const available = frame.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 2;
-      const rendered = pre.getBoundingClientRect().width;
-      const current = parseFloat(getComputedStyle(pre).fontSize);
-      if (available <= 0 || rendered <= 0 || current <= 0) return;
-      const next = Math.min(preferred, Math.max(8, current * available / rendered));
+      const font = getComputedStyle(pre);
+      measure.font = `${font.fontStyle} ${font.fontWeight} ${preferred}px ${font.fontFamily}`;
+      const natural = Math.max(...lines.map((line) => measure.measureText(line).width));
+      if (available <= 0 || natural <= 0) return;
+      const next = Math.min(preferred, Math.max(8, preferred * available / natural));
       if (fittedPx === null || Math.abs(next - fittedPx) > .02) fittedPx = next;
     };
     const schedule = () => {

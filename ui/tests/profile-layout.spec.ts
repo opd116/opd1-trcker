@@ -161,12 +161,13 @@ test.describe("actual Windows 150% display scale", () => {
       await openScene(page, scene);
       expect(await page.evaluate(() => devicePixelRatio)).toBe(1.5);
       if (scene !== "ingame-remembered") await expectLayout(page, scene === "details-more");
+      // Capture the unmodified UI before the ink checker temporarily changes clipping/decoration for its pixel probes.
+      await page.screenshot({ path: info.outputPath(`680x760-dpr1.5-${scene}.png`) });
       expect(await fitChecks(page, scene)).toEqual([]);
       await info.attach("actual-viewport", {
         body: JSON.stringify({ viewport: page.viewportSize(), dpr: await page.evaluate(() => devicePixelRatio), scene }),
         contentType: "application/json",
       });
-      await page.screenshot({ path: info.outputPath(`680x760-dpr1.5-${scene}.png`) });
     });
   }
 });

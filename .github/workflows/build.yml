@@ -282,6 +282,14 @@ jobs:
           find tests/baselines/compact -maxdepth 1 -type f -name '*.png' -delete
           npx playwright test visual-baseline.spec.ts --update-snapshots
 
+      - name: Upload failed reference-render evidence
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: visual-baseline-failures
+          path: ui/test-results
+          if-no-files-found: ignore
+
       # A wrong snapshot path (the spec or the config writing somewhere else) must not look like a success.
       - name: Guard (the baseline PNGs exist)
         run: |

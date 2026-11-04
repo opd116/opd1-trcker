@@ -4,6 +4,7 @@
 // Render/compare only in the pinned Playwright image (VISUAL_BASELINES=1). Missing active references FAIL;
 // they never silently skip CI. Intentional reference generation uses the existing manual workflow.
 import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { PUUID } from "../src/lib/demo/cdv8";
 import { RECAP_MATCH_ID } from "../src/lib/demo/v2/status";
@@ -93,10 +94,12 @@ async function imageReport(page: Page): Promise<{ bad: string[]; count: number }
 for (const b of BASELINES) {
   const sizes = b.size === "glance" ? [COMPACT_SIZES.glance] : [COMPACT_SIZES.default, COMPACT_SIZES.min];
   for (const size of sizes) test(`baseline: ${b.name} ${size.width}×${size.height} (${b.what})`, async ({ page }, testInfo) => {
-    const name = `compact/${b.name}-${size.width}x${size.height}.png`;
-    const png = testInfo.snapshotPath(name, { kind: "screenshot" });
+    const file = `${b.name}-${size.width}x${size.height}.png`;
+    // Playwright sanitizes '/' inside a single screenshot name. Separate segments preserve the intended subdirectory.
+    const name = ["compact", file];
+    const png = join(testInfo.project.testDir, "baselines", ...name);
     const updating = testInfo.config.updateSnapshots === "all" || testInfo.config.updateSnapshots === "changed";
-    if (!updating) expect(existsSync(png), `required Compact reference is missing: ${name}`).toBe(true);
+    if (!updating) expect(existsSync(png), `required Compact reference is missing: ${name.join("/")}`).toBe(true);
 
     await page.setViewportSize(size);
     await openScene(page, b.scene, b.params);

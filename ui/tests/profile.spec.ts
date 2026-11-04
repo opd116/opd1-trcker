@@ -58,6 +58,7 @@ test("another player: name, header actions, encounters, loadout, maps, recent ro
  */
 async function expectRecentMapLabelFits(page: Page, w: number, h: number, dpr1 = false): Promise<void> {
   await page.setViewportSize({ width: w, height: h });
+  if (dpr1) expect(await page.evaluate(() => devicePixelRatio)).toBe(1.5);
   await open(page, "scene=details-more");
   const d = dialog(page);
   await expect(d).toHaveAttribute("aria-busy", "false");
@@ -90,8 +91,11 @@ test("recent-match map labels fit their ink without the truncation marker (line-
     await expectRecentMapLabelFits(page, w, h);
 });
 
-test("recent-match map labels fit their ink at 680×760, DPR 1.5", async ({ page }) => {
-  await expectRecentMapLabelFits(page, 680, 760, true);
+test.describe("actual DPR 1.5", () => {
+  test.use({ deviceScaleFactor: 1.5 });
+  test("recent-match map labels fit their ink at 680×760, DPR 1.5", async ({ page }) => {
+    await expectRecentMapLabelFits(page, 680, 760, true);
+  });
 });
 
 test("the user: personal notes, Competitive stats, Net RR, clickable recent rows", async ({ page }) => {

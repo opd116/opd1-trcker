@@ -271,23 +271,23 @@ jobs:
           key: ui-test-media-${{ hashFiles('ui/src/lib/demo/**/*.ts', 'ui/src/lib/demo/meta.json') }}
           restore-keys: ui-test-media-
 
-      # The committed PNGs are removed first: what the spec writes is then the complete set (a renamed or removed scene
-      # leaves no orphan), and the guard below cannot be satisfied by the files that came with the checkout.
+      # R211: generate only the explicitly approved Compact references. Keep the root-level v2 PNGs as history.
+      # Clearing this owned subdirectory ensures the guard cannot be satisfied by stale Compact references.
       - name: Regenerate the visual baselines
         working-directory: ui
         env:
           VISUAL_BASELINES: "1"
         run: |
-          mkdir -p tests/baselines
-          find tests/baselines -type f -name '*.png' -delete
+          mkdir -p tests/baselines/compact
+          find tests/baselines/compact -maxdepth 1 -type f -name '*.png' -delete
           npx playwright test visual-baseline.spec.ts --update-snapshots
 
       # A wrong snapshot path (the spec or the config writing somewhere else) must not look like a success.
       - name: Guard (the baseline PNGs exist)
         run: |
-          count=$(find ui/tests/baselines -type f -name '*.png' | wc -l)
-          if [ "$count" -eq 0 ]; then
-            echo "::error title=No baselines::the run wrote no PNG under ui/tests/baselines; check the snapshot path of visual-baseline.spec.ts"
+          count=$(find ui/tests/baselines/compact -maxdepth 1 -type f -name '*.png' | wc -l)
+          if [ "$count" -ne 33 ]; then
+            echo "::error title=Incomplete Compact baselines::expected all 33 approved viewport/state references, found $count"
             exit 1
           fi
           echo "$count baseline PNGs"
@@ -298,16 +298,15 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: visual-baselines
-          path: ui/tests/baselines
+          path: ui/tests/baselines/compact
           # A "re-run all jobs" of the same run uploads again under the same name.
           overwrite: true
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 
-  # Puts the rendered PNGs on the branch. Only git runs here (no npm, no browser), so the write token never meets
-  # third-party code. Commits only when a file really changed, then lays the commit on top of whatever was pushed to the
-  # branch in the meantime.
+  # Puts the rendered Compact PNGs on the same source revision. Only git runs here (no npm, no browser), so the write
+  # token never meets third-party code. A moved branch fails instead of attaching stale pictures to different source.
   baselines-commit:
     needs: baselines-render
     runs-on: ubuntu-latest
@@ -330,31 +329,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      # The old PNGs go first, so a baseline the render no longer made is deleted from the branch too.
-      - name: Clear the old baselines
-        run: rm -rf ui/tests/baselines
+      - name: Verify the source branch has not moved
+        run: |
+          git fetch origin "$GITHUB_REF_NAME"
+          if [ "$(git rev-parse FETCH_HEAD)" != "$GITHUB_SHA" ]; then
+            echo "::error::the branch moved after these pictures were rendered; regenerate from the new source"
+            exit 1
+          fi
+
+      - name: Clear only the Compact references
+        run: |
+          mkdir -p ui/tests/baselines/compact
+          find ui/tests/baselines/compact -maxdepth 1 -type f -name '*.png' -delete
 
       - name: Download the rendered baselines
         uses: actions/download-artifact@v7
         with:
           name: visual-baselines
-          path: ui/tests/baselines
+          path: ui/tests/baselines/compact
 
       - name: Commit and push the baselines
         run: |
-          if [ -z "$(find ui/tests/baselines -type f -name '*.png' -print -quit)" ]; then
-            echo "::error title=No baselines::the downloaded artifact has no PNG; not touching the branch"
-            exit 1
-          fi
+          files=()
+          for state in live-ingame live-pregame live-peak live-waiting live-lobby live-recap profile profile-hidden saved history scoreboard comp skins ascii settings about; do
+            for size in 700x860 680x760; do
+              file="ui/tests/baselines/compact/$state-$size.png"
+              if [ ! -f "$file" ]; then echo "::error::missing required Compact reference: $file"; exit 1; fi
+              files+=("$file")
+            done
+          done
+          files+=("ui/tests/baselines/compact/live-glance-420x420.png")
+          if [ ! -f "${files[32]}" ]; then echo "::error::missing square Glance reference"; exit 1; fi
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add ui/tests/baselines
+          git add -- "${files[@]}"
           if git diff --cached --quiet; then
             echo "The baselines did not change; nothing to commit."
             echo "The baselines did not change; nothing was committed." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          git commit -m "test(ui): update the visual baselines" -- ui/tests/baselines
-          git pull --rebase origin "$GITHUB_REF_NAME"
+          git commit -m "test(ui): establish approved Compact visual references" -- "${files[@]}"
           git push origin HEAD:"refs/heads/$GITHUB_REF_NAME"
           echo "The visual baselines were committed to \`$GITHUB_REF_NAME\` ($(git rev-parse --short HEAD))." >> "$GITHUB_STEP_SUMMARY"

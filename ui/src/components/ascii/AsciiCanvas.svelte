@@ -14,9 +14,48 @@
   /** The keyboard cursor (cell), null until the canvas is used from the keyboard. */
   let cursor = $state<[number, number] | null>(null);
   let focused = $state(false);
-  let availableWidth = $state(0);
-  // Fit ordinary art to the compact editor; unusually wide saved drawings remain scrollable rather than illegible.
-  const fontPx = $derived(availableWidth > 0 ? Math.min(canvas.fontPx, Math.max(8, (availableWidth - 40) / (canvas.W * .61))) : canvas.fontPx);
+  let backdrop = $state<HTMLDivElement | null>(null);
+  let surface = $state<HTMLPreElement | null>(null);
+  let fittedPx = $state<number | null>(null);
+  const fontPx = $derived(Math.min(canvas.fontPx, fittedPx ?? canvas.fontPx));
+
+  // Measure the real rendered advance, including symbol fallback fonts, rather than assuming every glyph is .61em.
+  // Preserve the existing 8px art floor: unusually wide saved drawings still scroll instead of being clipped.
+  $effect(() => {
+    const frame = backdrop;
+    const pre = surface;
+    const preferred = canvas.fontPx;
+    void canvas.out;
+    if (!frame || !pre) return;
+    let pending = 0;
+    let active = true;
+    const fit = () => {
+      pending = 0;
+      if (!active) return;
+      const style = getComputedStyle(frame);
+      const available = frame.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - 2;
+      const rendered = pre.getBoundingClientRect().width;
+      const current = parseFloat(getComputedStyle(pre).fontSize);
+      if (available <= 0 || rendered <= 0 || current <= 0) return;
+      const next = Math.min(preferred, Math.max(8, current * available / rendered));
+      if (fittedPx === null || Math.abs(next - fittedPx) > .02) fittedPx = next;
+    };
+    const schedule = () => {
+      if (active && !pending) pending = requestAnimationFrame(fit);
+    };
+    const observer = new ResizeObserver(schedule);
+    observer.observe(frame);
+    observer.observe(pre);
+    void document.fonts.ready.then(schedule);
+    document.fonts.addEventListener("loadingdone", schedule);
+    schedule();
+    return () => {
+      active = false;
+      cancelAnimationFrame(pending);
+      observer.disconnect();
+      document.fonts.removeEventListener("loadingdone", schedule);
+    };
+  });
 
   function paint(x: number, y: number) {
     const k = `${x},${y}`;
@@ -68,10 +107,11 @@
 
 <svelte:window onmouseup={up} />
 
-<div class="backdrop" bind:clientWidth={availableWidth} role="presentation" onmouseup={up} onmouseleave={up}>
+<div class="backdrop" bind:this={backdrop} role="presentation" onmouseup={up} onmouseleave={up}>
   <!-- A drawing surface: the pointer and the keyboard both paint on it (role="application"). -->
   <!-- svelte-ignore a11y_no_noninteractive_tabindex, a11y_no_noninteractive_element_interactions -->
   <pre
+    bind:this={surface}
     class="canvas"
     role="application"
     aria-label="ASCII art. Click and drag to draw on it. From the keyboard, arrow keys move the cursor and Space draws."

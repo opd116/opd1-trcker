@@ -22,6 +22,7 @@ The name is spelled `OPD1 TRCKER` on purpose. Never "correct" it to TRACKER.
 | R208 | 2026-11-04 | active | Correct party reference: rounded vertical spine with small arrows into portraits |
 | R209 | 2026-11-04 | superseded (partial) | Solid party strokes; wider white thresholds; compact profile section order |
 | R210 | 2026-11-04 | active | Exact 6 metric colors & 5 continuous threshold arrays; Profile single vertical scroll (no 340px cap/scroll in RecentTable); measured layout in ProfileDrawer (no grid gaps, exact 12–20px Mates-to-Maps gap, deterministic left/right placement); unified .mlabel headings; review NSIS installer authorized (no auto-install/merge) |
+| R211 | 2026-11-04 | active | User approved the full Compact design; migrate active visual references to baselines/compact at both normal sizes and square Glance, retaining v2 history and unchanged quality gates; Windows remains the app target |
 
 
 ## Working with the user
@@ -124,6 +125,7 @@ Match History, Settings (empty for now), Saved players with notes, Skins, ASCII 
 - **Verify every screen before showing the user.** Render it at 700×860, 680×760 and (Live) Glance 420×420 in a headless browser, screenshot it, and check for overlap, clipping, and unwanted scrollbars.
 - Fonts are bundled locally (latin-subset woff2, only weights used). No runtime requests to Google Fonts or any CDN; images go through the Rust img cache (CSP stays strict).
 - The compact design has one theme (red accent `#d63743`, Barlow Semi Condensed 500/600/700 with Geist Mono for code); the v2 violet accent and the v8 options are gone (R189, R205).
+- **R211 visual acceptance:** The user explicitly approved the whole new Compact design after choosing it over the historical v2 comparison. Active snapshots live under `ui/tests/baselines/compact/` at 700×860, 680×760 and (Glance) 420×420, rendered in the pinned CI image. Root-level v2 snapshots are history, not current acceptance targets. Keep comparison tolerance and functional/privacy tests intact; missing required Compact snapshots fail rather than skip. Windows builds/tests remain mandatory even when other checks run on Linux.
 
 ## Hidden names (incognito)
 

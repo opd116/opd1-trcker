@@ -823,6 +823,8 @@
   }
 
   .profile-content {
+    /* Absolute-positioned sections still need their measured extent in the body's scroll flow. */
+    flex: none;
     position: relative;
     width: 100%;
   }

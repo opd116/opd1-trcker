@@ -93,8 +93,9 @@
   .alternate{background:var(--row-alternate)}.compact-player:hover,.selected{background:var(--row-hover)}.self:before{content:'';position:absolute;inset:0 auto 0 0;width:2px;background:var(--accent)}
   .identity{display:flex;gap:8px;align-items:center;min-width:0}.portrait{width:36px;height:36px;flex:none;overflow:hidden;border:1px solid var(--line-media);border-radius:6px;background:var(--skel)}.portrait.party{border:2px solid var(--party)}.portrait img{display:block;width:100%;height:100%;object-fit:contain}
   .names{min-width:0;flex:1}.name-line{display:flex;align-items:center;gap:5px;white-space:nowrap}.name-line strong{font:600 15px/18px var(--font);overflow:hidden;text-overflow:ellipsis;min-width:0}.name-line strong.hidden{font-style:italic}.remembered{text-decoration:underline dotted;text-underline-offset:2px}.remembered-icon{width:13px;height:13px;flex:none}.you{color:var(--accent-text);font:600 11px/1 var(--font)}
-  /* Preserve ellipsis while letting the remembered-name underline paint below the name's line box. */
-  .name-line strong.remembered{overflow:clip;overflow-clip-margin:6px}
+  /* Pin the dotted stroke's metrics at fractional Windows display scales, retaining ellipsis and the approved
+     2px underline offset / 6px clip margin without widening the name's paint into its neighbours. */
+  .name-line strong.remembered{overflow:clip;overflow-clip-margin:6px;text-decoration-thickness:1px}
   .subline{display:flex;gap:5px;align-items:center;min-height:18px;font:500 12px/18px var(--font);color:var(--text-muted)}.tag{white-space:nowrap}.saved{font:600 12px/16px var(--font);display:flex;gap:3px;align-items:center;border:1px solid #484848;border-radius:4px;padding:0 4px;flex:none}.saved svg{width:9px;height:11px;fill:currentColor}.encounters{display:inline-flex;gap:3px;align-items:center;font-size:13px}.encounters svg{width:18px;height:18px}
   /* R208: match the user's reference: rounded spine, small arrows into portraits, no outlined boxes.
      Only active stroke edges get a border; border-style on every side creates phantom dashed boxes. */
